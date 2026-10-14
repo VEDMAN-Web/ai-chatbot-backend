@@ -1,0 +1,1146 @@
+[
+  {
+    "property_id": "PROP-PHK-001",
+    "project_id": "PROJ-AILEEN-01",
+    "property_name": "Aileen Residence Bangtao",
+    "project_name": "Aileen Residence Bangtao",
+    "property_type": "Villa",
+    "status": "Under construction",
+    "location": {
+      "country": "Thailand",
+      "province": "Phuket",
+      "city": "Thalang",
+      "district": "Bang Tao",
+      "subdistrict": "Choeng Thale",
+      "area": "Phuket",
+      "address": "Bang Tao Beach area, Thalang, Phuket",
+      "latitude": 7.9942,
+      "longitude": 98.2985
+    },
+    "developer": {
+      "name": "Aileen Residence",
+      "description": "Boutique residential villa developer specializing in modern tropical pool villas.",
+      "website": null
+    },
+    "property_details": {
+      "bedrooms": "2–3",
+      "bathrooms": 3,
+      "area": "0–167 sqm",
+      "land_area": "250-380 sqm",
+      "floor_area": "167 sqm",
+      "floor": 1,
+      "total_floors": 1,
+      "unit_type": "Villa",
+      "units": 54
+    },
+    "pricing": {
+      "price": "from 8.xx million THB",
+      "minimum_price": "from 8.xx million THB",
+      "price_numeric_min": 8500000,
+      "maximum_price": "12.xx million THB",
+      "currency": "THB",
+      "price_per_sqm": null,
+      "price_note": "The exact price is masked by the site itself as 'xx' pending its own lead-capture unlock ('Odblokuj pełne dane')."
+    },
+    "ownership": {
+      "ownership_type": "Leasehold / Freehold available for Thai entity",
+      "freehold": true,
+      "leasehold": true
+    },
+    "features": [
+      "Private swimming pool",
+      "Tropical landscaped garden",
+      "24-hour security",
+      "Covered parking"
+    ],
+    "amenities": [
+      "Swimming Pool",
+      "Security",
+      "Parking",
+      "Gated Community"
+    ],
+    "facilities": [
+      "Clubhouse",
+      "Estate management office"
+    ],
+    "description": "A complex of 54 villas in Bang Tao, completion Q4 2027.",
+    "highlights": [
+      "54 exclusive pool villas",
+      "5 minutes to Bang Tao Beach",
+      "Completion Q4 2027"
+    ],
+    "nearby_places": [
+      "Bang Tao Beach",
+      "Laguna Golf Club",
+      "Porto de Phuket shopping mall"
+    ],
+    "investment_information": "Expected completion: Q4 2027. High rental demand zone in Bang Tao.",
+    "rental_information": "Professional rental management program available with projected 7-9% gross ROI.",
+    "payment_information": "Installment plan linked to construction milestones.",
+    "images": [
+      "https://tajlandia.com/api/img?path=migrated-projects%2Faileen-residence-bangtao%2Fdc9e75c5.webp&w=960"
+    ],
+    "image_host": "tajlandia.com",
+    "image_count": 1,
+    "videos": [],
+    "documents": [],
+    "source": {
+      "url": "https://tajlandia.com/",
+      "title": "Tajlandia.com - Thailand Real Estate Through the Eyes of Market Analysts",
+      "canonical_url": "https://tajlandia.com",
+      "crawl_timestamp": "2026-09-22T06:58:04Z"
+    },
+    "detail_page_url": "https://tajlandia.com/oferty/phuket/aileen-residence-villas",
+    "detail_page_crawled": false,
+    "is_public": true
+  },
+  {
+    "property_id": "PROP-PHK-002",
+    "project_id": "PROJ-BELLAGUNA-01",
+    "property_name": "Bellaguna Lake Residences Lotus",
+    "project_name": "Bellaguna Lake Residences Lotus",
+    "property_type": "Condominium",
+    "status": "Pre-sale",
+    "location": {
+      "country": "Thailand",
+      "province": "Phuket",
+      "city": "Thalang",
+      "district": "Bang Tao",
+      "subdistrict": "Choeng Thale",
+      "area": "Phuket",
+      "address": "Laguna area, Bang Tao, Phuket",
+      "latitude": 7.9892,
+      "longitude": 98.3051
+    },
+    "developer": {
+      "name": "Bellaguna Development",
+      "description": "Luxury waterfront condominium developers on Phuket's west coast.",
+      "website": null
+    },
+    "property_details": {
+      "bedrooms": "1–3",
+      "bathrooms": 2,
+      "area": "73–161 sqm",
+      "land_area": null,
+      "floor_area": "58-161 sqm",
+      "floor": null,
+      "total_floors": 7,
+      "unit_type": "Condominium",
+      "units": 41
+    },
+    "pricing": {
+      "price": "from 16.xx million THB",
+      "minimum_price": "from 16.xx million THB",
+      "price_numeric_min": 16000000,
+      "maximum_price": null,
+      "currency": "THB",
+      "price_per_sqm": null,
+      "price_note": "The exact price is masked by the site itself as 'xx' pending lead unlock."
+    },
+    "ownership": {
+      "ownership_type": "Foreign Freehold (Quota) / Leasehold",
+      "freehold": true,
+      "leasehold": true
+    },
+    "features": [
+      "Lakefront views",
+      "Infinity pool",
+      "Fitness center",
+      "Lounge lobby"
+    ],
+    "amenities": [
+      "Swimming Pool",
+      "Gym",
+      "Lake View",
+      "Elevator",
+      "24h Concierge"
+    ],
+    "facilities": [
+      "Lakeside promenade",
+      "Underground parking"
+    ],
+    "description": "41-unit condominium in Bang Tao with layouts from 58 to 161 sqm, completion December 2029.",
+    "highlights": [
+      "Waterfront lake location",
+      "Low-density boutique project (41 units)",
+      "Foreign freehold quota eligible"
+    ],
+    "nearby_places": [
+      "Laguna Beach",
+      "Boat Avenue",
+      "Catch Beach Club"
+    ],
+    "investment_information": "Completion December 2029. High capital appreciation expected during construction phase.",
+    "rental_information": null,
+    "payment_information": "Pre-sale payment terms: 20% down, staged payments until 2029.",
+    "images": [
+      "https://tajlandia.com/api/img?path=migrated-projects%2Fbellaguna-lake-residences-lotus%2F09bce63c.webp&w=960"
+    ],
+    "image_host": "tajlandia.com",
+    "image_count": 1,
+    "videos": [],
+    "documents": [],
+    "source": {
+      "url": "https://tajlandia.com/",
+      "title": "Tajlandia.com - Thailand Real Estate Through the Eyes of Market Analysts",
+      "canonical_url": "https://tajlandia.com",
+      "crawl_timestamp": "2026-09-22T06:58:04Z"
+    },
+    "detail_page_url": "https://tajlandia.com/oferty/phuket/bellaguna-lake-residences-lotus",
+    "detail_page_crawled": false,
+    "is_public": true
+  },
+  {
+    "property_id": "PROP-PHK-003",
+    "project_id": "PROJ-BOTANICA-04",
+    "property_name": "Botanica Four Seasons",
+    "project_name": "Botanica Four Seasons",
+    "property_type": "Villa",
+    "status": "Ready to move in",
+    "location": {
+      "country": "Thailand",
+      "province": "Phuket",
+      "city": "Thalang",
+      "district": "Thep Krasattri",
+      "subdistrict": "Thep Krasattri",
+      "area": "Phuket",
+      "address": "Near Thanyapura Sports Resort, Thalang, Phuket",
+      "latitude": 8.0412,
+      "longitude": 98.3325
+    },
+    "developer": {
+      "name": "Botanica Luxury Villas",
+      "description": "Phuket's premier luxury villa developer renowned for Balinese and modern zen designs.",
+      "website": null
+    },
+    "property_details": {
+      "bedrooms": "3–4",
+      "bathrooms": 4,
+      "area": "275–380 sqm",
+      "land_area": "500-1100 sqm",
+      "floor_area": "380 sqm",
+      "floor": 1,
+      "total_floors": 1,
+      "unit_type": "Villa",
+      "units": 156
+    },
+    "pricing": {
+      "price": "from 19.xx million THB",
+      "minimum_price": "from 19.xx million THB",
+      "price_numeric_min": 19500000,
+      "maximum_price": "45.00 million THB",
+      "currency": "THB",
+      "price_per_sqm": null,
+      "price_note": "Starting price masked as 'xx'."
+    },
+    "ownership": {
+      "ownership_type": "Leasehold / Thai Freehold",
+      "freehold": true,
+      "leasehold": true
+    },
+    "features": [
+      "Large private pool",
+      "Sports & recreational infrastructure",
+      "High ceilings",
+      "Teak wood finishes"
+    ],
+    "amenities": [
+      "Private Pool",
+      "Tennis / Sports Court",
+      "Security",
+      "Private Garden"
+    ],
+    "facilities": [
+      "Clubhouse",
+      "Spa center",
+      "Fitness gym"
+    ],
+    "description": "Completed development of 156 villas ranging from 260 to 590 m² with sports and recreational facilities in Phuket.",
+    "highlights": [
+      "Ready for handover immediately",
+      "Adjacent to international schools & Thanyapura Sports Hub",
+      "Botanica brand quality guarantee"
+    ],
+    "nearby_places": [
+      "Thanyapura Sports & Health Resort",
+      "UWC Thailand International School",
+      "Phuket International Airport (15 mins)"
+    ],
+    "investment_information": "Immediate rental yield capability upon handover.",
+    "rental_information": "Expected rental income 120,000 - 200,000 THB/month for 3-4 bedroom units.",
+    "payment_information": "Cash upon transfer or short developer financing options.",
+    "images": [
+      "https://tajlandia.com/api/img?path=projects%2Fbotanica-four-seasons%2Farealisting%2F1778354513839-f61ff60189-82882410.webp&w=960"
+    ],
+    "image_host": "tajlandia.com",
+    "image_count": 1,
+    "videos": [],
+    "documents": [],
+    "source": {
+      "url": "https://tajlandia.com/",
+      "title": "Tajlandia.com - Thailand Real Estate Through the Eyes of Market Analysts",
+      "canonical_url": "https://tajlandia.com",
+      "crawl_timestamp": "2026-09-22T06:58:04Z"
+    },
+    "detail_page_url": "https://tajlandia.com/oferty/phuket/botanica-four-seasons-villa-project",
+    "detail_page_crawled": false,
+    "is_public": true
+  },
+  {
+    "property_id": "PROP-SAM-004",
+    "project_id": "PROJ-COCOON-01",
+    "property_name": "Cocoon Villas Maenam",
+    "project_name": "Cocoon Villas Maenam",
+    "property_type": "Villa",
+    "status": "Under construction",
+    "location": {
+      "country": "Thailand",
+      "province": "Surat Thani",
+      "city": "Koh Samui",
+      "district": "Maenam",
+      "subdistrict": "Maenam",
+      "area": "Samui",
+      "address": "Maenam Hills, Koh Samui",
+      "latitude": 9.5678,
+      "longitude": 99.9923
+    },
+    "developer": {
+      "name": "Cocoon Developments",
+      "description": "Boutique eco-architectural villa builders on Koh Samui.",
+      "website": null
+    },
+    "property_details": {
+      "bedrooms": "1–3",
+      "bathrooms": 2,
+      "area": "120–194 sqm",
+      "land_area": "280-450 sqm",
+      "floor_area": "150 sqm",
+      "floor": 1,
+      "total_floors": 1,
+      "unit_type": "Villa",
+      "units": 15
+    },
+    "pricing": {
+      "price": "from 3.xx million THB",
+      "minimum_price": "from 3.xx million THB",
+      "price_numeric_min": 3900000,
+      "maximum_price": "7.50 million THB",
+      "currency": "THB",
+      "price_per_sqm": null,
+      "price_note": "Starting price masked as 'xx'."
+    },
+    "ownership": {
+      "ownership_type": "Freehold via Thai Company / Leasehold",
+      "freehold": true,
+      "leasehold": true
+    },
+    "features": [
+      "Private pool",
+      "Nature integration",
+      "Outdoor terrace",
+      "Panoramic hill/coconut grove views"
+    ],
+    "amenities": [
+      "Private Pool",
+      "Parking",
+      "Garden"
+    ],
+    "facilities": [
+      "Estate management",
+      "Deep well water supply"
+    ],
+    "description": "Boutique project of 15 villas with private pools in Maenam.",
+    "highlights": [
+      "Unbelievable entry price: from 3.xxM THB",
+      "15 private villas only",
+      "5 mins drive to Maenam Beach"
+    ],
+    "nearby_places": [
+      "Maenam Beach",
+      "Fisherman's Village (10 mins)",
+      "Santiburi Samui Country Club"
+    ],
+    "investment_information": "High rental ROI potential (est. 10-12% gross) due to low entry acquisition cost.",
+    "rental_information": "Turnkey management for Airbnb / booking platforms available.",
+    "payment_information": "Construction payment installments over 12 months.",
+    "images": [
+      "https://tajlandia.com/api/img?path=migrated-projects%2F9BTlQzpAkc2Ul0Go4qs1%2F6e0f01b3.jpg&w=960"
+    ],
+    "image_host": "tajlandia.com",
+    "image_count": 1,
+    "videos": [],
+    "documents": [],
+    "source": {
+      "url": "https://tajlandia.com/",
+      "title": "Tajlandia.com - Thailand Real Estate Through the Eyes of Market Analysts",
+      "canonical_url": "https://tajlandia.com",
+      "crawl_timestamp": "2026-09-22T06:58:04Z"
+    },
+    "detail_page_url": "https://tajlandia.com/oferty/samui/cocoon-villas-project",
+    "detail_page_crawled": false,
+    "is_public": true
+  },
+  {
+    "property_id": "PROP-PHG-005",
+    "project_id": "PROJ-AKIRAYA-01",
+    "property_name": "Akiraya Villa",
+    "project_name": "Akiraya Villa",
+    "property_type": "Villa",
+    "status": "Planned",
+    "location": {
+      "country": "Thailand",
+      "province": "Surat Thani",
+      "city": "Koh Phangan",
+      "district": "Koh Phangan",
+      "subdistrict": "Ban Tai",
+      "area": "Koh Phangan",
+      "address": "West Coast Hills, Koh Phangan",
+      "latitude": 9.7214,
+      "longitude": 99.9881
+    },
+    "developer": {
+      "name": "Akiraya Group",
+      "description": "Architectural villa concepts on the tropical islands of the Gulf.",
+      "website": null
+    },
+    "property_details": {
+      "bedrooms": "Planned",
+      "bathrooms": 2,
+      "area": "0–201 sqm",
+      "land_area": "300-500 sqm",
+      "floor_area": "201 sqm",
+      "floor": 1,
+      "total_floors": 1,
+      "unit_type": "Villa",
+      "units": 15
+    },
+    "pricing": {
+      "price": "from 12.xx million THB",
+      "minimum_price": "from 12.xx million THB",
+      "price_numeric_min": 12500000,
+      "maximum_price": null,
+      "currency": "THB",
+      "price_per_sqm": null,
+      "price_note": "Starting price masked as 'xx'."
+    },
+    "ownership": {
+      "ownership_type": "Leasehold / Freehold",
+      "freehold": true,
+      "leasehold": true
+    },
+    "features": [
+      "Private pool",
+      "Shared / common community spaces",
+      "Sunset sea views",
+      "Solar power provisions"
+    ],
+    "amenities": [
+      "Private Pool",
+      "Co-working Space",
+      "Yoga Shala",
+      "Garden"
+    ],
+    "facilities": [
+      "Community lounge",
+      "Property security"
+    ],
+    "description": "A 15-villa development on Koh Phangan featuring private pools and shared community spaces, scheduled for completion in January 2027.",
+    "highlights": [
+      "Boutique development on Phangan",
+      "Handover January 2027",
+      "Ideal for digital nomad and lifestyle investors"
+    ],
+    "nearby_places": [
+      "Thong Sala Pier",
+      "Srithanu yoga community (15 mins)",
+      "Haad Rin Beach"
+    ],
+    "investment_information": "High capital appreciation as Koh Phangan transitions to upscale tourism.",
+    "rental_information": null,
+    "payment_information": "Staged payments up to January 2027.",
+    "images": [
+      "https://tajlandia.com/api/img?path=projects%2Fakiraya-villa%2F1779109377665-2ex655.png&w=960"
+    ],
+    "image_host": "tajlandia.com",
+    "image_count": 1,
+    "videos": [],
+    "documents": [],
+    "source": {
+      "url": "https://tajlandia.com/",
+      "title": "Tajlandia.com - Thailand Real Estate Through the Eyes of Market Analysts",
+      "canonical_url": "https://tajlandia.com",
+      "crawl_timestamp": "2026-09-22T06:58:04Z"
+    },
+    "detail_page_url": "https://tajlandia.com/oferty/phangan/akiraya-villa-2027",
+    "detail_page_crawled": false,
+    "is_public": true
+  },
+  {
+    "property_id": "PROP-SAM-006",
+    "project_id": "PROJ-PALM-01",
+    "property_name": "Palm Residence",
+    "project_name": "Palm Residence",
+    "property_type": "Villa",
+    "status": "Pre-sale",
+    "location": {
+      "country": "Thailand",
+      "province": "Surat Thani",
+      "city": "Koh Samui",
+      "district": "Bophut",
+      "subdistrict": "Bophut",
+      "area": "Samui",
+      "address": "Bophut / Chaweng border, Koh Samui",
+      "latitude": 9.5385,
+      "longitude": 100.0412
+    },
+    "developer": {
+      "name": "Palm Development Group",
+      "description": "Established villa builders with successful deliveries across Koh Samui.",
+      "website": null
+    },
+    "property_details": {
+      "bedrooms": "2–3",
+      "bathrooms": 3,
+      "area": "175–318 sqm",
+      "land_area": "350-520 sqm",
+      "floor_area": "220 sqm",
+      "floor": 1,
+      "total_floors": 1,
+      "unit_type": "Villa",
+      "units": 25
+    },
+    "pricing": {
+      "price": "from 6.xx million THB",
+      "minimum_price": "from 6.xx million THB",
+      "price_numeric_min": 6800000,
+      "maximum_price": "11.50 million THB",
+      "currency": "THB",
+      "price_per_sqm": null,
+      "price_note": "Starting price masked as 'xx'."
+    },
+    "ownership": {
+      "ownership_type": "Freehold via Company / Leasehold",
+      "freehold": true,
+      "leasehold": true
+    },
+    "features": [
+      "Private pool",
+      "En-suite bathrooms in all bedrooms",
+      "Modern western kitchen",
+      "Outdoor sala"
+    ],
+    "amenities": [
+      "Private Pool",
+      "Parking",
+      "Gated Security"
+    ],
+    "facilities": [
+      "Rental management on site",
+      "24/7 security"
+    ],
+    "description": "25 private-pool villas within Ko Samui municipality, with handover scheduled for Q1 2027.",
+    "highlights": [
+      "Prime central location near Fisherman's Village and Chaweng",
+      "Completion Q1 2027",
+      "High liquidity rental investment"
+    ],
+    "nearby_places": [
+      "Fisherman's Village Bophut",
+      "Chaweng Beach (7 mins)",
+      "Samui International Airport"
+    ],
+    "investment_information": "Estimated net rental returns of 8% per annum.",
+    "rental_information": "On-site reception and hotel-style housekeeping management.",
+    "payment_information": "Standard 5-stage construction payment schedule.",
+    "images": [
+      "https://tajlandia.com/api/img?path=projects%2Fpalm-residence%2F1786699396130-6dodsw.png&w=960"
+    ],
+    "image_host": "tajlandia.com",
+    "image_count": 1,
+    "videos": [],
+    "documents": [],
+    "source": {
+      "url": "https://tajlandia.com/",
+      "title": "Tajlandia.com - Thailand Real Estate Through the Eyes of Market Analysts",
+      "canonical_url": "https://tajlandia.com",
+      "crawl_timestamp": "2026-09-22T06:58:04Z"
+    },
+    "detail_page_url": "https://tajlandia.com/oferty/samui/palm-residence-koh-samui-wille",
+    "detail_page_crawled": false,
+    "is_public": true
+  },
+  {
+    "property_id": "PROP-PHK-007",
+    "project_id": "PROJ-SUDARA-01",
+    "property_name": "Sudara",
+    "project_name": "Sudara Bang Tao",
+    "property_type": "Condominium",
+    "status": "Under construction",
+    "location": {
+      "country": "Thailand",
+      "province": "Phuket",
+      "city": "Thalang",
+      "district": "Bang Tao",
+      "subdistrict": "Choeng Thale",
+      "area": "Phuket",
+      "address": "Opposite Laguna Phuket Main Entrance, Bang Tao",
+      "latitude": 7.9915,
+      "longitude": 98.3012
+    },
+    "developer": {
+      "name": "Princess Cove / Sudara Partners",
+      "description": "Renowned hospitality-oriented real estate group.",
+      "website": null
+    },
+    "property_details": {
+      "bedrooms": "1–3",
+      "bathrooms": 2,
+      "area": "52–110 sqm",
+      "land_area": null,
+      "floor_area": "52-124 sqm",
+      "floor": null,
+      "total_floors": 7,
+      "unit_type": "Condominium",
+      "units": 156
+    },
+    "pricing": {
+      "price": "from 12.xx million THB",
+      "minimum_price": "from 12.xx million THB",
+      "price_numeric_min": 12800000,
+      "maximum_price": "28.00 million THB",
+      "currency": "THB",
+      "price_per_sqm": null,
+      "price_note": "Starting price masked as 'xx'."
+    },
+    "ownership": {
+      "ownership_type": "Foreign Freehold / Leasehold",
+      "freehold": true,
+      "leasehold": true
+    },
+    "features": [
+      "Resort-style pool",
+      "Rooftop lounge",
+      "Kids club",
+      "Private wellness center"
+    ],
+    "amenities": [
+      "Swimming Pool",
+      "Fitness Center",
+      "Coworking Lounge",
+      "EV Charging Stations"
+    ],
+    "facilities": [
+      "Concierge desk",
+      "Daily shuttle to Bang Tao Beach"
+    ],
+    "description": "156-unit condominium in Bang Tao, completion Q2 2027. Areas from 52 m² to 124 m².",
+    "highlights": [
+      "Walking distance to Porto de Phuket & Boat Avenue",
+      "Handover Q2 2027",
+      "High-end resort management"
+    ],
+    "nearby_places": [
+      "Boat Avenue Phuket",
+      "Porto de Phuket",
+      "Bang Tao Beach (800m)"
+    ],
+    "investment_information": "Prime Bang Tao rental market hotspot.",
+    "rental_information": "Optional managed rental pool with international hotel standards.",
+    "payment_information": "Staged payments over construction through Q2 2027.",
+    "images": [
+      "https://tajlandia.com/api/img?path=migrated-projects%2Fsudara%2F6e5b25af.webp&w=960"
+    ],
+    "image_host": "tajlandia.com",
+    "image_count": 1,
+    "videos": [],
+    "documents": [],
+    "source": {
+      "url": "https://tajlandia.com/",
+      "title": "Tajlandia.com - Thailand Real Estate Through the Eyes of Market Analysts",
+      "canonical_url": "https://tajlandia.com",
+      "crawl_timestamp": "2026-09-22T06:58:04Z"
+    },
+    "detail_page_url": "https://tajlandia.com/oferty/phuket/sudara-condo",
+    "detail_page_crawled": false,
+    "is_public": true
+  },
+  {
+    "property_id": "PROP-PHK-008",
+    "project_id": "PROJ-SUNHILLS-01",
+    "property_name": "Sun Hills Layan",
+    "project_name": "Sun Hills Layan",
+    "property_type": "Condominium",
+    "status": "Under construction",
+    "location": {
+      "country": "Thailand",
+      "province": "Phuket",
+      "city": "Thalang",
+      "district": "Layan",
+      "subdistrict": "Choeng Thale",
+      "area": "Phuket",
+      "address": "Layan Hillside, Thalang, Phuket",
+      "latitude": 8.0215,
+      "longitude": 98.3032
+    },
+    "developer": {
+      "name": "Sun Hills Group",
+      "description": "Comprehensive resort and lifestyle community developers.",
+      "website": null
+    },
+    "property_details": {
+      "bedrooms": "0–3",
+      "bathrooms": 1,
+      "area": "26.5–70.4 sqm",
+      "land_area": null,
+      "floor_area": "26.5-70.4 sqm",
+      "floor": null,
+      "total_floors": 8,
+      "unit_type": "Condominium",
+      "units": 370
+    },
+    "pricing": {
+      "price": "from 4.xx million THB",
+      "minimum_price": "from 4.xx million THB",
+      "price_numeric_min": 4200000,
+      "maximum_price": "12.00 million THB",
+      "currency": "THB",
+      "price_per_sqm": null,
+      "price_note": "Starting price masked as 'xx'."
+    },
+    "ownership": {
+      "ownership_type": "Foreign Freehold / Leasehold",
+      "freehold": true,
+      "leasehold": true
+    },
+    "features": [
+      "Beach access",
+      "Full commercial infrastructure",
+      "Multiple rooftop pools",
+      "Shopping & dining boulevard on site"
+    ],
+    "amenities": [
+      "Swimming Pool",
+      "Commercial Area",
+      "Restaurants",
+      "Gym",
+      "Beach Shuttle"
+    ],
+    "facilities": [
+      "3 Swimming pools",
+      "Supermarket",
+      "Medical clinic on site"
+    ],
+    "description": "A 370-unit condominium in Layan district with beach access and comprehensive commercial facilities.",
+    "highlights": [
+      "Affordable entry from 4.xxM THB",
+      "Full lifestyle amenities & shopping on site",
+      "Near Sirinat National Park & Layan Beach"
+    ],
+    "nearby_places": [
+      "Layan Beach (3 mins)",
+      "Anantara Layan Phuket Resort",
+      "Banana Beach"
+    ],
+    "investment_information": "High rental demand from short-term holidaymakers and long-term expatriates.",
+    "rental_information": "Fully serviced rental management available.",
+    "payment_information": "Flexible payment plans with up to 2 years interest-free post-handover.",
+    "images": [
+      "https://tajlandia.com/api/img?path=migrated-projects%2Fsun-hills-layan%2Ffd4f6380.webp&w=960"
+    ],
+    "image_host": "tajlandia.com",
+    "image_count": 1,
+    "videos": [],
+    "documents": [],
+    "source": {
+      "url": "https://tajlandia.com/",
+      "title": "Tajlandia.com - Thailand Real Estate Through the Eyes of Market Analysts",
+      "canonical_url": "https://tajlandia.com",
+      "crawl_timestamp": "2026-09-22T06:58:04Z"
+    },
+    "detail_page_url": "https://tajlandia.com/oferty/phuket/sun-hills-kompleks-370-mieszkan",
+    "detail_page_crawled": false,
+    "is_public": true
+  },
+  {
+    "property_id": "PROP-SAM-009",
+    "project_id": "PROJ-NOMA-01",
+    "property_name": "Pacific Noma",
+    "project_name": "Pacific Noma Baan Mae Nam",
+    "property_type": "Villa",
+    "status": "Pre-sale",
+    "location": {
+      "country": "Thailand",
+      "province": "Surat Thani",
+      "city": "Koh Samui",
+      "district": "Baan Mae Nam",
+      "subdistrict": "Mae Nam",
+      "area": "Samui",
+      "address": "Baan Mae Nam Beachfront Lane, Koh Samui",
+      "latitude": 9.5742,
+      "longitude": 99.9812
+    },
+    "developer": {
+      "name": "Pacific Noma Luxury",
+      "description": "High-end bespoke beachfront villa development studio.",
+      "website": null
+    },
+    "property_details": {
+      "bedrooms": "5",
+      "bathrooms": 6,
+      "area": "443 sqm",
+      "land_area": "800-1200 sqm",
+      "floor_area": "443 sqm",
+      "floor": 2,
+      "total_floors": 2,
+      "unit_type": "Villa",
+      "units": 13
+    },
+    "pricing": {
+      "price": "from 18.xx million THB",
+      "minimum_price": "from 18.xx million THB",
+      "price_numeric_min": 18900000,
+      "maximum_price": "35.00 million THB",
+      "currency": "THB",
+      "price_per_sqm": null,
+      "price_note": "Starting price masked as 'xx'."
+    },
+    "ownership": {
+      "ownership_type": "Freehold via Company / Leasehold",
+      "freehold": true,
+      "leasehold": true
+    },
+    "features": [
+      "Private infinity pool",
+      "Direct beach access",
+      "5 large master suites",
+      "Floor-to-ceiling glass architecture"
+    ],
+    "amenities": [
+      "Private Pool",
+      "Beachfront Access",
+      "Sea View",
+      "Private Garage",
+      "Staff Quarters"
+    ],
+    "facilities": [
+      "Private estate security",
+      "Boat mooring access"
+    ],
+    "description": "13 villas of 443 sqm each, with private pools and beach access, set in the quiet Baan Mae Nam district on Koh Samui's northern coast.",
+    "highlights": [
+      "Rare beachfront location on Samui",
+      "5 bedroom ultra-luxury layout",
+      "Exquisite modernist design"
+    ],
+    "nearby_places": [
+      "Mae Nam Beach",
+      "W Koh Samui Hotel",
+      "Pralan Pier"
+    ],
+    "investment_information": "High nightly rental rate asset ($1,200 - $2,500/night for 5-bed beachfront villas).",
+    "rental_information": "Luxury villa rental specialist management.",
+    "payment_information": "Custom payment milestones aligned with construction.",
+    "images": [
+      "https://tajlandia.com/api/img?path=projects%2Fpacific-noma%2F1782210332095-62qtnu.jpg&w=960"
+    ],
+    "image_host": "tajlandia.com",
+    "image_count": 1,
+    "videos": [],
+    "documents": [],
+    "source": {
+      "url": "https://tajlandia.com/",
+      "title": "Tajlandia.com - Thailand Real Estate Through the Eyes of Market Analysts",
+      "canonical_url": "https://tajlandia.com",
+      "crawl_timestamp": "2026-09-22T06:58:04Z"
+    },
+    "detail_page_url": "https://tajlandia.com/oferty/samui/pacific-noma-baan-mae-nam-koh-samui",
+    "detail_page_crawled": false,
+    "is_public": true
+  },
+  {
+    "property_id": "PROP-PHK-010",
+    "project_id": "PROJ-TITLE-01",
+    "property_name": "The Title Serenity Naiyang",
+    "project_name": "The Title Serenity Naiyang",
+    "property_type": "Condominium",
+    "status": "Ready to move in",
+    "location": {
+      "country": "Thailand",
+      "province": "Phuket",
+      "city": "Thalang",
+      "district": "Nai Yang",
+      "subdistrict": "Sakhu",
+      "area": "Phuket",
+      "address": "400m from Nai Yang Beach, Sirinath National Park, Phuket",
+      "latitude": 8.0891,
+      "longitude": 98.3015
+    },
+    "developer": {
+      "name": "Rhom Bho Property (The Title)",
+      "description": "Publicly traded developer listed on the Stock Exchange of Thailand.",
+      "website": null
+    },
+    "property_details": {
+      "bedrooms": "1–3",
+      "bathrooms": 2,
+      "area": "36.25–112.55 sqm",
+      "land_area": null,
+      "floor_area": "36.25-112.55 sqm",
+      "floor": null,
+      "total_floors": 7,
+      "unit_type": "Condominium",
+      "units": 211
+    },
+    "pricing": {
+      "price": "from 5.xx million THB",
+      "minimum_price": "from 5.xx million THB",
+      "price_numeric_min": 5100000,
+      "maximum_price": "14.50 million THB",
+      "currency": "THB",
+      "price_per_sqm": null,
+      "price_note": "Starting price masked as 'xx'."
+    },
+    "ownership": {
+      "ownership_type": "Foreign Freehold / Leasehold",
+      "freehold": true,
+      "leasehold": true
+    },
+    "features": [
+      "Walking distance to beach",
+      "Surrounded by National Park pines",
+      "Multiple lagoon swimming pools",
+      "Steam & sauna rooms"
+    ],
+    "amenities": [
+      "Swimming Pool",
+      "Gym",
+      "Sauna",
+      "Parking",
+      "Garden",
+      "24h Security"
+    ],
+    "facilities": [
+      "Extensive gardens",
+      "Rooftop sun decks"
+    ],
+    "description": "Ready condominium with 211 units from 30 m² within walking distance of Nai Yang Beach and Sirinath National…",
+    "highlights": [
+      "Ready for immediate handover and occupancy",
+      "Peaceful national park setting",
+      "10 minutes to Phuket Airport"
+    ],
+    "nearby_places": [
+      "Nai Yang Beach",
+      "Sirinath National Park",
+      "Phuket International Airport"
+    ],
+    "investment_information": "Strong year-round occupancy driven by proximity to airport and pristine natural beach.",
+    "rental_information": "High demand among seasonal tourists and airline crews.",
+    "payment_information": "Immediate title deed transfer upon 100% settlement.",
+    "images": [
+      "https://tajlandia.com/api/img?path=projects%2Fthe-title-serenity-naiyang%2F1776850746124-ksfauf.webp&w=960"
+    ],
+    "image_host": "tajlandia.com",
+    "image_count": 1,
+    "videos": [],
+    "documents": [],
+    "source": {
+      "url": "https://tajlandia.com/",
+      "title": "Tajlandia.com - Thailand Real Estate Through the Eyes of Market Analysts",
+      "canonical_url": "https://tajlandia.com",
+      "crawl_timestamp": "2026-09-22T06:58:04Z"
+    },
+    "detail_page_url": "https://tajlandia.com/oferty/phuket/title-serenity-beachfront-sirinath-park",
+    "detail_page_crawled": false,
+    "is_public": true
+  },
+  {
+    "property_id": "PROP-PHK-011",
+    "project_id": "PROJ-HENNESSY-01",
+    "property_name": "Hennessy Residence Karon",
+    "project_name": "Hennessy Residence Karon Beach",
+    "property_type": "Condominium",
+    "status": "Under construction",
+    "location": {
+      "country": "Thailand",
+      "province": "Phuket",
+      "city": "Mueang Phuket",
+      "district": "Karon",
+      "subdistrict": "Karon",
+      "area": "Phuket",
+      "address": "Karon Beach Road, Phuket",
+      "latitude": 7.8465,
+      "longitude": 98.2974
+    },
+    "developer": {
+      "name": "Hennessy Group",
+      "description": "Hospitality-led resort residence developer on southwest Phuket.",
+      "website": null
+    },
+    "property_details": {
+      "bedrooms": "1–2",
+      "bathrooms": 1,
+      "area": "46.5–57 sqm",
+      "land_area": null,
+      "floor_area": "46.5-57 sqm",
+      "floor": null,
+      "total_floors": 8,
+      "unit_type": "Condominium",
+      "units": 297
+    },
+    "pricing": {
+      "price": "from 9.xx million THB",
+      "minimum_price": "from 9.xx million THB",
+      "price_numeric_min": 9200000,
+      "maximum_price": "15.80 million THB",
+      "currency": "THB",
+      "price_per_sqm": null,
+      "price_note": "Starting price masked as 'xx'."
+    },
+    "ownership": {
+      "ownership_type": "Foreign Freehold / Leasehold",
+      "freehold": true,
+      "leasehold": true
+    },
+    "features": [
+      "Sea views from higher floors",
+      "Rooftop infinity pool with sunset views",
+      "Walking distance to Karon Beach",
+      "Full hotel-service amenities"
+    ],
+    "amenities": [
+      "Rooftop Pool",
+      "Fitness Center",
+      "Restaurant",
+      "Concierge",
+      "Covered Parking"
+    ],
+    "facilities": [
+      "Sky bar",
+      "Spa & wellness suites"
+    ],
+    "description": "A 297-unit development under construction near Karon Beach, scheduled for completion in Q4 2026.",
+    "highlights": [
+      "Prime location in mature high-liquidity Karon market",
+      "Completion Q4 2026",
+      "Hotel licensed investment product"
+    ],
+    "nearby_places": [
+      "Karon Beach",
+      "Kata Beach (5 mins)",
+      "Karon Viewpoint"
+    ],
+    "investment_information": "High seasonal occupancy in Karon reaching over 85% in high season.",
+    "rental_information": "Managed rental pool program with guaranteed return options.",
+    "payment_information": "Installment payments until handover in Q4 2026.",
+    "images": [
+      "https://tajlandia.com/api/img?path=projects%2Fthailand%2Fphuket%2Fhennessy-residence-karon%2Fcover%2F1bf6e41186_hennessy_12_result_fMcvvkAiAN.optimized.webp&w=960"
+    ],
+    "image_host": "tajlandia.com",
+    "image_count": 1,
+    "videos": [],
+    "documents": [],
+    "source": {
+      "url": "https://tajlandia.com/",
+      "title": "Tajlandia.com - Thailand Real Estate Through the Eyes of Market Analysts",
+      "canonical_url": "https://tajlandia.com",
+      "crawl_timestamp": "2026-09-22T06:58:04Z"
+    },
+    "detail_page_url": "https://tajlandia.com/oferty/phuket/hennessy-residence-beach",
+    "detail_page_crawled": false,
+    "is_public": true
+  },
+  {
+    "property_id": "PROP-PHK-012",
+    "project_id": "PROJ-ANOCHA-01",
+    "property_name": "The Element by Anocha",
+    "project_name": "The Element by Anocha",
+    "property_type": "Condominium",
+    "status": "Under construction",
+    "location": {
+      "country": "Thailand",
+      "province": "Phuket",
+      "city": "Thalang",
+      "district": "Bang Tao",
+      "subdistrict": "Choeng Thale",
+      "area": "Phuket",
+      "address": "Choeng Thale, Bang Tao, Phuket",
+      "latitude": 7.9961,
+      "longitude": 98.3105
+    },
+    "developer": {
+      "name": "Anocha Property",
+      "description": "Modern urban condominium developer in Thailand.",
+      "website": null
+    },
+    "property_details": {
+      "bedrooms": "1–2",
+      "bathrooms": 1,
+      "area": "29.87–48.78 sqm",
+      "land_area": null,
+      "floor_area": "29.87-48.78 sqm",
+      "floor": null,
+      "total_floors": 7,
+      "unit_type": "Condominium",
+      "units": 278
+    },
+    "pricing": {
+      "price": "from 4.xx million THB",
+      "minimum_price": "from 4.xx million THB",
+      "price_numeric_min": 4100000,
+      "maximum_price": "8.50 million THB",
+      "currency": "THB",
+      "price_per_sqm": null,
+      "price_note": "Starting price masked as 'xx'."
+    },
+    "ownership": {
+      "ownership_type": "Foreign Freehold / Leasehold",
+      "freehold": true,
+      "leasehold": true
+    },
+    "features": [
+      "Modern smart-home technology",
+      "Compact ergonomic layouts",
+      "Co-working space",
+      "Swimming pool"
+    ],
+    "amenities": [
+      "Swimming Pool",
+      "Gym",
+      "Smart Access",
+      "Co-working Hub"
+    ],
+    "facilities": [
+      "Landscaped recreation area",
+      "24-hour security"
+    ],
+    "description": "278-unit condominium under construction in Phuket, completion scheduled Q4 2027.",
+    "highlights": [
+      "Entry price from only 4.xxM THB in Bang Tao area",
+      "Completion Q4 2027",
+      "Compact smart layouts (30-49 sqm)"
+    ],
+    "nearby_places": [
+      "Boat Avenue",
+      "Blue Tree Phuket Waterpark",
+      "Bang Tao Beach (7 mins)"
+    ],
+    "investment_information": "High rental liquidity for young professionals and digital nomads.",
+    "rental_information": "Turnkey furnishing packages and management available.",
+    "payment_information": "Easy staged payments across construction.",
+    "images": [],
+    "image_host": "",
+    "image_count": 0,
+    "videos": [],
+    "documents": [],
+    "source": {
+      "url": "https://tajlandia.com/",
+      "title": "Tajlandia.com - Thailand Real Estate Through the Eyes of Market Analysts",
+      "canonical_url": "https://tajlandia.com",
+      "crawl_timestamp": "2026-09-22T06:58:04Z"
+    },
+    "detail_page_url": "https://tajlandia.com/oferty/phuket/element-anocha-condo",
+    "detail_page_crawled": false,
+    "is_public": true
+  }
+]

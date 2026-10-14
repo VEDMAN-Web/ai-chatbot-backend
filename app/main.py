@@ -1,0 +1,342 @@
+import os
+from fastapi import FastAPI, Depends, Query, HTTPException, status
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+from sqlalchemy.orm import Session
+from typing import List, Optional
+from app.core.config import settings
+from app.db.session import get_db
+from app.services.property_search import PropertyFilterParams, search_properties_safe, get_property_by_id
+from app.db.models import Property
+from app.api.v1.chat import router as chat_router
+from app.api.v1.admin import router as admin_router
+from app.api.v1.auth import router as auth_router
+
+app = FastAPI(
+    title="Tajlandia AI Property Intelligence Platform API",
+    description="Multi-tenant backend for Public Customer Chatbot & Internal Admin Agent.",
+    version="1.0.0",
+    docs_url="/docs",
+    redoc_url="/redoc"
+)
+
+# Mount Static Assets & Frontend
+static_dir = os.path.join(os.path.dirname(__file__), "static")
+if os.path.exists(static_dir):
+    app.mount("/static", StaticFiles(directory=static_dir), name="static")
+
+@app.on_event("startup")
+def startup_db_init():
+    """Ensure all PostgreSQL tables and extensions exist on boot and seed admin user."""
+    try:
+        import sqlalchemy as sa
+        from app.db.session import engine, Base, SessionLocal
+        import app.db.models  # noqa
+        from app.db.models import User
+        from app.core.security import hash_password
+
+        # 1. Safe DDL synchronization for existing users table
+        with engine.begin() as conn:
+            conn.execute(sa.text("""
+                ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE;
+                ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash VARCHAR(255);
+                ALTER TABLE users ADD COLUMN IF NOT EXISTS google_email VARCHAR(255);
+                ALTER TABLE users ADD COLUMN IF NOT EXISTS google_refresh_token TEXT;
+            """))
+
+        # 2. Ensure all tables (including user_sessions) exist
+        Base.metadata.create_all(bind=engine)
+        print("FastAPI Startup: Verified all database tables and columns.")
+
+        with SessionLocal() as db:
+            for admin_email in [settings.ADMIN_EMAIL, "admin@tajlandia.com"]:
+                clean_email = admin_email.strip().lower()
+                admin = db.query(User).filter(func.lower(User.email) == clean_email).first()
+                if not admin:
+                    admin = User(
+                        email=clean_email,
+                        name="Super Admin",
+                        role="super_admin",
+                        password_hash=hash_password(settings.ADMIN_PASSWORD),
+                        is_active=True
+                    )
+                    db.add(admin)
+                    db.commit()
+                    print(f"FastAPI Startup: Provisioned super-admin account '{clean_email}'.")
+                else:
+                    admin.password_hash = hash_password(settings.ADMIN_PASSWORD)
+                    admin.is_active = True
+                    admin.role = "super_admin"
+                    db.commit()
+                    print(f"FastAPI Startup: Updated password hash for super-admin '{clean_email}'.")
+
+            try:
+                from app.services.firestore_auth_service import add_or_update_admin_in_firestore
+                add_or_update_admin_in_firestore(
+                    email="admin@tajlandia.com",
+                    password=settings.ADMIN_PASSWORD,
+                    role="super_admin",
+                    name="Super Admin",
+                    is_active=True
+                )
+                print("FastAPI Startup: Synced admin@tajlandia.com to Firestore admin_authentication.")
+            except Exception as fe:
+                print(f"FastAPI Startup Firestore sync notice: {fe}")
+    except Exception as e:
+        print(f"FastAPI Startup DB Notice: {e}")
+
+@app.get("/", include_in_schema=False)
+def serve_frontend():
+    """Serves the main Tajlandia AI modern dark Single Page App."""
+    index_path = os.path.join(static_dir, "index.html")
+    if os.path.exists(index_path):
+        return FileResponse(index_path)
+    return {"message": "Tajlandia AI Backend Active"}
+
+@app.get("/admin-ui", include_in_schema=False)
+def serve_admin_frontend():
+    """Serves admin view of frontend."""
+    index_path = os.path.join(static_dir, "index.html")
+    if os.path.exists(index_path):
+        return FileResponse(index_path)
+    return {"message": "Tajlandia AI Backend Active"}
+
+# Robust CORS Configuration: allows all frontend ports (Vite 5173, Next 3000, etc.) and deployed domains
+app.add_middleware(
+    CORSMiddleware,
+    allow_origin_regex=r".*",
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Register Public Chatbot & Admin Agent Routers
+app.include_router(chat_router, prefix="/api/v1")
+app.include_router(admin_router, prefix="/api/v1")
+app.include_router(auth_router, prefix="/api/v1")
+
+# Convenience route aliases for authentication and user management
+from app.api.v1.auth import (
+    user_login,
+    user_logout,
+    register_user,
+    list_admin_users_with_google_status,
+    create_admin_user,
+    get_admin_user_details,
+    update_admin_user,
+    delete_admin_user,
+    UserLoginResponse,
+    UserLogoutResponse,
+    AdminUserDirectoryItem
+)
+app.post("/login", response_model=UserLoginResponse, tags=["Authentication"], include_in_schema=False)(user_login)
+app.post("/logout", response_model=UserLogoutResponse, tags=["Authentication"], include_in_schema=False)(user_logout)
+app.post("/api/v1/login", response_model=UserLoginResponse, tags=["Authentication"], include_in_schema=False)(user_login)
+app.post("/api/v1/logout", response_model=UserLogoutResponse, tags=["Authentication"], include_in_schema=False)(user_logout)
+app.post("/admin/login", response_model=UserLoginResponse, tags=["Authentication"], include_in_schema=False)(user_login)
+app.post("/api/v1/admin/login", response_model=UserLoginResponse, tags=["Authentication"], include_in_schema=False)(user_login)
+app.post("/api/v1/register", response_model=AdminUserDirectoryItem, status_code=status.HTTP_201_CREATED, tags=["Authentication"], include_in_schema=False)(register_user)
+app.post("/register", response_model=AdminUserDirectoryItem, status_code=status.HTTP_201_CREATED, tags=["Authentication"], include_in_schema=False)(register_user)
+app.post("/api/admin/auth/register", response_model=AdminUserDirectoryItem, status_code=status.HTTP_201_CREATED, tags=["Authentication"], include_in_schema=True)(register_user)
+app.post("/api/admin/auth/login", response_model=UserLoginResponse, tags=["Authentication"], include_in_schema=True)(user_login)
+app.post("/admin/auth/register", response_model=AdminUserDirectoryItem, status_code=status.HTTP_201_CREATED, tags=["Authentication"], include_in_schema=False)(register_user)
+app.post("/admin/auth/login", response_model=UserLoginResponse, tags=["Authentication"], include_in_schema=False)(user_login)
+app.post("/api/auth/register", response_model=AdminUserDirectoryItem, status_code=status.HTTP_201_CREATED, tags=["Authentication"], include_in_schema=False)(register_user)
+app.post("/api/auth/login", response_model=UserLoginResponse, tags=["Authentication"], include_in_schema=False)(user_login)
+
+# User management aliases (/api/v1/admin/users and /api/v1/users)
+app.get("/api/v1/admin/users", response_model=list[AdminUserDirectoryItem], tags=["Admin Directory"], include_in_schema=False)(list_admin_users_with_google_status)
+app.get("/api/v1/users", response_model=list[AdminUserDirectoryItem], tags=["Admin Directory"], include_in_schema=False)(list_admin_users_with_google_status)
+app.post("/api/v1/admin/users", response_model=AdminUserDirectoryItem, status_code=status.HTTP_201_CREATED, tags=["Admin Directory"], include_in_schema=False)(create_admin_user)
+app.post("/api/v1/users", response_model=AdminUserDirectoryItem, status_code=status.HTTP_201_CREATED, tags=["Admin Directory"], include_in_schema=False)(create_admin_user)
+app.get("/api/v1/admin/users/{user_id}", response_model=AdminUserDirectoryItem, tags=["Admin Directory"], include_in_schema=False)(get_admin_user_details)
+app.get("/api/v1/users/{user_id}", response_model=AdminUserDirectoryItem, tags=["Admin Directory"], include_in_schema=False)(get_admin_user_details)
+app.patch("/api/v1/admin/users/{user_id}", response_model=AdminUserDirectoryItem, tags=["Admin Directory"], include_in_schema=False)(update_admin_user)
+app.put("/api/v1/admin/users/{user_id}", response_model=AdminUserDirectoryItem, tags=["Admin Directory"], include_in_schema=False)(update_admin_user)
+app.patch("/api/v1/users/{user_id}", response_model=AdminUserDirectoryItem, tags=["Admin Directory"], include_in_schema=False)(update_admin_user)
+app.put("/api/v1/users/{user_id}", response_model=AdminUserDirectoryItem, tags=["Admin Directory"], include_in_schema=False)(update_admin_user)
+app.delete("/api/v1/admin/users/{user_id}", tags=["Admin Directory"], include_in_schema=False)(delete_admin_user)
+app.delete("/api/v1/users/{user_id}", tags=["Admin Directory"], include_in_schema=False)(delete_admin_user)
+
+@app.get("/health", tags=["System"])
+def health_check(db: Session = Depends(get_db)):
+    """System health check, PostgreSQL, and Firestore connection test."""
+    try:
+        count = db.query(Property).count()
+        fs_health = {"connected": False}
+        if getattr(settings, "ENABLE_FIRESTORE_SYNC", False):
+            try:
+                from app.services.firestore_service import check_firestore_health
+                fs_health = check_firestore_health()
+            except Exception as fe:
+                fs_health = {"connected": False, "error": str(fe)}
+
+        return {
+            "status": "healthy",
+            "environment": settings.ENVIRONMENT,
+            "database": "connected",
+            "total_properties": count,
+            "firestore": fs_health
+        }
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database connection failed."
+        )
+
+@app.get("/api/v1/branding", tags=["System"])
+def get_branding(site_origin: Optional[str] = Query(None, description="Optional tenant domain")):
+    """
+    Returns active tenant branding, bot name, and contact details.
+    Adapts dynamically based on environment settings or client site_origin
+    (tajlandia.com, thai.estate, varsoviaestate.com).
+    """
+    from app.core.tenant import resolve_tenant
+    tenant = resolve_tenant(site_origin)
+    return {
+        "site_origin": tenant.site_origin,
+        "brand_name": tenant.brand_name,
+        "bot_name": tenant.bot_name,
+        "brand_title": tenant.brand_title,
+        "brand_subtitle": tenant.brand_subtitle,
+        "domain": tenant.domain,
+        "advisor_email": tenant.advisor_email,
+        "website_url": tenant.website_url
+    }
+
+@app.get("/api/v1/properties", tags=["Properties"])
+def list_properties(
+    location: Optional[str] = Query(None, description="Location search query (e.g. Phuket, Bang Tao, Samui)"),
+    property_type: Optional[str] = Query(None, description="Villa or Condominium"),
+    min_price: Optional[float] = Query(None, ge=0),
+    max_price: Optional[float] = Query(None, ge=0),
+    bedrooms: Optional[int] = Query(None, ge=0),
+    has_pool: Optional[bool] = Query(None),
+    beach_access: Optional[bool] = Query(None),
+    status: Optional[str] = Query(None),
+    db: Session = Depends(get_db)
+):
+    """Direct property filtering endpoint using safe SQLAlchemy query builder."""
+    params = PropertyFilterParams(
+        location=location,
+        property_type=property_type,
+        min_price=min_price,
+        max_price=max_price,
+        bedrooms=bedrooms,
+        has_pool=has_pool,
+        beach_access=beach_access,
+        status=status
+    )
+    results = search_properties_safe(db, params)
+    
+    output = []
+    for p in results:
+        img_urls = [img.image_url for img in p.images]
+        output.append({
+            "property_id": p.property_id,
+            "property_name": p.property_name,
+            "property_type": p.property_type,
+            "status": p.status,
+            "area": p.area,
+            "district": p.district,
+            "price_display": p.price_display,
+            "bedrooms": p.bedrooms_display,
+            "area_sqm": p.area_display,
+            "has_pool": p.has_pool,
+            "beach_access": p.beach_access,
+            "images": img_urls,
+            "detail_page_url": p.detail_page_url
+        })
+    return {"count": len(output), "properties": output}
+
+@app.get("/api/v1/properties/{property_id}", tags=["Properties"])
+def get_property(
+    property_id: str,
+    db: Session = Depends(get_db)
+):
+    """Lookup property by exact Property ID."""
+    p = get_property_by_id(db, property_id)
+    if not p:
+        if getattr(settings, "ENABLE_FIRESTORE_SYNC", False):
+            try:
+                from app.services.firestore_service import get_property_by_id_from_firestore
+                fs_p = get_property_by_id_from_firestore(property_id)
+                if fs_p:
+                    return {
+                        "found": True,
+                        "property_id": fs_p["property_id"],
+                        "property_name": fs_p["name"],
+                        "property_type": fs_p["property_type"],
+                        "status": fs_p["status"],
+                        "location": {
+                            "country": fs_p.get("province") or "Thailand",
+                            "province": fs_p.get("province"),
+                            "district": fs_p.get("district"),
+                            "address": fs_p.get("address"),
+                            "latitude": fs_p.get("latitude"),
+                            "longitude": fs_p.get("longitude")
+                        },
+                        "pricing": {
+                            "display": fs_p.get("price"),
+                            "numeric_min": fs_p.get("price_numeric_min"),
+                            "currency": fs_p.get("currency", "THB")
+                        },
+                        "details": {
+                            "bedrooms": fs_p.get("bedrooms"),
+                            "area": fs_p.get("area")
+                        },
+                        "amenities": fs_p.get("raw_firestore_data", {}).get("amenities", []),
+                        "images": fs_p.get("images", []),
+                        "detail_page_url": fs_p.get("detail_page_url")
+                    }
+            except Exception:
+                pass
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Property with ID '{property_id}' not found."
+        )
+    
+    img_urls = [img.image_url for img in p.images]
+    return {
+        "found": True,
+        "property_id": p.property_id,
+        "property_name": p.property_name,
+        "project_name": p.project_name,
+        "property_type": p.property_type,
+        "status": p.status,
+        "location": {
+            "country": p.country,
+            "province": p.province,
+            "district": p.district,
+            "area": p.area,
+            "address": p.address,
+            "latitude": p.latitude,
+            "longitude": p.longitude
+        },
+        "developer": {
+            "name": p.developer_name,
+            "description": p.developer_description
+        },
+        "pricing": {
+            "display": p.price_display,
+            "numeric_min": float(p.price_numeric_min) if p.price_numeric_min else None,
+            "currency": p.currency,
+            "note": p.price_note
+        },
+        "details": {
+            "bedrooms": p.bedrooms_display,
+            "bathrooms": p.bathrooms,
+            "area": p.area_display,
+            "units": p.units
+        },
+        "description": p.description,
+        "investment_info": p.investment_information,
+        "rental_info": p.rental_information,
+        "payment_info": p.payment_information,
+        "amenities": p.amenities,
+        "features": p.features,
+        "highlights": p.highlights,
+        "images": img_urls,
+        "detail_page_url": p.detail_page_url
+    }

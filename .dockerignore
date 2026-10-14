@@ -1,0 +1,65 @@
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials/
+credentials.json
+client_secrets.json
+token.json
+service_account.json
+
+# Tests & Verification
+tests/
+test/
+scratch/
+*test*.py
+*_test.py
+test_*.py
+scripts/test_*.py
+scripts/verify_*.py
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Python cache & virtual environments
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+ENV/
+
+# Local installation artifacts
+pgvector_extracted/
+*.zip
+*.tar.gz
+INSTALL_PGVECTOR_ADMIN.bat
+scripts/copy_pgvector.ps1
+scripts/elevate_copy.py
+scripts/install_pgvector.py
+frontend_example.html
+
+# Data & documents
+data/reports/*
+!data/reports/.gitkeep
+data/drive_docs/private/
+*.pdf
+*.xlsx
+*.docx
+*.csv
+!data/tajlandia-com-2026-09-22.xlsx
+
+# OS & IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db

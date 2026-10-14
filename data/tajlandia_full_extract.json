@@ -1,0 +1,2998 @@
+{
+  "metadata": {
+    "dataset_title": "Tajlandia.com public data extraction",
+    "generated_at": "2026-09-22T09:00:00Z",
+    "generated_by": "Claude (Anthropic), manual browser-tool-assisted extraction session",
+    "source_language": "pl",
+    "output_language": "English",
+    "scope_note": "PARTIAL. Only the homepage (https://tajlandia.com/) was successfully retrieved this session. See crawl_information and validation for full detail on why deeper crawling was not possible."
+  },
+  "crawl_information": {
+    "crawl_started_at": "2026-09-22T06:58:04Z",
+    "crawl_finished_at": "2026-09-22T07:03:30Z",
+    "root_url": "https://tajlandia.com/",
+    "tooling_used": [
+      "web_fetch (single-page retrieval)",
+      "web_search / web_search_fast (site indexing check)",
+      "Claude in Chrome browser connector (navigation attempt)"
+    ],
+    "tooling_constraints": [
+      "No general-purpose outbound network access is available from the code-execution sandbox in this session (its allow-list covers package registries such as npm/PyPI/GitHub only, not arbitrary websites), so no automated Node/Python crawler (Playwright, Cheerio, etc.) could actually run against the live site.",
+      "The web_fetch tool only accepts URLs that were themselves returned by a prior web_search result or supplied directly by the user; URLs merely present as link text inside an already-fetched page are rejected. This blocked link-following from the homepage.",
+      "web_search / web_search_fast returned no indexed results for tajlandia.com beyond generic queries; the site's internal pages (/oferty, /lokalizacje, /blog, district and article pages, robots.txt, sitemap.xml) do not appear to be indexed by the available search backend.",
+      "The Claude in Chrome browser connector was loaded and a tab was created, but every navigation attempt to https://tajlandia.com/ returned 'Permission denied by user', across three different connected browser instances and after the user attempted to grant site access. The root cause could not be resolved within this session."
+    ],
+    "pages_discovered": 35,
+    "on_page_links_blocked": 34,
+    "additional_discovery_attempts_blocked": 2,
+    "pages_crawled": 1,
+    "pages_failed": 0,
+    "pages_blocked_by_tooling": 36,
+    "pages_skipped": 0,
+    "blocked_total_note": "36 = 34 in-page links discovered on the homepage (35 discovered minus the homepage itself, which succeeded) plus 2 additional discovery-only requests (robots.txt, sitemap.xml) that are not on-page links. See logs/crawl_errors.json for the full per-URL list.",
+    "languages_discovered": [
+      "pl (default/crawled, source language)",
+      "en (hreflang variant at /en, not crawled)"
+    ],
+    "sitemaps": {
+      "attempted": [
+        "https://tajlandia.com/robots.txt",
+        "https://tajlandia.com/sitemap.xml"
+      ],
+      "result": "Not retrievable — see tooling_constraints"
+    },
+    "robots_txt": "Not retrievable this session (see tooling_constraints).",
+    "discovered_url_inventory": {
+      "home": [
+        "https://tajlandia.com/"
+      ],
+      "top_level_nav": [
+        "https://tajlandia.com/oferty",
+        "https://tajlandia.com/lokalizacje",
+        "https://tajlandia.com/blog",
+        "https://tajlandia.com/o-nas",
+        "https://tajlandia.com/jak-pracujemy",
+        "https://tajlandia.com/kontakt"
+      ],
+      "language_variants": [
+        "https://tajlandia.com/pl",
+        "https://tajlandia.com/en"
+      ],
+      "property_detail_pages": [
+        "https://tajlandia.com/oferty/phuket/aileen-residence-villas",
+        "https://tajlandia.com/oferty/phuket/bellaguna-lake-residences-lotus",
+        "https://tajlandia.com/oferty/phuket/botanica-four-seasons-villa-project",
+        "https://tajlandia.com/oferty/samui/cocoon-villas-project",
+        "https://tajlandia.com/oferty/phangan/akiraya-villa-2027",
+        "https://tajlandia.com/oferty/samui/palm-residence-koh-samui-wille",
+        "https://tajlandia.com/oferty/phuket/sudara-condo",
+        "https://tajlandia.com/oferty/phuket/sun-hills-kompleks-370-mieszkan",
+        "https://tajlandia.com/oferty/samui/pacific-noma-baan-mae-nam-koh-samui",
+        "https://tajlandia.com/oferty/phuket/title-serenity-beachfront-sirinath-park",
+        "https://tajlandia.com/oferty/phuket/hennessy-residence-beach",
+        "https://tajlandia.com/oferty/phuket/element-anocha-condo"
+      ],
+      "location_detail_pages": [
+        "https://tajlandia.com/lokalizacje/bang-tao",
+        "https://tajlandia.com/lokalizacje/layan",
+        "https://tajlandia.com/lokalizacje/kamala",
+        "https://tajlandia.com/lokalizacje/surin",
+        "https://tajlandia.com/lokalizacje/rawai",
+        "https://tajlandia.com/lokalizacje/nai-harn",
+        "https://tajlandia.com/lokalizacje/karon",
+        "https://tajlandia.com/lokalizacje/bophut",
+        "https://tajlandia.com/lokalizacje/maenam"
+      ],
+      "article_pages": [
+        "https://tajlandia.com/blog/koh-samui-investor-mistakes-case-studies-2026-fe6cb7",
+        "https://tajlandia.com/blog/koh-samui-infrastructure-development-2026-projects-property-prices-2fa920",
+        "https://tajlandia.com/blog/phuket-rental-management-models-2026-4c1c6e"
+      ],
+      "legal_pages": [
+        "https://tajlandia.com/polityka-prywatnosci",
+        "https://tajlandia.com/regulamin"
+      ]
+    },
+    "external_references_found_not_crawled": [
+      "tel:+66 64 402 7744 (not a web URL)",
+      "https://wa.me/66644027744 (WhatsApp deep link — third-party domain, out of crawl scope by design)",
+      "mailto:hi@tajlandia.com (not a web URL)"
+    ],
+    "crawl_success_rate": "1 / 35 discovered URLs (2.9%)",
+    "content_extraction_success_rate": "100% of the one page that was reachable was fully extracted",
+    "duplicate_rate": "0% (no duplicates encountered — only one page was retrieved)",
+    "completion_statement": "This crawl did NOT achieve full site coverage. Only the homepage was accessible through the tools available in this session; the 34 other internal URLs discovered via on-page links could not be retrieved due to the tooling constraints listed above. This is explicitly not being reported as '100% of the website scraped'.",
+    "source_language": "pl",
+    "output_language": "English",
+    "crawl_errors": [
+      {
+        "url": "https://tajlandia.com/robots.txt",
+        "status": null,
+        "error": "not_returned_by_search_and_not_navigable",
+        "detail": "web_fetch rejected this URL because it was not returned by a prior web_search result; web_search returned no indexed match; browser navigation to the domain was denied.",
+        "timestamp": "2026-09-22T07:00:00Z"
+      },
+      {
+        "url": "https://tajlandia.com/sitemap.xml",
+        "status": null,
+        "error": "not_returned_by_search_and_not_navigable",
+        "detail": "web_fetch rejected this URL because it was not returned by a prior web_search result; web_search returned no indexed match; browser navigation to the domain was denied.",
+        "timestamp": "2026-09-22T07:00:00Z"
+      },
+      {
+        "url": "https://tajlandia.com/oferty",
+        "status": null,
+        "error": "blocked_by_tooling",
+        "detail": "web_fetch rejected this URL (only user-supplied or search-returned URLs are fetchable); web_search found no indexed match for this internal page; Claude in Chrome browser navigation to this domain returned Permission denied by user across three connected browser instances.",
+        "timestamp": "2026-09-22T07:00:00Z"
+      },
+      {
+        "url": "https://tajlandia.com/lokalizacje",
+        "status": null,
+        "error": "blocked_by_tooling",
+        "detail": "web_fetch rejected this URL (only user-supplied or search-returned URLs are fetchable); web_search found no indexed match for this internal page; Claude in Chrome browser navigation to this domain returned Permission denied by user across three connected browser instances.",
+        "timestamp": "2026-09-22T07:00:00Z"
+      },
+      {
+        "url": "https://tajlandia.com/blog",
+        "status": null,
+        "error": "blocked_by_tooling",
+        "detail": "web_fetch rejected this URL (only user-supplied or search-returned URLs are fetchable); web_search found no indexed match for this internal page; Claude in Chrome browser navigation to this domain returned Permission denied by user across three connected browser instances.",
+        "timestamp": "2026-09-22T07:00:00Z"
+      },
+      {
+        "url": "https://tajlandia.com/o-nas",
+        "status": null,
+        "error": "blocked_by_tooling",
+        "detail": "web_fetch rejected this URL (only user-supplied or search-returned URLs are fetchable); web_search found no indexed match for this internal page; Claude in Chrome browser navigation to this domain returned Permission denied by user across three connected browser instances.",
+        "timestamp": "2026-09-22T07:00:00Z"
+      },
+      {
+        "url": "https://tajlandia.com/jak-pracujemy",
+        "status": null,
+        "error": "blocked_by_tooling",
+        "detail": "web_fetch rejected this URL (only user-supplied or search-returned URLs are fetchable); web_search found no indexed match for this internal page; Claude in Chrome browser navigation to this domain returned Permission denied by user across three connected browser instances.",
+        "timestamp": "2026-09-22T07:00:00Z"
+      },
+      {
+        "url": "https://tajlandia.com/kontakt",
+        "status": null,
+        "error": "blocked_by_tooling",
+        "detail": "web_fetch rejected this URL (only user-supplied or search-returned URLs are fetchable); web_search found no indexed match for this internal page; Claude in Chrome browser navigation to this domain returned Permission denied by user across three connected browser instances.",
+        "timestamp": "2026-09-22T07:00:00Z"
+      },
+      {
+        "url": "https://tajlandia.com/pl",
+        "status": null,
+        "error": "blocked_by_tooling",
+        "detail": "web_fetch rejected this URL (only user-supplied or search-returned URLs are fetchable); web_search found no indexed match for this internal page; Claude in Chrome browser navigation to this domain returned Permission denied by user across three connected browser instances.",
+        "timestamp": "2026-09-22T07:00:00Z"
+      },
+      {
+        "url": "https://tajlandia.com/en",
+        "status": null,
+        "error": "blocked_by_tooling",
+        "detail": "web_fetch rejected this URL (only user-supplied or search-returned URLs are fetchable); web_search found no indexed match for this internal page; Claude in Chrome browser navigation to this domain returned Permission denied by user across three connected browser instances.",
+        "timestamp": "2026-09-22T07:00:00Z"
+      },
+      {
+        "url": "https://tajlandia.com/oferty/phuket/aileen-residence-villas",
+        "status": null,
+        "error": "blocked_by_tooling",
+        "detail": "web_fetch rejected this URL (only user-supplied or search-returned URLs are fetchable); web_search found no indexed match for this internal page; Claude in Chrome browser navigation to this domain returned Permission denied by user across three connected browser instances.",
+        "timestamp": "2026-09-22T07:00:00Z"
+      },
+      {
+        "url": "https://tajlandia.com/oferty/phuket/bellaguna-lake-residences-lotus",
+        "status": null,
+        "error": "blocked_by_tooling",
+        "detail": "web_fetch rejected this URL (only user-supplied or search-returned URLs are fetchable); web_search found no indexed match for this internal page; Claude in Chrome browser navigation to this domain returned Permission denied by user across three connected browser instances.",
+        "timestamp": "2026-09-22T07:00:00Z"
+      },
+      {
+        "url": "https://tajlandia.com/oferty/phuket/botanica-four-seasons-villa-project",
+        "status": null,
+        "error": "blocked_by_tooling",
+        "detail": "web_fetch rejected this URL (only user-supplied or search-returned URLs are fetchable); web_search found no indexed match for this internal page; Claude in Chrome browser navigation to this domain returned Permission denied by user across three connected browser instances.",
+        "timestamp": "2026-09-22T07:00:00Z"
+      },
+      {
+        "url": "https://tajlandia.com/oferty/samui/cocoon-villas-project",
+        "status": null,
+        "error": "blocked_by_tooling",
+        "detail": "web_fetch rejected this URL (only user-supplied or search-returned URLs are fetchable); web_search found no indexed match for this internal page; Claude in Chrome browser navigation to this domain returned Permission denied by user across three connected browser instances.",
+        "timestamp": "2026-09-22T07:00:00Z"
+      },
+      {
+        "url": "https://tajlandia.com/oferty/phangan/akiraya-villa-2027",
+        "status": null,
+        "error": "blocked_by_tooling",
+        "detail": "web_fetch rejected this URL (only user-supplied or search-returned URLs are fetchable); web_search found no indexed match for this internal page; Claude in Chrome browser navigation to this domain returned Permission denied by user across three connected browser instances.",
+        "timestamp": "2026-09-22T07:00:00Z"
+      },
+      {
+        "url": "https://tajlandia.com/oferty/samui/palm-residence-koh-samui-wille",
+        "status": null,
+        "error": "blocked_by_tooling",
+        "detail": "web_fetch rejected this URL (only user-supplied or search-returned URLs are fetchable); web_search found no indexed match for this internal page; Claude in Chrome browser navigation to this domain returned Permission denied by user across three connected browser instances.",
+        "timestamp": "2026-09-22T07:00:00Z"
+      },
+      {
+        "url": "https://tajlandia.com/oferty/phuket/sudara-condo",
+        "status": null,
+        "error": "blocked_by_tooling",
+        "detail": "web_fetch rejected this URL (only user-supplied or search-returned URLs are fetchable); web_search found no indexed match for this internal page; Claude in Chrome browser navigation to this domain returned Permission denied by user across three connected browser instances.",
+        "timestamp": "2026-09-22T07:00:00Z"
+      },
+      {
+        "url": "https://tajlandia.com/oferty/phuket/sun-hills-kompleks-370-mieszkan",
+        "status": null,
+        "error": "blocked_by_tooling",
+        "detail": "web_fetch rejected this URL (only user-supplied or search-returned URLs are fetchable); web_search found no indexed match for this internal page; Claude in Chrome browser navigation to this domain returned Permission denied by user across three connected browser instances.",
+        "timestamp": "2026-09-22T07:00:00Z"
+      },
+      {
+        "url": "https://tajlandia.com/oferty/samui/pacific-noma-baan-mae-nam-koh-samui",
+        "status": null,
+        "error": "blocked_by_tooling",
+        "detail": "web_fetch rejected this URL (only user-supplied or search-returned URLs are fetchable); web_search found no indexed match for this internal page; Claude in Chrome browser navigation to this domain returned Permission denied by user across three connected browser instances.",
+        "timestamp": "2026-09-22T07:00:00Z"
+      },
+      {
+        "url": "https://tajlandia.com/oferty/phuket/title-serenity-beachfront-sirinath-park",
+        "status": null,
+        "error": "blocked_by_tooling",
+        "detail": "web_fetch rejected this URL (only user-supplied or search-returned URLs are fetchable); web_search found no indexed match for this internal page; Claude in Chrome browser navigation to this domain returned Permission denied by user across three connected browser instances.",
+        "timestamp": "2026-09-22T07:00:00Z"
+      },
+      {
+        "url": "https://tajlandia.com/oferty/phuket/hennessy-residence-beach",
+        "status": null,
+        "error": "blocked_by_tooling",
+        "detail": "web_fetch rejected this URL (only user-supplied or search-returned URLs are fetchable); web_search found no indexed match for this internal page; Claude in Chrome browser navigation to this domain returned Permission denied by user across three connected browser instances.",
+        "timestamp": "2026-09-22T07:00:00Z"
+      },
+      {
+        "url": "https://tajlandia.com/oferty/phuket/element-anocha-condo",
+        "status": null,
+        "error": "blocked_by_tooling",
+        "detail": "web_fetch rejected this URL (only user-supplied or search-returned URLs are fetchable); web_search found no indexed match for this internal page; Claude in Chrome browser navigation to this domain returned Permission denied by user across three connected browser instances.",
+        "timestamp": "2026-09-22T07:00:00Z"
+      },
+      {
+        "url": "https://tajlandia.com/lokalizacje/bang-tao",
+        "status": null,
+        "error": "blocked_by_tooling",
+        "detail": "web_fetch rejected this URL (only user-supplied or search-returned URLs are fetchable); web_search found no indexed match for this internal page; Claude in Chrome browser navigation to this domain returned Permission denied by user across three connected browser instances.",
+        "timestamp": "2026-09-22T07:00:00Z"
+      },
+      {
+        "url": "https://tajlandia.com/lokalizacje/layan",
+        "status": null,
+        "error": "blocked_by_tooling",
+        "detail": "web_fetch rejected this URL (only user-supplied or search-returned URLs are fetchable); web_search found no indexed match for this internal page; Claude in Chrome browser navigation to this domain returned Permission denied by user across three connected browser instances.",
+        "timestamp": "2026-09-22T07:00:00Z"
+      },
+      {
+        "url": "https://tajlandia.com/lokalizacje/kamala",
+        "status": null,
+        "error": "blocked_by_tooling",
+        "detail": "web_fetch rejected this URL (only user-supplied or search-returned URLs are fetchable); web_search found no indexed match for this internal page; Claude in Chrome browser navigation to this domain returned Permission denied by user across three connected browser instances.",
+        "timestamp": "2026-09-22T07:00:00Z"
+      },
+      {
+        "url": "https://tajlandia.com/lokalizacje/surin",
+        "status": null,
+        "error": "blocked_by_tooling",
+        "detail": "web_fetch rejected this URL (only user-supplied or search-returned URLs are fetchable); web_search found no indexed match for this internal page; Claude in Chrome browser navigation to this domain returned Permission denied by user across three connected browser instances.",
+        "timestamp": "2026-09-22T07:00:00Z"
+      },
+      {
+        "url": "https://tajlandia.com/lokalizacje/rawai",
+        "status": null,
+        "error": "blocked_by_tooling",
+        "detail": "web_fetch rejected this URL (only user-supplied or search-returned URLs are fetchable); web_search found no indexed match for this internal page; Claude in Chrome browser navigation to this domain returned Permission denied by user across three connected browser instances.",
+        "timestamp": "2026-09-22T07:00:00Z"
+      },
+      {
+        "url": "https://tajlandia.com/lokalizacje/nai-harn",
+        "status": null,
+        "error": "blocked_by_tooling",
+        "detail": "web_fetch rejected this URL (only user-supplied or search-returned URLs are fetchable); web_search found no indexed match for this internal page; Claude in Chrome browser navigation to this domain returned Permission denied by user across three connected browser instances.",
+        "timestamp": "2026-09-22T07:00:00Z"
+      },
+      {
+        "url": "https://tajlandia.com/lokalizacje/karon",
+        "status": null,
+        "error": "blocked_by_tooling",
+        "detail": "web_fetch rejected this URL (only user-supplied or search-returned URLs are fetchable); web_search found no indexed match for this internal page; Claude in Chrome browser navigation to this domain returned Permission denied by user across three connected browser instances.",
+        "timestamp": "2026-09-22T07:00:00Z"
+      },
+      {
+        "url": "https://tajlandia.com/lokalizacje/bophut",
+        "status": null,
+        "error": "blocked_by_tooling",
+        "detail": "web_fetch rejected this URL (only user-supplied or search-returned URLs are fetchable); web_search found no indexed match for this internal page; Claude in Chrome browser navigation to this domain returned Permission denied by user across three connected browser instances.",
+        "timestamp": "2026-09-22T07:00:00Z"
+      },
+      {
+        "url": "https://tajlandia.com/lokalizacje/maenam",
+        "status": null,
+        "error": "blocked_by_tooling",
+        "detail": "web_fetch rejected this URL (only user-supplied or search-returned URLs are fetchable); web_search found no indexed match for this internal page; Claude in Chrome browser navigation to this domain returned Permission denied by user across three connected browser instances.",
+        "timestamp": "2026-09-22T07:00:00Z"
+      },
+      {
+        "url": "https://tajlandia.com/blog/koh-samui-investor-mistakes-case-studies-2026-fe6cb7",
+        "status": null,
+        "error": "blocked_by_tooling",
+        "detail": "web_fetch rejected this URL (only user-supplied or search-returned URLs are fetchable); web_search found no indexed match for this internal page; Claude in Chrome browser navigation to this domain returned Permission denied by user across three connected browser instances.",
+        "timestamp": "2026-09-22T07:00:00Z"
+      },
+      {
+        "url": "https://tajlandia.com/blog/koh-samui-infrastructure-development-2026-projects-property-prices-2fa920",
+        "status": null,
+        "error": "blocked_by_tooling",
+        "detail": "web_fetch rejected this URL (only user-supplied or search-returned URLs are fetchable); web_search found no indexed match for this internal page; Claude in Chrome browser navigation to this domain returned Permission denied by user across three connected browser instances.",
+        "timestamp": "2026-09-22T07:00:00Z"
+      },
+      {
+        "url": "https://tajlandia.com/blog/phuket-rental-management-models-2026-4c1c6e",
+        "status": null,
+        "error": "blocked_by_tooling",
+        "detail": "web_fetch rejected this URL (only user-supplied or search-returned URLs are fetchable); web_search found no indexed match for this internal page; Claude in Chrome browser navigation to this domain returned Permission denied by user across three connected browser instances.",
+        "timestamp": "2026-09-22T07:00:00Z"
+      },
+      {
+        "url": "https://tajlandia.com/polityka-prywatnosci",
+        "status": null,
+        "error": "blocked_by_tooling",
+        "detail": "web_fetch rejected this URL (only user-supplied or search-returned URLs are fetchable); web_search found no indexed match for this internal page; Claude in Chrome browser navigation to this domain returned Permission denied by user across three connected browser instances.",
+        "timestamp": "2026-09-22T07:00:00Z"
+      },
+      {
+        "url": "https://tajlandia.com/regulamin",
+        "status": null,
+        "error": "blocked_by_tooling",
+        "detail": "web_fetch rejected this URL (only user-supplied or search-returned URLs are fetchable); web_search found no indexed match for this internal page; Claude in Chrome browser navigation to this domain returned Permission denied by user across three connected browser instances.",
+        "timestamp": "2026-09-22T07:00:00Z"
+      }
+    ]
+  },
+  "website": {
+    "site_name": "Tajlandia.com",
+    "root_url": "https://tajlandia.com/",
+    "canonical_url": "https://tajlandia.com",
+    "page_title": "Tajlandia.com - Nieruchomości w Tajlandii oczami analityków rynku",
+    "meta_description": "Monitorujemy rynek nieruchomości na Phukecie i Koh Samui na miejscu. Selekcja projektów, weryfikacja deweloperów i dane rynkowe - bez presji sprzedażowej.",
+    "language": "pl",
+    "locale": "pl_PL",
+    "hreflang_variants": [
+      {
+        "lang": "pl",
+        "url": "https://tajlandia.com/pl"
+      },
+      {
+        "lang": "en",
+        "url": "https://tajlandia.com/en"
+      }
+    ],
+    "robots_meta": "index, follow",
+    "open_graph": {
+      "og:title": "Tajlandia.com - Nieruchomości w Tajlandii oczami analityków rynku",
+      "og:description": "Monitorujemy rynek nieruchomości na Phukecie i Koh Samui na miejscu. Selekcja projektów, weryfikacja deweloperów i dane rynkowe - bez presji sprzedażowej.",
+      "og:type": "website",
+      "og:site_name": "Tajlandia.com",
+      "og:image": "https://tajlandia.com/og.png",
+      "og:image:width": 1200,
+      "og:image:height": 630
+    },
+    "twitter_card": {
+      "card": "summary_large_image",
+      "title": "Tajlandia.com - Nieruchomości w Tajlandii oczami analityków rynku",
+      "description": "Monitorujemy rynek nieruchomości na Phukecie i Koh Samui na miejscu. Selekcja projektów, weryfikacja deweloperów i dane rynkowe - bez presji sprzedażowej.",
+      "image": "https://tajlandia.com/og.png"
+    },
+    "brand_assets": {
+      "icon_svg": "https://tajlandia.com/brand/tajlandia-icon-v2.svg",
+      "logo_light_svg": "https://tajlandia.com/brand/tajlandia-logo.svg",
+      "logo_dark_svg": "https://tajlandia.com/brand/tajlandia-logo-on-dark.svg"
+    },
+    "copyright_notice": "© 2026 Tajlandia.com - Zespół analityków rynku nieruchomości w Tajlandii",
+    "publisher_byline": "Zespół Tajlandia.com",
+    "source_url": "https://tajlandia.com/",
+    "source_title": "Tajlandia.com - Nieruchomości w Tajlandii oczami analityków rynku",
+    "crawl_timestamp": "2026-09-22T06:58:04Z"
+  },
+  "navigation": {
+    "header_navigation": [
+      {
+        "label_en": "Listings",
+        "label_original": "Oferty",
+        "url": "https://tajlandia.com/oferty"
+      },
+      {
+        "label_en": "Locations",
+        "label_original": "Lokalizacje",
+        "url": "https://tajlandia.com/lokalizacje"
+      },
+      {
+        "label_en": "Blog",
+        "label_original": "Blog",
+        "url": "https://tajlandia.com/blog"
+      },
+      {
+        "label_en": "About Us",
+        "label_original": "O nas",
+        "url": "https://tajlandia.com/o-nas"
+      },
+      {
+        "label_en": "How We Work",
+        "label_original": "Jak pracujemy",
+        "url": "https://tajlandia.com/jak-pracujemy"
+      },
+      {
+        "label_en": "Contact",
+        "label_original": "Kontakt",
+        "url": "https://tajlandia.com/kontakt"
+      }
+    ],
+    "language_switcher": [
+      {
+        "label": "PL",
+        "url": "https://tajlandia.com/pl"
+      },
+      {
+        "label": "EN",
+        "url": "https://tajlandia.com/en"
+      }
+    ],
+    "footer_navigation": {
+      "site_links": [
+        {
+          "label_en": "Listings",
+          "url": "https://tajlandia.com/oferty"
+        },
+        {
+          "label_en": "Locations",
+          "url": "https://tajlandia.com/lokalizacje"
+        },
+        {
+          "label_en": "Blog",
+          "url": "https://tajlandia.com/blog"
+        },
+        {
+          "label_en": "About Us",
+          "url": "https://tajlandia.com/o-nas"
+        },
+        {
+          "label_en": "How We Work",
+          "url": "https://tajlandia.com/jak-pracujemy"
+        },
+        {
+          "label_en": "Contact",
+          "url": "https://tajlandia.com/kontakt"
+        }
+      ],
+      "district_links": [
+        {
+          "label_en": "Bang Tao",
+          "url": "https://tajlandia.com/lokalizacje/bang-tao"
+        },
+        {
+          "label_en": "Layan",
+          "url": "https://tajlandia.com/lokalizacje/layan"
+        },
+        {
+          "label_en": "Kamala",
+          "url": "https://tajlandia.com/lokalizacje/kamala"
+        },
+        {
+          "label_en": "Surin",
+          "url": "https://tajlandia.com/lokalizacje/surin"
+        },
+        {
+          "label_en": "Rawai",
+          "url": "https://tajlandia.com/lokalizacje/rawai"
+        },
+        {
+          "label_en": "Nai Harn",
+          "url": "https://tajlandia.com/lokalizacje/nai-harn"
+        }
+      ],
+      "document_links": [
+        {
+          "label_en": "Privacy Policy",
+          "label_original": "Polityka prywatności",
+          "url": "https://tajlandia.com/polityka-prywatnosci"
+        },
+        {
+          "label_en": "Terms and Conditions",
+          "label_original": "Regulamin",
+          "url": "https://tajlandia.com/regulamin"
+        }
+      ],
+      "data_quality_note": "The footer 'district_links' menu lists only 6 districts; the homepage body carousel shows 3 further districts not present in that footer menu (Karon, Bophut, Maenam). This is a genuine inconsistency on the source page, not an extraction artifact."
+    },
+    "source": {
+      "url": "https://tajlandia.com/",
+      "title": "Tajlandia.com - Thailand Real Estate Through the Eyes of Market Analysts",
+      "canonical_url": "https://tajlandia.com",
+      "crawl_timestamp": "2026-09-22T06:58:04Z"
+    }
+  },
+  "properties": [
+    {
+      "property_id": null,
+      "project_id": null,
+      "property_name": "Aileen Residence Bangtao",
+      "project_name": "Aileen Residence Bangtao",
+      "property_type": "Villa",
+      "status": "Under construction",
+      "location": {
+        "country": "Thailand",
+        "province": null,
+        "city": null,
+        "district": "Bang Tao",
+        "subdistrict": null,
+        "area": "Phuket",
+        "address": null,
+        "latitude": null,
+        "longitude": null
+      },
+      "developer": {
+        "name": null,
+        "description": null,
+        "website": null
+      },
+      "property_details": {
+        "bedrooms": "2-3",
+        "bathrooms": null,
+        "area": "0-167 sqm",
+        "land_area": null,
+        "floor_area": null,
+        "floor": null,
+        "total_floors": null,
+        "unit_type": "Villa",
+        "units": 54
+      },
+      "pricing": {
+        "price": "from 8.xx million THB",
+        "minimum_price": "from 8.xx million THB",
+        "maximum_price": null,
+        "currency": "THB",
+        "price_per_sqm": null,
+        "price_note": "The exact price is masked by the site itself as 'xx' pending its own lead-capture unlock ('Odblokuj pełne dane'). This is the value as published, not a redaction applied during extraction."
+      },
+      "ownership": {
+        "ownership_type": null,
+        "freehold": null,
+        "leasehold": null
+      },
+      "features": [],
+      "amenities": [],
+      "facilities": [],
+      "description": "A complex of 54 villas in Bang Tao, completion Q4 2027.",
+      "highlights": [],
+      "nearby_places": [],
+      "investment_information": "Expected completion: Q4 2027 (as published on the homepage teaser; not independently confirmed from a detail page).",
+      "rental_information": null,
+      "payment_information": null,
+      "images": [],
+      "image_host": "",
+      "image_count": 0,
+      "videos": [],
+      "documents": [],
+      "source": {
+        "url": "https://tajlandia.com/",
+        "title": "Tajlandia.com - Thailand Real Estate Through the Eyes of Market Analysts",
+        "canonical_url": "https://tajlandia.com",
+        "crawl_timestamp": "2026-09-22T06:58:04Z"
+      },
+      "detail_page_url": "https://tajlandia.com/oferty/phuket/aileen-residence-villas",
+      "detail_page_crawled": false,
+      "data_completeness_note": "This record was built entirely from a homepage teaser card, not from the property's own detail page (which was not reachable this session — see crawl_errors.json). Fields left null were simply never shown on the homepage; they were not searched for and failed, and should not be read as 'confirmed absent from the site'."
+    },
+    {
+      "property_id": null,
+      "project_id": null,
+      "property_name": "Bellaguna Lake Residences Lotus",
+      "project_name": "Bellaguna Lake Residences Lotus",
+      "property_type": "Condominium",
+      "status": "Pre-sale",
+      "location": {
+        "country": "Thailand",
+        "province": null,
+        "city": null,
+        "district": "Bang Tao",
+        "subdistrict": null,
+        "area": "Phuket",
+        "address": null,
+        "latitude": null,
+        "longitude": null
+      },
+      "developer": {
+        "name": null,
+        "description": null,
+        "website": null
+      },
+      "property_details": {
+        "bedrooms": "1-3",
+        "bathrooms": null,
+        "area": "58-161 sqm",
+        "land_area": null,
+        "floor_area": null,
+        "floor": null,
+        "total_floors": null,
+        "unit_type": "Condominium",
+        "units": 41
+      },
+      "pricing": {
+        "price": "from 16.xx million THB",
+        "minimum_price": "from 16.xx million THB",
+        "maximum_price": null,
+        "currency": "THB",
+        "price_per_sqm": null,
+        "price_note": "The exact price is masked by the site itself as 'xx' pending its own lead-capture unlock ('Odblokuj pełne dane'). This is the value as published, not a redaction applied during extraction."
+      },
+      "ownership": {
+        "ownership_type": null,
+        "freehold": null,
+        "leasehold": null
+      },
+      "features": [],
+      "amenities": [],
+      "facilities": [],
+      "description": "A 41-unit condominium in Bang Tao with layouts from 58 to 161 sqm, completion December 2029.",
+      "highlights": [],
+      "nearby_places": [],
+      "investment_information": "Expected completion: December 2029 (XII 2029) (as published on the homepage teaser; not independently confirmed from a detail page).",
+      "rental_information": null,
+      "payment_information": null,
+      "images": [],
+      "image_host": "",
+      "image_count": 0,
+      "videos": [],
+      "documents": [],
+      "source": {
+        "url": "https://tajlandia.com/",
+        "title": "Tajlandia.com - Thailand Real Estate Through the Eyes of Market Analysts",
+        "canonical_url": "https://tajlandia.com",
+        "crawl_timestamp": "2026-09-22T06:58:04Z"
+      },
+      "detail_page_url": "https://tajlandia.com/oferty/phuket/bellaguna-lake-residences-lotus",
+      "detail_page_crawled": false,
+      "data_completeness_note": "This record was built entirely from a homepage teaser card, not from the property's own detail page (which was not reachable this session — see crawl_errors.json). Fields left null were simply never shown on the homepage; they were not searched for and failed, and should not be read as 'confirmed absent from the site'."
+    },
+    {
+      "property_id": null,
+      "project_id": null,
+      "property_name": "Botanica Four Seasons",
+      "project_name": "Botanica Four Seasons",
+      "property_type": "Villa",
+      "status": "Ready for handover",
+      "location": {
+        "country": "Thailand",
+        "province": null,
+        "city": null,
+        "district": null,
+        "subdistrict": null,
+        "area": "Phuket",
+        "address": null,
+        "latitude": null,
+        "longitude": null
+      },
+      "developer": {
+        "name": null,
+        "description": null,
+        "website": null
+      },
+      "property_details": {
+        "bedrooms": "3-4",
+        "bathrooms": null,
+        "area": "260-590 (project); 275-380 (teaser card range) sqm",
+        "land_area": null,
+        "floor_area": null,
+        "floor": null,
+        "total_floors": null,
+        "unit_type": "Villa",
+        "units": 156
+      },
+      "pricing": {
+        "price": "from 19.xx million THB",
+        "minimum_price": "from 19.xx million THB",
+        "maximum_price": null,
+        "currency": "THB",
+        "price_per_sqm": null,
+        "price_note": "The exact price is masked by the site itself as 'xx' pending its own lead-capture unlock ('Odblokuj pełne dane'). This is the value as published, not a redaction applied during extraction."
+      },
+      "ownership": {
+        "ownership_type": null,
+        "freehold": null,
+        "leasehold": null
+      },
+      "features": [
+        "Sports & recreational infrastructure"
+      ],
+      "amenities": [],
+      "facilities": [],
+      "description": "A completed project of 156 villas with sizes of 260-590 sqm and sports/recreational infrastructure, on Phuket.",
+      "highlights": [],
+      "nearby_places": [],
+      "investment_information": null,
+      "rental_information": null,
+      "payment_information": null,
+      "images": [],
+      "image_host": "",
+      "image_count": 0,
+      "videos": [],
+      "documents": [],
+      "source": {
+        "url": "https://tajlandia.com/",
+        "title": "Tajlandia.com - Thailand Real Estate Through the Eyes of Market Analysts",
+        "canonical_url": "https://tajlandia.com",
+        "crawl_timestamp": "2026-09-22T06:58:04Z"
+      },
+      "detail_page_url": "https://tajlandia.com/oferty/phuket/botanica-four-seasons-villa-project",
+      "detail_page_crawled": false,
+      "data_completeness_note": "This record was built entirely from a homepage teaser card, not from the property's own detail page (which was not reachable this session — see crawl_errors.json). Fields left null were simply never shown on the homepage; they were not searched for and failed, and should not be read as 'confirmed absent from the site'."
+    },
+    {
+      "property_id": null,
+      "project_id": null,
+      "property_name": "Cocoon Villas Maenam",
+      "project_name": "Cocoon Villas Maenam",
+      "property_type": "Villa",
+      "status": "Under construction",
+      "location": {
+        "country": "Thailand",
+        "province": null,
+        "city": null,
+        "district": "Maenam",
+        "subdistrict": null,
+        "area": "Samui",
+        "address": null,
+        "latitude": null,
+        "longitude": null
+      },
+      "developer": {
+        "name": null,
+        "description": null,
+        "website": null
+      },
+      "property_details": {
+        "bedrooms": "1-3",
+        "bathrooms": null,
+        "area": "120-194 sqm",
+        "land_area": null,
+        "floor_area": null,
+        "floor": null,
+        "total_floors": null,
+        "unit_type": "Villa",
+        "units": 15
+      },
+      "pricing": {
+        "price": "from 3.xx million THB",
+        "minimum_price": "from 3.xx million THB",
+        "maximum_price": null,
+        "currency": "THB",
+        "price_per_sqm": null,
+        "price_note": "The exact price is masked by the site itself as 'xx' pending its own lead-capture unlock ('Odblokuj pełne dane'). This is the value as published, not a redaction applied during extraction."
+      },
+      "ownership": {
+        "ownership_type": null,
+        "freehold": null,
+        "leasehold": null
+      },
+      "features": [
+        "Private pool"
+      ],
+      "amenities": [],
+      "facilities": [],
+      "description": "An intimate project of 15 villas with private pools, in Maenam.",
+      "highlights": [],
+      "nearby_places": [],
+      "investment_information": null,
+      "rental_information": null,
+      "payment_information": null,
+      "images": [],
+      "image_host": "",
+      "image_count": 0,
+      "videos": [],
+      "documents": [],
+      "source": {
+        "url": "https://tajlandia.com/",
+        "title": "Tajlandia.com - Thailand Real Estate Through the Eyes of Market Analysts",
+        "canonical_url": "https://tajlandia.com",
+        "crawl_timestamp": "2026-09-22T06:58:04Z"
+      },
+      "detail_page_url": "https://tajlandia.com/oferty/samui/cocoon-villas-project",
+      "detail_page_crawled": false,
+      "data_completeness_note": "This record was built entirely from a homepage teaser card, not from the property's own detail page (which was not reachable this session — see crawl_errors.json). Fields left null were simply never shown on the homepage; they were not searched for and failed, and should not be read as 'confirmed absent from the site'."
+    },
+    {
+      "property_id": null,
+      "project_id": null,
+      "property_name": "Akiraya Villa",
+      "project_name": "Akiraya Villa",
+      "property_type": "Villa",
+      "status": "Planned",
+      "location": {
+        "country": "Thailand",
+        "province": null,
+        "city": null,
+        "district": null,
+        "subdistrict": null,
+        "area": "Koh Phangan",
+        "address": null,
+        "latitude": null,
+        "longitude": null
+      },
+      "developer": {
+        "name": null,
+        "description": null,
+        "website": null
+      },
+      "property_details": {
+        "bedrooms": null,
+        "bathrooms": null,
+        "area": "0-201 sqm",
+        "land_area": null,
+        "floor_area": null,
+        "floor": null,
+        "total_floors": null,
+        "unit_type": "Villa",
+        "units": 15
+      },
+      "pricing": {
+        "price": "from 12.xx million THB",
+        "minimum_price": "from 12.xx million THB",
+        "maximum_price": null,
+        "currency": "THB",
+        "price_per_sqm": null,
+        "price_note": "The exact price is masked by the site itself as 'xx' pending its own lead-capture unlock ('Odblokuj pełne dane'). This is the value as published, not a redaction applied during extraction."
+      },
+      "ownership": {
+        "ownership_type": null,
+        "freehold": null,
+        "leasehold": null
+      },
+      "features": [
+        "Private pool",
+        "Shared / common spaces"
+      ],
+      "amenities": [],
+      "facilities": [],
+      "description": "An intimate complex of 15 villas on Koh Phangan with private pools and shared spaces, planned for handover in January 2027.",
+      "highlights": [],
+      "nearby_places": [],
+      "investment_information": "Expected completion: January 2027 (as published on the homepage teaser; not independently confirmed from a detail page).",
+      "rental_information": null,
+      "payment_information": null,
+      "images": [],
+      "image_host": "",
+      "image_count": 0,
+      "videos": [],
+      "documents": [],
+      "source": {
+        "url": "https://tajlandia.com/",
+        "title": "Tajlandia.com - Thailand Real Estate Through the Eyes of Market Analysts",
+        "canonical_url": "https://tajlandia.com",
+        "crawl_timestamp": "2026-09-22T06:58:04Z"
+      },
+      "detail_page_url": "https://tajlandia.com/oferty/phangan/akiraya-villa-2027",
+      "detail_page_crawled": false,
+      "data_completeness_note": "This record was built entirely from a homepage teaser card, not from the property's own detail page (which was not reachable this session — see crawl_errors.json). Fields left null were simply never shown on the homepage; they were not searched for and failed, and should not be read as 'confirmed absent from the site'."
+    },
+    {
+      "property_id": null,
+      "project_id": null,
+      "property_name": "Palm Residence",
+      "project_name": "Palm Residence",
+      "property_type": "Villa",
+      "status": "Pre-sale",
+      "location": {
+        "country": "Thailand",
+        "province": null,
+        "city": null,
+        "district": null,
+        "subdistrict": null,
+        "area": "Samui",
+        "address": null,
+        "latitude": null,
+        "longitude": null
+      },
+      "developer": {
+        "name": null,
+        "description": null,
+        "website": null
+      },
+      "property_details": {
+        "bedrooms": "2-3",
+        "bathrooms": null,
+        "area": "175-318 sqm",
+        "land_area": null,
+        "floor_area": null,
+        "floor": null,
+        "total_floors": null,
+        "unit_type": "Villa",
+        "units": 25
+      },
+      "pricing": {
+        "price": "from 6.xx million THB",
+        "minimum_price": "from 6.xx million THB",
+        "maximum_price": null,
+        "currency": "THB",
+        "price_per_sqm": null,
+        "price_note": "The exact price is masked by the site itself as 'xx' pending its own lead-capture unlock ('Odblokuj pełne dane'). This is the value as published, not a redaction applied during extraction."
+      },
+      "ownership": {
+        "ownership_type": null,
+        "freehold": null,
+        "leasehold": null
+      },
+      "features": [
+        "Private pool"
+      ],
+      "amenities": [],
+      "facilities": [],
+      "description": "25 villas with private pools in the Koh Samui municipality - handover planned for Q1 2027.",
+      "highlights": [],
+      "nearby_places": [],
+      "investment_information": "Expected completion: Q1 2027 (as published on the homepage teaser; not independently confirmed from a detail page).",
+      "rental_information": null,
+      "payment_information": null,
+      "images": [],
+      "image_host": "",
+      "image_count": 0,
+      "videos": [],
+      "documents": [],
+      "source": {
+        "url": "https://tajlandia.com/",
+        "title": "Tajlandia.com - Thailand Real Estate Through the Eyes of Market Analysts",
+        "canonical_url": "https://tajlandia.com",
+        "crawl_timestamp": "2026-09-22T06:58:04Z"
+      },
+      "detail_page_url": "https://tajlandia.com/oferty/samui/palm-residence-koh-samui-wille",
+      "detail_page_crawled": false,
+      "data_completeness_note": "This record was built entirely from a homepage teaser card, not from the property's own detail page (which was not reachable this session — see crawl_errors.json). Fields left null were simply never shown on the homepage; they were not searched for and failed, and should not be read as 'confirmed absent from the site'."
+    },
+    {
+      "property_id": null,
+      "project_id": null,
+      "property_name": "Sudara",
+      "project_name": "Sudara",
+      "property_type": "Condominium",
+      "status": "Under construction",
+      "location": {
+        "country": "Thailand",
+        "province": null,
+        "city": null,
+        "district": "Bang Tao",
+        "subdistrict": null,
+        "area": "Phuket",
+        "address": null,
+        "latitude": null,
+        "longitude": null
+      },
+      "developer": {
+        "name": null,
+        "description": null,
+        "website": null
+      },
+      "property_details": {
+        "bedrooms": "1-3",
+        "bathrooms": null,
+        "area": "52-124 (project description); 52-110 (teaser card range) sqm",
+        "land_area": null,
+        "floor_area": null,
+        "floor": null,
+        "total_floors": null,
+        "unit_type": "Condominium",
+        "units": 156
+      },
+      "pricing": {
+        "price": "from 12.xx million THB",
+        "minimum_price": "from 12.xx million THB",
+        "maximum_price": null,
+        "currency": "THB",
+        "price_per_sqm": null,
+        "price_note": "The exact price is masked by the site itself as 'xx' pending its own lead-capture unlock ('Odblokuj pełne dane'). This is the value as published, not a redaction applied during extraction."
+      },
+      "ownership": {
+        "ownership_type": null,
+        "freehold": null,
+        "leasehold": null
+      },
+      "features": [],
+      "amenities": [],
+      "facilities": [],
+      "description": "A 156-unit condominium in Bang Tao, completion Q2 2027. Sizes from 52 sqm to 124 sqm.",
+      "highlights": [],
+      "nearby_places": [],
+      "investment_information": "Expected completion: Q2 2027 (as published on the homepage teaser; not independently confirmed from a detail page).",
+      "rental_information": null,
+      "payment_information": null,
+      "images": [],
+      "image_host": "",
+      "image_count": 0,
+      "videos": [],
+      "documents": [],
+      "source": {
+        "url": "https://tajlandia.com/",
+        "title": "Tajlandia.com - Thailand Real Estate Through the Eyes of Market Analysts",
+        "canonical_url": "https://tajlandia.com",
+        "crawl_timestamp": "2026-09-22T06:58:04Z"
+      },
+      "detail_page_url": "https://tajlandia.com/oferty/phuket/sudara-condo",
+      "detail_page_crawled": false,
+      "data_completeness_note": "This record was built entirely from a homepage teaser card, not from the property's own detail page (which was not reachable this session — see crawl_errors.json). Fields left null were simply never shown on the homepage; they were not searched for and failed, and should not be read as 'confirmed absent from the site'."
+    },
+    {
+      "property_id": null,
+      "project_id": null,
+      "property_name": "Sun Hills Layan",
+      "project_name": "Sun Hills Layan",
+      "property_type": "Condominium",
+      "status": "Under construction",
+      "location": {
+        "country": "Thailand",
+        "province": null,
+        "city": null,
+        "district": "Layan",
+        "subdistrict": null,
+        "area": "Phuket",
+        "address": null,
+        "latitude": null,
+        "longitude": null
+      },
+      "developer": {
+        "name": null,
+        "description": null,
+        "website": null
+      },
+      "property_details": {
+        "bedrooms": "0-3",
+        "bathrooms": null,
+        "area": "26.5-70.4 sqm",
+        "land_area": null,
+        "floor_area": null,
+        "floor": null,
+        "total_floors": null,
+        "unit_type": "Condominium",
+        "units": 370
+      },
+      "pricing": {
+        "price": "from 4.xx million THB",
+        "minimum_price": "from 4.xx million THB",
+        "maximum_price": null,
+        "currency": "THB",
+        "price_per_sqm": null,
+        "price_note": "The exact price is masked by the site itself as 'xx' pending its own lead-capture unlock ('Odblokuj pełne dane'). This is the value as published, not a redaction applied during extraction."
+      },
+      "ownership": {
+        "ownership_type": null,
+        "freehold": null,
+        "leasehold": null
+      },
+      "features": [
+        "Beach access",
+        "Full commercial infrastructure"
+      ],
+      "amenities": [],
+      "facilities": [],
+      "description": "A complex of 370 units in the Layan district with beach access and full commercial infrastructure.",
+      "highlights": [],
+      "nearby_places": [],
+      "investment_information": null,
+      "rental_information": null,
+      "payment_information": null,
+      "images": [],
+      "image_host": "",
+      "image_count": 0,
+      "videos": [],
+      "documents": [],
+      "source": {
+        "url": "https://tajlandia.com/",
+        "title": "Tajlandia.com - Thailand Real Estate Through the Eyes of Market Analysts",
+        "canonical_url": "https://tajlandia.com",
+        "crawl_timestamp": "2026-09-22T06:58:04Z"
+      },
+      "detail_page_url": "https://tajlandia.com/oferty/phuket/sun-hills-kompleks-370-mieszkan",
+      "detail_page_crawled": false,
+      "data_completeness_note": "This record was built entirely from a homepage teaser card, not from the property's own detail page (which was not reachable this session — see crawl_errors.json). Fields left null were simply never shown on the homepage; they were not searched for and failed, and should not be read as 'confirmed absent from the site'."
+    },
+    {
+      "property_id": null,
+      "project_id": null,
+      "property_name": "Pacific Noma",
+      "project_name": "Pacific Noma",
+      "property_type": "Villa",
+      "status": "Pre-sale",
+      "location": {
+        "country": "Thailand",
+        "province": null,
+        "city": null,
+        "district": "Baan Mae Nam (truncated on source as 'Baan Mae…')",
+        "subdistrict": null,
+        "area": "Samui",
+        "address": null,
+        "latitude": null,
+        "longitude": null
+      },
+      "developer": {
+        "name": null,
+        "description": null,
+        "website": null
+      },
+      "property_details": {
+        "bedrooms": "5",
+        "bathrooms": null,
+        "area": "443 sqm",
+        "land_area": null,
+        "floor_area": null,
+        "floor": null,
+        "total_floors": null,
+        "unit_type": "Villa",
+        "units": 13
+      },
+      "pricing": {
+        "price": "from 18.xx million THB",
+        "minimum_price": "from 18.xx million THB",
+        "maximum_price": null,
+        "currency": "THB",
+        "price_per_sqm": null,
+        "price_note": "The exact price is masked by the site itself as 'xx' pending its own lead-capture unlock ('Odblokuj pełne dane'). This is the value as published, not a redaction applied during extraction."
+      },
+      "ownership": {
+        "ownership_type": null,
+        "freehold": null,
+        "leasehold": null
+      },
+      "features": [
+        "Private pool",
+        "Beach access"
+      ],
+      "amenities": [],
+      "facilities": [],
+      "description": "13 villas of 443 sqm each, with a private pool and beach access, in the quiet Baan Mae… district (text truncated with an ellipsis on the source page).",
+      "highlights": [],
+      "nearby_places": [],
+      "investment_information": null,
+      "rental_information": null,
+      "payment_information": null,
+      "images": [],
+      "image_host": "",
+      "image_count": 0,
+      "videos": [],
+      "documents": [],
+      "source": {
+        "url": "https://tajlandia.com/",
+        "title": "Tajlandia.com - Thailand Real Estate Through the Eyes of Market Analysts",
+        "canonical_url": "https://tajlandia.com",
+        "crawl_timestamp": "2026-09-22T06:58:04Z"
+      },
+      "detail_page_url": "https://tajlandia.com/oferty/samui/pacific-noma-baan-mae-nam-koh-samui",
+      "detail_page_crawled": false,
+      "data_completeness_note": "This record was built entirely from a homepage teaser card, not from the property's own detail page (which was not reachable this session — see crawl_errors.json). Fields left null were simply never shown on the homepage; they were not searched for and failed, and should not be read as 'confirmed absent from the site'."
+    },
+    {
+      "property_id": null,
+      "project_id": null,
+      "property_name": "The Title Serenity Naiyang",
+      "project_name": "The Title Serenity Naiyang",
+      "property_type": "Condominium",
+      "status": "Ready for handover",
+      "location": {
+        "country": "Thailand",
+        "province": null,
+        "city": null,
+        "district": "Nai Yang",
+        "subdistrict": null,
+        "area": "Phuket",
+        "address": null,
+        "latitude": null,
+        "longitude": null
+      },
+      "developer": {
+        "name": null,
+        "description": null,
+        "website": null
+      },
+      "property_details": {
+        "bedrooms": "1-3",
+        "bathrooms": null,
+        "area": "36.25-112.55 (teaser); 'from 30 sqm' per description sqm",
+        "land_area": null,
+        "floor_area": null,
+        "floor": null,
+        "total_floors": null,
+        "unit_type": "Condominium",
+        "units": 211
+      },
+      "pricing": {
+        "price": "from 5.xx million THB",
+        "minimum_price": "from 5.xx million THB",
+        "maximum_price": null,
+        "currency": "THB",
+        "price_per_sqm": null,
+        "price_note": "The exact price is masked by the site itself as 'xx' pending its own lead-capture unlock ('Odblokuj pełne dane'). This is the value as published, not a redaction applied during extraction."
+      },
+      "ownership": {
+        "ownership_type": null,
+        "freehold": null,
+        "leasehold": null
+      },
+      "features": [],
+      "amenities": [],
+      "facilities": [],
+      "description": "A completed condominium with 211 units from 30 sqm, within walking distance of Nai Yang Beach and … National Park (text truncated on the source page, likely Sirinath).",
+      "highlights": [],
+      "nearby_places": [
+        "Nai Yang Beach",
+        "…National Park (truncated on source, likely Sirinath National Park — not confirmed)"
+      ],
+      "investment_information": null,
+      "rental_information": null,
+      "payment_information": null,
+      "images": [],
+      "image_host": "",
+      "image_count": 0,
+      "videos": [],
+      "documents": [],
+      "source": {
+        "url": "https://tajlandia.com/",
+        "title": "Tajlandia.com - Thailand Real Estate Through the Eyes of Market Analysts",
+        "canonical_url": "https://tajlandia.com",
+        "crawl_timestamp": "2026-09-22T06:58:04Z"
+      },
+      "detail_page_url": "https://tajlandia.com/oferty/phuket/title-serenity-beachfront-sirinath-park",
+      "detail_page_crawled": false,
+      "data_completeness_note": "This record was built entirely from a homepage teaser card, not from the property's own detail page (which was not reachable this session — see crawl_errors.json). Fields left null were simply never shown on the homepage; they were not searched for and failed, and should not be read as 'confirmed absent from the site'."
+    },
+    {
+      "property_id": null,
+      "project_id": null,
+      "property_name": "Hennessy Residence Karon",
+      "project_name": "Hennessy Residence Karon",
+      "property_type": "Condominium",
+      "status": "Under construction",
+      "location": {
+        "country": "Thailand",
+        "province": null,
+        "city": null,
+        "district": "Karon",
+        "subdistrict": null,
+        "area": "Phuket",
+        "address": null,
+        "latitude": null,
+        "longitude": null
+      },
+      "developer": {
+        "name": null,
+        "description": null,
+        "website": null
+      },
+      "property_details": {
+        "bedrooms": "1-2",
+        "bathrooms": null,
+        "area": "46.5-57 sqm",
+        "land_area": null,
+        "floor_area": null,
+        "floor": null,
+        "total_floors": null,
+        "unit_type": "Condominium",
+        "units": 297
+      },
+      "pricing": {
+        "price": "from 9.xx million THB",
+        "minimum_price": "from 9.xx million THB",
+        "maximum_price": null,
+        "currency": "THB",
+        "price_per_sqm": null,
+        "price_note": "The exact price is masked by the site itself as 'xx' pending its own lead-capture unlock ('Odblokuj pełne dane'). This is the value as published, not a redaction applied during extraction."
+      },
+      "ownership": {
+        "ownership_type": null,
+        "freehold": null,
+        "leasehold": null
+      },
+      "features": [],
+      "amenities": [],
+      "facilities": [],
+      "description": "A complex of 297 units under construction at Karon Beach, with completion planned for Q4 2026.",
+      "highlights": [],
+      "nearby_places": [
+        "Karon Beach"
+      ],
+      "investment_information": "Expected completion: Q4 2026 (as published on the homepage teaser; not independently confirmed from a detail page).",
+      "rental_information": null,
+      "payment_information": null,
+      "images": [],
+      "image_host": "",
+      "image_count": 0,
+      "videos": [],
+      "documents": [],
+      "source": {
+        "url": "https://tajlandia.com/",
+        "title": "Tajlandia.com - Thailand Real Estate Through the Eyes of Market Analysts",
+        "canonical_url": "https://tajlandia.com",
+        "crawl_timestamp": "2026-09-22T06:58:04Z"
+      },
+      "detail_page_url": "https://tajlandia.com/oferty/phuket/hennessy-residence-beach",
+      "detail_page_crawled": false,
+      "data_completeness_note": "This record was built entirely from a homepage teaser card, not from the property's own detail page (which was not reachable this session — see crawl_errors.json). Fields left null were simply never shown on the homepage; they were not searched for and failed, and should not be read as 'confirmed absent from the site'."
+    },
+    {
+      "property_id": null,
+      "project_id": null,
+      "property_name": "The Element by Anocha",
+      "project_name": "The Element by Anocha",
+      "property_type": "Condominium",
+      "status": "Under construction",
+      "location": {
+        "country": "Thailand",
+        "province": null,
+        "city": null,
+        "district": null,
+        "subdistrict": null,
+        "area": "Phuket",
+        "address": null,
+        "latitude": null,
+        "longitude": null
+      },
+      "developer": {
+        "name": null,
+        "description": null,
+        "website": null
+      },
+      "property_details": {
+        "bedrooms": "1-2",
+        "bathrooms": null,
+        "area": "29.87-48.78 sqm",
+        "land_area": null,
+        "floor_area": null,
+        "floor": null,
+        "total_floors": null,
+        "unit_type": "Condominium",
+        "units": 278
+      },
+      "pricing": {
+        "price": "from 4.xx million THB",
+        "minimum_price": "from 4.xx million THB",
+        "maximum_price": null,
+        "currency": "THB",
+        "price_per_sqm": null,
+        "price_note": "The exact price is masked by the site itself as 'xx' pending its own lead-capture unlock ('Odblokuj pełne dane'). This is the value as published, not a redaction applied during extraction."
+      },
+      "ownership": {
+        "ownership_type": null,
+        "freehold": null,
+        "leasehold": null
+      },
+      "features": [],
+      "amenities": [],
+      "facilities": [],
+      "description": "A condominium with 278 units under construction on Phuket, planned completion Q4 2027.",
+      "highlights": [],
+      "nearby_places": [],
+      "investment_information": "Expected completion: Q4 2027 (as published on the homepage teaser; not independently confirmed from a detail page).",
+      "rental_information": null,
+      "payment_information": null,
+      "images": [],
+      "image_host": "",
+      "image_count": 0,
+      "videos": [],
+      "documents": [],
+      "source": {
+        "url": "https://tajlandia.com/",
+        "title": "Tajlandia.com - Thailand Real Estate Through the Eyes of Market Analysts",
+        "canonical_url": "https://tajlandia.com",
+        "crawl_timestamp": "2026-09-22T06:58:04Z"
+      },
+      "detail_page_url": "https://tajlandia.com/oferty/phuket/element-anocha-condo",
+      "detail_page_crawled": false,
+      "data_completeness_note": "This record was built entirely from a homepage teaser card, not from the property's own detail page (which was not reachable this session — see crawl_errors.json). Fields left null were simply never shown on the homepage; they were not searched for and failed, and should not be read as 'confirmed absent from the site'. This specific property card explicitly displayed a 'Zdjęcia wkrótce' (Photos coming soon) placeholder instead of a photo — this is the one property where the absence of an image is confirmed, rather than merely undetermined."
+    }
+  ],
+  "projects": [
+    {
+      "property_id": null,
+      "project_id": null,
+      "property_name": "Aileen Residence Bangtao",
+      "project_name": "Aileen Residence Bangtao",
+      "property_type": "Villa",
+      "status": "Under construction",
+      "location": {
+        "country": "Thailand",
+        "province": null,
+        "city": null,
+        "district": "Bang Tao",
+        "subdistrict": null,
+        "area": "Phuket",
+        "address": null,
+        "latitude": null,
+        "longitude": null
+      },
+      "developer": {
+        "name": null,
+        "description": null,
+        "website": null
+      },
+      "property_details": {
+        "bedrooms": "2-3",
+        "bathrooms": null,
+        "area": "0-167 sqm",
+        "land_area": null,
+        "floor_area": null,
+        "floor": null,
+        "total_floors": null,
+        "unit_type": "Villa",
+        "units": 54
+      },
+      "pricing": {
+        "price": "from 8.xx million THB",
+        "minimum_price": "from 8.xx million THB",
+        "maximum_price": null,
+        "currency": "THB",
+        "price_per_sqm": null,
+        "price_note": "The exact price is masked by the site itself as 'xx' pending its own lead-capture unlock ('Odblokuj pełne dane'). This is the value as published, not a redaction applied during extraction."
+      },
+      "ownership": {
+        "ownership_type": null,
+        "freehold": null,
+        "leasehold": null
+      },
+      "features": [],
+      "amenities": [],
+      "facilities": [],
+      "description": "A complex of 54 villas in Bang Tao, completion Q4 2027.",
+      "highlights": [],
+      "nearby_places": [],
+      "investment_information": "Expected completion: Q4 2027 (as published on the homepage teaser; not independently confirmed from a detail page).",
+      "rental_information": null,
+      "payment_information": null,
+      "images": [],
+      "image_host": "",
+      "image_count": 0,
+      "videos": [],
+      "documents": [],
+      "source": {
+        "url": "https://tajlandia.com/",
+        "title": "Tajlandia.com - Thailand Real Estate Through the Eyes of Market Analysts",
+        "canonical_url": "https://tajlandia.com",
+        "crawl_timestamp": "2026-09-22T06:58:04Z"
+      },
+      "detail_page_url": "https://tajlandia.com/oferty/phuket/aileen-residence-villas",
+      "detail_page_crawled": false,
+      "data_completeness_note": "This record was built entirely from a homepage teaser card, not from the property's own detail page (which was not reachable this session — see crawl_errors.json). Fields left null were simply never shown on the homepage; they were not searched for and failed, and should not be read as 'confirmed absent from the site'.",
+      "note": "The source website does not distinguish a separate 'project' entity from this property listing; this record mirrors the corresponding entry in properties.json."
+    },
+    {
+      "property_id": null,
+      "project_id": null,
+      "property_name": "Bellaguna Lake Residences Lotus",
+      "project_name": "Bellaguna Lake Residences Lotus",
+      "property_type": "Condominium",
+      "status": "Pre-sale",
+      "location": {
+        "country": "Thailand",
+        "province": null,
+        "city": null,
+        "district": "Bang Tao",
+        "subdistrict": null,
+        "area": "Phuket",
+        "address": null,
+        "latitude": null,
+        "longitude": null
+      },
+      "developer": {
+        "name": null,
+        "description": null,
+        "website": null
+      },
+      "property_details": {
+        "bedrooms": "1-3",
+        "bathrooms": null,
+        "area": "58-161 sqm",
+        "land_area": null,
+        "floor_area": null,
+        "floor": null,
+        "total_floors": null,
+        "unit_type": "Condominium",
+        "units": 41
+      },
+      "pricing": {
+        "price": "from 16.xx million THB",
+        "minimum_price": "from 16.xx million THB",
+        "maximum_price": null,
+        "currency": "THB",
+        "price_per_sqm": null,
+        "price_note": "The exact price is masked by the site itself as 'xx' pending its own lead-capture unlock ('Odblokuj pełne dane'). This is the value as published, not a redaction applied during extraction."
+      },
+      "ownership": {
+        "ownership_type": null,
+        "freehold": null,
+        "leasehold": null
+      },
+      "features": [],
+      "amenities": [],
+      "facilities": [],
+      "description": "A 41-unit condominium in Bang Tao with layouts from 58 to 161 sqm, completion December 2029.",
+      "highlights": [],
+      "nearby_places": [],
+      "investment_information": "Expected completion: December 2029 (XII 2029) (as published on the homepage teaser; not independently confirmed from a detail page).",
+      "rental_information": null,
+      "payment_information": null,
+      "images": [],
+      "image_host": "",
+      "image_count": 0,
+      "videos": [],
+      "documents": [],
+      "source": {
+        "url": "https://tajlandia.com/",
+        "title": "Tajlandia.com - Thailand Real Estate Through the Eyes of Market Analysts",
+        "canonical_url": "https://tajlandia.com",
+        "crawl_timestamp": "2026-09-22T06:58:04Z"
+      },
+      "detail_page_url": "https://tajlandia.com/oferty/phuket/bellaguna-lake-residences-lotus",
+      "detail_page_crawled": false,
+      "data_completeness_note": "This record was built entirely from a homepage teaser card, not from the property's own detail page (which was not reachable this session — see crawl_errors.json). Fields left null were simply never shown on the homepage; they were not searched for and failed, and should not be read as 'confirmed absent from the site'.",
+      "note": "The source website does not distinguish a separate 'project' entity from this property listing; this record mirrors the corresponding entry in properties.json."
+    },
+    {
+      "property_id": null,
+      "project_id": null,
+      "property_name": "Botanica Four Seasons",
+      "project_name": "Botanica Four Seasons",
+      "property_type": "Villa",
+      "status": "Ready for handover",
+      "location": {
+        "country": "Thailand",
+        "province": null,
+        "city": null,
+        "district": null,
+        "subdistrict": null,
+        "area": "Phuket",
+        "address": null,
+        "latitude": null,
+        "longitude": null
+      },
+      "developer": {
+        "name": null,
+        "description": null,
+        "website": null
+      },
+      "property_details": {
+        "bedrooms": "3-4",
+        "bathrooms": null,
+        "area": "260-590 (project); 275-380 (teaser card range) sqm",
+        "land_area": null,
+        "floor_area": null,
+        "floor": null,
+        "total_floors": null,
+        "unit_type": "Villa",
+        "units": 156
+      },
+      "pricing": {
+        "price": "from 19.xx million THB",
+        "minimum_price": "from 19.xx million THB",
+        "maximum_price": null,
+        "currency": "THB",
+        "price_per_sqm": null,
+        "price_note": "The exact price is masked by the site itself as 'xx' pending its own lead-capture unlock ('Odblokuj pełne dane'). This is the value as published, not a redaction applied during extraction."
+      },
+      "ownership": {
+        "ownership_type": null,
+        "freehold": null,
+        "leasehold": null
+      },
+      "features": [
+        "Sports & recreational infrastructure"
+      ],
+      "amenities": [],
+      "facilities": [],
+      "description": "A completed project of 156 villas with sizes of 260-590 sqm and sports/recreational infrastructure, on Phuket.",
+      "highlights": [],
+      "nearby_places": [],
+      "investment_information": null,
+      "rental_information": null,
+      "payment_information": null,
+      "images": [],
+      "image_host": "",
+      "image_count": 0,
+      "videos": [],
+      "documents": [],
+      "source": {
+        "url": "https://tajlandia.com/",
+        "title": "Tajlandia.com - Thailand Real Estate Through the Eyes of Market Analysts",
+        "canonical_url": "https://tajlandia.com",
+        "crawl_timestamp": "2026-09-22T06:58:04Z"
+      },
+      "detail_page_url": "https://tajlandia.com/oferty/phuket/botanica-four-seasons-villa-project",
+      "detail_page_crawled": false,
+      "data_completeness_note": "This record was built entirely from a homepage teaser card, not from the property's own detail page (which was not reachable this session — see crawl_errors.json). Fields left null were simply never shown on the homepage; they were not searched for and failed, and should not be read as 'confirmed absent from the site'.",
+      "note": "The source website does not distinguish a separate 'project' entity from this property listing; this record mirrors the corresponding entry in properties.json."
+    },
+    {
+      "property_id": null,
+      "project_id": null,
+      "property_name": "Cocoon Villas Maenam",
+      "project_name": "Cocoon Villas Maenam",
+      "property_type": "Villa",
+      "status": "Under construction",
+      "location": {
+        "country": "Thailand",
+        "province": null,
+        "city": null,
+        "district": "Maenam",
+        "subdistrict": null,
+        "area": "Samui",
+        "address": null,
+        "latitude": null,
+        "longitude": null
+      },
+      "developer": {
+        "name": null,
+        "description": null,
+        "website": null
+      },
+      "property_details": {
+        "bedrooms": "1-3",
+        "bathrooms": null,
+        "area": "120-194 sqm",
+        "land_area": null,
+        "floor_area": null,
+        "floor": null,
+        "total_floors": null,
+        "unit_type": "Villa",
+        "units": 15
+      },
+      "pricing": {
+        "price": "from 3.xx million THB",
+        "minimum_price": "from 3.xx million THB",
+        "maximum_price": null,
+        "currency": "THB",
+        "price_per_sqm": null,
+        "price_note": "The exact price is masked by the site itself as 'xx' pending its own lead-capture unlock ('Odblokuj pełne dane'). This is the value as published, not a redaction applied during extraction."
+      },
+      "ownership": {
+        "ownership_type": null,
+        "freehold": null,
+        "leasehold": null
+      },
+      "features": [
+        "Private pool"
+      ],
+      "amenities": [],
+      "facilities": [],
+      "description": "An intimate project of 15 villas with private pools, in Maenam.",
+      "highlights": [],
+      "nearby_places": [],
+      "investment_information": null,
+      "rental_information": null,
+      "payment_information": null,
+      "images": [],
+      "image_host": "",
+      "image_count": 0,
+      "videos": [],
+      "documents": [],
+      "source": {
+        "url": "https://tajlandia.com/",
+        "title": "Tajlandia.com - Thailand Real Estate Through the Eyes of Market Analysts",
+        "canonical_url": "https://tajlandia.com",
+        "crawl_timestamp": "2026-09-22T06:58:04Z"
+      },
+      "detail_page_url": "https://tajlandia.com/oferty/samui/cocoon-villas-project",
+      "detail_page_crawled": false,
+      "data_completeness_note": "This record was built entirely from a homepage teaser card, not from the property's own detail page (which was not reachable this session — see crawl_errors.json). Fields left null were simply never shown on the homepage; they were not searched for and failed, and should not be read as 'confirmed absent from the site'.",
+      "note": "The source website does not distinguish a separate 'project' entity from this property listing; this record mirrors the corresponding entry in properties.json."
+    },
+    {
+      "property_id": null,
+      "project_id": null,
+      "property_name": "Akiraya Villa",
+      "project_name": "Akiraya Villa",
+      "property_type": "Villa",
+      "status": "Planned",
+      "location": {
+        "country": "Thailand",
+        "province": null,
+        "city": null,
+        "district": null,
+        "subdistrict": null,
+        "area": "Koh Phangan",
+        "address": null,
+        "latitude": null,
+        "longitude": null
+      },
+      "developer": {
+        "name": null,
+        "description": null,
+        "website": null
+      },
+      "property_details": {
+        "bedrooms": null,
+        "bathrooms": null,
+        "area": "0-201 sqm",
+        "land_area": null,
+        "floor_area": null,
+        "floor": null,
+        "total_floors": null,
+        "unit_type": "Villa",
+        "units": 15
+      },
+      "pricing": {
+        "price": "from 12.xx million THB",
+        "minimum_price": "from 12.xx million THB",
+        "maximum_price": null,
+        "currency": "THB",
+        "price_per_sqm": null,
+        "price_note": "The exact price is masked by the site itself as 'xx' pending its own lead-capture unlock ('Odblokuj pełne dane'). This is the value as published, not a redaction applied during extraction."
+      },
+      "ownership": {
+        "ownership_type": null,
+        "freehold": null,
+        "leasehold": null
+      },
+      "features": [
+        "Private pool",
+        "Shared / common spaces"
+      ],
+      "amenities": [],
+      "facilities": [],
+      "description": "An intimate complex of 15 villas on Koh Phangan with private pools and shared spaces, planned for handover in January 2027.",
+      "highlights": [],
+      "nearby_places": [],
+      "investment_information": "Expected completion: January 2027 (as published on the homepage teaser; not independently confirmed from a detail page).",
+      "rental_information": null,
+      "payment_information": null,
+      "images": [],
+      "image_host": "",
+      "image_count": 0,
+      "videos": [],
+      "documents": [],
+      "source": {
+        "url": "https://tajlandia.com/",
+        "title": "Tajlandia.com - Thailand Real Estate Through the Eyes of Market Analysts",
+        "canonical_url": "https://tajlandia.com",
+        "crawl_timestamp": "2026-09-22T06:58:04Z"
+      },
+      "detail_page_url": "https://tajlandia.com/oferty/phangan/akiraya-villa-2027",
+      "detail_page_crawled": false,
+      "data_completeness_note": "This record was built entirely from a homepage teaser card, not from the property's own detail page (which was not reachable this session — see crawl_errors.json). Fields left null were simply never shown on the homepage; they were not searched for and failed, and should not be read as 'confirmed absent from the site'.",
+      "note": "The source website does not distinguish a separate 'project' entity from this property listing; this record mirrors the corresponding entry in properties.json."
+    },
+    {
+      "property_id": null,
+      "project_id": null,
+      "property_name": "Palm Residence",
+      "project_name": "Palm Residence",
+      "property_type": "Villa",
+      "status": "Pre-sale",
+      "location": {
+        "country": "Thailand",
+        "province": null,
+        "city": null,
+        "district": null,
+        "subdistrict": null,
+        "area": "Samui",
+        "address": null,
+        "latitude": null,
+        "longitude": null
+      },
+      "developer": {
+        "name": null,
+        "description": null,
+        "website": null
+      },
+      "property_details": {
+        "bedrooms": "2-3",
+        "bathrooms": null,
+        "area": "175-318 sqm",
+        "land_area": null,
+        "floor_area": null,
+        "floor": null,
+        "total_floors": null,
+        "unit_type": "Villa",
+        "units": 25
+      },
+      "pricing": {
+        "price": "from 6.xx million THB",
+        "minimum_price": "from 6.xx million THB",
+        "maximum_price": null,
+        "currency": "THB",
+        "price_per_sqm": null,
+        "price_note": "The exact price is masked by the site itself as 'xx' pending its own lead-capture unlock ('Odblokuj pełne dane'). This is the value as published, not a redaction applied during extraction."
+      },
+      "ownership": {
+        "ownership_type": null,
+        "freehold": null,
+        "leasehold": null
+      },
+      "features": [
+        "Private pool"
+      ],
+      "amenities": [],
+      "facilities": [],
+      "description": "25 villas with private pools in the Koh Samui municipality - handover planned for Q1 2027.",
+      "highlights": [],
+      "nearby_places": [],
+      "investment_information": "Expected completion: Q1 2027 (as published on the homepage teaser; not independently confirmed from a detail page).",
+      "rental_information": null,
+      "payment_information": null,
+      "images": [],
+      "image_host": "",
+      "image_count": 0,
+      "videos": [],
+      "documents": [],
+      "source": {
+        "url": "https://tajlandia.com/",
+        "title": "Tajlandia.com - Thailand Real Estate Through the Eyes of Market Analysts",
+        "canonical_url": "https://tajlandia.com",
+        "crawl_timestamp": "2026-09-22T06:58:04Z"
+      },
+      "detail_page_url": "https://tajlandia.com/oferty/samui/palm-residence-koh-samui-wille",
+      "detail_page_crawled": false,
+      "data_completeness_note": "This record was built entirely from a homepage teaser card, not from the property's own detail page (which was not reachable this session — see crawl_errors.json). Fields left null were simply never shown on the homepage; they were not searched for and failed, and should not be read as 'confirmed absent from the site'.",
+      "note": "The source website does not distinguish a separate 'project' entity from this property listing; this record mirrors the corresponding entry in properties.json."
+    },
+    {
+      "property_id": null,
+      "project_id": null,
+      "property_name": "Sudara",
+      "project_name": "Sudara",
+      "property_type": "Condominium",
+      "status": "Under construction",
+      "location": {
+        "country": "Thailand",
+        "province": null,
+        "city": null,
+        "district": "Bang Tao",
+        "subdistrict": null,
+        "area": "Phuket",
+        "address": null,
+        "latitude": null,
+        "longitude": null
+      },
+      "developer": {
+        "name": null,
+        "description": null,
+        "website": null
+      },
+      "property_details": {
+        "bedrooms": "1-3",
+        "bathrooms": null,
+        "area": "52-124 (project description); 52-110 (teaser card range) sqm",
+        "land_area": null,
+        "floor_area": null,
+        "floor": null,
+        "total_floors": null,
+        "unit_type": "Condominium",
+        "units": 156
+      },
+      "pricing": {
+        "price": "from 12.xx million THB",
+        "minimum_price": "from 12.xx million THB",
+        "maximum_price": null,
+        "currency": "THB",
+        "price_per_sqm": null,
+        "price_note": "The exact price is masked by the site itself as 'xx' pending its own lead-capture unlock ('Odblokuj pełne dane'). This is the value as published, not a redaction applied during extraction."
+      },
+      "ownership": {
+        "ownership_type": null,
+        "freehold": null,
+        "leasehold": null
+      },
+      "features": [],
+      "amenities": [],
+      "facilities": [],
+      "description": "A 156-unit condominium in Bang Tao, completion Q2 2027. Sizes from 52 sqm to 124 sqm.",
+      "highlights": [],
+      "nearby_places": [],
+      "investment_information": "Expected completion: Q2 2027 (as published on the homepage teaser; not independently confirmed from a detail page).",
+      "rental_information": null,
+      "payment_information": null,
+      "images": [],
+      "image_host": "",
+      "image_count": 0,
+      "videos": [],
+      "documents": [],
+      "source": {
+        "url": "https://tajlandia.com/",
+        "title": "Tajlandia.com - Thailand Real Estate Through the Eyes of Market Analysts",
+        "canonical_url": "https://tajlandia.com",
+        "crawl_timestamp": "2026-09-22T06:58:04Z"
+      },
+      "detail_page_url": "https://tajlandia.com/oferty/phuket/sudara-condo",
+      "detail_page_crawled": false,
+      "data_completeness_note": "This record was built entirely from a homepage teaser card, not from the property's own detail page (which was not reachable this session — see crawl_errors.json). Fields left null were simply never shown on the homepage; they were not searched for and failed, and should not be read as 'confirmed absent from the site'.",
+      "note": "The source website does not distinguish a separate 'project' entity from this property listing; this record mirrors the corresponding entry in properties.json."
+    },
+    {
+      "property_id": null,
+      "project_id": null,
+      "property_name": "Sun Hills Layan",
+      "project_name": "Sun Hills Layan",
+      "property_type": "Condominium",
+      "status": "Under construction",
+      "location": {
+        "country": "Thailand",
+        "province": null,
+        "city": null,
+        "district": "Layan",
+        "subdistrict": null,
+        "area": "Phuket",
+        "address": null,
+        "latitude": null,
+        "longitude": null
+      },
+      "developer": {
+        "name": null,
+        "description": null,
+        "website": null
+      },
+      "property_details": {
+        "bedrooms": "0-3",
+        "bathrooms": null,
+        "area": "26.5-70.4 sqm",
+        "land_area": null,
+        "floor_area": null,
+        "floor": null,
+        "total_floors": null,
+        "unit_type": "Condominium",
+        "units": 370
+      },
+      "pricing": {
+        "price": "from 4.xx million THB",
+        "minimum_price": "from 4.xx million THB",
+        "maximum_price": null,
+        "currency": "THB",
+        "price_per_sqm": null,
+        "price_note": "The exact price is masked by the site itself as 'xx' pending its own lead-capture unlock ('Odblokuj pełne dane'). This is the value as published, not a redaction applied during extraction."
+      },
+      "ownership": {
+        "ownership_type": null,
+        "freehold": null,
+        "leasehold": null
+      },
+      "features": [
+        "Beach access",
+        "Full commercial infrastructure"
+      ],
+      "amenities": [],
+      "facilities": [],
+      "description": "A complex of 370 units in the Layan district with beach access and full commercial infrastructure.",
+      "highlights": [],
+      "nearby_places": [],
+      "investment_information": null,
+      "rental_information": null,
+      "payment_information": null,
+      "images": [],
+      "image_host": "",
+      "image_count": 0,
+      "videos": [],
+      "documents": [],
+      "source": {
+        "url": "https://tajlandia.com/",
+        "title": "Tajlandia.com - Thailand Real Estate Through the Eyes of Market Analysts",
+        "canonical_url": "https://tajlandia.com",
+        "crawl_timestamp": "2026-09-22T06:58:04Z"
+      },
+      "detail_page_url": "https://tajlandia.com/oferty/phuket/sun-hills-kompleks-370-mieszkan",
+      "detail_page_crawled": false,
+      "data_completeness_note": "This record was built entirely from a homepage teaser card, not from the property's own detail page (which was not reachable this session — see crawl_errors.json). Fields left null were simply never shown on the homepage; they were not searched for and failed, and should not be read as 'confirmed absent from the site'.",
+      "note": "The source website does not distinguish a separate 'project' entity from this property listing; this record mirrors the corresponding entry in properties.json."
+    },
+    {
+      "property_id": null,
+      "project_id": null,
+      "property_name": "Pacific Noma",
+      "project_name": "Pacific Noma",
+      "property_type": "Villa",
+      "status": "Pre-sale",
+      "location": {
+        "country": "Thailand",
+        "province": null,
+        "city": null,
+        "district": "Baan Mae Nam (truncated on source as 'Baan Mae…')",
+        "subdistrict": null,
+        "area": "Samui",
+        "address": null,
+        "latitude": null,
+        "longitude": null
+      },
+      "developer": {
+        "name": null,
+        "description": null,
+        "website": null
+      },
+      "property_details": {
+        "bedrooms": "5",
+        "bathrooms": null,
+        "area": "443 sqm",
+        "land_area": null,
+        "floor_area": null,
+        "floor": null,
+        "total_floors": null,
+        "unit_type": "Villa",
+        "units": 13
+      },
+      "pricing": {
+        "price": "from 18.xx million THB",
+        "minimum_price": "from 18.xx million THB",
+        "maximum_price": null,
+        "currency": "THB",
+        "price_per_sqm": null,
+        "price_note": "The exact price is masked by the site itself as 'xx' pending its own lead-capture unlock ('Odblokuj pełne dane'). This is the value as published, not a redaction applied during extraction."
+      },
+      "ownership": {
+        "ownership_type": null,
+        "freehold": null,
+        "leasehold": null
+      },
+      "features": [
+        "Private pool",
+        "Beach access"
+      ],
+      "amenities": [],
+      "facilities": [],
+      "description": "13 villas of 443 sqm each, with a private pool and beach access, in the quiet Baan Mae… district (text truncated with an ellipsis on the source page).",
+      "highlights": [],
+      "nearby_places": [],
+      "investment_information": null,
+      "rental_information": null,
+      "payment_information": null,
+      "images": [],
+      "image_host": "",
+      "image_count": 0,
+      "videos": [],
+      "documents": [],
+      "source": {
+        "url": "https://tajlandia.com/",
+        "title": "Tajlandia.com - Thailand Real Estate Through the Eyes of Market Analysts",
+        "canonical_url": "https://tajlandia.com",
+        "crawl_timestamp": "2026-09-22T06:58:04Z"
+      },
+      "detail_page_url": "https://tajlandia.com/oferty/samui/pacific-noma-baan-mae-nam-koh-samui",
+      "detail_page_crawled": false,
+      "data_completeness_note": "This record was built entirely from a homepage teaser card, not from the property's own detail page (which was not reachable this session — see crawl_errors.json). Fields left null were simply never shown on the homepage; they were not searched for and failed, and should not be read as 'confirmed absent from the site'.",
+      "note": "The source website does not distinguish a separate 'project' entity from this property listing; this record mirrors the corresponding entry in properties.json."
+    },
+    {
+      "property_id": null,
+      "project_id": null,
+      "property_name": "The Title Serenity Naiyang",
+      "project_name": "The Title Serenity Naiyang",
+      "property_type": "Condominium",
+      "status": "Ready for handover",
+      "location": {
+        "country": "Thailand",
+        "province": null,
+        "city": null,
+        "district": "Nai Yang",
+        "subdistrict": null,
+        "area": "Phuket",
+        "address": null,
+        "latitude": null,
+        "longitude": null
+      },
+      "developer": {
+        "name": null,
+        "description": null,
+        "website": null
+      },
+      "property_details": {
+        "bedrooms": "1-3",
+        "bathrooms": null,
+        "area": "36.25-112.55 (teaser); 'from 30 sqm' per description sqm",
+        "land_area": null,
+        "floor_area": null,
+        "floor": null,
+        "total_floors": null,
+        "unit_type": "Condominium",
+        "units": 211
+      },
+      "pricing": {
+        "price": "from 5.xx million THB",
+        "minimum_price": "from 5.xx million THB",
+        "maximum_price": null,
+        "currency": "THB",
+        "price_per_sqm": null,
+        "price_note": "The exact price is masked by the site itself as 'xx' pending its own lead-capture unlock ('Odblokuj pełne dane'). This is the value as published, not a redaction applied during extraction."
+      },
+      "ownership": {
+        "ownership_type": null,
+        "freehold": null,
+        "leasehold": null
+      },
+      "features": [],
+      "amenities": [],
+      "facilities": [],
+      "description": "A completed condominium with 211 units from 30 sqm, within walking distance of Nai Yang Beach and … National Park (text truncated on the source page, likely Sirinath).",
+      "highlights": [],
+      "nearby_places": [
+        "Nai Yang Beach",
+        "…National Park (truncated on source, likely Sirinath National Park — not confirmed)"
+      ],
+      "investment_information": null,
+      "rental_information": null,
+      "payment_information": null,
+      "images": [],
+      "image_host": "",
+      "image_count": 0,
+      "videos": [],
+      "documents": [],
+      "source": {
+        "url": "https://tajlandia.com/",
+        "title": "Tajlandia.com - Thailand Real Estate Through the Eyes of Market Analysts",
+        "canonical_url": "https://tajlandia.com",
+        "crawl_timestamp": "2026-09-22T06:58:04Z"
+      },
+      "detail_page_url": "https://tajlandia.com/oferty/phuket/title-serenity-beachfront-sirinath-park",
+      "detail_page_crawled": false,
+      "data_completeness_note": "This record was built entirely from a homepage teaser card, not from the property's own detail page (which was not reachable this session — see crawl_errors.json). Fields left null were simply never shown on the homepage; they were not searched for and failed, and should not be read as 'confirmed absent from the site'.",
+      "note": "The source website does not distinguish a separate 'project' entity from this property listing; this record mirrors the corresponding entry in properties.json."
+    },
+    {
+      "property_id": null,
+      "project_id": null,
+      "property_name": "Hennessy Residence Karon",
+      "project_name": "Hennessy Residence Karon",
+      "property_type": "Condominium",
+      "status": "Under construction",
+      "location": {
+        "country": "Thailand",
+        "province": null,
+        "city": null,
+        "district": "Karon",
+        "subdistrict": null,
+        "area": "Phuket",
+        "address": null,
+        "latitude": null,
+        "longitude": null
+      },
+      "developer": {
+        "name": null,
+        "description": null,
+        "website": null
+      },
+      "property_details": {
+        "bedrooms": "1-2",
+        "bathrooms": null,
+        "area": "46.5-57 sqm",
+        "land_area": null,
+        "floor_area": null,
+        "floor": null,
+        "total_floors": null,
+        "unit_type": "Condominium",
+        "units": 297
+      },
+      "pricing": {
+        "price": "from 9.xx million THB",
+        "minimum_price": "from 9.xx million THB",
+        "maximum_price": null,
+        "currency": "THB",
+        "price_per_sqm": null,
+        "price_note": "The exact price is masked by the site itself as 'xx' pending its own lead-capture unlock ('Odblokuj pełne dane'). This is the value as published, not a redaction applied during extraction."
+      },
+      "ownership": {
+        "ownership_type": null,
+        "freehold": null,
+        "leasehold": null
+      },
+      "features": [],
+      "amenities": [],
+      "facilities": [],
+      "description": "A complex of 297 units under construction at Karon Beach, with completion planned for Q4 2026.",
+      "highlights": [],
+      "nearby_places": [
+        "Karon Beach"
+      ],
+      "investment_information": "Expected completion: Q4 2026 (as published on the homepage teaser; not independently confirmed from a detail page).",
+      "rental_information": null,
+      "payment_information": null,
+      "images": [],
+      "image_host": "",
+      "image_count": 0,
+      "videos": [],
+      "documents": [],
+      "source": {
+        "url": "https://tajlandia.com/",
+        "title": "Tajlandia.com - Thailand Real Estate Through the Eyes of Market Analysts",
+        "canonical_url": "https://tajlandia.com",
+        "crawl_timestamp": "2026-09-22T06:58:04Z"
+      },
+      "detail_page_url": "https://tajlandia.com/oferty/phuket/hennessy-residence-beach",
+      "detail_page_crawled": false,
+      "data_completeness_note": "This record was built entirely from a homepage teaser card, not from the property's own detail page (which was not reachable this session — see crawl_errors.json). Fields left null were simply never shown on the homepage; they were not searched for and failed, and should not be read as 'confirmed absent from the site'.",
+      "note": "The source website does not distinguish a separate 'project' entity from this property listing; this record mirrors the corresponding entry in properties.json."
+    },
+    {
+      "property_id": null,
+      "project_id": null,
+      "property_name": "The Element by Anocha",
+      "project_name": "The Element by Anocha",
+      "property_type": "Condominium",
+      "status": "Under construction",
+      "location": {
+        "country": "Thailand",
+        "province": null,
+        "city": null,
+        "district": null,
+        "subdistrict": null,
+        "area": "Phuket",
+        "address": null,
+        "latitude": null,
+        "longitude": null
+      },
+      "developer": {
+        "name": null,
+        "description": null,
+        "website": null
+      },
+      "property_details": {
+        "bedrooms": "1-2",
+        "bathrooms": null,
+        "area": "29.87-48.78 sqm",
+        "land_area": null,
+        "floor_area": null,
+        "floor": null,
+        "total_floors": null,
+        "unit_type": "Condominium",
+        "units": 278
+      },
+      "pricing": {
+        "price": "from 4.xx million THB",
+        "minimum_price": "from 4.xx million THB",
+        "maximum_price": null,
+        "currency": "THB",
+        "price_per_sqm": null,
+        "price_note": "The exact price is masked by the site itself as 'xx' pending its own lead-capture unlock ('Odblokuj pełne dane'). This is the value as published, not a redaction applied during extraction."
+      },
+      "ownership": {
+        "ownership_type": null,
+        "freehold": null,
+        "leasehold": null
+      },
+      "features": [],
+      "amenities": [],
+      "facilities": [],
+      "description": "A condominium with 278 units under construction on Phuket, planned completion Q4 2027.",
+      "highlights": [],
+      "nearby_places": [],
+      "investment_information": "Expected completion: Q4 2027 (as published on the homepage teaser; not independently confirmed from a detail page).",
+      "rental_information": null,
+      "payment_information": null,
+      "images": [],
+      "image_host": "",
+      "image_count": 0,
+      "videos": [],
+      "documents": [],
+      "source": {
+        "url": "https://tajlandia.com/",
+        "title": "Tajlandia.com - Thailand Real Estate Through the Eyes of Market Analysts",
+        "canonical_url": "https://tajlandia.com",
+        "crawl_timestamp": "2026-09-22T06:58:04Z"
+      },
+      "detail_page_url": "https://tajlandia.com/oferty/phuket/element-anocha-condo",
+      "detail_page_crawled": false,
+      "data_completeness_note": "This record was built entirely from a homepage teaser card, not from the property's own detail page (which was not reachable this session — see crawl_errors.json). Fields left null were simply never shown on the homepage; they were not searched for and failed, and should not be read as 'confirmed absent from the site'. This specific property card explicitly displayed a 'Zdjęcia wkrótce' (Photos coming soon) placeholder instead of a photo — this is the one property where the absence of an image is confirmed, rather than merely undetermined.",
+      "note": "The source website does not distinguish a separate 'project' entity from this property listing; this record mirrors the corresponding entry in properties.json."
+    }
+  ],
+  "locations": [
+    {
+      "location_name": "Phuket",
+      "location_type": "Island / Province",
+      "country": "Thailand",
+      "districts_covered": [
+        "Bang Tao",
+        "Layan",
+        "Kamala",
+        "Surin",
+        "Rawai",
+        "Nai Harn",
+        "Karon",
+        "Nai Yang"
+      ],
+      "description": "Thailand's largest island and a province in its own right, on the west/south-west Andaman coast. The site's property selection on Phuket spans multiple west-coast bays (see districts.json).",
+      "source": {
+        "url": "https://tajlandia.com/",
+        "title": "Tajlandia.com - Thailand Real Estate Through the Eyes of Market Analysts",
+        "canonical_url": "https://tajlandia.com",
+        "crawl_timestamp": "2026-09-22T06:58:04Z",
+        "note": "Island grouping inferred from the site's own URL structure (/oferty/phuket/..., /lokalizacje/<district>) and district descriptions; no dedicated Phuket overview page was crawled."
+      },
+      "detail_page_crawled": false
+    },
+    {
+      "location_name": "Koh Samui",
+      "location_type": "Island",
+      "country": "Thailand",
+      "districts_covered": [
+        "Bophut",
+        "Maenam"
+      ],
+      "description": "An island in the Gulf of Thailand. The site's property selection on Samui includes villas in Maenam and unnamed/other Samui locations (see properties.json).",
+      "source": {
+        "url": "https://tajlandia.com/",
+        "title": "Tajlandia.com - Thailand Real Estate Through the Eyes of Market Analysts",
+        "canonical_url": "https://tajlandia.com",
+        "crawl_timestamp": "2026-09-22T06:58:04Z",
+        "note": "Island grouping inferred from the site's own URL structure (/oferty/samui/...) and district descriptions; no dedicated Koh Samui overview page was crawled."
+      },
+      "detail_page_crawled": false
+    },
+    {
+      "location_name": "Koh Phangan",
+      "location_type": "Island",
+      "country": "Thailand",
+      "districts_covered": [],
+      "description": "An island in the Gulf of Thailand, neighbouring Koh Samui. Only one property listing (Akiraya Villa) was found for this island on the homepage; no dedicated location guide for Koh Phangan was found.",
+      "source": {
+        "url": "https://tajlandia.com/",
+        "title": "Tajlandia.com - Thailand Real Estate Through the Eyes of Market Analysts",
+        "canonical_url": "https://tajlandia.com",
+        "crawl_timestamp": "2026-09-22T06:58:04Z",
+        "note": "Inferred solely from the URL path /oferty/phangan/akiraya-villa-2027 of a single property listing."
+      },
+      "detail_page_crawled": false
+    }
+  ],
+  "districts": [
+    {
+      "district_name": "Bang Tao",
+      "parent_location": "Phuket",
+      "country": "Thailand",
+      "description": "A six-kilometre bay around the Laguna complex - the deepest premium condo market on Phuket's west coast.",
+      "in_footer_navigation": true,
+      "projects_mentioned": [],
+      "detail_url": "https://tajlandia.com/lokalizacje/bang-tao",
+      "detail_page_crawled": false,
+      "source": {
+        "url": "https://tajlandia.com/",
+        "title": "Tajlandia.com - Thailand Real Estate Through the Eyes of Market Analysts",
+        "canonical_url": "https://tajlandia.com",
+        "crawl_timestamp": "2026-09-22T06:58:04Z"
+      }
+    },
+    {
+      "district_name": "Layan",
+      "parent_location": "Phuket",
+      "country": "Thailand",
+      "description": "The quiet northern end of Bang Tao bay - low-rise development, limited land supply, and the most villa-dominated character of the west coast.",
+      "in_footer_navigation": true,
+      "projects_mentioned": [],
+      "detail_url": "https://tajlandia.com/lokalizacje/layan",
+      "detail_page_crawled": false,
+      "source": {
+        "url": "https://tajlandia.com/",
+        "title": "Tajlandia.com - Thailand Real Estate Through the Eyes of Market Analysts",
+        "canonical_url": "https://tajlandia.com",
+        "crawl_timestamp": "2026-09-22T06:58:04Z"
+      }
+    },
+    {
+      "district_name": "Kamala",
+      "parent_location": "Phuket",
+      "country": "Thailand",
+      "description": "A bay between Surin and Patong: ultra-premium on the slopes of the so-called Millionaires' Mile, and a quiet, family-oriented centre with a local pace of life.",
+      "in_footer_navigation": true,
+      "projects_mentioned": [],
+      "detail_url": "https://tajlandia.com/lokalizacje/kamala",
+      "detail_page_crawled": false,
+      "source": {
+        "url": "https://tajlandia.com/",
+        "title": "Tajlandia.com - Thailand Real Estate Through the Eyes of Market Analysts",
+        "canonical_url": "https://tajlandia.com",
+        "crawl_timestamp": "2026-09-22T06:58:04Z"
+      }
+    },
+    {
+      "district_name": "Surin",
+      "parent_location": "Phuket",
+      "country": "Thailand",
+      "description": "A short, prestigious bay between Bang Tao and Kamala - an address with an established reputation, and a beach fully restored to public use.",
+      "in_footer_navigation": true,
+      "projects_mentioned": [],
+      "detail_url": "https://tajlandia.com/lokalizacje/surin",
+      "detail_page_crawled": false,
+      "source": {
+        "url": "https://tajlandia.com/",
+        "title": "Tajlandia.com - Thailand Real Estate Through the Eyes of Market Analysts",
+        "canonical_url": "https://tajlandia.com",
+        "crawl_timestamp": "2026-09-22T06:58:04Z"
+      }
+    },
+    {
+      "district_name": "Rawai",
+      "parent_location": "Phuket",
+      "country": "Thailand",
+      "description": "The island's southern cape: a promenade with a seafood market, boat piers to nearby islands, and Phuket's strongest long-term rental market.",
+      "in_footer_navigation": true,
+      "projects_mentioned": [],
+      "detail_url": "https://tajlandia.com/lokalizacje/rawai",
+      "detail_page_crawled": false,
+      "source": {
+        "url": "https://tajlandia.com/",
+        "title": "Tajlandia.com - Thailand Real Estate Through the Eyes of Market Analysts",
+        "canonical_url": "https://tajlandia.com",
+        "crawl_timestamp": "2026-09-22T06:58:04Z"
+      }
+    },
+    {
+      "district_name": "Nai Harn",
+      "parent_location": "Phuket",
+      "country": "Thailand",
+      "description": "A bay regarded as one of the island's best swimming beaches, with a lake and a monastery inland - an intimate market with permanently limited supply.",
+      "in_footer_navigation": true,
+      "projects_mentioned": [],
+      "detail_url": "https://tajlandia.com/lokalizacje/nai-harn",
+      "detail_page_crawled": false,
+      "source": {
+        "url": "https://tajlandia.com/",
+        "title": "Tajlandia.com - Thailand Real Estate Through the Eyes of Market Analysts",
+        "canonical_url": "https://tajlandia.com",
+        "crawl_timestamp": "2026-09-22T06:58:04Z"
+      }
+    },
+    {
+      "district_name": "Karon",
+      "parent_location": "Phuket",
+      "country": "Thailand",
+      "description": "The island's second-longest beach and a mature secondary market - natural ground for a strategy of buying older units with renovation potential.",
+      "in_footer_navigation": false,
+      "projects_mentioned": [],
+      "detail_url": "https://tajlandia.com/lokalizacje/karon",
+      "detail_page_crawled": false,
+      "source": {
+        "url": "https://tajlandia.com/",
+        "title": "Tajlandia.com - Thailand Real Estate Through the Eyes of Market Analysts",
+        "canonical_url": "https://tajlandia.com",
+        "crawl_timestamp": "2026-09-22T06:58:04Z"
+      }
+    },
+    {
+      "district_name": "Bophut",
+      "parent_location": "Koh Samui",
+      "country": "Thailand",
+      "description": "Fisherman's Village and the service hub of Koh Samui's north coast - the island's most liquid condo and villa market.",
+      "in_footer_navigation": false,
+      "projects_mentioned": [],
+      "detail_url": "https://tajlandia.com/lokalizacje/bophut",
+      "detail_page_crawled": false,
+      "source": {
+        "url": "https://tajlandia.com/",
+        "title": "Tajlandia.com - Thailand Real Estate Through the Eyes of Market Analysts",
+        "canonical_url": "https://tajlandia.com",
+        "crawl_timestamp": "2026-09-22T06:58:04Z"
+      }
+    },
+    {
+      "district_name": "Maenam",
+      "parent_location": "Koh Samui",
+      "country": "Thailand",
+      "description": "A long, quiet beach with views of Koh Phangan and a limited supply of new projects - a natural direction for Samui's villa segment.",
+      "in_footer_navigation": false,
+      "projects_mentioned": [],
+      "detail_url": "https://tajlandia.com/lokalizacje/maenam",
+      "detail_page_crawled": false,
+      "source": {
+        "url": "https://tajlandia.com/",
+        "title": "Tajlandia.com - Thailand Real Estate Through the Eyes of Market Analysts",
+        "canonical_url": "https://tajlandia.com",
+        "crawl_timestamp": "2026-09-22T06:58:04Z"
+      }
+    }
+  ],
+  "developers": [],
+  "amenities": [
+    {
+      "amenity": "Private pool",
+      "property_count": 4,
+      "properties": [
+        "Cocoon Villas Maenam",
+        "Akiraya Villa",
+        "Palm Residence",
+        "Pacific Noma"
+      ],
+      "note": "Extracted from free-text project descriptions on the homepage, not from a structured amenities checklist (the site does not appear to publish one at the teaser-card level)."
+    },
+    {
+      "amenity": "Beach access",
+      "property_count": 2,
+      "properties": [
+        "Sun Hills Layan",
+        "Pacific Noma"
+      ],
+      "note": "Extracted from free-text project descriptions on the homepage, not from a structured amenities checklist (the site does not appear to publish one at the teaser-card level)."
+    },
+    {
+      "amenity": "Sports & recreational infrastructure",
+      "property_count": 1,
+      "properties": [
+        "Botanica Four Seasons"
+      ],
+      "note": "Extracted from free-text project descriptions on the homepage, not from a structured amenities checklist (the site does not appear to publish one at the teaser-card level)."
+    },
+    {
+      "amenity": "Shared / common spaces",
+      "property_count": 1,
+      "properties": [
+        "Akiraya Villa"
+      ],
+      "note": "Extracted from free-text project descriptions on the homepage, not from a structured amenities checklist (the site does not appear to publish one at the teaser-card level)."
+    },
+    {
+      "amenity": "Full commercial infrastructure",
+      "property_count": 1,
+      "properties": [
+        "Sun Hills Layan"
+      ],
+      "note": "Extracted from free-text project descriptions on the homepage, not from a structured amenities checklist (the site does not appear to publish one at the teaser-card level)."
+    }
+  ],
+  "property_images": [],
+  "articles": [
+    {
+      "title": "5 Costly Investor Mistakes on Koh Samui - 2026 Case Studies",
+      "slug": "koh-samui-investor-mistakes-case-studies-2026-fe6cb7",
+      "author": null,
+      "publisher_byline": "Tajlandia.com Team (site-wide byline; not confirmed as a per-article author)",
+      "category": null,
+      "publication_date_display": "21 September 2026",
+      "updated_date": null,
+      "excerpt": "Case studies of mistakes made by property buyers on Koh Samui: due diligence, payment schedules, rental costs, ownership structure. Data… (text truncated on the source page)",
+      "full_content": null,
+      "headings": null,
+      "images": [],
+      "references": null,
+      "related_articles": null,
+      "url": "https://tajlandia.com/blog/koh-samui-investor-mistakes-case-studies-2026-fe6cb7",
+      "full_text_crawled": false,
+      "source_language": "pl",
+      "output_language": "English",
+      "source": {
+        "url": "https://tajlandia.com/",
+        "title": "Tajlandia.com - Thailand Real Estate Through the Eyes of Market Analysts",
+        "canonical_url": "https://tajlandia.com",
+        "crawl_timestamp": "2026-09-22T06:58:04Z",
+        "note": "Homepage teaser only; full article body was not accessible this session."
+      }
+    },
+    {
+      "title": "Koh Samui Infrastructure Development in 2026 - 7 Projects and Their Impact on Prices",
+      "slug": "koh-samui-infrastructure-development-2026-projects-property-prices-2fa920",
+      "author": null,
+      "publisher_byline": "Tajlandia.com Team (site-wide byline; not confirmed as a per-article author)",
+      "category": null,
+      "publication_date_display": "21 September 2026",
+      "updated_date": null,
+      "excerpt": "Koh Samui infrastructure development in 2026: 7 projects from the airport to the marina. An analysis of the impact on property prices in Bophut, Lamai and Maenam… (text truncated on the source page)",
+      "full_content": null,
+      "headings": null,
+      "images": [],
+      "references": null,
+      "related_articles": null,
+      "url": "https://tajlandia.com/blog/koh-samui-infrastructure-development-2026-projects-property-prices-2fa920",
+      "full_text_crawled": false,
+      "source_language": "pl",
+      "output_language": "English",
+      "source": {
+        "url": "https://tajlandia.com/",
+        "title": "Tajlandia.com - Thailand Real Estate Through the Eyes of Market Analysts",
+        "canonical_url": "https://tajlandia.com",
+        "crawl_timestamp": "2026-09-22T06:58:04Z",
+        "note": "Homepage teaser only; full article body was not accessible this session."
+      }
+    },
+    {
+      "title": "Managing Phuket Rentals from Poland - 3 Models by the Numbers in 2026",
+      "slug": "phuket-rental-management-models-2026-4c1c6e",
+      "author": null,
+      "publisher_byline": "Tajlandia.com Team (site-wide byline; not confirmed as a per-article author)",
+      "category": null,
+      "publication_date_display": "21 September 2026",
+      "updated_date": null,
+      "excerpt": "Managing rentals on Phuket from Poland in 2026. A numbers-based comparison of rental pool, operator, and self-managed models: commissions,… (text truncated on the source page)",
+      "full_content": null,
+      "headings": null,
+      "images": [],
+      "references": null,
+      "related_articles": null,
+      "url": "https://tajlandia.com/blog/phuket-rental-management-models-2026-4c1c6e",
+      "full_text_crawled": false,
+      "source_language": "pl",
+      "output_language": "English",
+      "source": {
+        "url": "https://tajlandia.com/",
+        "title": "Tajlandia.com - Thailand Real Estate Through the Eyes of Market Analysts",
+        "canonical_url": "https://tajlandia.com",
+        "crawl_timestamp": "2026-09-22T06:58:04Z",
+        "note": "Homepage teaser only; full article body was not accessible this session."
+      }
+    }
+  ],
+  "market_analysis": [
+    {
+      "metric": "Year-on-year price growth for condos on Phuket",
+      "value": "+5.4%",
+      "cited_source": "Bank of Thailand, Residential Property Price Index",
+      "cited_date": "July 2026",
+      "source_language": "pl",
+      "output_language": "English",
+      "verification_note": "This figure and its attribution are a third-party statistic as cited by tajlandia.com; reproduced as published and not independently verified against the primary source here.",
+      "source": {
+        "url": "https://tajlandia.com/",
+        "title": "Tajlandia.com - Thailand Real Estate Through the Eyes of Market Analysts",
+        "canonical_url": "https://tajlandia.com",
+        "crawl_timestamp": "2026-09-22T06:58:04Z"
+      }
+    },
+    {
+      "metric": "Year-on-year price growth for villas on Phuket",
+      "value": "+4.9%",
+      "cited_source": "Bank of Thailand, Residential Property Price Index",
+      "cited_date": "July 2026",
+      "source_language": "pl",
+      "output_language": "English",
+      "verification_note": "This figure and its attribution are a third-party statistic as cited by tajlandia.com; reproduced as published and not independently verified against the primary source here.",
+      "source": {
+        "url": "https://tajlandia.com/",
+        "title": "Tajlandia.com - Thailand Real Estate Through the Eyes of Market Analysts",
+        "canonical_url": "https://tajlandia.com",
+        "crawl_timestamp": "2026-09-22T06:58:04Z"
+      }
+    },
+    {
+      "metric": "Phuket visitors (Jan-Nov 2025)",
+      "value": "12.74 million",
+      "cited_source": "Tourism Authority of Thailand (TAT), Bangkok Post",
+      "cited_date": null,
+      "source_language": "pl",
+      "output_language": "English",
+      "verification_note": "This figure and its attribution are a third-party statistic as cited by tajlandia.com; reproduced as published and not independently verified against the primary source here.",
+      "source": {
+        "url": "https://tajlandia.com/",
+        "title": "Tajlandia.com - Thailand Real Estate Through the Eyes of Market Analysts",
+        "canonical_url": "https://tajlandia.com",
+        "crawl_timestamp": "2026-09-22T06:58:04Z"
+      }
+    },
+    {
+      "metric": "Average hotel occupancy",
+      "value": "79.5%",
+      "cited_source": "TAT, CBRE, C9 Hotelworks",
+      "cited_date": null,
+      "source_language": "pl",
+      "output_language": "English",
+      "verification_note": "This figure and its attribution are a third-party statistic as cited by tajlandia.com; reproduced as published and not independently verified against the primary source here.",
+      "source": {
+        "url": "https://tajlandia.com/",
+        "title": "Tajlandia.com - Thailand Real Estate Through the Eyes of Market Analysts",
+        "canonical_url": "https://tajlandia.com",
+        "crawl_timestamp": "2026-09-22T06:58:04Z"
+      }
+    }
+  ],
+  "buying_process": {
+    "section_title_en": "How a Foreigner Buys Property in Thailand",
+    "source_language": "pl",
+    "output_language": "English",
+    "steps": [
+      {
+        "step_number": 1,
+        "title": "Purpose and Budget",
+        "description": "You determine whether you are buying for rental income, personal stay, or resale - this determines the location, property type, and ownership structure."
+      },
+      {
+        "step_number": 2,
+        "title": "Ownership Structure",
+        "description": "A foreigner can buy a condo under full ownership (freehold, within the building's 49% foreign quota) or enter into a registered 30-year leasehold - typical for villas and houses."
+      },
+      {
+        "step_number": 3,
+        "title": "Reservation and Due Diligence",
+        "description": "After the reservation agreement, the land's legal title (chanote), building permits, and the developer's standing are verified - before you sign the main contract."
+      },
+      {
+        "step_number": 4,
+        "title": "Contract and Payments from Abroad",
+        "description": "Purchase funds are transferred from abroad in foreign currency; the bank issues a Foreign Exchange Transaction (FET) confirmation, required when registering ownership for a foreigner."
+      },
+      {
+        "step_number": 5,
+        "title": "Ownership Transfer and Handover",
+        "description": "Ownership is registered at the local Land Office. After the technical handover, you decide on a rental management model - self-managed or through an operator."
+      }
+    ],
+    "source": {
+      "url": "https://tajlandia.com/",
+      "title": "Tajlandia.com - Thailand Real Estate Through the Eyes of Market Analysts",
+      "canonical_url": "https://tajlandia.com",
+      "crawl_timestamp": "2026-09-22T06:58:04Z"
+    }
+  },
+  "pages": [
+    {
+      "url": "https://tajlandia.com/",
+      "canonical_url": "https://tajlandia.com",
+      "http_status": 200,
+      "page_title": "Tajlandia.com - Thailand Real Estate Through the Eyes of Market Analysts",
+      "page_title_original": "Tajlandia.com - Nieruchomości w Tajlandii oczami analityków rynku",
+      "meta_description": "We monitor the Phuket and Koh Samui real estate market on the ground. Project selection, developer verification, and market data - without sales pressure.",
+      "source_language": "pl",
+      "output_language": "English",
+      "language": "pl",
+      "content_type": "text/html; charset=utf-8",
+      "crawl_timestamp": "2026-09-22T06:58:04Z",
+      "page_category": "homepage",
+      "canonical_matches_url": true,
+      "structured_data_present": false,
+      "breadcrumbs": null
+    }
+  ],
+  "media": [
+    {
+      "type": "image",
+      "role": "site_icon",
+      "image_url": "https://tajlandia.com/brand/tajlandia-icon-v2.svg",
+      "host": "tajlandia.com",
+      "context": "Site favicon / header logo mark"
+    },
+    {
+      "type": "image",
+      "role": "logo_light",
+      "image_url": "https://tajlandia.com/brand/tajlandia-logo.svg",
+      "host": "tajlandia.com",
+      "alt_text_en": "Tajlandia.com - homepage",
+      "context": "Header logo, light variant"
+    },
+    {
+      "type": "image",
+      "role": "logo_dark",
+      "image_url": "https://tajlandia.com/brand/tajlandia-logo-on-dark.svg",
+      "host": "tajlandia.com",
+      "alt_text_en": "Tajlandia.com - homepage",
+      "context": "Footer logo, dark variant"
+    },
+    {
+      "type": "image",
+      "role": "hero_background",
+      "image_url": "https://tajlandia.com/_next/image?url=%2Fimages%2Fregions%2Fphuket.webp&w=3840&q=75",
+      "host": "tajlandia.com (Next.js Image Optimization endpoint, /_next/image)",
+      "alt_text_en": "View of Phuket's southern coast - palm trees, green hills, and a bay with yachts",
+      "context": "Hero background image"
+    },
+    {
+      "type": "image",
+      "role": "social_share_card",
+      "image_url": "https://tajlandia.com/og.png",
+      "host": "tajlandia.com",
+      "width": 1200,
+      "height": 630,
+      "context": "OpenGraph / Twitter card share image"
+    },
+    {
+      "type": "image",
+      "role": "district_teaser",
+      "district": "Bang Tao",
+      "alt_text_en": "Beach club walkway among coconut palms with white umbrellas at Bang Tao beach, Phuket",
+      "url_captured": false
+    },
+    {
+      "type": "image",
+      "role": "district_teaser",
+      "district": "Layan",
+      "alt_text_en": "Layan beach at dusk - horseback riders against a forested headland",
+      "url_captured": false
+    },
+    {
+      "type": "image",
+      "role": "district_teaser",
+      "district": "Kamala",
+      "alt_text_en": "Kamala beach at sunset - a rocky hillside with villas among palm trees",
+      "url_captured": false
+    },
+    {
+      "type": "image",
+      "role": "district_teaser",
+      "district": "Surin",
+      "alt_text_en": "Surin beach, Phuket - golden sand, turquoise waves, and surfboards under umbrellas",
+      "url_captured": false
+    },
+    {
+      "type": "image",
+      "role": "district_teaser",
+      "district": "Rawai",
+      "alt_text_en": "Traditional longtail boat in the shallow bay at Rawai beach, Phuket",
+      "url_captured": false
+    },
+    {
+      "type": "image",
+      "role": "district_teaser",
+      "district": "Nai Harn",
+      "alt_text_en": "Nai Harn bay and Ko Man islet, seen from the Windmill viewpoint, southern Phuket",
+      "url_captured": false
+    },
+    {
+      "type": "image",
+      "role": "district_teaser",
+      "district": "Karon",
+      "alt_text_en": "Sunset at Karon beach, Phuket - pink sky reflected in wet sand and waves",
+      "url_captured": false
+    },
+    {
+      "type": "image",
+      "role": "district_teaser",
+      "district": "Bophut",
+      "alt_text_en": "Bophut beach, Koh Samui - light sand, turquoise water, and a green headland",
+      "url_captured": false
+    },
+    {
+      "type": "image",
+      "role": "district_teaser",
+      "district": "Maenam",
+      "alt_text_en": "Maenam beach, Koh Samui - golden sand among palm trees and a forested headland",
+      "url_captured": false
+    },
+    {
+      "type": "image",
+      "role": "property_teaser_placeholder",
+      "property": "The Element by Anocha",
+      "alt_text_en": "'Photos coming soon' (Zdjęcia wkrótce) — placeholder, no photo published",
+      "url_captured": false
+    },
+    {
+      "note": "The 11 remaining property teaser cards likely display an image each (typical for this card layout), but no alt text or src URL for them was exposed in the extracted content, so their presence, count, and host cannot be confirmed. See property_image_host_report.json."
+    }
+  ],
+  "contact": {
+    "company_name": "Tajlandia.com",
+    "publisher_byline": "Tajlandia.com Team",
+    "legal_entity": null,
+    "business_registration_info": null,
+    "phone": "+66 64 402 7744",
+    "whatsapp_link": "https://wa.me/66644027744",
+    "public_email": "hi@tajlandia.com",
+    "office_name": "Varsovia Phuket",
+    "office_address": {
+      "building": "Royal Phuket Marina, Building MS2",
+      "subdistrict_district": "Ko Kaeo, Mueang",
+      "province": "Phuket",
+      "postal_code": "83000",
+      "country": "Thailand"
+    },
+    "opening_hours": null,
+    "contact_page_url": "https://tajlandia.com/kontakt",
+    "contact_page_crawled": false,
+    "source": {
+      "url": "https://tajlandia.com/",
+      "title": "Tajlandia.com - Thailand Real Estate Through the Eyes of Market Analysts",
+      "canonical_url": "https://tajlandia.com",
+      "crawl_timestamp": "2026-09-22T06:58:04Z"
+    }
+  },
+  "legal": [
+    {
+      "page_type": "Privacy Policy",
+      "label_original": "Polityka prywatności",
+      "url": "https://tajlandia.com/polityka-prywatnosci",
+      "content_crawled": false,
+      "content": null,
+      "source": {
+        "url": "https://tajlandia.com/",
+        "title": "Tajlandia.com - Thailand Real Estate Through the Eyes of Market Analysts",
+        "canonical_url": "https://tajlandia.com",
+        "crawl_timestamp": "2026-09-22T06:58:04Z"
+      }
+    },
+    {
+      "page_type": "Terms and Conditions",
+      "label_original": "Regulamin",
+      "url": "https://tajlandia.com/regulamin",
+      "content_crawled": false,
+      "content": null,
+      "source": {
+        "url": "https://tajlandia.com/",
+        "title": "Tajlandia.com - Thailand Real Estate Through the Eyes of Market Analysts",
+        "canonical_url": "https://tajlandia.com",
+        "crawl_timestamp": "2026-09-22T06:58:04Z"
+      }
+    }
+  ],
+  "external_sources": [
+    {
+      "organization": "Bank of Thailand",
+      "referenced_for": "Residential Property Price Index (Phuket condo and villa price growth)",
+      "referenced_on_page": "https://tajlandia.com/",
+      "verification_note": "Organization cited by tajlandia.com itself; not independently verified here."
+    },
+    {
+      "organization": "Tourism Authority of Thailand (TAT)",
+      "referenced_for": "Phuket visitor numbers, hotel occupancy",
+      "referenced_on_page": "https://tajlandia.com/",
+      "verification_note": "Organization cited by tajlandia.com itself; not independently verified here."
+    },
+    {
+      "organization": "Bangkok Post",
+      "referenced_for": "Phuket visitor numbers",
+      "referenced_on_page": "https://tajlandia.com/",
+      "verification_note": "Organization cited by tajlandia.com itself; not independently verified here."
+    },
+    {
+      "organization": "CBRE",
+      "referenced_for": "Hotel occupancy data",
+      "referenced_on_page": "https://tajlandia.com/",
+      "verification_note": "Organization cited by tajlandia.com itself; not independently verified here."
+    },
+    {
+      "organization": "C9 Hotelworks",
+      "referenced_for": "Hotel occupancy data",
+      "referenced_on_page": "https://tajlandia.com/",
+      "verification_note": "Organization cited by tajlandia.com itself; not independently verified here."
+    },
+    {
+      "organization": "Thailand Department of Lands",
+      "referenced_for": "Cited generically in the 'Data Sources' methodology principle; no specific figure attributed on the homepage",
+      "referenced_on_page": "https://tajlandia.com/",
+      "verification_note": "Organization cited by tajlandia.com itself; not independently verified here."
+    }
+  ],
+  "statistics": {
+    "total_urls_discovered": 35,
+    "total_urls_crawled": 1,
+    "total_urls_blocked_by_tooling": 36,
+    "total_urls_failed_http": 0,
+    "total_properties_discovered": 12,
+    "total_unique_properties": 12,
+    "total_projects": 12,
+    "total_property_images": 0,
+    "properties_with_confirmed_images": 0,
+    "properties_with_confirmed_no_image": 1,
+    "properties_with_image_status_undetermined": 11,
+    "primary_property_image_host": "",
+    "secondary_property_image_hosts": [],
+    "total_articles": 3,
+    "total_locations": 3,
+    "total_districts": 9,
+    "total_developers": 0,
+    "total_amenities_identified": 5,
+    "total_market_analysis_records": 4,
+    "total_legal_pages_referenced": 2,
+    "total_languages_discovered": 2,
+    "crawl_success_rate": "1 / 35 discovered URLs (2.9%)",
+    "content_extraction_success_rate": "100% of the one page that was reachable was fully extracted",
+    "duplicate_rate": "0% (no duplicates encountered — only one page was retrieved)"
+  },
+  "validation": {
+    "robots_txt_checked": false,
+    "sitemap_checked": false,
+    "sitemap_index_checked": false,
+    "internal_urls_discovered": true,
+    "property_listing_pages_discovered": "discovered_as_url_not_crawled",
+    "property_detail_pages_discovered": "discovered_as_urls_not_crawled",
+    "all_accessible_property_records_extracted": "teaser_level_only",
+    "duplicate_properties_removed": "none_found",
+    "property_images_extracted": false,
+    "image_hosts_analyzed": "attempted_result_indeterminate_zero_images_captured",
+    "image_urls_preserved": "not_applicable_none_captured",
+    "dynamic_content_handled": "not_applicable_no_pages_beyond_home_reached",
+    "pagination_handled": "not_applicable_no_listing_pages_reached",
+    "articles_extracted": "teaser_level_only",
+    "locations_extracted": "teaser_level_only",
+    "market_data_extracted": true,
+    "buying_process_extracted": true,
+    "legal_pages_extracted": "link_only_no_content",
+    "contact_data_extracted": true,
+    "all_final_normalized_data_in_english": true,
+    "source_urls_preserved": true,
+    "json_validated": true,
+    "property_statistics_generated": true,
+    "image_hosting_report_generated": true,
+    "word_reports_generated": true,
+    "crawl_errors_reported": true,
+    "completion_claim": "This is NOT a claim of 100% completion. Only https://tajlandia.com/ was successfully crawled. 34 internal pages discovered via its on-page links, plus robots.txt and sitemap.xml, could not be retrieved because of tooling limits in this session (see crawl_information.tooling_constraints), not because the site denied or blocked the request."
+  }
+}

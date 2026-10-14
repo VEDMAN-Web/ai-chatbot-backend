@@ -1,0 +1,112 @@
+[
+  {
+    "property_id": "PROP-PHK-001",
+    "property_name": "Aileen Residence Bangtao",
+    "specifications": {
+      "roof_material": "High-grade heat-insulating asphalt composite shingles with double-layer waterproofing membrane",
+      "roof_colour": "Charcoal Grey / Matte Anthracite",
+      "flooring": "Imported non-slip Italian porcelain tiles (living areas) & engineered teak wood (bedrooms)",
+      "walls": "Aerated concrete Q-CON blocks with thermal insulation and smooth skim coat acrylic paint",
+      "doors_and_windows": "Powder-coated anodized aluminium frames with 8mm tempered low-E double-glazed glass",
+      "exterior_materials": "Natural Andaman stacked stone feature cladding, water-resistant timber-look composite slats",
+      "interior_materials": "Custom teak built-in cabinetry, quartz stone countertops, LED cove lighting",
+      "construction_details": {
+        "foundation": "Reinforced concrete pile foundation",
+        "structure": "Post-tensioned reinforced concrete frame",
+        "ceiling_height": "3.5 meters in main living room, 2.8 meters in bedrooms",
+        "pool_specs": "8m x 3.5m salt-chlorinator infinity pool with Cotto volcanic stone mosaic"
+      },
+      "architectural_style": "Modern Tropical Minimalist",
+      "developer_contact": "Aileen Residence Development Team"
+    },
+    "internal_notes": "Client VIP discount approved up to 3% on early full cash settlement. Foreign leasehold registration via 30+30+30 lease agreement with developer."
+  },
+  {
+    "property_id": "PROP-PHK-002",
+    "property_name": "Bellaguna Lake Residences Lotus",
+    "specifications": {
+      "roof_material": "Reinforced concrete flat roof with multi-ply elastomeric bitumen waterproofing and acoustic insulation",
+      "roof_colour": "Reflective White / Protective Solar Coating",
+      "flooring": "Polished terrazzo in communal lobbies, acoustic underlay vinyl-wood planks in private units",
+      "walls": "Double-layer plasterboard partition with acoustic rockwool insulation between units",
+      "doors_and_windows": "Heavy-duty soundproof aluminium sliding doors with laminated safety glass",
+      "exterior_materials": "Hydrophobic textured facade plaster, architectural aluminium solar shading fins",
+      "interior_materials": "Engineered quartz countertops, Blum soft-close fittings, moisture-resistant ceiling drywall",
+      "construction_details": {
+        "foundation": "Cast-in-place bored piles to bedrock",
+        "structure": "Earthquake-resistant reinforced concrete frame (TIS standard)",
+        "ceiling_height": "2.8 meters clear ceiling height",
+        "lakefront_protection": "Reinforced retaining wall along lake boundary"
+      },
+      "architectural_style": "Contemporary Waterfront Resort",
+      "developer_contact": "Bellaguna Commercial Sales Desk"
+    },
+    "internal_notes": "Foreign freehold quota currently 35% sold out. Units facing the west lake carry a 5% view premium."
+  },
+  {
+    "property_id": "PROP-PHK-003",
+    "property_name": "Botanica Four Seasons",
+    "specifications": {
+      "roof_material": "Cedar wood shingle tiles on high-tensile steel truss with breathable radiant barrier",
+      "roof_colour": "Natural weathered cedar brown",
+      "flooring": "Hand-cut natural stone tiles in living area, solid Burmese teak in master bedrooms",
+      "walls": "Double cavity masonry exterior walls for maximum tropical cooling",
+      "doors_and_windows": "Custom floor-to-ceiling solid teak wooden doors, German Schuco aluminium double-glazing",
+      "exterior_materials": "Handcrafted river-stone masonry walls, solid hardwood perimeter fencing",
+      "interior_materials": "Imported European sanitaryware (Kohler / Grohe), solid wood island counter, brass hardware",
+      "construction_details": {
+        "foundation": "Deep driven concrete piles",
+        "structure": "Heavy-duty reinforced concrete with high-durability marine-grade rebar",
+        "ceiling_height": "Cathedral pitched ceiling reaching 5.2 meters in central pavilion",
+        "pool_specs": "12m x 4.5m private saltwater pool with integrated Jacuzzi and natural Sukabumi stone"
+      },
+      "architectural_style": "Modern Luxury Balinese & Zen fusion",
+      "developer_contact": "Botanica Luxury Headquarters (Cherngtalay)"
+    },
+    "internal_notes": "Unit 4B and 12A are developer show villas, available fully furnished for immediate handover. Price inclusive of premium furniture package valued at 3.5M THB."
+  },
+  {
+    "property_id": "PROP-SAM-004",
+    "property_name": "Cocoon Villas Maenam",
+    "specifications": {
+      "roof_material": "Curved organic bamboo composite roof with bituminous waterproofing membrane",
+      "roof_colour": "Forest Earth Green / Bamboo Ochre",
+      "flooring": "Honed polished concrete with wax finish, river pebble accents in bathrooms",
+      "walls": "Rammed-earth exterior accent walls and lightweight acoustic blockwork",
+      "doors_and_windows": "Custom curved timber pivot doors with tinted tempered glass",
+      "exterior_materials": "Sustainably harvested bamboo cladding, local granite retaining boulders",
+      "interior_materials": "Minimalist micro-cement vanity units, matte black sanitary fittings",
+      "construction_details": {
+        "foundation": "Pad footings on granite hillside bedrock",
+        "structure": "Hybrid lightweight steel and glued laminated timber (Glulam)",
+        "ceiling_height": "3.2 meters organic curved vault",
+        "pool_specs": "6m x 3m plunge pool with overflow edge"
+      },
+      "architectural_style": "Biophilic Organic Eco-Architecture",
+      "developer_contact": "Cocoon Samui Projects Ltd"
+    },
+    "internal_notes": "Entry-level pricing from 3.9M THB is for the 1-bedroom layout. Water supply via private deep well; electricity connected directly to PEA grid at official government rates."
+  },
+  {
+    "property_id": "PROP-SAM-009",
+    "property_name": "Pacific Noma",
+    "specifications": {
+      "roof_material": "Ultra-slim cantilevered pre-stressed concrete slab with crystalline waterproofing and green roof garden",
+      "roof_colour": "Light Slate Grey & Living Grass Sedum",
+      "flooring": "Seamless large-format sintered stone slabs (1200x2400mm) imported from Spain",
+      "walls": "Architectural off-shutter fair-faced concrete with matte protective sealer",
+      "doors_and_windows": "Motorized flush-floor recessed aluminium sliding doors with triple-laminated acoustic glass",
+      "exterior_materials": "Off-shutter architectural concrete, marine-grade 316 stainless steel railings, titanium zinc panels",
+      "interior_materials": "Italian Poliform custom kitchen, marble bookmatched feature walls, smart home KNX automation",
+      "construction_details": {
+        "foundation": "Continuous reinforced raft foundation with sheet pile beachfront barrier",
+        "structure": "Cast-in-place architectural concrete with long cantilevers",
+        "ceiling_height": "4.0 meters on ground floor, 3.4 meters on upper level",
+        "pool_specs": "18m x 5m direct beachfront infinity-edge pool with underwater sound system"
+      },
+      "architectural_style": "High-Modernist Monolithic Beachfront",
+      "developer_contact": "Pacific Noma Executive Sales (Bangkok & Samui)"
+    },
+    "internal_notes": "Exclusive beach access rights registered on Chanote land title. Mooring buoy permit granted in front of villa for yachts up to 50ft."
+  }
+]

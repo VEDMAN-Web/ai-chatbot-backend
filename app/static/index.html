@@ -1,0 +1,524 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Varsovia Estate — Premium Thailand Properties</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🌴</text></svg>">
+</head>
+<body>
+
+<div class="app-container">
+  
+  <!-- Left Sidebar -->
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <div class="brand-badge">✦</div>
+      <div>
+        <div class="brand-title">Varsovia Estate</div>
+        <div class="brand-subtitle" id="brandSubtitle">Exclusive Estates</div>
+      </div>
+    </div>
+
+    <!-- New Chat Button -->
+    <button class="btn-new-chat" id="btnNewChat">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+      <span id="btnNewChatLabel">New chat</span>
+    </button>
+
+    <!-- Mode Switcher (Public Customer vs Admin Internal) -->
+    <div class="mode-switcher">
+      <button class="mode-tab active" id="tabPublic" onclick="setAgentMode('public')">
+        Client Chat
+      </button>
+      <button class="mode-tab" id="tabAdmin" onclick="setAgentMode('admin')">
+        Admin Team
+      </button>
+    </div>
+
+    <!-- Sidebar Language Switcher (EN / PL / TH) -->
+    <div class="sidebar-lang-box">
+      <div class="sidebar-section-title" id="sidebarLangLabel">Language / ภาษา</div>
+      <div class="sidebar-lang-switcher">
+        <button class="sidebar-lang-btn active" id="sideBtnLangEn" onclick="setAppLanguage('en')" title="Switch to English">
+          <span class="lang-flag">🇬🇧</span>
+          <span id="sideBtnLangEnLabel">English</span>
+        </button>
+        <button class="sidebar-lang-btn" id="sideBtnLangPl" onclick="setAppLanguage('pl')" title="Przełącz na polski">
+          <span class="lang-flag">🇵🇱</span>
+          <span id="sideBtnLangPlLabel">Polski</span>
+        </button>
+        <button class="sidebar-lang-btn" id="sideBtnLangTh" onclick="setAppLanguage('th')" title="เปลี่ยนเป็นภาษาไทย">
+          <span class="lang-flag">🇹🇭</span>
+          <span id="sideBtnLangThLabel">ภาษาไทย</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- Recent Sessions History -->
+    <div class="sidebar-section-title" id="sidebarHistoryLabel">Recent Conversations</div>
+    <div class="history-list" id="historyList">
+      <!-- Injected dynamically via app.js -->
+    </div>
+
+    <!-- System Status Footer -->
+    <div style="margin-top: auto; padding-top: 16px; border-top: 1px solid var(--border-subtle); font-size: 11px; color: var(--text-dim); display: flex; justify-content: space-between; align-items: center;">
+      <span id="agentStatusDot" style="display: inline-flex; align-items: center; gap: 6px;">
+        <span style="width: 7px; height: 7px; border-radius: 50%; background: #10b981;"></span>
+        <span id="agentStatusText">Online & Ready</span>
+      </span>
+      <span id="agentModelLabel">GPT-5.5 / Claude Opus</span>
+    </div>
+  </aside>
+
+  <!-- Main View Area -->
+  <main class="main-content">
+    
+    <!-- Top Navigation Bar -->
+    <header class="topbar">
+      <!-- Upper Side Two Choice Switcher -->
+      <div class="top-mode-selector">
+        <button class="top-choice-btn active" id="topBtnUser" onclick="setAgentMode('public')">
+          <span class="choice-icon">✦</span>
+          <span id="topBtnUserText">Test User Chatbot</span>
+        </button>
+        <button class="top-choice-btn" id="topBtnAdmin" onclick="setAgentMode('admin')">
+          <span class="choice-icon">⚡</span>
+          <span id="topBtnAdminText">Test Admin Side Chatbot</span>
+        </button>
+      </div>
+
+      <!-- Top Language Switcher (EN / PL / TH) -->
+      <div class="top-lang-switcher" id="topLangSwitcher" title="Switch language (English / Polski / ภาษาไทย)">
+        <button class="top-lang-btn active" id="topBtnLangEn" onclick="setAppLanguage('en')" title="English">
+          <span class="lang-flag">🇬🇧</span>
+          <span>EN</span>
+        </button>
+        <button class="top-lang-btn" id="topBtnLangPl" onclick="setAppLanguage('pl')" title="Polski">
+          <span class="lang-flag">🇵🇱</span>
+          <span>PL</span>
+        </button>
+        <button class="top-lang-btn" id="topBtnLangTh" onclick="setAppLanguage('th')" title="ภาษาไทย">
+          <span class="lang-flag">🇹🇭</span>
+          <span>TH</span>
+        </button>
+      </div>
+
+      <div class="search-box">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#6b7280" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+        <input type="text" id="topSearchInput" placeholder="Search by city, project or property ID" onkeydown="if(event.key==='Enter') executeTopSearch()" />
+      </div>
+
+      <div class="topbar-actions">
+        <button class="btn-secondary" onclick="triggerQuickAction('report')">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
+          <span id="btnReportLabel">Reports</span>
+        </button>
+
+        <button class="btn-secondary" onclick="triggerQuickAction('listing')">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+          <span id="btnAddListingLabel">Add Listing</span>
+        </button>
+
+        <button class="btn-secondary" id="btnBatchOps" onclick="openBatchOpsModal()" style="display: none;" title="Bulk file upload (Excel, PDF, DOCX, CSV) with 6-day undo">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="12" y1="18" x2="12" y2="12"></line><line x1="9" y1="15" x2="15" y2="15"></line></svg>
+          <span id="btnBatchOpsLabel">Bulk File Ops (6D Undo)</span>
+        </button>
+
+        <div class="icon-btn" title="Notifications">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path><path d="M13.73 21a2 2 0 0 1-3.46 0"></path></svg>
+        </div>
+
+        <div class="avatar-btn" title="Staff Account">
+          TJ
+        </div>
+      </div>
+    </header>
+ 
+    <!-- User Preferences & Search Focus Live Strip -->
+    <div class="user-focus-bar" id="userFocusBar" style="display: none;">
+      <div class="focus-bar-left">
+        <span class="focus-target-icon">🎯</span>
+        <span class="focus-title" id="focusBarTitle">Active Focus:</span>
+        <div class="focus-chips" id="focusChipsContainer"></div>
+      </div>
+      <div class="focus-bar-right">
+        <button class="btn-inspect-focus" onclick="toggleFocusDrawer()">
+          <span class="btn-focus-icon">📋</span>
+          <span id="btnInspectFocusLabel">What We Fetched</span>
+          <span class="focus-count-badge" id="focusCountBadge">0</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- Slide-Down / Modal Focus Drawer -->
+    <div class="focus-drawer-overlay" id="focusDrawerOverlay" onclick="closeFocusDrawer()" style="display: none;"></div>
+    <div class="focus-drawer" id="focusDrawer" style="display: none;">
+      <div class="focus-drawer-header">
+        <div class="focus-drawer-title-wrap">
+          <div class="focus-drawer-icon">🎯</div>
+          <div>
+            <div class="focus-drawer-title">Client Search Focus & Extracted Preferences</div>
+            <div class="focus-drawer-subtitle">Live real-time criteria extracted from your conversation</div>
+          </div>
+        </div>
+        <button class="btn-drawer-close" onclick="closeFocusDrawer()">&times;</button>
+      </div>
+      <div class="focus-drawer-body">
+        <!-- Summary Box -->
+        <div class="focus-summary-box">
+          <div class="focus-summary-badge">⚡ Current AI Search Focus</div>
+          <div class="focus-summary-text" id="focusDrawerSummary">
+            Ready to discover your ideal Thailand property as you share your requirements.
+          </div>
+        </div>
+
+        <!-- Two column grid -->
+        <div class="focus-grid-cols">
+          <!-- Column 1: What We Fetched from Chat -->
+          <div class="focus-col">
+            <div class="focus-col-header">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>
+              What We Fetched From Chat
+            </div>
+            <div class="fetched-items-list" id="fetchedItemsList">
+              <div class="empty-fetched-placeholder">No criteria mentioned yet. Tell me your preferred location, villa type, or budget!</div>
+            </div>
+          </div>
+
+          <!-- Column 2: Active Profile & Targets -->
+          <div class="focus-col">
+            <div class="focus-col-header">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 14 14"></polyline></svg>
+              Active Criteria Matchers
+            </div>
+            <div class="criteria-table" id="criteriaTable">
+              <!-- Dynamic attributes -->
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="focus-drawer-footer">
+        <div class="focus-privacy-hint">
+          🔒 Grounded live filtering • Encrypted in PostgreSQL session
+        </div>
+        <button class="btn-reset-focus" onclick="resetUserPreferences()">
+          🔄 Reset Preferences
+        </button>
+      </div>
+    </div>
+
+    <!-- Chat Viewport -->
+    <div class="chat-viewport" id="chatViewport">
+      <div class="chat-inner-container" id="chatContainer">
+        
+        <!-- Welcome Hero Section (Visible when starting fresh) -->
+        <div class="welcome-hero" id="welcomeHero">
+          <div class="hero-sparkle-badge">
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l2.4 7.2L22 12l-7.6 2.8L12 22l-2.4-7.2L2 12l7.6-2.8z"/></svg>
+          </div>
+          <h1 class="hero-title" id="heroTitle">Welcome to Varsovia Estate</h1>
+          <p class="hero-subtitle">
+            Ask me anything about Thailand real estate — from property prices to market trends and investment opportunities.
+          </p>
+
+          <div class="try-asking-label" id="tryAskingLabel">Try asking me:</div>
+
+          <div class="prompt-cards-grid" id="promptCardsGrid">
+            <div class="prompt-card" onclick="sendSamplePrompt('🏖️ Explore luxury pool villas and condominiums in Thailand')">
+              <div class="prompt-card-text">🏖️ Explore luxury pool villas and condominiums in Thailand</div>
+            </div>
+            <div class="prompt-card" onclick="sendSamplePrompt('📖 How does property ownership & buying work in Thailand?')">
+              <div class="prompt-card-text">📖 How does property ownership & buying work in Thailand?</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Chat Messages (Injected here dynamically) -->
+        <div id="messagesArea" style="display: flex; flex-direction: column; gap: 20px;"></div>
+
+      </div>
+    </div>
+
+    <!-- Floating Bottom Input Bar -->
+    <div class="bottom-input-container">
+      <div class="input-pill-box">
+        <textarea 
+          class="chat-input" 
+          id="chatInput" 
+          rows="1" 
+          placeholder="Ask me anything about Thailand real estate..." 
+          onkeydown="handleInputKeyDown(event)"
+        ></textarea>
+        <button class="btn-attachment" id="btnAttachment" onclick="openBatchOpsModal('upload')" style="display: none;" title="Bulk file upload (Excel, CSV, PDF, Word) with 6-day undo">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path></svg>
+        </button>
+        <button class="btn-send" id="btnSend" onclick="handleSendMessage()">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="22" y1="2" x2="11" y2="13"></line>
+            <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+          </svg>
+        </button>
+      </div>
+      <div class="footer-disclaimer" id="footerDisclaimer">
+        Varsovia Estate can make mistakes. Check important information.
+      </div>
+    </div>
+
+</div>
+
+<!-- ================= 1. Google Maps & Location Modal ================= -->
+<div class="app-modal-overlay" id="mapModalOverlay" onclick="closeMapModal()" style="display: none;"></div>
+<div class="app-modal" id="mapModal" style="display: none;">
+  <div class="app-modal-header">
+    <div class="app-modal-title-wrap">
+      <div class="app-modal-icon">📍</div>
+      <div>
+        <div class="app-modal-title" id="mapModalTitle">Location & Google Maps</div>
+        <div class="app-modal-subtitle" id="mapModalSubtitle">Verified Location & Nearby Infrastructure</div>
+      </div>
+    </div>
+    <button class="app-modal-close" onclick="closeMapModal()">&times;</button>
+  </div>
+  <div class="app-modal-body">
+    <div class="map-iframe-container" id="mapIframeContainer">
+      <iframe id="mapFrame" class="map-iframe" src="" allowfullscreen="" loading="lazy"></iframe>
+    </div>
+    <div class="map-coords-bar" id="mapCoordsBar">
+      <span class="coords-tag">📌 Coordinates: <strong id="mapCoordsText">8.0051° N, 98.2982° E</strong></span>
+      <span class="location-tag" id="mapLocationText">Bang Tao, Phuket</span>
+    </div>
+    <div class="proximity-section">
+      <div class="proximity-title">🚗 Proximity to Key Hubs & Amenities</div>
+      <div class="proximity-grid" id="proximityGrid">
+        <!-- Injected dynamically -->
+      </div>
+    </div>
+  </div>
+  <div class="app-modal-footer">
+    <button class="btn-modal-secondary" onclick="closeMapModal()">Close</button>
+    <a id="btnGoogleMapsDirect" href="#" target="_blank" class="btn-modal-primary">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 2a8 8 0 0 0-8 8c0 5.25 8 12 8 12s8-6.75 8-12a8 8 0 0 0-8-8z"></path><circle cx="12" cy="10" r="3"></circle></svg>
+      Open in Google Maps App ↗
+    </a>
+  </div>
+</div>
+
+<!-- ================= 2. Google Calendar Viewing Modal ================= -->
+<div class="app-modal-overlay" id="calendarModalOverlay" onclick="closeCalendarModal()" style="display: none;"></div>
+<div class="app-modal" id="calendarModal" style="display: none;">
+  <div class="app-modal-header">
+    <div class="app-modal-title-wrap">
+      <div class="app-modal-icon">📅</div>
+      <div>
+        <div class="app-modal-title">Schedule Property Viewing</div>
+        <div class="app-modal-subtitle">Reserve an on-site or private virtual live tour with an advisor</div>
+      </div>
+    </div>
+    <button class="app-modal-close" onclick="closeCalendarModal()">&times;</button>
+  </div>
+  <div class="app-modal-body">
+    <div class="modal-form-property-chip">
+      <span class="form-prop-label">Property:</span>
+      <strong id="calModalPropName">Villa Amanzi</strong>
+      <span class="form-prop-id" id="calModalPropId">PROP-PHK-001</span>
+    </div>
+    
+    <div class="modal-form-row">
+      <div class="modal-form-group">
+        <label class="modal-form-label">Preferred Date *</label>
+        <input type="date" id="calDateInput" class="modal-form-input" />
+      </div>
+      <div class="modal-form-group">
+        <label class="modal-form-label">Preferred Time *</label>
+        <input type="time" id="calTimeInput" class="modal-form-input" value="14:00" />
+      </div>
+    </div>
+
+    <div class="modal-form-row">
+      <div class="modal-form-group">
+        <label class="modal-form-label">Your Name</label>
+        <input type="text" id="calNameInput" class="modal-form-input" placeholder="e.g. John Doe" />
+      </div>
+      <div class="modal-form-group">
+        <label class="modal-form-label">Your Email (for Calendar Invite) *</label>
+        <input type="email" id="calEmailInput" class="modal-form-input" placeholder="e.g. client@example.com" />
+      </div>
+    </div>
+
+    <div class="modal-form-group">
+      <label class="modal-form-label">Special Requests / Questions</label>
+      <input type="text" id="calNotesInput" class="modal-form-input" placeholder="e.g. Request video tour, English speaking advisor" />
+    </div>
+
+    <div class="modal-alert-info">
+      💡 <strong>One-Click Sync:</strong> You will immediately receive a direct 1-click Google Calendar add link to sync the appointment with your personal calendar.
+    </div>
+  </div>
+  <div class="app-modal-footer">
+    <button class="btn-modal-secondary" onclick="closeCalendarModal()">Cancel</button>
+    <button class="btn-modal-primary" id="btnConfirmViewing" onclick="submitScheduleViewing()">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect><line x1="16" y1="2" x2="16" y2="6"></line><line x1="8" y1="2" x2="8" y2="6"></line><line x1="3" y1="10" x2="21" y2="10"></line></svg>
+      Schedule & Add to Google Calendar
+    </button>
+  </div>
+</div>
+
+<!-- ================= 3. Gmail Property Brochure Modal ================= -->
+<div class="app-modal-overlay" id="emailModalOverlay" onclick="closeEmailModal()" style="display: none;"></div>
+<div class="app-modal" id="emailModal" style="display: none;">
+  <div class="app-modal-header">
+    <div class="app-modal-title-wrap">
+      <div class="app-modal-icon">✉️</div>
+      <div>
+        <div class="app-modal-title">Email Verified Property Specs</div>
+        <div class="app-modal-subtitle">Direct dispatch via Gmail with complete floor plans & investment analysis</div>
+      </div>
+    </div>
+    <button class="app-modal-close" onclick="closeEmailModal()">&times;</button>
+  </div>
+  <div class="app-modal-body">
+    <div class="modal-form-property-chip">
+      <span class="form-prop-label">Listing:</span>
+      <strong id="emailModalPropName">Villa Amanzi</strong>
+      <span class="form-prop-id" id="emailModalPropId">PROP-PHK-001</span>
+    </div>
+
+    <div class="modal-form-group">
+      <label class="modal-form-label">Recipient Email *</label>
+      <input type="email" id="emailBrochureInput" class="modal-form-input" placeholder="e.g. client@example.com" />
+    </div>
+
+    <div class="modal-form-group">
+      <label class="modal-form-label">Client Name</label>
+      <input type="text" id="emailClientNameInput" class="modal-form-input" placeholder="e.g. John Doe" />
+    </div>
+
+    <div class="modal-alert-info">
+      📨 The email will include verified specifications, high-res photos, ownership guidelines, and ROI estimates dispatched directly via Gmail.
+    </div>
+  </div>
+  <div class="app-modal-footer">
+    <button class="btn-modal-secondary" onclick="closeEmailModal()">Cancel</button>
+    <button class="btn-modal-primary" id="btnConfirmSendBrochure" onclick="submitSendBrochure()">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
+      Send via Gmail 🚀
+    </button>
+  </div>
+</div>
+
+<!-- ================= 4. Admin Bulk File Operations & 6-Day Undo Modal ================= -->
+<div class="app-modal-overlay" id="batchModalOverlay" onclick="closeBatchOpsModal()" style="display: none;"></div>
+<div class="app-modal batch-modal" id="batchModal" style="display: none;">
+  <div class="app-modal-header">
+    <div class="app-modal-title-wrap">
+      <div class="app-modal-icon">📁</div>
+      <div>
+        <div class="app-modal-title">Bulk Property Operations & 6-Day Undo</div>
+        <div class="app-modal-subtitle">Instant database updates from Excel/PDF/DOCX/CSV with 6-day rollback</div>
+      </div>
+    </div>
+    <button class="app-modal-close" onclick="closeBatchOpsModal()">&times;</button>
+  </div>
+
+  <!-- Modal Navigation Tabs -->
+  <div class="batch-modal-tabs">
+    <button class="batch-tab-btn active" id="tabBtnBatchUpload" onclick="switchBatchTab('upload')">
+      <span>⚡ Upload & Execute</span>
+    </button>
+    <button class="batch-tab-btn" id="tabBtnBatchHistory" onclick="switchBatchTab('history')">
+      <span>🕒 6-Day Undo & History</span>
+      <span class="batch-tab-badge" id="batchHistoryCountBadge">0</span>
+    </button>
+  </div>
+
+  <div class="app-modal-body">
+    <!-- TAB 1: UPLOAD & EXECUTE -->
+    <div id="batchTabUploadView" class="batch-tab-view">
+      <!-- File Dropzone -->
+      <div class="batch-dropzone" id="batchDropzone" onclick="document.getElementById('batchFileInput').click()">
+        <input type="file" id="batchFileInput" style="display: none;" accept=".xlsx,.xls,.csv,.pdf,.docx,.json" onchange="onBatchFileSelected(event)" />
+        <div class="dropzone-icon">📥</div>
+        <div class="dropzone-text" id="batchDropzoneText">
+          <strong>Click to upload</strong> or drag and drop property document
+        </div>
+        <div class="dropzone-hint">Supports Excel (.xlsx, .xls), CSV (.csv), PDF (.pdf), Word (.docx), JSON</div>
+        <div id="batchFileSelectedChip" class="batch-file-chip" style="display: none;">
+          <span class="chip-file-icon">📄</span>
+          <span class="chip-file-name" id="batchFileName">file.xlsx</span>
+          <span class="chip-file-size" id="batchFileSize">0 KB</span>
+          <button type="button" class="chip-remove-btn" onclick="clearSelectedBatchFile(event)" title="Remove file">&times;</button>
+        </div>
+      </div>
+
+      <!-- Action Type Selection -->
+      <div class="batch-section-title">Select Database Action:</div>
+      <div class="batch-action-grid">
+        <label class="batch-action-card selected" id="cardActionUpdate" onclick="selectBatchAction('update')">
+          <input type="radio" name="batchActionType" value="update" checked style="display: none;" />
+          <div class="card-radio-indicator"></div>
+          <div class="card-body">
+            <div class="card-title">✏️ Update Properties</div>
+            <div class="card-desc">Matches listings by ID, title, or slug and updates prices, status, amenities, etc.</div>
+          </div>
+        </label>
+        <label class="batch-action-card" id="cardActionDelete" onclick="selectBatchAction('delete')">
+          <input type="radio" name="batchActionType" value="delete" style="display: none;" />
+          <div class="card-radio-indicator"></div>
+          <div class="card-body">
+            <div class="card-title">🗑️ Delete / Remove Properties</div>
+            <div class="card-desc">Permanently removes matched properties from active public & internal portfolio.</div>
+          </div>
+        </label>
+        <label class="batch-action-card" id="cardActionCreate" onclick="selectBatchAction('create')">
+          <input type="radio" name="batchActionType" value="create" style="display: none;" />
+          <div class="card-radio-indicator"></div>
+          <div class="card-body">
+            <div class="card-title">➕ Add / Create Properties</div>
+            <div class="card-desc">Parses rows as brand-new listings and provisions them into Firestore & database.</div>
+          </div>
+        </label>
+      </div>
+
+      <!-- Optional Audit Notes -->
+      <div class="modal-form-group">
+        <label class="modal-form-label">Audit Notes / Reason (Optional):</label>
+        <input type="text" id="batchNotesInput" class="modal-form-input" placeholder="e.g. Q4 Price adjustment per developer memorandum" />
+      </div>
+
+      <!-- 6-Day Safe Retention Notice -->
+      <div class="modal-alert-info">
+        🛡️ <strong>Instant Mutation + 6-Day Rollback Guarantee:</strong> Database changes execute instantly upon submission. A full snapshot of the previous state is saved for exactly 6 days, allowing 1-click restoration anytime during this window.
+      </div>
+
+      <!-- Result Banner -->
+      <div id="batchExecutionResult" class="batch-result-box" style="display: none;">
+        <!-- Injected dynamically -->
+      </div>
+    </div>
+
+    <!-- TAB 2: 6-DAY UNDO & HISTORY -->
+    <div id="batchTabHistoryView" class="batch-tab-view" style="display: none;">
+      <div class="batch-history-header">
+        <span class="history-subtitle">Operations stored within active 6-day retention window:</span>
+        <button class="btn-refresh-history" onclick="loadBatchHistory(true)">🔄 Refresh</button>
+      </div>
+      <div id="batchHistoryList" class="batch-history-list">
+        <div class="batch-loading-placeholder">Loading operation history...</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="app-modal-footer">
+    <button class="btn-modal-secondary" onclick="closeBatchOpsModal()">Close</button>
+    <button class="btn-modal-primary" id="btnExecuteBatch" onclick="submitBatchOperation()">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"></path></svg>
+      <span id="btnExecuteBatchText">Execute Instantly</span>
+    </button>
+  </div>
+</div>
+
+<script src="/static/js/app.js"></script>
+</body>
+</html>
