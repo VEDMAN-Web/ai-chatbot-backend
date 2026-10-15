@@ -382,6 +382,84 @@ def execute_batch_property_operation(
     }
 
 
+def record_crud_operation_snapshot(
+    action_type: str,
+    property_id: str,
+    previous_state: Optional[Dict[str, Any]],
+    staff_user: AuthenticatedStaff,
+    source: str = "admin_crud",
+    created_id: Optional[str] = None,
+    db_session: Optional[Any] = None
+) -> Optional[str]:
+    """
+    Saves a 6-day pre-modification snapshot for individual admin CRUD operations
+    (create, update, delete) to support 1-click Undo / Rollback via the 6-day window.
+    """
+    action_clean = action_type.lower().strip()
+    if action_clean == "remove":
+        action_clean = "delete"
+    elif action_clean == "write":
+        action_clean = "create"
+
+    fs_client = get_firestore_client(target="admin") or get_firestore_client()
+    if not fs_client:
+        return None
+
+    operation_id = f"crud_{uuid.uuid4().hex[:12]}"
+    now = datetime.now(timezone.utc)
+    expires_at = now + timedelta(days=SNAPSHOT_RETENTION_DAYS)
+
+    previous_snapshot = {}
+    if previous_state:
+        previous_snapshot[property_id] = dict(previous_state)
+
+    created_ids = [created_id] if created_id else []
+    affected_ids = [property_id]
+
+    snapshot_doc = {
+        "operation_id": operation_id,
+        "action_type": action_clean,
+        "source_filename": source,
+        "staff_user_id": staff_user.user_id,
+        "staff_email": staff_user.email,
+        "status": "APPLIED",
+        "affected_count": len(affected_ids),
+        "affected_ids": affected_ids,
+        "previous_snapshot": previous_snapshot,
+        "created_ids": created_ids,
+        "created_at": now.isoformat(),
+        "expires_at": expires_at.isoformat(),
+        "details": [{
+            "property_id": property_id,
+            "action": action_clean
+        }]
+    }
+
+    try:
+        fs_client.collection(BATCH_OPERATIONS_COLLECTION).document(operation_id).set(snapshot_doc)
+        logger.info(f"Saved 6-day CRUD snapshot for {action_clean} on {property_id} (op: {operation_id}, expires: {expires_at.isoformat()})")
+    except Exception as e:
+        logger.warning(f"Failed to persist CRUD snapshot to Firestore: {e}")
+        return None
+
+    # Log to audit trail
+    if db_session:
+        try:
+            record_audit_log(
+                db=db_session,
+                staff_user_id=staff_user.user_id,
+                tool_name=f"admin_crud_{action_clean}",
+                tool_arguments={"property_id": property_id, "source": source},
+                proposed_payload={"operation_id": operation_id, "expires_at": expires_at.isoformat()},
+                confirmed_by_staff=True,
+                execution_result=f"Instantly executed {action_clean} on property {property_id}."
+            )
+        except Exception:
+            pass
+
+    return operation_id
+
+
 def _resolve_firestore_document(projects_col: Any, record: Dict[str, Any]) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
     """Finds a matching Firestore document by property_id, slug, or name/title."""
     query_str = (record.get("property_id") or record.get("id") or record.get("doc_id") or record.get("name") or "").strip()

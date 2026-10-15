@@ -94,7 +94,7 @@ def get_user_firestore_client():
     return _user_firestore_client
 
 
-def get_firestore_client(target: str = "user"):
+def get_firestore_client(target: str = "user", *args, **kwargs):
     """
     Universal Firestore client getter.
     Defaults to get_user_firestore_client() for customer chat & catalog queries,
@@ -329,6 +329,15 @@ def normalize_firestore_project(doc_id: str, data: Dict[str, Any]) -> Dict[str, 
     if not desc_str:
         desc_str = f"Exclusive development '{name_str}' in {location_str}. Featuring {bedrooms_str}, {area_str}, with pricing starting from {price_display}."
 
+    # Websites & Domains Scope
+    raw_websites = data.get("websites") or data.get("domains") or data.get("allowed_websites")
+    if raw_websites:
+        from app.core.tenant import normalize_website_list
+        websites_list = normalize_website_list(raw_websites)
+    else:
+        site_orig = data.get("siteOrigin") or "varsoviaestate.com"
+        websites_list = [site_orig]
+
     return {
         "property_id": doc_id,
         "name": name_str,
@@ -353,6 +362,8 @@ def normalize_firestore_project(doc_id: str, data: Dict[str, Any]) -> Dict[str, 
         "highlights": (data.get("highlights") or amenities)[:3],
         "expected_roi": data.get("expectedROI") or data.get("rentalYield"),
         "description": desc_str,
+        "websites": websites_list,
+        "is_public": data.get("isActive", True),
         "raw_firestore_data": safe_raw_data
     }
 
@@ -360,13 +371,15 @@ def normalize_firestore_project(doc_id: str, data: Dict[str, Any]) -> Dict[str, 
 def fetch_properties_from_firestore(
     limit: int = 150,
     city_id: Optional[str] = None,
-    active_only: bool = True
+    active_only: bool = True,
+    target: str = "user"
 ) -> List[Dict[str, Any]]:
     """
     Fetches real property projects from Firestore `projects` collection.
     Supports cityId filtering and active_only flag.
+    Routes to user or admin Firestore client based on target.
     """
-    client = get_firestore_client()
+    client = get_firestore_client(target=target)
     if not client:
         logger.warning("Firestore client not available.")
         raise FirestoreDatabaseError("Firestore client is not initialized or unavailable.")
@@ -405,9 +418,9 @@ def fetch_properties_from_firestore(
         raise FirestoreDatabaseError(f"Error communicating with Firestore: {e}")
 
 
-def get_firestore_properties_count() -> int:
+def get_firestore_properties_count(target: str = "user") -> int:
     """Returns the total number of property projects in Firestore 'projects' collection."""
-    client = get_firestore_client()
+    client = get_firestore_client(target=target)
     if not client:
         return 0
     try:
@@ -424,11 +437,12 @@ def get_firestore_properties_count() -> int:
             return 0
 
 
-def get_property_by_id_from_firestore(property_id: str) -> Optional[Dict[str, Any]]:
+def get_property_by_id_from_firestore(property_id: str, target: str = "user") -> Optional[Dict[str, Any]]:
     """
     Retrieves a single property project from Firestore by document ID, slugified name, or title.
+    Routes to user or admin Firestore client based on target.
     """
-    client = get_firestore_client()
+    client = get_firestore_client(target=target)
     if not client:
         return None
 
@@ -526,12 +540,15 @@ def search_properties_firestore(
     has_pool: Optional[bool] = None,
     beach_access: Optional[bool] = None,
     query: Optional[str] = None,
+    websites: Optional[List[str]] = None,
+    target: str = "user",
     limit: int = 6,
     exclude_property_ids: Optional[List[str]] = None
 ) -> List[Dict[str, Any]]:
     """
     Searches properties in Firestore projects collection using structured criteria.
     Includes Google Maps URLs, embeds, and landmark calculations.
+    Routes to user or admin Firestore client based on target.
     """
     from app.services.maps_service import (
         build_google_maps_url,
@@ -546,7 +563,7 @@ def search_properties_firestore(
 
     # 1. Direct search by query / project name (e.g. "15 Sukhumvit Residences", "Sea Heaven Phuket Naithon Phase 3.1")
     if q_clean:
-        direct_prop = get_property_by_id_from_firestore(q_clean)
+        direct_prop = get_property_by_id_from_firestore(q_clean, target=target)
         if direct_prop:
             maps_url = build_google_maps_url(
                 latitude=direct_prop.get("latitude"),
@@ -578,7 +595,7 @@ def search_properties_firestore(
 
     # If location looks like a specific project name rather than a region, attempt direct resolution
     if loc_clean and loc_clean not in known_regions and len(loc_clean) >= 3:
-        direct_prop = get_property_by_id_from_firestore(location)
+        direct_prop = get_property_by_id_from_firestore(location, target=target)
         if direct_prop:
             maps_url = build_google_maps_url(
                 latitude=direct_prop.get("latitude"),
@@ -609,7 +626,7 @@ def search_properties_firestore(
             city_hint = c
             break
 
-    all_props = fetch_properties_from_firestore(limit=250, city_id=city_hint, active_only=True)
+    all_props = fetch_properties_from_firestore(limit=250, city_id=city_hint, active_only=True, target=target)
     if not all_props and not matched:
         return []
 
@@ -623,6 +640,16 @@ def search_properties_firestore(
             p_name_l = str(p.get("name") or "").strip().lower()
             if p_id in exclude_set or p_name_l in exclude_set:
                 continue
+
+        # Website / Tenant Domain filter
+        if websites:
+            p_sites = p.get("websites") or p.get("domains") or ([p.get("siteOrigin")] if p.get("siteOrigin") else [])
+            if p_sites:
+                from app.core.tenant import normalize_website_domain, normalize_tenant_domain_key
+                norm_w = [normalize_website_domain(w) for w in websites if w]
+                key_w = [normalize_tenant_domain_key(w) for w in websites if w]
+                if not any(normalize_website_domain(s) in norm_w or normalize_tenant_domain_key(s) in key_w for s in p_sites):
+                    continue
 
         # Location filter
         if loc_clean:
@@ -713,15 +740,17 @@ def save_or_update_property_firestore(
     property_id: str,
     fields: Dict[str, Any],
     images: Optional[List[str]] = None,
-    cover_image: Optional[str] = None
+    cover_image: Optional[str] = None,
+    target: str = "admin"
 ) -> bool:
     """
     Creates or updates a property project in Cloud Firestore `projects` collection.
     Supports updating core property information, pricing, bedrooms, and property images.
+    Routes to admin or user Firestore client based on target (defaults to admin).
     """
-    client = get_firestore_client()
+    client = get_firestore_client(target=target)
     if not client:
-        logger.warning("Firestore client not available for property update.")
+        logger.warning(f"Firestore client ({target}) not available for property update.")
         return False
 
     clean_id = str(property_id).strip()
@@ -822,16 +851,18 @@ def save_or_update_property_firestore(
 def delete_property_firestore(
     property_id: str,
     hard_delete: bool = False,
-    staff_email: Optional[str] = None
+    staff_email: Optional[str] = None,
+    target: str = "admin"
 ) -> bool:
     """
     Deactivates or deletes a property from Cloud Firestore `projects` collection.
     By default performs a soft delete (isActive=False, status='Archived') to preserve referential integrity,
     or permanently removes the document if hard_delete is True.
+    Routes to admin or user Firestore client based on target (defaults to admin).
     """
-    client = get_firestore_client()
+    client = get_firestore_client(target=target)
     if not client:
-        logger.warning("Firestore client not available for property deletion.")
+        logger.warning(f"Firestore client ({target}) not available for property deletion.")
         return False
 
     clean_id = str(property_id).strip()

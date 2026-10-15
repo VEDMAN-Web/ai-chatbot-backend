@@ -787,6 +787,8 @@ def search_properties_unified(
                 has_pool=params.has_pool,
                 beach_access=params.beach_access,
                 query=getattr(params, "query", None),
+                websites=getattr(params, "websites", None),
+                target="user",
                 limit=lim + len(exclude_set),
                 exclude_property_ids=list(exclude_set)
             )
@@ -799,15 +801,17 @@ def search_properties_unified(
         except Exception as e:
             logger.warning(f"Error querying Firestore properties in search_properties_unified: {e}")
 
-    # 2. Local database fallback (only if Firestore returned no cards)
+    # 2. Local database fallback (only if Firestore client is completely unavailable/uninitialized, e.g. offline testing)
     if not cards and db is not None:
         try:
-            db_props = search_properties_safe(db, params)
-            for p in db_props:
-                pid = str(p.property_id or "").strip().lower()
-                pname = str(p.property_name or "").strip().lower()
-                if pid not in exclude_set and pname not in exclude_set:
-                    cards.append(format_property_card(p))
+            from app.services.firestore_service import get_firestore_client
+            if not get_firestore_client("user"):
+                db_props = search_properties_safe(db, params)
+                for p in db_props:
+                    pid = str(p.property_id or "").strip().lower()
+                    pname = str(p.property_name or "").strip().lower()
+                    if pid not in exclude_set and pname not in exclude_set:
+                        cards.append(format_property_card(p))
         except Exception as e:
             logger.warning(f"Error querying local database properties in search_properties_unified: {e}")
 
@@ -3295,8 +3299,7 @@ class PublicAgentService:
             stored_prefs = {}
             conversation.preferences = {}
             params = PropertyFilterParams(offset=0, limit=10)
-            matched = search_properties_safe(db, params)
-            cards = [format_property_card(p) for p in matched]
+            cards = search_properties_unified(db, params, limit=10)
             search_filters = {}
         elif foreign_loc:
             cards = []

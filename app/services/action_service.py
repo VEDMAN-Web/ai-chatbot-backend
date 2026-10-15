@@ -385,7 +385,7 @@ def _execute_update_listing(db: Session, payload: Dict[str, Any]) -> Dict[str, A
     target_websites = payload.get("websites") or fields.get("websites") or payload.get("selected_websites")
     norm_websites = normalize_website_list(target_websites) if target_websites else None
 
-    if not prop or mode == "create":
+    if not prop:
         # Create a new property
         is_created = True
         prop_name = fields.get("property_name") or payload.get("title") or property_id
