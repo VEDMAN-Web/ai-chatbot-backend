@@ -2543,6 +2543,7 @@ def _execute_admin_tool(
 
     # 1. Read Tool: search_properties_full
     if tool_name == "search_properties_full":
+        selected_websites = getattr(staff_user, "selected_websites", None)
         params = PropertyFilterParams(
             location=tool_args.get("location"),
             property_type=tool_args.get("property_type"),
@@ -2551,7 +2552,8 @@ def _execute_admin_tool(
             bedrooms=tool_args.get("bedrooms"),
             has_pool=tool_args.get("has_pool"),
             status=tool_args.get("status"),
-            limit=tool_args.get("limit", 10)
+            limit=tool_args.get("limit", 10),
+            websites=selected_websites
         )
         props = search_properties_safe(db, params)
         res = [_prop_to_dict(p) for p in props]
@@ -2572,6 +2574,10 @@ def _execute_admin_tool(
                     existing_ids = {p.get("property_id") for p in res}
                     for fp in fs_props:
                         pid = fp.get("property_id")
+                        if selected_websites:
+                            fp_sites = fp.get("websites") or fp.get("allowed_websites")
+                            if fp_sites and not any(s in selected_websites for s in fp_sites):
+                                continue
                         if pid and pid not in existing_ids:
                             res.append(_clean_property_for_admin_tool(fp))
             except Exception as e:
@@ -2712,7 +2718,8 @@ def _execute_admin_tool(
         lids = tool_args.get("lead_ids")
         rtype = tool_args.get("report_type")
         title = tool_args.get("title")
-        res = generate_report(db, fmt, property_ids=pids, lead_ids=lids, report_type=rtype, title=title)
+        selected_websites = getattr(staff_user, "selected_websites", None)
+        res = generate_report(db, fmt, property_ids=pids, lead_ids=lids, report_type=rtype, title=title, websites=selected_websites)
         record_audit_log(
             db=db,
             staff_user_id=staff_email,
@@ -2941,8 +2948,20 @@ def _execute_admin_tool(
 
     elif tool_name in ["create_or_update_listing", "propose_listing_update"]:
         from app.db.models import Property
+        from app.services.property_search import property_belongs_to_websites
         target_pid = tool_args.get("property_id")
+        selected_websites = getattr(staff_user, "selected_websites", None)
         prop = db.query(Property).filter(Property.property_id == target_pid).first() if target_pid else None
+        if prop and selected_websites and not property_belongs_to_websites(prop, selected_websites):
+            return {
+                "status": "FORBIDDEN",
+                "message": f"Access denied: Property '{target_pid}' does not belong to your currently selected website(s): {selected_websites}."
+            }, False, None
+
+        if "fields_to_update" in tool_args and selected_websites:
+            if "websites" not in tool_args["fields_to_update"]:
+                tool_args["fields_to_update"]["websites"] = selected_websites
+
         is_valid, missing, err_msg = validate_property_data(tool_args, existing_property=prop)
         if not is_valid:
             proposal_res = {

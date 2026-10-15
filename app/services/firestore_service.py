@@ -726,6 +726,16 @@ def save_or_update_property_firestore(
                 amenities.append("Private Pool")
             update_payload["amenities"] = amenities
 
+        # Multi-Tenant Websites & Domains Scope
+        raw_websites = fields.get("websites") or fields.get("domains") or fields.get("allowed_websites")
+        if raw_websites:
+            from app.core.tenant import normalize_website_list
+            norm_ws = normalize_website_list(raw_websites)
+            if norm_ws:
+                update_payload["websites"] = norm_ws
+                update_payload["domains"] = norm_ws
+                update_payload["siteOrigin"] = norm_ws[0]
+
         # Images
         final_images = list(existing_data.get("images") or [])
         if images:

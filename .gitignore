@@ -45,6 +45,7 @@ tests/*
 !tests/test_ai_guardrails.py
 !tests/test_admin_auth_and_audit_apis.py
 !tests/test_anti_pressure_and_admin_validation.py
+!tests/test_site_access_role_crud.py
 *.cover
 
 # 3. Python & Virtual Environments

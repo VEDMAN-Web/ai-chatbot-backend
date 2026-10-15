@@ -92,6 +92,63 @@ def normalize_tenant_domain_key(val: Optional[str]) -> str:
     return v
 
 
+ALL_CANONICAL_WEBSITES: list[str] = [
+    "varsoviaestate.com",
+    "tajlandia.com",
+    "thai.estate"
+]
+
+
+def normalize_website_domain(val: Optional[str]) -> str:
+    """
+    Normalizes any input (key or domain, e.g. 'tajlandia', 'thai.estate', 'varsovia')
+    to its full canonical domain string:
+      - 'tajlandia.com'
+      - 'varsoviaestate.com'
+      - 'thai.estate'
+    """
+    if not val:
+        return ""
+    key = normalize_tenant_domain_key(val)
+    if key in CANONICAL_DOMAINS:
+        return CANONICAL_DOMAINS[key]
+    val_clean = str(val).strip().lower()
+    for canonical in ALL_CANONICAL_WEBSITES:
+        if val_clean == canonical:
+            return canonical
+    return val_clean
+
+
+def normalize_website_list(vals: Any) -> list[str]:
+    """
+    Normalizes a list, comma-separated string, or single string of websites
+    into a deduplicated, ordered list of canonical domains.
+    Example:
+      ['tajlandia', 'varsoviaestate.com'] -> ['varsoviaestate.com', 'tajlandia.com']
+      'thai.estate,tajlandia' -> ['tajlandia.com', 'thai.estate']
+    """
+    if not vals:
+        return []
+    raw_list: list[str] = []
+    if isinstance(vals, str):
+        raw_list = [s.strip() for s in vals.split(",") if s.strip()]
+    elif isinstance(vals, (list, tuple, set)):
+        for item in vals:
+            if isinstance(item, str):
+                for s in item.split(","):
+                    if s.strip():
+                        raw_list.append(s.strip())
+    
+    result: list[str] = []
+    for r in raw_list:
+        canon = normalize_website_domain(r)
+        if canon and canon in ALL_CANONICAL_WEBSITES and canon not in result:
+            result.append(canon)
+        elif canon and canon not in result:
+            result.append(canon)
+    return result
+
+
 def get_current_env_domain_key() -> str:
     """
     Returns the canonical domain key decided by .env

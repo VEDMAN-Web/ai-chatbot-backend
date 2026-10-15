@@ -501,7 +501,8 @@ def generate_report(
     lead_ids: Optional[List[str]] = None,
     report_type: Optional[str] = None,
     title: Optional[str] = None,
-    storage: Optional[StorageProvider] = None
+    storage: Optional[StorageProvider] = None,
+    websites: Optional[List[str]] = None
 ) -> Dict[str, Any]:
     """
     Builds property intelligence or buyer lead intelligence reports in PDF, XLSX, DOCX, or CSV.
@@ -631,6 +632,10 @@ def generate_report(
     if property_ids:
         clean_ids = [pid.strip().upper() for pid in property_ids]
         query = query.filter(Property.property_id.in_(clean_ids))
+    if websites:
+        from app.services.property_search import build_property_query, PropertyFilterParams
+        params = PropertyFilterParams(websites=websites)
+        query = build_property_query(query, params)
     properties = query.all()
 
     properties_data = []

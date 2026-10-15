@@ -1,0 +1,339 @@
+import uuid
+import pytest
+from fastapi.testclient import TestClient
+
+from app.main import app
+from app.core.config import settings
+from app.db.session import SessionLocal
+from app.db.models import User, Property, UserSession
+from app.core.security import hash_password, generate_session_token
+from app.core.tenant import ALL_CANONICAL_WEBSITES
+
+client = TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def clean_db(monkeypatch):
+    """Setup clean test users and test properties without network ADC delays."""
+    monkeypatch.setattr(settings, "ENABLE_FIRESTORE_SYNC", False)
+    monkeypatch.setattr("app.services.firestore_auth_service.get_firestore_client", lambda: None)
+    monkeypatch.setattr("app.services.firestore_service.get_firestore_client", lambda: None)
+    db = SessionLocal()
+    try:
+        # Create a test super admin
+        super_admin_email = "test_super_admin@tajlandia.com"
+        existing_sa = db.query(User).filter(User.email == super_admin_email).first()
+        if not existing_sa:
+            sa = User(
+                email=super_admin_email,
+                name="Test Super Admin",
+                role="super_admin",
+                password_hash=hash_password("SuperAdmin123!"),
+                is_active=True,
+                allowed_websites=list(ALL_CANONICAL_WEBSITES)
+            )
+            db.add(sa)
+            db.commit()
+    finally:
+        db.close()
+    yield
+
+
+def _login_and_get_token(email: str, password: str) -> str:
+    """Helper to authenticate and return session token."""
+    resp = client.post("/api/v1/auth/login", json={"email": email, "password": password})
+    assert resp.status_code == 200, f"Login failed for {email}: {resp.text}"
+    return resp.json()["access_token"]
+
+
+def test_super_admin_can_assign_single_multiple_all_websites():
+    """
+    Super Admin can assign specific access to any user:
+    - All websites (['varsoviaestate.com', 'tajlandia.com', 'thai.estate'])
+    - Multiple websites (['tajlandia.com', 'varsoviaestate.com'])
+    - Single website (['thai.estate'])
+    """
+    sa_token = _login_and_get_token("test_super_admin@tajlandia.com", "SuperAdmin123!")
+    headers = {"Authorization": f"Bearer {sa_token}"}
+
+    # 1. Single website worker
+    single_email = f"single_{uuid.uuid4().hex[:6]}@thai.estate"
+    resp1 = client.post(
+        "/api/v1/auth/admin/users",
+        headers=headers,
+        json={
+            "email": single_email,
+            "password": "WorkerPass123!",
+            "name": "Single Site Worker",
+            "role": "worker",
+            "websites": ["thai.estate"]
+        }
+    )
+    assert resp1.status_code == 201, resp1.text
+    assert resp1.json()["allowed_websites"] == ["thai.estate"]
+
+    # 2. Multiple websites worker (Tajlandia & Varsovia)
+    multi_email = f"multi_{uuid.uuid4().hex[:6]}@tajlandia.com"
+    resp2 = client.post(
+        "/api/v1/auth/admin/users",
+        headers=headers,
+        json={
+            "email": multi_email,
+            "password": "WorkerPass123!",
+            "name": "Multi Site Worker",
+            "role": "worker",
+            "websites": ["tajlandia.com", "varsoviaestate.com"]
+        }
+    )
+    assert resp2.status_code == 201, resp2.text
+    assigned_multi = resp2.json()["allowed_websites"]
+    assert "tajlandia.com" in assigned_multi
+    assert "varsoviaestate.com" in assigned_multi
+    assert "thai.estate" not in assigned_multi
+
+    # 3. All websites admin
+    all_email = f"all_{uuid.uuid4().hex[:6]}@tajlandia.com"
+    resp3 = client.post(
+        "/api/v1/auth/admin/users",
+        headers=headers,
+        json={
+            "email": all_email,
+            "password": "AdminPass123!",
+            "name": "All Sites Admin",
+            "role": "admin",
+            "websites": ["varsoviaestate.com", "tajlandia.com", "thai.estate"]
+        }
+    )
+    assert resp3.status_code == 201, resp3.text
+    assigned_all = resp3.json()["allowed_websites"]
+    assert len(assigned_all) == 3
+    assert set(assigned_all) == {"varsoviaestate.com", "tajlandia.com", "thai.estate"}
+
+
+def test_user_login_returns_allowed_websites():
+    """When a user logs in, the API returns their allowed_websites."""
+    sa_token = _login_and_get_token("test_super_admin@tajlandia.com", "SuperAdmin123!")
+    user_email = f"login_test_{uuid.uuid4().hex[:6]}@tajlandia.com"
+
+    create_u_resp = client.post(
+        "/api/v1/auth/admin/users",
+        headers={"Authorization": f"Bearer {sa_token}"},
+        json={
+            "email": user_email,
+            "password": "MySecretPass123!",
+            "name": "Check Websites Worker",
+            "role": "worker",
+            "websites": ["tajlandia.com", "varsoviaestate.com"]
+        }
+    )
+    assert create_u_resp.status_code == 201, create_u_resp.text
+
+    login_resp = client.post("/api/v1/auth/login", json={"email": user_email, "password": "MySecretPass123!"})
+    assert login_resp.status_code == 200, login_resp.text
+    user_info = login_resp.json()["user"]
+    assert "allowed_websites" in user_info
+    assert set(user_info["allowed_websites"]) == {"tajlandia.com", "varsoviaestate.com"}
+
+    # Test logging in with dynamic target domain: "varsoviaestate.com"
+    login_varsovia = client.post(
+        "/api/v1/auth/login",
+        json={"email": user_email, "password": "MySecretPass123!", "domain": "varsoviaestate.com"}
+    )
+    assert login_varsovia.status_code == 200
+    assert login_varsovia.json()["user"]["domain"] == "varsoviaestate.com"
+
+    # Test logging in with unauthorized domain "thai.estate" should be rejected with 403
+    login_thai = client.post(
+        "/api/v1/auth/login",
+        json={"email": user_email, "password": "MySecretPass123!", "domain": "thai.estate"}
+    )
+    assert login_thai.status_code == 403
+
+
+
+def test_active_checkbox_selection_and_isolation():
+    """
+    User has access to Tajlandia and Varsovia.
+    - If user selects Tajlandia, CRUD is performed ONLY on Tajlandia.
+    - User cannot select thai.estate (403 Forbidden).
+    - User cannot see thai.estate properties.
+    """
+    sa_token = _login_and_get_token("test_super_admin@tajlandia.com", "SuperAdmin123!")
+    worker_email = f"worker_{uuid.uuid4().hex[:6]}@tajlandia.com"
+
+    # Create worker with access to tajlandia.com & varsoviaestate.com
+    create_w_resp = client.post(
+        "/api/v1/auth/admin/users",
+        headers={"Authorization": f"Bearer {sa_token}"},
+        json={
+            "email": worker_email,
+            "password": "WorkerPass123!",
+            "name": "Tajlandia & Varsovia Worker",
+            "role": "worker",
+            "websites": ["tajlandia.com", "varsoviaestate.com"]
+        }
+    )
+    assert create_w_resp.status_code == 201, create_w_resp.text
+    worker_token = _login_and_get_token(worker_email, "WorkerPass123!")
+
+    # 1. Attempting to select an unauthorized website (thai.estate) yields 403 Forbidden
+    resp_unauth = client.get(
+        "/api/v1/admin/properties",
+        headers={
+            "Authorization": f"Bearer {worker_token}",
+            "X-Selected-Websites": "thai.estate"
+        }
+    )
+    assert resp_unauth.status_code == 403
+    assert "Access denied" in resp_unauth.json()["detail"]
+
+    # 2. Select authorized checkbox (tajlandia.com)
+    prop_id = f"PROP-TAJ-{uuid.uuid4().hex[:6].upper()}"
+    create_resp = client.post(
+        "/api/v1/admin/properties",
+        headers={
+            "Authorization": f"Bearer {worker_token}",
+            "X-Selected-Websites": "tajlandia.com"
+        },
+        json={
+            "property_id": prop_id,
+            "property_name": "Tajlandia Sunset Villa",
+            "property_type": "Villa",
+            "location": "Phuket",
+            "bedrooms": "3",
+            "status": "Available",
+            "price_display": "15,000,000 THB",
+            "websites": ["tajlandia.com"]
+        }
+    )
+    assert create_resp.status_code == 201, create_resp.text
+    created_prop = create_resp.json()
+    assert "tajlandia.com" in created_prop["websites"]
+
+    # 3. Fetching with X-Selected-Websites: tajlandia.com returns the property
+    list_taj = client.get(
+        "/api/v1/admin/properties",
+        headers={
+            "Authorization": f"Bearer {worker_token}",
+            "X-Selected-Websites": "tajlandia.com"
+        }
+    )
+    assert list_taj.status_code == 200
+    taj_ids = [p["property_id"] for p in list_taj.json()["properties"]]
+    assert prop_id in taj_ids
+
+    # 4. Switching selection to Varsovia only: Tajlandia property MUST NOT be returned
+    list_var = client.get(
+        "/api/v1/admin/properties",
+        headers={
+            "Authorization": f"Bearer {worker_token}",
+            "X-Selected-Websites": "varsoviaestate.com"
+        }
+    )
+    assert list_var.status_code == 200
+    var_ids = [p["property_id"] for p in list_var.json()["properties"]]
+    assert prop_id not in var_ids
+
+    # 5. Direct GET with X-Selected-Websites: varsoviaestate.com -> 403 (Forbidden: property belongs to Tajlandia)
+    get_isolated = client.get(
+        f"/api/v1/admin/properties/{prop_id}",
+        headers={
+            "Authorization": f"Bearer {worker_token}",
+            "X-Selected-Websites": "varsoviaestate.com"
+        }
+    )
+    assert get_isolated.status_code == 403
+
+    # 6. Direct GET with X-Selected-Websites: tajlandia.com -> 200 Success
+    get_success = client.get(
+        f"/api/v1/admin/properties/{prop_id}",
+        headers={
+            "Authorization": f"Bearer {worker_token}",
+            "X-Selected-Websites": "tajlandia.com"
+        }
+    )
+    assert get_success.status_code == 200
+    assert get_success.json()["property_id"] == prop_id
+
+    # 7. Updating while selected website does not match -> 403 Forbidden
+    update_fail = client.put(
+        f"/api/v1/admin/properties/{prop_id}",
+        headers={
+            "Authorization": f"Bearer {worker_token}",
+            "X-Selected-Websites": "varsoviaestate.com"
+        },
+        json={"property_name": "Attempted Hack Name"}
+    )
+    assert update_fail.status_code == 403
+
+
+def test_cross_website_crud_with_all_access():
+    """
+    Super Admin or User with all 3 sites access creates a property for thai.estate.
+    - When selecting thai.estate -> property is visible.
+    - When selecting tajlandia.com -> property is strictly invisible.
+    - When selecting both tajlandia.com and thai.estate -> property is visible.
+    """
+    sa_token = _login_and_get_token("test_super_admin@tajlandia.com", "SuperAdmin123!")
+
+    thai_prop_id = f"PROP-THAI-{uuid.uuid4().hex[:6].upper()}"
+    create_resp = client.post(
+        "/api/v1/admin/properties",
+        headers={
+            "Authorization": f"Bearer {sa_token}",
+            "X-Selected-Websites": "thai.estate"
+        },
+        json={
+            "property_id": thai_prop_id,
+            "property_name": "Exclusive Thai Estate Condominium",
+            "property_type": "Condominium",
+            "location": "Koh Samui",
+            "bedrooms": "2",
+            "status": "Available",
+            "price_display": "8,500,000 THB",
+            "websites": ["thai.estate"]
+        }
+    )
+    assert create_resp.status_code == 201, create_resp.text
+
+    # 1. Fetch with thai.estate selected
+    resp_thai = client.get(
+        "/api/v1/admin/properties",
+        headers={
+            "Authorization": f"Bearer {sa_token}",
+            "X-Selected-Websites": "thai.estate"
+        }
+    )
+    assert resp_thai.status_code == 200
+    assert thai_prop_id in [p["property_id"] for p in resp_thai.json()["properties"]]
+
+    # 2. Fetch with tajlandia.com selected -> Thai property is NOT returned
+    resp_taj = client.get(
+        "/api/v1/admin/properties",
+        headers={
+            "Authorization": f"Bearer {sa_token}",
+            "X-Selected-Websites": "tajlandia.com"
+        }
+    )
+    assert resp_taj.status_code == 200
+    assert thai_prop_id not in [p["property_id"] for p in resp_taj.json()["properties"]]
+
+    # 3. Public endpoint GET /api/v1/properties with selected_websites query param
+    pub_taj = client.get(f"/api/v1/properties?selected_websites=tajlandia.com")
+    assert pub_taj.status_code == 200
+    assert thai_prop_id not in [p["property_id"] for p in pub_taj.json()["properties"]]
+
+    pub_thai = client.get(f"/api/v1/properties?selected_websites=thai.estate")
+    assert pub_thai.status_code == 200
+    assert thai_prop_id in [p["property_id"] for p in pub_thai.json()["properties"]]
+
+    # 4. Multi-checkbox selection (tajlandia.com, thai.estate)
+    resp_multi = client.get(
+        "/api/v1/admin/properties",
+        headers={
+            "Authorization": f"Bearer {sa_token}",
+            "X-Selected-Websites": "tajlandia.com, thai.estate"
+        }
+    )
+    assert resp_multi.status_code == 200
+    assert thai_prop_id in [p["property_id"] for p in resp_multi.json()["properties"]]

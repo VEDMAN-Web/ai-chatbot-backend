@@ -230,10 +230,18 @@ def execute_batch_property_operation(
     # --------------------------------------------------------------------------
     # A. DELETE / REMOVE
     # --------------------------------------------------------------------------
+    selected_sites = getattr(staff_user, "selected_websites", None)
+
     if action_clean == "delete":
         for rec in records:
             doc_id, current_doc = _resolve_firestore_document(projects_col, rec)
             if doc_id and current_doc:
+                if selected_sites:
+                    doc_sites = current_doc.get("websites") or current_doc.get("allowed_websites")
+                    if doc_sites and not any(s in selected_sites for s in doc_sites):
+                        logger.warning(f"Batch delete skipping {doc_id} as it is outside selected websites: {selected_sites}")
+                        continue
+
                 # Capture complete previous state snapshot
                 previous_snapshot[doc_id] = current_doc
                 affected_ids.append(doc_id)
@@ -260,6 +268,12 @@ def execute_batch_property_operation(
         for rec in records:
             doc_id, current_doc = _resolve_firestore_document(projects_col, rec)
             if doc_id and current_doc:
+                if selected_sites:
+                    doc_sites = current_doc.get("websites") or current_doc.get("allowed_websites")
+                    if doc_sites and not any(s in selected_websites for s in doc_sites):
+                        logger.warning(f"Batch update skipping {doc_id} as it is outside selected websites: {selected_sites}")
+                        continue
+
                 # Capture complete previous state snapshot
                 previous_snapshot[doc_id] = current_doc
                 affected_ids.append(doc_id)
@@ -291,6 +305,8 @@ def execute_batch_property_operation(
         for rec in records:
             new_id = rec.get("property_id") or f"PROP-{uuid.uuid4().hex[:8].upper()}"
             doc_payload = dict(rec)
+            if selected_sites and not doc_payload.get("websites"):
+                doc_payload["websites"] = selected_sites
             doc_payload["isActive"] = True
             doc_payload["createdAt"] = now.isoformat()
             doc_payload["updatedAt"] = now.isoformat()

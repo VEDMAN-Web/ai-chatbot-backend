@@ -1,15 +1,28 @@
 import os
 from datetime import datetime
 from typing import Dict, Any, Optional, List
-from fastapi import APIRouter, Depends, HTTPException, Query, status, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, Query, status, UploadFile, File, Form, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
-from app.db.models import Conversation
+from app.db.models import Conversation, Property
 from app.core.config import settings
-from app.core.auth import AuthenticatedStaff, require_admin_or_employee
+from app.core.auth import (
+    AuthenticatedStaff,
+    require_admin_or_employee,
+    require_admin_or_employee_with_sites,
+    require_admin_or_super_admin_with_sites,
+    require_super_admin_with_sites
+)
+from app.core.tenant import normalize_website_list, normalize_website_domain
+from app.services.property_search import (
+    PropertyFilterParams,
+    search_properties_safe,
+    property_belongs_to_websites,
+    get_property_by_id
+)
 from app.services.admin_agent import process_admin_chat
 from app.services.action_service import (
     get_pending_action,
@@ -25,6 +38,7 @@ class AdminChatRequest(BaseModel):
     session_id: str = Field(..., example="admin-session-001", description="Admin session identifier")
     message: Optional[str] = Field(None, example="What is the roof material of PROP-PHK-001?", description="Admin message")
     site_origin: str = Field("tajlandia.com", example="tajlandia.com", description="Admin origin client")
+    selected_websites: Optional[List[str]] = Field(None, description="Active selected websites from UI checkboxes, e.g. ['tajlandia.com', 'varsoviaestate.com']")
     language: Optional[str] = Field("en", description="Language code for conversation ('en' or 'pl'). Default is 'en'", example="en")
     action: Optional[str] = Field(None, description="Direct action trigger ('confirm' or 'reject')", example="confirm")
     pending_action_id: Optional[str] = Field(None, description="Target action ID to confirm or reject", example="act_550e8400-...")
@@ -56,13 +70,14 @@ class ActionRejectRequest(BaseModel):
 @router.post("/chat", response_model=AdminChatResponse)
 def admin_chat_endpoint(
     req: AdminChatRequest,
-    staff: AuthenticatedStaff = Depends(require_admin_or_employee),
+    staff: AuthenticatedStaff = Depends(require_admin_or_employee_with_sites),
     db: Session = Depends(get_db)
 ):
     """
     Authenticated Admin / Internal Team AI Agent unified endpoint.
     Handles general inquiries, technical dossiers, reports, write proposals,
     and in-chat action confirmations/rejections in one single API.
+    Strictly scoped to the staff member's active selected websites.
     """
     user_msg = (req.message or "").strip()
     if not user_msg and not req.action:
@@ -71,12 +86,25 @@ def admin_chat_endpoint(
             detail="Please provide a chat message or specify an action ('confirm'/'reject')."
         )
 
+    # If request body explicitly supplies selected_websites, validate and apply
+    if req.selected_websites:
+        norm_selected = normalize_website_list(req.selected_websites)
+        unauthorized = [s for s in norm_selected if s not in staff.allowed_websites]
+        if unauthorized:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Access denied: You do not have permissions for website(s): {unauthorized}. Authorized: {staff.allowed_websites}."
+            )
+        staff.selected_websites = norm_selected
+
+    active_origin = staff.selected_websites[0] if staff.selected_websites else req.site_origin
+
     res = process_admin_chat(
         db=db,
         session_id=req.session_id,
         message=user_msg,
         staff_user=staff,
-        site_origin=req.site_origin,
+        site_origin=active_origin,
         requested_language=req.language,
         action=req.action,
         pending_action_id=req.pending_action_id
@@ -335,6 +363,7 @@ class PropertyCreateRequest(BaseModel):
     description: Optional[str] = Field(None, example="Stunning luxury pool villa with panoramic sea views.")
     images: Optional[List[str]] = Field(default_factory=list, example=["https://example.com/pool.jpg", "https://example.com/bedroom.jpg"])
     cover_image: Optional[str] = Field(None, example="https://example.com/pool.jpg")
+    websites: Optional[List[str]] = Field(None, example=["tajlandia.com", "varsoviaestate.com"], description="Specific website domains for this property: 'varsoviaestate.com', 'tajlandia.com', 'thai.estate'")
     is_public: Optional[bool] = Field(True, example=True)
 
 
@@ -363,34 +392,171 @@ class PropertyUpdateRequest(BaseModel):
     description: Optional[str] = Field(None, example="Updated description with new villa details.")
     images: Optional[List[str]] = Field(None, example=["https://example.com/new-image.jpg"])
     cover_image: Optional[str] = Field(None, example="https://example.com/new-cover.jpg")
+    websites: Optional[List[str]] = Field(None, example=["tajlandia.com"], description="Update website domains for this property")
     is_public: Optional[bool] = Field(None, example=True)
+
+
+@router.get("/properties")
+def list_admin_properties_endpoint(
+    location: Optional[str] = Query(None, description="Location filter"),
+    property_type: Optional[str] = Query(None, description="Property type"),
+    min_price: Optional[float] = Query(None, ge=0),
+    max_price: Optional[float] = Query(None, ge=0),
+    bedrooms: Optional[int] = Query(None, ge=0),
+    has_pool: Optional[bool] = Query(None),
+    status: Optional[str] = Query(None),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    staff: AuthenticatedStaff = Depends(require_admin_or_employee_with_sites),
+    db: Session = Depends(get_db)
+):
+    """
+    Fetches property listings strictly scoped to the staff member's currently selected websites.
+    If user selected Tajlandia & Varsovia, properties belonging exclusively to thai.estate are NOT returned.
+    """
+    params = PropertyFilterParams(
+        location=location,
+        property_type=property_type,
+        min_price=min_price,
+        max_price=max_price,
+        bedrooms=bedrooms,
+        has_pool=has_pool,
+        status=status,
+        websites=staff.selected_websites,
+        limit=limit,
+        offset=offset,
+        is_public=None
+    )
+    results = search_properties_safe(db, params)
+    output = []
+    for p in results:
+        output.append({
+            "property_id": p.property_id,
+            "property_name": p.property_name,
+            "project_name": p.project_name,
+            "property_type": p.property_type,
+            "status": p.status,
+            "province": p.province,
+            "district": p.district,
+            "area": p.area,
+            "price_display": p.price_display,
+            "bedrooms": p.bedrooms_display,
+            "has_pool": p.has_pool,
+            "websites": p.websites or [],
+            "images": [img.image_url for img in p.images] if p.images else [],
+            "is_public": p.is_public
+        })
+    return {
+        "count": len(output),
+        "selected_websites": staff.selected_websites,
+        "properties": output
+    }
+
+
+@router.get("/properties/{property_id}")
+def get_admin_property_endpoint(
+    property_id: str,
+    staff: AuthenticatedStaff = Depends(require_admin_or_employee_with_sites),
+    db: Session = Depends(get_db)
+):
+    """
+    Retrieves a single property listing.
+    Strictly verifies that the property belongs to the staff member's currently selected websites.
+    """
+    prop = db.query(Property).filter(Property.property_id == property_id).first()
+    if not prop:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Property with ID '{property_id}' not found."
+        )
+    if not property_belongs_to_websites(prop, staff.selected_websites):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                f"Access denied: Property '{property_id}' is not part of your currently selected website(s) "
+                f"{staff.selected_websites}."
+            )
+        )
+    return {
+        "found": True,
+        "property_id": prop.property_id,
+        "property_name": prop.property_name,
+        "project_name": prop.project_name,
+        "property_type": prop.property_type,
+        "status": prop.status,
+        "location": {
+            "country": prop.country,
+            "province": prop.province,
+            "district": prop.district,
+            "area": prop.area,
+            "address": prop.address
+        },
+        "pricing": {
+            "display": prop.price_display,
+            "numeric_min": float(prop.price_numeric_min) if prop.price_numeric_min else None,
+            "currency": prop.currency
+        },
+        "details": {
+            "bedrooms": prop.bedrooms_display,
+            "bathrooms": prop.bathrooms,
+            "area": prop.area_display
+        },
+        "amenities": prop.amenities,
+        "websites": prop.websites or [],
+        "images": [img.image_url for img in prop.images] if prop.images else [],
+        "is_public": prop.is_public
+    }
 
 
 @router.post("/properties", status_code=status.HTTP_201_CREATED)
 def create_property_endpoint(
     req: PropertyCreateRequest,
-    staff: AuthenticatedStaff = Depends(require_admin_or_employee),
+    staff: AuthenticatedStaff = Depends(require_admin_or_employee_with_sites),
     db: Session = Depends(get_db)
 ):
     """
     Direct REST API to create a new property listing.
+    Scoped strictly to the staff member's active selected websites.
     Instantly saves to PostgreSQL and synchronizes with Cloud Firestore `projects` collection.
     """
     import uuid
     from app.services.action_service import _execute_update_listing
     pid = req.property_id or f"PROP-{uuid.uuid4().hex[:8].upper()}"
+
+    # Website scope validation
+    if req.websites:
+        norm_targets = normalize_website_list(req.websites)
+        unauthorized = [s for s in norm_targets if s not in staff.allowed_websites]
+        if unauthorized:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Access denied: You cannot create properties for website(s) outside your permissions: {unauthorized}."
+            )
+        not_selected = [s for s in norm_targets if s not in staff.selected_websites]
+        if not_selected:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Website(s) {not_selected} are not in your currently active checkbox selection ({staff.selected_websites})."
+            )
+        assigned_websites = norm_targets
+    else:
+        assigned_websites = list(staff.selected_websites)
+
     payload = {
         "property_id": pid,
         "mode": "create",
         "fields": req.model_dump(exclude_unset=True, exclude={"images", "cover_image"}),
         "images": req.images or [],
-        "cover_image": req.cover_image
+        "cover_image": req.cover_image,
+        "websites": assigned_websites,
+        "selected_websites": assigned_websites
     }
     result = _execute_update_listing(db, payload)
     return {
         "status": "CREATED",
         "message": f"Property '{pid}' successfully created in database and Firestore.",
         "property_id": pid,
+        "websites": assigned_websites,
         "details": result
     }
 
@@ -399,14 +565,50 @@ def create_property_endpoint(
 def update_property_endpoint(
     property_id: str,
     req: PropertyUpdateRequest,
-    staff: AuthenticatedStaff = Depends(require_admin_or_employee),
+    staff: AuthenticatedStaff = Depends(require_admin_or_employee_with_sites),
     db: Session = Depends(get_db)
 ):
     """
     Direct REST API to update an existing property listing.
+    Strictly verifies that the property belongs to the staff member's currently selected websites.
     Updates fields, pricing, bedrooms, and images in PostgreSQL and Cloud Firestore.
     """
     from app.services.action_service import _execute_update_listing
+    
+    # 1. Verify property existence and website scope
+    prop = db.query(Property).filter(Property.property_id == property_id).first()
+    if not prop:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Property with ID '{property_id}' not found."
+        )
+    if not property_belongs_to_websites(prop, staff.selected_websites):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                f"Access denied: Property '{property_id}' does not belong to your currently selected website(s) "
+                f"{staff.selected_websites}."
+            )
+        )
+
+    # 2. If updating websites, validate user has permission
+    assigned_websites = None
+    if req.websites is not None:
+        norm_targets = normalize_website_list(req.websites)
+        unauthorized = [s for s in norm_targets if s not in staff.allowed_websites]
+        if unauthorized:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Access denied: Cannot assign property to unauthorized website(s): {unauthorized}."
+            )
+        not_selected = [s for s in norm_targets if s not in staff.selected_websites]
+        if not_selected:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Website(s) {not_selected} are not in your currently active checkbox selection ({staff.selected_websites})."
+            )
+        assigned_websites = norm_targets
+
     update_data = req.model_dump(exclude_unset=True, exclude={"images", "cover_image"})
     payload = {
         "property_id": property_id,
@@ -415,11 +617,15 @@ def update_property_endpoint(
         "images": req.images,
         "cover_image": req.cover_image
     }
+    if assigned_websites is not None:
+        payload["websites"] = assigned_websites
+
     result = _execute_update_listing(db, payload)
     return {
         "status": "UPDATED",
         "message": f"Property '{property_id}' successfully updated in database and Firestore.",
         "property_id": property_id,
+        "websites": assigned_websites or prop.websites,
         "details": result
     }
 
@@ -428,27 +634,38 @@ def update_property_endpoint(
 def delete_property_endpoint(
     property_id: str,
     hard_delete: bool = False,
-    staff: AuthenticatedStaff = Depends(require_admin_or_employee),
+    staff: AuthenticatedStaff = Depends(require_admin_or_employee_with_sites),
     db: Session = Depends(get_db)
 ):
     """
     Direct REST API to delete/deactivate a property listing.
-    Performs soft-delete by default (marking isActive=False and status='Archived' in Firestore & SQL),
-    or permanent removal if `hard_delete=true`.
+    Strictly verifies that the property belongs to the staff member's currently selected websites.
     """
-    from app.db.models import Property
     from app.services.firestore_service import delete_property_firestore
     from app.services.cache_service import search_cache
 
-    # 1. Update/Delete in PostgreSQL
+    # 1. Update/Delete in PostgreSQL with website verification
     prop = db.query(Property).filter(Property.property_id == property_id).first()
-    if prop:
-        if hard_delete:
-            db.delete(prop)
-        else:
-            prop.is_public = False
-            prop.status = "Archived"
-        db.commit()
+    if not prop:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Property with ID '{property_id}' not found."
+        )
+    if not property_belongs_to_websites(prop, staff.selected_websites):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                f"Access denied: Property '{property_id}' does not belong to your currently selected website(s) "
+                f"{staff.selected_websites}."
+            )
+        )
+
+    if hard_delete:
+        db.delete(prop)
+    else:
+        prop.is_public = False
+        prop.status = "Archived"
+    db.commit()
 
     # 2. Update/Delete in Cloud Firestore
     fs_ok = delete_property_firestore(

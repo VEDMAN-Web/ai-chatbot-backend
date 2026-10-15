@@ -83,6 +83,7 @@ class Property(Base):
     highlights = Column(JSONB, default=list)
     nearby_places = Column(JSONB, default=list)
     raw_metadata = Column(JSONB, default=dict)
+    websites = Column(JSONB, default=list, nullable=True)  # List of canonical sites: varsoviaestate.com, tajlandia.com, thai.estate
 
     detail_page_url = Column(String(500), nullable=True)
     is_public = Column(Boolean, default=True, index=True)
@@ -164,6 +165,7 @@ class User(Base):
     name = Column(String(255), nullable=True)
     role = Column(String(50), default="public", index=True)  # public, employee, super_admin
     domain = Column(String(100), default="tajlandia.com", index=True)
+    allowed_websites = Column(JSONB, default=list, nullable=True)  # Specific sites assigned by Super Admin: varsoviaestate.com, tajlandia.com, thai.estate
     password_hash = Column(String(255), nullable=True)
     is_active = Column(Boolean, default=True, nullable=False)
     google_email = Column(String(255), nullable=True, index=True)

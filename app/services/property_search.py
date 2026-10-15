@@ -2,15 +2,17 @@ import re
 from typing import Optional, List, Dict, Any
 from decimal import Decimal
 from sqlalchemy.orm import Session
-from sqlalchemy import and_, or_
+from sqlalchemy import and_, or_, cast, String
 from pydantic import BaseModel, Field, field_validator
 from app.db.models import Property, PropertyImage, PropertySpec
+from app.core.tenant import normalize_website_list, normalize_website_domain, normalize_tenant_domain_key
 
 class PropertyFilterParams(BaseModel):
     location: Optional[str] = Field(None, max_length=100)
     province: Optional[str] = Field(None, max_length=100)
     district: Optional[str] = Field(None, max_length=100)
     property_type: Optional[str] = Field(None, max_length=50)  # Villa, Condominium
+    websites: Optional[List[str]] = Field(None, description="Filter properties by authorized/selected websites")
     min_price: Optional[Decimal] = None
     max_price: Optional[Decimal] = None
     bedrooms: Optional[int] = None
@@ -22,7 +24,7 @@ class PropertyFilterParams(BaseModel):
     sea_view: Optional[bool] = None
     query: Optional[str] = Field(None, max_length=200)
     status: Optional[str] = Field(None, max_length=50)
-    is_public: bool = True
+    is_public: Optional[bool] = True
     limit: int = 10
     offset: int = 0
 
@@ -74,6 +76,13 @@ class PropertyFilterParams(BaseModel):
         elif "condo" in v_low or "apartment" in v_low:
             return "Condominium"
         return v.strip()
+
+    @field_validator("websites", mode="before")
+    def sanitize_websites(cls, v):
+        if v is None:
+            return None
+        from app.core.tenant import normalize_website_list
+        return normalize_website_list(v)
 
 def build_property_query(db: Session, filters: PropertyFilterParams):
     """
@@ -143,10 +152,65 @@ def build_property_query(db: Session, filters: PropertyFilterParams):
     if filters.sea_view is not None:
         conditions.append(Property.sea_view == filters.sea_view)
 
+    # Scoped Multi-Tenant Website Filter
+    if filters.websites:
+        site_conditions = []
+        for site in filters.websites:
+            canon = normalize_website_domain(site)
+            key = normalize_tenant_domain_key(site)
+            if canon:
+                site_conditions.append(cast(Property.websites, String).ilike(f'%"{canon}"%'))
+                site_conditions.append(cast(Property.websites, String).ilike(f'%{canon}%'))
+            if key:
+                site_conditions.append(cast(Property.websites, String).ilike(f'%"{key}"%'))
+
+        # If tajlandia.com is among the selected sites, also match unassigned legacy properties
+        if any("tajlandia" in s for s in filters.websites):
+            site_conditions.append(Property.websites == None)
+            site_conditions.append(cast(Property.websites, String) == "[]")
+            site_conditions.append(cast(Property.websites, String) == "null")
+            site_conditions.append(cast(Property.websites, String) == "")
+
+        if site_conditions:
+            conditions.append(or_(*site_conditions))
+
     if conditions:
         query = query.filter(and_(*conditions))
 
     return query.order_by(Property.price_numeric_min.asc().nulls_last())
+
+
+def property_belongs_to_websites(prop: Optional[Property], target_websites: List[str]) -> bool:
+    """
+    Verifies if a Property record belongs to ANY of the given target_websites.
+    Used for verifying RBAC authorization during GET, PUT, and DELETE operations.
+    """
+    if not prop or not target_websites:
+        return False
+    normalized_targets = [normalize_website_domain(w) for w in target_websites if w]
+    target_keys = [normalize_tenant_domain_key(w) for w in target_websites if w]
+
+    prop_sites = []
+    if getattr(prop, "websites", None):
+        raw = prop.websites
+        if isinstance(raw, list):
+            prop_sites = [normalize_website_domain(s) for s in raw if s]
+        elif isinstance(raw, str):
+            prop_sites = [normalize_website_domain(s) for s in raw.split(",") if s.strip()]
+
+    # If property has explicit website assignments, verify overlap
+    if prop_sites:
+        return any(
+            s in normalized_targets or normalize_tenant_domain_key(s) in target_keys
+            for s in prop_sites
+        )
+
+    # Fallback for unassigned legacy properties: default to tajlandia.com
+    if any("tajlandia" in t for t in normalized_targets):
+        return True
+
+    return False
+
 
 def search_properties_safe(db: Session, filters: PropertyFilterParams) -> List[Property]:
     """Execute the safe query and fetch matched records with images."""

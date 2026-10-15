@@ -1,5 +1,5 @@
 import os
-from fastapi import FastAPI, Depends, Query, HTTPException, status
+from fastapi import FastAPI, Depends, Query, HTTPException, status, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -7,7 +7,8 @@ from sqlalchemy.orm import Session
 from typing import List, Optional
 from app.core.config import settings
 from app.db.session import get_db
-from app.services.property_search import PropertyFilterParams, search_properties_safe, get_property_by_id
+from app.services.property_search import PropertyFilterParams, search_properties_safe, get_property_by_id, property_belongs_to_websites
+from app.core.tenant import normalize_website_list
 from app.db.models import Property
 from app.api.v1.chat import router as chat_router
 from app.api.v1.admin import router as admin_router
@@ -36,13 +37,15 @@ def startup_db_init():
         from app.db.models import User
         from app.core.security import hash_password
 
-        # 1. Safe DDL synchronization for existing users table
+        # 1. Safe DDL synchronization for existing users & properties tables
         with engine.begin() as conn:
             conn.execute(sa.text("""
                 ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE;
                 ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash VARCHAR(255);
                 ALTER TABLE users ADD COLUMN IF NOT EXISTS google_email VARCHAR(255);
                 ALTER TABLE users ADD COLUMN IF NOT EXISTS google_refresh_token TEXT;
+                ALTER TABLE users ADD COLUMN IF NOT EXISTS allowed_websites JSONB DEFAULT '[]'::jsonb;
+                ALTER TABLE properties ADD COLUMN IF NOT EXISTS websites JSONB DEFAULT '[]'::jsonb;
             """))
 
         # 2. Ensure all tables (including user_sessions) exist
@@ -207,6 +210,7 @@ def get_branding(site_origin: Optional[str] = Query(None, description="Optional 
 
 @app.get("/api/v1/properties", tags=["Properties"])
 def list_properties(
+    request: Request,
     location: Optional[str] = Query(None, description="Location search query (e.g. Phuket, Bang Tao, Samui)"),
     property_type: Optional[str] = Query(None, description="Villa or Condominium"),
     min_price: Optional[float] = Query(None, ge=0),
@@ -215,9 +219,22 @@ def list_properties(
     has_pool: Optional[bool] = Query(None),
     beach_access: Optional[bool] = Query(None),
     status: Optional[str] = Query(None),
+    websites: Optional[str] = Query(None, description="Comma-separated website domains or single domain"),
+    site_origin: Optional[str] = Query(None, description="Tenant site origin domain"),
     db: Session = Depends(get_db)
 ):
-    """Direct property filtering endpoint using safe SQLAlchemy query builder."""
+    """Direct property filtering endpoint using safe SQLAlchemy query builder with website scoping."""
+    raw_sites = (
+        websites
+        or request.query_params.get("selected_websites")
+        or request.query_params.get("sites")
+        or site_origin
+        or request.headers.get("x-selected-websites")
+        or request.headers.get("x-selected-sites")
+        or request.headers.get("x-site-origin")
+    )
+    target_websites = normalize_website_list(raw_sites) if raw_sites else None
+
     params = PropertyFilterParams(
         location=location,
         property_type=property_type,
@@ -226,7 +243,8 @@ def list_properties(
         bedrooms=bedrooms,
         has_pool=has_pool,
         beach_access=beach_access,
-        status=status
+        status=status,
+        websites=target_websites
     )
     results = search_properties_safe(db, params)
     
@@ -246,6 +264,7 @@ def list_properties(
             "has_pool": p.has_pool,
             "beach_access": p.beach_access,
             "images": img_urls,
+            "websites": p.websites or ["tajlandia.com"],
             "detail_page_url": p.detail_page_url
         })
     return {"count": len(output), "properties": output}
@@ -253,9 +272,23 @@ def list_properties(
 @app.get("/api/v1/properties/{property_id}", tags=["Properties"])
 def get_property(
     property_id: str,
+    request: Request,
+    websites: Optional[str] = Query(None, description="Optional website filter"),
+    site_origin: Optional[str] = Query(None, description="Tenant site origin domain"),
     db: Session = Depends(get_db)
 ):
-    """Lookup property by exact Property ID."""
+    """Lookup property by exact Property ID with optional website scope check."""
+    raw_sites = (
+        websites
+        or request.query_params.get("selected_websites")
+        or request.query_params.get("sites")
+        or site_origin
+        or request.headers.get("x-selected-websites")
+        or request.headers.get("x-selected-sites")
+        or request.headers.get("x-site-origin")
+    )
+    target_websites = normalize_website_list(raw_sites) if raw_sites else None
+
     p = get_property_by_id(db, property_id)
     if not p:
         if getattr(settings, "ENABLE_FIRESTORE_SYNC", False):
@@ -263,6 +296,12 @@ def get_property(
                 from app.services.firestore_service import get_property_by_id_from_firestore
                 fs_p = get_property_by_id_from_firestore(property_id)
                 if fs_p:
+                    fs_websites = fs_p.get("websites") or fs_p.get("allowed_websites")
+                    if target_websites and fs_websites and not any(w in target_websites for w in fs_websites):
+                        raise HTTPException(
+                            status_code=status.HTTP_404_NOT_FOUND,
+                            detail=f"Property with ID '{property_id}' not found in website scope {target_websites}."
+                        )
                     return {
                         "found": True,
                         "property_id": fs_p["property_id"],
@@ -288,15 +327,24 @@ def get_property(
                         },
                         "amenities": fs_p.get("raw_firestore_data", {}).get("amenities", []),
                         "images": fs_p.get("images", []),
+                        "websites": fs_websites or ["tajlandia.com"],
                         "detail_page_url": fs_p.get("detail_page_url")
                     }
+            except HTTPException:
+                raise
             except Exception:
                 pass
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Property with ID '{property_id}' not found."
         )
-    
+
+    if target_websites and not property_belongs_to_websites(p, target_websites):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Property with ID '{property_id}' does not belong to selected website(s) {target_websites}."
+        )
+
     img_urls = [img.image_url for img in p.images]
     return {
         "found": True,
@@ -338,5 +386,6 @@ def get_property(
         "features": p.features,
         "highlights": p.highlights,
         "images": img_urls,
+        "websites": p.websites or ["tajlandia.com"],
         "detail_page_url": p.detail_page_url
     }

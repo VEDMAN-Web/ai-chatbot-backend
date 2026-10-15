@@ -4,7 +4,7 @@ import json
 import time
 import urllib.parse
 from datetime import datetime, timedelta
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Security, Request, status
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -25,7 +25,8 @@ from app.core.auth import (
     require_super_admin,
     require_admin_or_super_admin,
     require_staff_or_worker,
-    VALID_STAFF_ROLES
+    VALID_STAFF_ROLES,
+    resolve_user_allowed_websites
 )
 from app.core.security import hash_password, verify_password, generate_session_token
 from app.services.google_services import SCOPES
@@ -34,7 +35,10 @@ from app.core.tenant import (
     get_current_env_domain_key,
     get_current_env_domain,
     normalize_tenant_domain_key,
-    CANONICAL_DOMAINS
+    CANONICAL_DOMAINS,
+    ALL_CANONICAL_WEBSITES,
+    normalize_website_domain,
+    normalize_website_list
 )
 
 import logging
@@ -361,6 +365,8 @@ class UserLoginRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="ignore")
     email: str = Field(..., description="Admin email address", json_schema_extra={"example": "admin@tajlandia.com"})
     password: str = Field(..., description="Account password", json_schema_extra={"example": "Admin@1234"})
+    domain: Optional[str] = Field(None, description="Optional target website domain: 'varsoviaestate.com', 'thai.estate', or 'tajlandia.com'")
+    site_origin: Optional[str] = Field(None, alias="siteOrigin")
 
     @model_validator(mode="before")
     @classmethod
@@ -369,6 +375,12 @@ class UserLoginRequest(BaseModel):
         if isinstance(data, dict):
             if not data.get("email") and data.get("username"):
                 data["email"] = data["username"]
+            if "siteOrigin" in data and "domain" not in data:
+                data["domain"] = data["siteOrigin"]
+            elif "site_origin" in data and "domain" not in data:
+                data["domain"] = data["site_origin"]
+            elif "website" in data and "domain" not in data:
+                data["domain"] = data["website"]
         return data
 
 
@@ -381,6 +393,7 @@ class UserInfoResponse(BaseModel):
     is_active: bool = True
     permissions: Optional[Dict[str, bool]] = None
     google_auth: GoogleAuthInfo = Field(default_factory=GoogleAuthInfo)
+    allowed_websites: List[str] = Field(default_factory=list, description="Permitted websites assigned to this staff account")
 
 
 class UserLoginResponse(BaseModel):
@@ -410,6 +423,7 @@ class AdminUserDirectoryItem(BaseModel):
     created_at: Optional[datetime] = None
     google_auth: GoogleAuthInfo = Field(default_factory=GoogleAuthInfo)
     active_sessions_count: int = 0
+    allowed_websites: List[str] = Field(default_factory=list, description="Permitted websites assigned to this staff account")
 
 
 class CreateUserRequest(BaseModel):
@@ -419,6 +433,7 @@ class CreateUserRequest(BaseModel):
     name: Optional[str] = None
     role: str = "worker"  # "worker", "admin", "super_admin", or legacy "employee"
     domain: Optional[str] = None  # Optional explicit domain; defaults to active .env domain
+    websites: Optional[List[str]] = Field(None, alias="allowed_websites", description="List of authorized websites: ['varsoviaestate.com', 'tajlandia.com', 'thai.estate']")
     is_active: bool = True
 
     @model_validator(mode="before")
@@ -431,6 +446,12 @@ class CreateUserRequest(BaseModel):
                     data["name"] = name_val
             if "isActive" in data and "is_active" not in data:
                 data["is_active"] = data["isActive"]
+            if "allowedWebsites" in data and "websites" not in data:
+                data["websites"] = data["allowedWebsites"]
+            if "allowed_domains" in data and "websites" not in data:
+                data["websites"] = data["allowed_domains"]
+            if "sites" in data and "websites" not in data:
+                data["websites"] = data["sites"]
         return data
 
 
@@ -440,6 +461,7 @@ class UpdateUserRequest(BaseModel):
     password: Optional[str] = None
     role: Optional[str] = None
     domain: Optional[str] = None
+    websites: Optional[List[str]] = Field(None, alias="allowed_websites", description="Update authorized websites: ['varsoviaestate.com', 'tajlandia.com', 'thai.estate']")
     is_active: Optional[bool] = None
 
     @model_validator(mode="before")
@@ -452,6 +474,12 @@ class UpdateUserRequest(BaseModel):
                     data["name"] = name_val
             if "isActive" in data and "is_active" not in data:
                 data["is_active"] = data["isActive"]
+            if "allowedWebsites" in data and "websites" not in data:
+                data["websites"] = data["allowedWebsites"]
+            if "allowed_domains" in data and "websites" not in data:
+                data["websites"] = data["allowed_domains"]
+            if "sites" in data and "websites" not in data:
+                data["websites"] = data["sites"]
         return data
 
 
@@ -462,6 +490,7 @@ class RegisterRequest(BaseModel):
     name: Optional[str] = None
     role: Optional[str] = "worker"
     domain: Optional[str] = None
+    websites: Optional[List[str]] = Field(None, alias="allowed_websites")
     admin_secret: Optional[str] = Field(None, alias="adminSecret")
 
     @model_validator(mode="before")
@@ -476,6 +505,12 @@ class RegisterRequest(BaseModel):
                 sec_val = data.get("adminSecret") or data.get("admin_secret") or data.get("secret")
                 if sec_val:
                     data["admin_secret"] = sec_val
+            if "allowedWebsites" in data and "websites" not in data:
+                data["websites"] = data["allowedWebsites"]
+            if "allowed_domains" in data and "websites" not in data:
+                data["websites"] = data["allowed_domains"]
+            if "sites" in data and "websites" not in data:
+                data["websites"] = data["sites"]
         return data
 
 
@@ -515,11 +550,14 @@ class ChangePasswordResponse(BaseModel):
 @router.post("/login", response_model=UserLoginResponse, tags=["Authentication"])
 def user_login(
     req: UserLoginRequest,
+    request: Request = None,
     db: Session = Depends(get_db)
 ):
     """
     Authenticates an administrative / staff user with email and password,
     creating an active session token. Restricted strictly to admin roles.
+    Supports dynamic domain selection via request body ('domain', 'siteOrigin')
+    or HTTP header ('X-Site-Origin', 'X-Website').
     """
     raw_ident = (req.email or getattr(req, "username", None) or "").strip()
     if not raw_ident:
@@ -571,14 +609,59 @@ def user_login(
             detail="Access restricted: login is only available for administrative and employee accounts."
         )
 
-    # 5. Enforce Multi-Tenant Domain Isolation (.env decided)
+    user_role = user.role or "worker"
+    is_privileged_admin = user_role.lower() in ["super_admin", "admin"]
+    user_allowed_sites = resolve_user_allowed_websites(user, user_role)
+
+    # 5. Resolve requested domain / website context
+    requested_domain_raw = (req.domain or req.site_origin or "").strip()
+    if not requested_domain_raw and request is not None:
+        requested_domain_raw = (
+            request.headers.get("x-site-origin")
+            or request.headers.get("x-website")
+            or request.headers.get("x-selected-websites", "").split(",")[0]
+            or ""
+        ).strip()
+
+    if requested_domain_raw:
+        canon_req = normalize_website_domain(requested_domain_raw)
+        if canon_req:
+            # Verify permission to access target domain
+            if is_privileged_admin or canon_req in user_allowed_sites:
+                user_domain = canon_req
+                # Persist selected default website for this account if changed
+                if getattr(user, "domain", None) != canon_req:
+                    user.domain = canon_req
+                    db.commit()
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=f"Access denied: Account '{user.email}' is not authorized for website '{canon_req}'. Allowed websites: {user_allowed_sites}"
+                )
+        else:
+            user_domain = get_current_env_domain()
+    else:
+        env_domain = get_current_env_domain()
+        # If this server instance is configured with an active .env domain and the user has permission, use it!
+        if is_privileged_admin or env_domain in user_allowed_sites:
+            user_domain = env_domain
+        else:
+            user_domain = getattr(user, "domain", None) or env_domain
+
+
+    # 6. Enforce Multi-Tenant Domain Isolation (.env decided)
     active_env_key = get_current_env_domain_key()
     user_dom_key = get_user_domain_key(user)
     
-    # Super admins and admins have universal authority across all site instances
-    is_privileged_admin = (user.role or "").lower() in ["super_admin", "admin"]
+    # Check if user's allowed_websites grants access to this server's active domain
+    has_site_permission = any(
+        normalize_tenant_domain_key(s) == active_env_key
+        for s in user_allowed_sites
+    )
+
     is_cross_tenant = (
-        user_dom_key in ("tajlandia", "varsovia", "thai")
+        not has_site_permission
+        and user_dom_key in ("tajlandia", "varsovia", "thai")
         and user_dom_key != active_env_key
     )
 
@@ -602,8 +685,6 @@ def user_login(
     db.add(new_session)
     db.commit()
 
-    user_role = user.role or "worker"
-    user_domain = getattr(user, "domain", None) or get_current_env_domain()
     return UserLoginResponse(
         access_token=session_token,
         token_type="bearer",
@@ -616,7 +697,8 @@ def user_login(
             domain=user_domain,
             is_active=getattr(user, "is_active", True),
             permissions=get_role_permissions(user_role),
-            google_auth=_get_user_google_info(user)
+            google_auth=_get_user_google_info(user),
+            allowed_websites=user_allowed_sites
         )
     )
 
@@ -666,6 +748,7 @@ def get_current_user_profile(
 
     resolved_role = staff.role or "worker"
     resolved_domain = getattr(staff, "domain", None) or getattr(user, "domain", None) or get_current_env_domain()
+    user_websites = staff.allowed_websites or resolve_user_allowed_websites(user, resolved_role)
     return UserInfoResponse(
         id=staff.user_id,
         email=staff.email,
@@ -674,7 +757,8 @@ def get_current_user_profile(
         domain=resolved_domain,
         is_active=getattr(user, "is_active", True) if user else True,
         permissions=staff.permissions or get_role_permissions(resolved_role),
-        google_auth=g_info
+        google_auth=g_info,
+        allowed_websites=user_websites
     )
 
 
@@ -728,8 +812,15 @@ def list_admin_users_with_google_status(
 
     all_users = query.order_by(User.created_at.asc()).all()
 
-    # Filter strictly by active website domain
-    users = [u for u in all_users if get_user_domain_key(u) == active_env_key]
+    # Filter by domain: Super Admins can inspect all domains; regular Admins are restricted to their allowed websites or active env
+    if staff.role == "super_admin":
+        users = all_users
+    else:
+        users = [
+            u for u in all_users 
+            if get_user_domain_key(u) == active_env_key or 
+            any(normalize_tenant_domain_key(w) == get_user_domain_key(u) for w in (staff.allowed_websites or []))
+        ]
 
     now = datetime.utcnow()
     results = []
@@ -742,6 +833,7 @@ def list_admin_users_with_google_status(
 
         resolved_u_role = u.role or "worker"
         resolved_u_domain = u.domain or CANONICAL_DOMAINS.get(active_env_key, get_current_env_domain())
+        allowed_sites = resolve_user_allowed_websites(u, resolved_u_role)
         results.append(AdminUserDirectoryItem(
             id=str(u.id),
             email=u.email,
@@ -752,7 +844,8 @@ def list_admin_users_with_google_status(
             permissions=get_role_permissions(resolved_u_role),
             created_at=u.created_at,
             google_auth=_get_user_google_info(u),
-            active_sessions_count=active_sess_count
+            active_sessions_count=active_sess_count,
+            allowed_websites=allowed_sites
         ))
     return results
 
@@ -768,8 +861,9 @@ def create_admin_user(
     Hierarchy:
       - super_admin can create super_admin, admin, or worker accounts.
       - admin can only create worker accounts.
-    Strict Domain Isolation:
-      - Accounts can only be created for the active website domain (.env).
+    Website Access Delegation:
+      - super_admin can grant access to: All websites, Multiple websites, or Single specific website.
+      - admin can only grant access to websites that they themselves have access to.
     Syncs with both PostgreSQL and Cloud Firestore admin_authentication.
     """
     active_env_key = get_current_env_domain_key()
@@ -822,6 +916,23 @@ def create_admin_user(
             detail=f"Access denied: Cannot create user for domain '{target_domain}'. This server instance is restricted to '{get_current_env_domain()}' ({active_env_key})."
         )
 
+    # Website access delegation
+    assigned_websites = None
+    if req.websites is not None:
+        norm_req_websites = normalize_website_list(req.websites)
+        if staff.role != "super_admin":
+            unauthorized = [s for s in norm_req_websites if s not in staff.allowed_websites]
+            if unauthorized:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=f"Access denied: You cannot grant access to website(s) outside your permissions: {unauthorized}."
+                )
+        assigned_websites = norm_req_websites
+    elif target_role == "super_admin":
+        assigned_websites = list(ALL_CANONICAL_WEBSITES)
+    else:
+        assigned_websites = normalize_website_list([target_domain])
+
     existing = db.query(User).filter(func.lower(User.email) == email_clean).first()
     if existing:
         raise HTTPException(status_code=400, detail=f"User with email '{email_clean}' already exists.")
@@ -831,8 +942,10 @@ def create_admin_user(
         name=req.name.strip() if req.name else email_clean.split("@")[0],
         role=target_role,
         domain=target_domain,
+        allowed_websites=assigned_websites,
         password_hash=hash_password(req.password.strip()),
-        is_active=req.is_active
+        is_active=req.is_active,
+        preferences={"allowed_websites": assigned_websites}
     )
     db.add(new_user)
     db.commit()
@@ -847,7 +960,8 @@ def create_admin_user(
             role=target_role,
             name=new_user.name or email_clean,
             domain=target_domain,
-            is_active=new_user.is_active
+            is_active=new_user.is_active,
+            allowed_websites=assigned_websites
         )
     except Exception as fe:
         logger.warning(f"Error syncing created user '{email_clean}' to Firestore: {fe}")
@@ -858,11 +972,11 @@ def create_admin_user(
             db=db,
             tool_name="admin:create_user",
             staff_user_id=staff.user_id,
-            tool_arguments={"email": email_clean, "role": target_role, "name": new_user.name, "domain": target_domain},
-            proposed_payload={"action": "create_user", "email": email_clean, "role": target_role, "domain": target_domain},
+            tool_arguments={"email": email_clean, "role": target_role, "name": new_user.name, "domain": target_domain, "websites": assigned_websites},
+            proposed_payload={"action": "create_user", "email": email_clean, "role": target_role, "domain": target_domain, "websites": assigned_websites},
             confirmed_by_staff=True,
             status="SUCCESS",
-            execution_result=f"Created {target_role} {email_clean} on domain {target_domain}"
+            execution_result=f"Created {target_role} {email_clean} on websites {assigned_websites}"
         )
     except Exception as ae:
         logger.warning(f"Audit log failed for user creation: {ae}")
@@ -877,7 +991,8 @@ def create_admin_user(
         permissions=get_role_permissions(new_user.role),
         created_at=new_user.created_at,
         google_auth=_get_user_google_info(new_user),
-        active_sessions_count=0
+        active_sessions_count=0,
+        allowed_websites=assigned_websites
     )
 
 
@@ -932,7 +1047,8 @@ def get_admin_user_details(
         permissions=get_role_permissions(resolved_u_role),
         created_at=user.created_at,
         google_auth=_get_user_google_info(user),
-        active_sessions_count=active_sess_count
+        active_sessions_count=active_sess_count,
+        allowed_websites=resolve_user_allowed_websites(user, resolved_u_role)
     )
 
 
@@ -945,12 +1061,13 @@ def update_admin_user(
     db: Session = Depends(get_db)
 ):
     """
-    Updates user details (name, password reset, role, active status, domain).
+    Updates user details (name, password reset, role, active status, domain, allowed_websites).
     Hierarchy:
-      - super_admin can update any user account and promote/demote roles.
+      - super_admin can update any user account, assign any websites, and promote/demote roles.
       - admin can only update worker accounts (cannot edit admins or super_admins, cannot promote to admin).
-    Strict Domain Isolation:
-      - Staff can only update accounts within the active website domain (.env). Cross-domain edits are blocked (403).
+    Strict Domain & Website Isolation:
+      - Super admin can assign any canonical websites (all, multiple, single).
+      - Admin can only grant websites within their own allowed_websites.
     Syncs with PostgreSQL and Cloud Firestore.
     """
     user = db.query(User).filter(User.id == user_id).first()
@@ -1023,6 +1140,19 @@ def update_admin_user(
                 detail="Admins cannot transfer user accounts across different website domains."
             )
         user.domain = CANONICAL_DOMAINS.get(new_dom_key, req.domain.strip())
+    if req.websites is not None:
+        clean_assigned_websites = normalize_website_list(req.websites)
+        if staff.role != "super_admin":
+            unauthorized_sites = [w for w in clean_assigned_websites if w not in (staff.allowed_websites or [])]
+            if unauthorized_sites:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=f"Cannot grant access to websites outside your authorized scope: {unauthorized_sites}"
+                )
+        user.allowed_websites = clean_assigned_websites
+        prefs = dict(user.preferences or {})
+        prefs["allowed_websites"] = clean_assigned_websites
+        user.preferences = prefs
     if req.is_active is not None:
         user.is_active = req.is_active
         if not req.is_active:
@@ -1043,7 +1173,8 @@ def update_admin_user(
             role=user.role,
             domain=user.domain,
             is_active=user.is_active,
-            password=new_plain_password
+            password=new_plain_password,
+            allowed_websites=user.allowed_websites
         )
     except Exception as fe:
         logger.warning(f"Error syncing updated user '{user.email}' to Firestore: {fe}")
@@ -1054,8 +1185,8 @@ def update_admin_user(
             db=db,
             tool_name="admin:update_user",
             staff_user_id=staff.user_id,
-            tool_arguments={"target_user_id": user_id, "email": user.email, "role": user.role, "domain": user.domain},
-            proposed_payload={"action": "update_user", "target_email": user.email},
+            tool_arguments={"target_user_id": user_id, "email": user.email, "role": user.role, "domain": user.domain, "allowed_websites": user.allowed_websites},
+            proposed_payload={"action": "update_user", "target_email": user.email, "allowed_websites": user.allowed_websites},
             confirmed_by_staff=True,
             status="SUCCESS",
             execution_result=f"Updated user {user.email}"
@@ -1082,7 +1213,8 @@ def update_admin_user(
         permissions=get_role_permissions(resolved_u_role),
         created_at=user.created_at,
         google_auth=_get_user_google_info(user),
-        active_sessions_count=active_sess_count
+        active_sessions_count=active_sess_count,
+        allowed_websites=resolve_user_allowed_websites(user, resolved_u_role)
     )
 
 
@@ -1207,6 +1339,14 @@ def register_user(
         email_key = normalize_tenant_domain_key(email_clean)
         resolved_domain = CANONICAL_DOMAINS.get(email_key, get_current_env_domain())
 
+    # Determine assigned websites (default to all canonical for super_admin, or resolved_domain for worker/admin)
+    if req.websites is not None:
+        assigned_websites = normalize_website_list(req.websites)
+    elif target_role == "super_admin":
+        assigned_websites = list(ALL_CANONICAL_WEBSITES)
+    else:
+        assigned_websites = [normalize_website_domain(resolved_domain)]
+
     existing = db.query(User).filter(func.lower(User.email) == email_clean).first()
     if existing:
         existing.password_hash = hash_password(plain_pass)
@@ -1215,6 +1355,10 @@ def register_user(
         existing.role = target_role
         existing.domain = resolved_domain
         existing.is_active = True
+        existing.allowed_websites = assigned_websites
+        prefs = dict(existing.preferences or {})
+        prefs["allowed_websites"] = assigned_websites
+        existing.preferences = prefs
         db.commit()
         db.refresh(existing)
         new_user = existing
@@ -1225,7 +1369,9 @@ def register_user(
             role=target_role,
             domain=resolved_domain,
             password_hash=hash_password(plain_pass),
-            is_active=True
+            is_active=True,
+            allowed_websites=assigned_websites,
+            preferences={"allowed_websites": assigned_websites}
         )
         db.add(new_user)
         db.commit()
@@ -1240,7 +1386,8 @@ def register_user(
             role=target_role,
             name=new_user.name or email_clean,
             domain=resolved_domain,
-            is_active=True
+            is_active=True,
+            allowed_websites=assigned_websites
         )
     except Exception as e:
         logger.warning(f"Error syncing new admin '{email_clean}' to Firestore: {e}")
@@ -1251,11 +1398,11 @@ def register_user(
             db=db,
             tool_name="auth:register",
             staff_user_id=email_clean,
-            tool_arguments={"email": email_clean, "role": target_role, "name": new_user.name, "domain": resolved_domain},
-            proposed_payload={"action": "register_admin", "email": email_clean, "role": target_role, "domain": resolved_domain},
+            tool_arguments={"email": email_clean, "role": target_role, "name": new_user.name, "domain": resolved_domain, "websites": assigned_websites},
+            proposed_payload={"action": "register_admin", "email": email_clean, "role": target_role, "domain": resolved_domain, "websites": assigned_websites},
             confirmed_by_staff=True,
             status="SUCCESS",
-            execution_result=f"Registered admin {email_clean} with role {target_role} on {resolved_domain}"
+            execution_result=f"Registered admin {email_clean} with role {target_role} on websites {assigned_websites}"
         )
     except Exception as ae:
         logger.warning(f"Error auditing register: {ae}")
@@ -1269,7 +1416,8 @@ def register_user(
         is_active=new_user.is_active,
         created_at=new_user.created_at,
         google_auth=_get_user_google_info(new_user),
-        active_sessions_count=0
+        active_sessions_count=0,
+        allowed_websites=resolve_user_allowed_websites(new_user, new_user.role)
     )
 
 

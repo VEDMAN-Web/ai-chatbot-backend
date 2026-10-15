@@ -33,8 +33,10 @@ def init_database():
                     ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash VARCHAR(255);
                     ALTER TABLE users ADD COLUMN IF NOT EXISTS google_email VARCHAR(255);
                     ALTER TABLE users ADD COLUMN IF NOT EXISTS google_refresh_token TEXT;
+                    ALTER TABLE users ADD COLUMN IF NOT EXISTS allowed_websites JSONB DEFAULT '[]'::jsonb;
+                    ALTER TABLE properties ADD COLUMN IF NOT EXISTS websites JSONB DEFAULT '[]'::jsonb;
                 """))
-                print("    [OK] Checked and synchronized users table columns.")
+                print("    [OK] Checked and synchronized users & properties table columns.")
 
             # 2. Ensure all tables exist
             Base.metadata.create_all(bind=engine)

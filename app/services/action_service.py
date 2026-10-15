@@ -373,11 +373,17 @@ def _execute_update_listing(db: Session, payload: Dict[str, Any]) -> Dict[str, A
         "bedrooms_display", "bedrooms_min", "bedrooms_max", "bathrooms",
         "area_display", "area_sqm_min", "area_sqm_max", "usable_area_sqm", "land_area_sqm",
         "description", "has_pool", "beach_access", "sea_view",
-        "features", "facilities", "amenities", "highlights", "developer_name", "ownership_type"
+        "features", "facilities", "amenities", "highlights", "developer_name", "ownership_type",
+        "websites"
     }
 
     updated_fields = {}
     is_created = False
+
+    from app.core.tenant import normalize_website_list, get_current_env_domain
+
+    target_websites = payload.get("websites") or fields.get("websites") or payload.get("selected_websites")
+    norm_websites = normalize_website_list(target_websites) if target_websites else None
 
     if not prop or mode == "create":
         # Create a new property
@@ -390,8 +396,16 @@ def _execute_update_listing(db: Session, payload: Dict[str, Any]) -> Dict[str, A
             created_at=datetime.now(timezone.utc),
             updated_at=datetime.now(timezone.utc)
         )
+        if norm_websites:
+            prop.websites = norm_websites
+            updated_fields["websites"] = norm_websites
+        else:
+            default_site = payload.get("site_origin") or get_current_env_domain()
+            prop.websites = normalize_website_list([default_site])
+            updated_fields["websites"] = prop.websites
+
         for k, v in fields.items():
-            if k in allowed_fields and hasattr(prop, k) and v is not None:
+            if k in allowed_fields and hasattr(prop, k) and v is not None and k != "websites":
                 setattr(prop, k, v)
                 updated_fields[k] = v
         db.add(prop)
@@ -399,8 +413,12 @@ def _execute_update_listing(db: Session, payload: Dict[str, Any]) -> Dict[str, A
         db.refresh(prop)
     else:
         # Update existing property
+        if norm_websites is not None:
+            prop.websites = norm_websites
+            updated_fields["websites"] = norm_websites
+
         for k, v in fields.items():
-            if k in allowed_fields and hasattr(prop, k) and v is not None:
+            if k in allowed_fields and hasattr(prop, k) and v is not None and k != "websites":
                 setattr(prop, k, v)
                 updated_fields[k] = v
         prop.updated_at = datetime.now(timezone.utc)
