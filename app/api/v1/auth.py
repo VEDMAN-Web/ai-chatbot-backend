@@ -363,8 +363,8 @@ def _get_user_google_info(user: Optional[User]) -> GoogleAuthInfo:
 
 class UserLoginRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="ignore")
-    email: str = Field(..., description="Admin email address", json_schema_extra={"example": "admin@tajlandia.com"})
-    password: str = Field(..., description="Account password", json_schema_extra={"example": "Admin@1234"})
+    email: str = Field(..., description="User email address", json_schema_extra={"example": "user@example.com"})
+    password: str = Field(..., description="Account password", json_schema_extra={"example": "Password123!"})
     domain: Optional[str] = Field(None, description="Optional target website domain: 'varsoviaestate.com', 'thai.estate', or 'tajlandia.com'")
     site_origin: Optional[str] = Field(None, alias="siteOrigin")
 
@@ -391,6 +391,7 @@ class UserInfoResponse(BaseModel):
     role: str
     domain: Optional[str] = None
     is_active: bool = True
+    status: str = "active"
     permissions: Optional[Dict[str, bool]] = None
     google_auth: GoogleAuthInfo = Field(default_factory=GoogleAuthInfo)
     allowed_websites: List[str] = Field(default_factory=list, description="Permitted websites assigned to this staff account")
@@ -419,11 +420,18 @@ class AdminUserDirectoryItem(BaseModel):
     role: str
     domain: Optional[str] = None
     is_active: bool
+    status: str = "active"
     permissions: Optional[Dict[str, bool]] = None
     created_at: Optional[datetime] = None
     google_auth: GoogleAuthInfo = Field(default_factory=GoogleAuthInfo)
     active_sessions_count: int = 0
     allowed_websites: List[str] = Field(default_factory=list, description="Permitted websites assigned to this staff account")
+
+
+class BlockUserRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="allow")
+    blocked: bool = Field(True, description="True to block user, False to unblock")
+    reason: Optional[str] = Field(None, description="Optional explanation or reason for blocking the account")
 
 
 class CreateUserRequest(BaseModel):
@@ -435,6 +443,7 @@ class CreateUserRequest(BaseModel):
     domain: Optional[str] = None  # Optional explicit domain; defaults to active .env domain
     websites: Optional[List[str]] = Field(None, alias="allowed_websites", description="List of authorized websites: ['varsoviaestate.com', 'tajlandia.com', 'thai.estate']")
     is_active: bool = True
+    status: Optional[str] = "active"
 
     @model_validator(mode="before")
     @classmethod
@@ -463,6 +472,7 @@ class UpdateUserRequest(BaseModel):
     domain: Optional[str] = None
     websites: Optional[List[str]] = Field(None, alias="allowed_websites", description="Update authorized websites: ['varsoviaestate.com', 'tajlandia.com', 'thai.estate']")
     is_active: Optional[bool] = None
+    status: Optional[str] = Field(None, description="Account status: 'active', 'blocked', 'deactivated'")
 
     @model_validator(mode="before")
     @classmethod
@@ -515,7 +525,7 @@ class RegisterRequest(BaseModel):
 
 
 class ForgotPasswordRequest(BaseModel):
-    email: str = Field(..., example="admin@tajlandia.com", description="Admin email address requesting password reset")
+    email: str = Field(..., example="user@example.com", description="User email address requesting password reset")
 
 
 class ForgotPasswordResponse(BaseModel):
@@ -527,7 +537,7 @@ class ForgotPasswordResponse(BaseModel):
 
 
 class ResetPasswordRequest(BaseModel):
-    email: str = Field(..., example="admin@tajlandia.com", description="Admin email address")
+    email: str = Field(..., example="user@example.com", description="User email address")
     reset_token: str = Field(..., description="Cryptographic reset token received from forgot-password")
     new_password: str = Field(..., min_length=4, description="New password (minimum 4 characters)")
 
@@ -586,11 +596,17 @@ def user_login(
                 headers={"WWW-Authenticate": "Bearer"}
             )
 
-        # 2. Verify account is active in database
-        if not getattr(user, "is_active", True):
+        # 2. Verify account is active and not blocked in database
+        user_status = (getattr(user, "status", None) or "active").lower()
+        if user_status == "blocked" or not getattr(user, "is_active", True):
+            db.query(UserSession).filter(
+                UserSession.user_id == user.id,
+                UserSession.revoked_at.is_(None)
+            ).update({"revoked_at": datetime.utcnow()}, synchronize_session=False)
+            db.commit()
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="User account is deactivated."
+                detail="User account is blocked. All active sessions have been terminated. Access denied."
             )
 
         # 3. Verify password against database password_hash
@@ -600,6 +616,19 @@ def user_login(
                 detail="Invalid email or password.",
                 headers={"WWW-Authenticate": "Bearer"}
             )
+
+    # Universal check: verify account is not blocked regardless of auth source (Firestore or DB)
+    user_status = (getattr(user, "status", None) or "active").lower()
+    if user_status == "blocked" or not getattr(user, "is_active", True):
+        db.query(UserSession).filter(
+            UserSession.user_id == user.id,
+            UserSession.revoked_at.is_(None)
+        ).update({"revoked_at": datetime.utcnow()}, synchronize_session=False)
+        db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="User account is blocked. All active sessions have been terminated. Access denied."
+        )
 
     # 4. Enforce staff/admin role from live account
     allowed_admin_roles = ["super_admin", "admin", "worker", "employee"]
@@ -696,6 +725,7 @@ def user_login(
             role=user_role,
             domain=user_domain,
             is_active=getattr(user, "is_active", True),
+            status=getattr(user, "status", None) or ("active" if getattr(user, "is_active", True) else "blocked"),
             permissions=get_role_permissions(user_role),
             google_auth=_get_user_google_info(user),
             allowed_websites=user_allowed_sites
@@ -749,6 +779,7 @@ def get_current_user_profile(
     resolved_role = staff.role or "worker"
     resolved_domain = getattr(staff, "domain", None) or getattr(user, "domain", None) or get_current_env_domain()
     user_websites = staff.allowed_websites or resolve_user_allowed_websites(user, resolved_role)
+    resolved_status = getattr(user, "status", None) or getattr(staff, "status", "active")
     return UserInfoResponse(
         id=staff.user_id,
         email=staff.email,
@@ -756,6 +787,7 @@ def get_current_user_profile(
         role=resolved_role,
         domain=resolved_domain,
         is_active=getattr(user, "is_active", True) if user else True,
+        status=resolved_status,
         permissions=staff.permissions or get_role_permissions(resolved_role),
         google_auth=g_info,
         allowed_websites=user_websites
@@ -767,6 +799,7 @@ def list_admin_users_with_google_status(
     role: Optional[str] = Query(None, description="Filter by role: super_admin, admin, worker"),
     search: Optional[str] = Query(None, description="Search by name or email"),
     is_active: Optional[bool] = Query(None, description="Filter by active status"),
+    status: Optional[str] = Query(None, description="Filter by status: active, blocked, deactivated"),
     staff: AuthenticatedStaff = Depends(require_admin_or_super_admin),
     db: Session = Depends(get_db)
 ):
@@ -810,6 +843,9 @@ def list_admin_users_with_google_status(
     if is_active is not None:
         query = query.filter(User.is_active == is_active)
 
+    if status:
+        query = query.filter(func.lower(User.status) == status.strip().lower())
+
     all_users = query.order_by(User.created_at.asc()).all()
 
     # Filter by domain: Super Admins can inspect all domains; regular Admins are restricted to their allowed websites or active env
@@ -841,6 +877,7 @@ def list_admin_users_with_google_status(
             role=resolved_u_role,
             domain=resolved_u_domain,
             is_active=getattr(u, "is_active", True),
+            status=getattr(u, "status", None) or ("active" if getattr(u, "is_active", True) else "blocked"),
             permissions=get_role_permissions(resolved_u_role),
             created_at=u.created_at,
             google_auth=_get_user_google_info(u),
@@ -945,6 +982,7 @@ def create_admin_user(
         allowed_websites=assigned_websites,
         password_hash=hash_password(req.password.strip()),
         is_active=req.is_active,
+        status=req.status or "active",
         preferences={"allowed_websites": assigned_websites}
     )
     db.add(new_user)
@@ -988,6 +1026,7 @@ def create_admin_user(
         role=new_user.role,
         domain=new_user.domain,
         is_active=new_user.is_active,
+        status=new_user.status or "active",
         permissions=get_role_permissions(new_user.role),
         created_at=new_user.created_at,
         google_auth=_get_user_google_info(new_user),
@@ -1044,6 +1083,7 @@ def get_admin_user_details(
         role=resolved_u_role,
         domain=resolved_u_domain,
         is_active=getattr(user, "is_active", True),
+        status=getattr(user, "status", None) or ("active" if getattr(user, "is_active", True) else "blocked"),
         permissions=get_role_permissions(resolved_u_role),
         created_at=user.created_at,
         google_auth=_get_user_google_info(user),
@@ -1153,13 +1193,24 @@ def update_admin_user(
         prefs = dict(user.preferences or {})
         prefs["allowed_websites"] = clean_assigned_websites
         user.preferences = prefs
+    if req.status is not None:
+        target_status = req.status.strip().lower()
+        user.status = target_status
+        if target_status == "blocked":
+            user.is_active = False
+            db.query(UserSession).filter(
+                UserSession.user_id == user.id,
+                UserSession.revoked_at.is_(None)
+            ).update({"revoked_at": datetime.utcnow()}, synchronize_session=False)
+        elif target_status == "active":
+            user.is_active = True
     if req.is_active is not None:
         user.is_active = req.is_active
         if not req.is_active:
             db.query(UserSession).filter(
                 UserSession.user_id == user.id,
                 UserSession.revoked_at.is_(None)
-            ).update({"revoked_at": datetime.utcnow()})
+            ).update({"revoked_at": datetime.utcnow()}, synchronize_session=False)
 
     db.commit()
     db.refresh(user)
@@ -1174,7 +1225,8 @@ def update_admin_user(
             domain=user.domain,
             is_active=user.is_active,
             password=new_plain_password,
-            allowed_websites=user.allowed_websites
+            allowed_websites=user.allowed_websites,
+            status=user.status
         )
     except Exception as fe:
         logger.warning(f"Error syncing updated user '{user.email}' to Firestore: {fe}")
@@ -1185,8 +1237,8 @@ def update_admin_user(
             db=db,
             tool_name="admin:update_user",
             staff_user_id=staff.user_id,
-            tool_arguments={"target_user_id": user_id, "email": user.email, "role": user.role, "domain": user.domain, "allowed_websites": user.allowed_websites},
-            proposed_payload={"action": "update_user", "target_email": user.email, "allowed_websites": user.allowed_websites},
+            tool_arguments={"target_user_id": user_id, "email": user.email, "role": user.role, "domain": user.domain, "allowed_websites": user.allowed_websites, "status": user.status},
+            proposed_payload={"action": "update_user", "target_email": user.email, "allowed_websites": user.allowed_websites, "status": user.status},
             confirmed_by_staff=True,
             status="SUCCESS",
             execution_result=f"Updated user {user.email}"
@@ -1210,6 +1262,7 @@ def update_admin_user(
         role=resolved_u_role,
         domain=resolved_u_domain,
         is_active=getattr(user, "is_active", True),
+        status=getattr(user, "status", None) or ("active" if getattr(user, "is_active", True) else "blocked"),
         permissions=get_role_permissions(resolved_u_role),
         created_at=user.created_at,
         google_auth=_get_user_google_info(user),
@@ -1300,6 +1353,100 @@ def delete_admin_user(
         logger.warning(f"Audit log failed for user deletion: {ae}")
 
     return {"success": True, "message": f"User '{deleted_email}' has been successfully deleted."}
+
+
+@router.post("/admin/users/{user_id}/block", response_model=AdminUserDirectoryItem, tags=["Admin Directory"])
+def block_admin_user(
+    user_id: str,
+    req: BlockUserRequest,
+    staff: AuthenticatedStaff = Depends(require_super_admin),
+    db: Session = Depends(get_db)
+):
+    """
+    Super Admin API to block or unblock any administrator or worker user.
+    When a user is blocked:
+      - All active sessions are immediately revoked in PostgreSQL.
+      - Account status is set to 'blocked' and is_active to False.
+      - Status is synced to Cloud Firestore admin_authentication collection (isBlocked=True).
+      - Blocked users cannot log in (403 Forbidden) and cannot call any admin APIs (chat, CRUD, etc.).
+    A Super Admin cannot block their own account.
+    """
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found.")
+
+    if str(staff.user_id) == str(user_id) or staff.email.lower() == user.email.lower():
+        raise HTTPException(
+            status_code=400,
+            detail="Super administrators cannot block their own account."
+        )
+
+    is_blocking = req.blocked
+    if is_blocking:
+        user.status = "blocked"
+        user.is_active = False
+        # Revoke all active sessions immediately
+        now = datetime.utcnow()
+        revoked_count = db.query(UserSession).filter(
+            UserSession.user_id == user.id,
+            UserSession.revoked_at.is_(None)
+        ).update({"revoked_at": now}, synchronize_session=False)
+        db.commit()
+        db.refresh(user)
+        logger.info(f"Blocked user {user.email} (id={user.id}). Revoked {revoked_count} active sessions.")
+    else:
+        user.status = "active"
+        user.is_active = True
+        db.commit()
+        db.refresh(user)
+        logger.info(f"Unblocked user {user.email} (id={user.id}).")
+
+    # Sync to Cloud Firestore admin_authentication
+    try:
+        from app.services.firestore_auth_service import update_admin_in_firestore
+        update_admin_in_firestore(
+            email=user.email,
+            is_active=user.is_active,
+            status=user.status
+        )
+    except Exception as fe:
+        logger.warning(f"Error syncing block status for user '{user.email}' to Firestore: {fe}")
+
+    # Record Audit Log
+    try:
+        record_audit_log(
+            db=db,
+            tool_name="admin:block_user",
+            staff_user_id=staff.user_id,
+            tool_arguments={"target_user_id": user_id, "email": user.email, "blocked": is_blocking, "reason": req.reason},
+            proposed_payload={"action": "block_user" if is_blocking else "unblock_user", "target_email": user.email},
+            confirmed_by_staff=True,
+            status="SUCCESS",
+            execution_result=f"{'Blocked' if is_blocking else 'Unblocked'} user {user.email}. Revoked sessions."
+        )
+    except Exception as ae:
+        logger.warning(f"Audit log failed for user block: {ae}")
+
+    resolved_u_role = user.role or "worker"
+    resolved_u_domain = user.domain or CANONICAL_DOMAINS.get(get_current_env_domain_key(), get_current_env_domain())
+    return AdminUserDirectoryItem(
+        id=str(user.id),
+        email=user.email,
+        name=user.name or user.email,
+        role=resolved_u_role,
+        domain=resolved_u_domain,
+        is_active=getattr(user, "is_active", True),
+        status=user.status or ("active" if user.is_active else "blocked"),
+        permissions=get_role_permissions(resolved_u_role),
+        created_at=user.created_at,
+        google_auth=_get_user_google_info(user),
+        active_sessions_count=0 if is_blocking else db.query(UserSession).filter(
+            UserSession.user_id == user.id,
+            UserSession.revoked_at.is_(None),
+            UserSession.expires_at > datetime.utcnow()
+        ).count(),
+        allowed_websites=resolve_user_allowed_websites(user, resolved_u_role)
+    )
 
 
 

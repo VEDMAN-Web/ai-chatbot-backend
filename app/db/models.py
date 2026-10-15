@@ -168,6 +168,7 @@ class User(Base):
     allowed_websites = Column(JSONB, default=list, nullable=True)  # Specific sites assigned by Super Admin: varsoviaestate.com, tajlandia.com, thai.estate
     password_hash = Column(String(255), nullable=True)
     is_active = Column(Boolean, default=True, nullable=False)
+    status = Column(String(50), default="active", nullable=True)  # 'active', 'blocked', 'deactivated'
     google_email = Column(String(255), nullable=True, index=True)
     google_refresh_token = Column(Text, nullable=True)
     preferences = Column(JSONB, default=dict)

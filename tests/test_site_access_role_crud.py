@@ -20,6 +20,13 @@ def clean_db(monkeypatch):
     monkeypatch.setattr("app.services.firestore_service.get_firestore_client", lambda: None)
     db = SessionLocal()
     try:
+        from sqlalchemy import text
+        try:
+            db.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT 'active';"))
+            db.commit()
+        except Exception:
+            db.rollback()
+
         # Create a test super admin
         super_admin_email = "test_super_admin@tajlandia.com"
         existing_sa = db.query(User).filter(User.email == super_admin_email).first()
@@ -168,8 +175,8 @@ def test_active_checkbox_selection_and_isolation():
         json={
             "email": worker_email,
             "password": "WorkerPass123!",
-            "name": "Tajlandia & Varsovia Worker",
-            "role": "worker",
+            "name": "Tajlandia & Varsovia Admin",
+            "role": "admin",
             "websites": ["tajlandia.com", "varsoviaestate.com"]
         }
     )
@@ -291,6 +298,7 @@ def test_cross_website_crud_with_all_access():
             "bedrooms": "2",
             "status": "Available",
             "price_display": "8,500,000 THB",
+            "price_numeric_min": 1000.0,
             "websites": ["thai.estate"]
         }
     )
@@ -319,11 +327,11 @@ def test_cross_website_crud_with_all_access():
     assert thai_prop_id not in [p["property_id"] for p in resp_taj.json()["properties"]]
 
     # 3. Public endpoint GET /api/v1/properties with selected_websites query param
-    pub_taj = client.get(f"/api/v1/properties?selected_websites=tajlandia.com")
+    pub_taj = client.get(f"/api/v1/properties?selected_websites=tajlandia.com&limit=100")
     assert pub_taj.status_code == 200
     assert thai_prop_id not in [p["property_id"] for p in pub_taj.json()["properties"]]
 
-    pub_thai = client.get(f"/api/v1/properties?selected_websites=thai.estate")
+    pub_thai = client.get(f"/api/v1/properties?selected_websites=thai.estate&limit=100")
     assert pub_thai.status_code == 200
     assert thai_prop_id in [p["property_id"] for p in pub_thai.json()["properties"]]
 
@@ -337,3 +345,214 @@ def test_cross_website_crud_with_all_access():
     )
     assert resp_multi.status_code == 200
     assert thai_prop_id in [p["property_id"] for p in resp_multi.json()["properties"]]
+
+
+def test_super_admin_can_block_and_unblock_user_terminating_sessions():
+    """
+    Test that when Super Admin blocks an admin or worker:
+    1. Status changes to 'blocked' and is_active becomes False.
+    2. All active sessions are immediately revoked.
+    3. Blocked user cannot call /me, property CRUD, or admin chat with existing token (403 Forbidden).
+    4. Blocked user cannot log in (403 Forbidden).
+    5. Super Admin unblocking restores access.
+    """
+    sa_token = _login_and_get_token("test_super_admin@tajlandia.com", "SuperAdmin123!")
+    sa_headers = {"Authorization": f"Bearer {sa_token}"}
+
+    # 1. Create a user
+    target_email = f"target_{uuid.uuid4().hex[:6]}@tajlandia.com"
+    create_resp = client.post(
+        "/api/v1/auth/admin/users",
+        headers=sa_headers,
+        json={
+            "email": target_email,
+            "password": "Password123!",
+            "name": "Target Staff",
+            "role": "admin",
+            "websites": ["tajlandia.com"]
+        }
+    )
+    assert create_resp.status_code == 201, create_resp.text
+    target_user_id = create_resp.json()["id"]
+    assert create_resp.json()["status"] == "active"
+
+    # 2. Target user logs in
+    target_token = _login_and_get_token(target_email, "Password123!")
+    target_headers = {
+        "Authorization": f"Bearer {target_token}",
+        "X-Selected-Websites": "tajlandia.com"
+    }
+
+    # 3. Verify user can access profile before blocking
+    me_resp = client.get("/api/v1/auth/me", headers=target_headers)
+    assert me_resp.status_code == 200
+    assert me_resp.json()["status"] == "active"
+
+    # 4. Super Admin blocks the user
+    block_resp = client.post(
+        f"/api/v1/auth/admin/users/{target_user_id}/block",
+        headers=sa_headers,
+        json={"blocked": True, "reason": "Security protocol"}
+    )
+    assert block_resp.status_code == 200, block_resp.text
+    block_data = block_resp.json()
+    assert block_data["status"] == "blocked"
+    assert block_data["is_active"] is False
+    assert block_data["active_sessions_count"] == 0
+
+    # 5. Blocked user's existing token is immediately rejected on ALL APIs
+    # 5a. Profile /me
+    me_blocked = client.get("/api/v1/auth/me", headers=target_headers)
+    assert me_blocked.status_code == 403
+    assert "blocked" in me_blocked.text.lower()
+
+    # 5b. Admin properties listing
+    props_blocked = client.get("/api/v1/admin/properties", headers=target_headers)
+    assert props_blocked.status_code == 403
+
+    # 5c. Admin chat
+    chat_blocked = client.post(
+        "/api/v1/admin/chat",
+        headers=target_headers,
+        json={"message": "Hello", "session_id": "test_sess"}
+    )
+    assert chat_blocked.status_code == 403
+
+    # 6. Blocked user cannot log in
+    login_attempt = client.post(
+        "/api/v1/auth/login",
+        json={"email": target_email, "password": "Password123!"}
+    )
+    assert login_attempt.status_code == 403
+    assert "blocked" in login_attempt.text.lower()
+
+    # 7. Super Admin unblocks user
+    unblock_resp = client.post(
+        f"/api/v1/auth/admin/users/{target_user_id}/block",
+        headers=sa_headers,
+        json={"blocked": False}
+    )
+    assert unblock_resp.status_code == 200
+    assert unblock_resp.json()["status"] == "active"
+    assert unblock_resp.json()["is_active"] is True
+
+    # 8. Unblocked user can log in again and obtain fresh session
+    login_success = client.post(
+        "/api/v1/auth/login",
+        json={"email": target_email, "password": "Password123!"}
+    )
+    assert login_success.status_code == 200
+    new_token = login_success.json()["access_token"]
+    assert new_token != target_token
+
+    # 9. Fresh token works
+    new_me = client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {new_token}"})
+    assert new_me.status_code == 200
+    assert new_me.json()["status"] == "active"
+
+
+def test_super_admin_cannot_block_own_account():
+    """Super Admin cannot block their own account."""
+    sa_token = _login_and_get_token("test_super_admin@tajlandia.com", "SuperAdmin123!")
+    sa_headers = {"Authorization": f"Bearer {sa_token}"}
+    me_resp = client.get("/api/v1/auth/me", headers=sa_headers)
+    sa_id = me_resp.json()["id"]
+
+    resp = client.post(
+        f"/api/v1/auth/admin/users/{sa_id}/block",
+        headers=sa_headers,
+        json={"blocked": True}
+    )
+    assert resp.status_code == 400
+    assert "cannot block their own account" in resp.text.lower()
+
+
+def test_regular_admin_cannot_block_users():
+    """Regular Admin does not have permission to block accounts (403 Forbidden)."""
+    sa_token = _login_and_get_token("test_super_admin@tajlandia.com", "SuperAdmin123!")
+    sa_headers = {"Authorization": f"Bearer {sa_token}"}
+
+    # Create a regular admin and worker
+    admin_email = f"reg_admin_{uuid.uuid4().hex[:6]}@tajlandia.com"
+    worker_email = f"worker_{uuid.uuid4().hex[:6]}@tajlandia.com"
+    client.post(
+        "/api/v1/auth/admin/users",
+        headers=sa_headers,
+        json={"email": admin_email, "password": "Password123!", "role": "admin", "websites": ["tajlandia.com"]}
+    )
+    w_resp = client.post(
+        "/api/v1/auth/admin/users",
+        headers=sa_headers,
+        json={"email": worker_email, "password": "Password123!", "role": "worker", "websites": ["tajlandia.com"]}
+    )
+    worker_id = w_resp.json()["id"]
+
+    admin_token = _login_and_get_token(admin_email, "Password123!")
+    admin_headers = {"Authorization": f"Bearer {admin_token}"}
+
+    # Regular admin attempts to call block endpoint -> 403 Forbidden
+    block_resp = client.post(
+        f"/api/v1/auth/admin/users/{worker_id}/block",
+        headers=admin_headers,
+        json={"blocked": True}
+    )
+    assert block_resp.status_code == 403
+
+
+def test_worker_cannot_perform_property_crud_but_can_chat():
+    """
+    Worker role:
+    - Can access admin chat
+    - Can view properties
+    - CANNOT create properties (403)
+    - CANNOT update properties (403)
+    - CANNOT delete properties (403)
+    """
+    sa_token = _login_and_get_token("test_super_admin@tajlandia.com", "SuperAdmin123!")
+    sa_headers = {"Authorization": f"Bearer {sa_token}"}
+
+    # Create a worker
+    worker_email = f"worker_crud_{uuid.uuid4().hex[:6]}@tajlandia.com"
+    client.post(
+        "/api/v1/auth/admin/users",
+        headers=sa_headers,
+        json={"email": worker_email, "password": "Password123!", "role": "worker", "websites": ["varsoviaestate.com", "tajlandia.com"]}
+    )
+
+    worker_token = _login_and_get_token(worker_email, "Password123!")
+    worker_headers = {
+        "Authorization": f"Bearer {worker_token}",
+        "X-Selected-Websites": "varsoviaestate.com"
+    }
+
+    # 1. Worker can view properties
+    list_resp = client.get("/api/v1/admin/properties", headers=worker_headers)
+    assert list_resp.status_code == 200
+
+    # 2. Worker cannot create properties
+    create_resp = client.post(
+        "/api/v1/admin/properties",
+        headers=worker_headers,
+        json={
+            "property_id": f"PROP-W-{uuid.uuid4().hex[:4]}",
+            "property_name": "Worker Villa",
+            "websites": ["tajlandia.com"]
+        }
+    )
+    assert create_resp.status_code == 403
+    assert "lacks permission" in create_resp.text.lower()
+
+    # 3. Worker cannot update properties
+    put_resp = client.put(
+        "/api/v1/admin/properties/PROP-W-TEST",
+        headers=worker_headers,
+        json={"property_name": "Updated"}
+    )
+    assert put_resp.status_code == 403
+
+    # 4. Worker cannot delete properties
+    del_resp = client.delete(
+        "/api/v1/admin/properties/PROP-W-TEST",
+        headers=worker_headers
+    )
+    assert del_resp.status_code == 403

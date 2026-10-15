@@ -59,7 +59,7 @@ def get_role_permissions(role: Optional[str]) -> Dict[str, bool]:
             "can_delete_users": False,
             "can_view_directory": False,
             "can_access_admin_chat": True,
-            "can_edit_properties": True
+            "can_edit_properties": False
         }
     return {
         "can_manage_super_admins": False,
@@ -80,6 +80,7 @@ class AuthenticatedStaff(BaseModel):
     domain: Optional[str] = None
     domain_key: Optional[str] = None
     session_id: Optional[str] = None
+    status: str = "active"  # 'active', 'blocked', 'deactivated'
     permissions: Optional[Dict[str, bool]] = None
     allowed_websites: List[str] = Field(default_factory=list)
     selected_websites: List[str] = Field(default_factory=list)
@@ -140,6 +141,17 @@ def get_current_user_from_db(
         # 1. Check if token exists in UserSession table
         existing_session = db.query(UserSession).filter(UserSession.token == token).first()
         if existing_session:
+            user = db.query(User).filter(User.id == existing_session.user_id).first()
+            user_status = getattr(user, "status", None) or ("blocked" if not getattr(user, "is_active", True) else "active")
+            if not user or not getattr(user, "is_active", True) or user_status == "blocked":
+                # Instantly terminate session in database
+                if existing_session.revoked_at is None:
+                    existing_session.revoked_at = datetime.utcnow()
+                    db.commit()
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="User account is blocked. All active sessions have been terminated. Access denied."
+                )
             if existing_session.revoked_at is not None:
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
@@ -151,12 +163,6 @@ def get_current_user_from_db(
                     status_code=status.HTTP_401_UNAUTHORIZED,
                     detail="Session has expired. Please log in again.",
                     headers={"WWW-Authenticate": "Bearer"}
-                )
-            user = db.query(User).filter(User.id == existing_session.user_id).first()
-            if not user or not getattr(user, "is_active", True):
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail="User account is deactivated or invalid."
                 )
             resolved_role = user.role or "worker"
             resolved_domain = getattr(user, "domain", None) or (user.preferences.get("domain") if isinstance(user.preferences, dict) else None) or get_current_env_domain()
@@ -170,6 +176,7 @@ def get_current_user_from_db(
                 domain=resolved_domain,
                 domain_key=resolved_domain_key,
                 session_id=str(existing_session.id),
+                status=user_status,
                 permissions=get_role_permissions(resolved_role),
                 allowed_websites=allowed_sites,
                 selected_websites=list(allowed_sites)
@@ -177,13 +184,17 @@ def get_current_user_from_db(
 
         # 2. Support standard dev tokens and service secrets
         if token.startswith("dev-token-"):
-            resolved_email = token.replace("dev-token-", "").strip()
-        elif token == "admin-token":
-            resolved_email = settings.ADMIN_EMAIL
-        elif token == "staff-token":
-            resolved_email = "staff@tajlandia.com"
+            resolved_email = token.replace("dev-token-", "").strip().lower()
         elif settings.INTERNAL_API_SECRET and token == settings.INTERNAL_API_SECRET:
-            resolved_email = settings.ADMIN_EMAIL
+            # Service token authenticated: select an active super admin dynamically from DB
+            admin_user = db.query(User).filter(User.role == "super_admin", User.is_active == True).first()
+            if not admin_user:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="No active administrator account found in database.",
+                    headers={"WWW-Authenticate": "Bearer"}
+                )
+            resolved_email = admin_user.email
         else:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
@@ -192,14 +203,16 @@ def get_current_user_from_db(
             )
 
     elif staff_email_hdr:
-        # Require valid staff email header
-        resolved_email = staff_email_hdr.strip()
+        resolved_email = staff_email_hdr.strip().lower()
     else:
-        # Seamless development / direct usage: default to admin staff when no headers provided
-        resolved_email = "admin@tajlandia.com"
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required. Please provide a valid Authorization Bearer token.",
+            headers={"WWW-Authenticate": "Bearer"}
+        )
 
-    # Verify user and role from PostgreSQL database or Cloud Firestore
-    user = db.query(User).filter(User.email.ilike(resolved_email)).first()
+    # Verify user and role dynamically from PostgreSQL database or Cloud Firestore
+    user = db.query(User).filter(func.lower(User.email) == resolved_email).first()
     if not user:
         try:
             from app.services.firestore_auth_service import get_admin_from_firestore, sync_firestore_admin_to_local_db
@@ -210,16 +223,18 @@ def get_current_user_from_db(
             pass
 
     if not user:
-        # Auto-create admin user in database if not present
-        user = User(
-            email=resolved_email,
-            name="Admin Staff",
-            role="super_admin",
-            domain=get_current_env_domain()
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"User account '{resolved_email}' does not exist in database.",
+            headers={"WWW-Authenticate": "Bearer"}
         )
-        db.add(user)
-        db.commit()
-        db.refresh(user)
+
+    user_status = getattr(user, "status", None) or ("blocked" if not getattr(user, "is_active", True) else "active")
+    if not getattr(user, "is_active", True) or user_status == "blocked":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Account is blocked. Access denied."
+        )
 
     resolved_role = user.role or "worker"
     resolved_domain = getattr(user, "domain", None) or (user.preferences.get("domain") if isinstance(user.preferences, dict) else None) or get_current_env_domain()
@@ -232,6 +247,7 @@ def get_current_user_from_db(
         role=resolved_role,
         domain=resolved_domain,
         domain_key=resolved_domain_key,
+        status=user_status,
         permissions=get_role_permissions(resolved_role),
         allowed_websites=allowed_sites,
         selected_websites=list(allowed_sites)
