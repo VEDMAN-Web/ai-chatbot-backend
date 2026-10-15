@@ -7,6 +7,16 @@ from app.core.security import hash_password
 
 client = TestClient(app)
 
+@pytest.fixture(autouse=True)
+def clean_db(monkeypatch):
+    """Setup clean test environment without ADC delays."""
+    from app.core.config import settings
+    monkeypatch.setattr(settings, "ENABLE_FIRESTORE_SYNC", False)
+    monkeypatch.setattr("app.services.firestore_auth_service.get_firestore_client", lambda: None)
+    monkeypatch.setattr("app.services.firestore_service.get_firestore_client", lambda: None)
+    yield
+
+
 def _seed_test_accounts():
     """Ensure all requested test users are present in local test DB."""
     accounts = [
@@ -158,6 +168,8 @@ def test_admin_can_promote_worker_to_admin_with_all_websites():
         "property_id": "TEST-PROMOTED-ADMIN-01",
         "property_name": "Promoted Admin Luxury Villa",
         "property_type": "Villa",
+        "location": "Bang Tao, Phuket",
+        "status": "Ready to move in",
         "price_display": "30,000,000 THB",
         "bedrooms": 4,
         "bathrooms": 4,
