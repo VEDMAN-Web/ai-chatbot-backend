@@ -10,8 +10,9 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-# Singleton Firestore client
-_firestore_client = None
+# Singleton Firestore clients
+_admin_firestore_client = None
+_user_firestore_client = None
 
 
 class FirestoreDatabaseError(Exception):
@@ -19,30 +20,14 @@ class FirestoreDatabaseError(Exception):
     pass
 
 
-def get_firestore_client():
-    """
-    Returns an initialized Firestore client.
-    Supports credentials from:
-    1. FIREBASE_SERVICE_ACCOUNT_KEY env var (raw JSON string or base64)
-    2. FIREBASE_CREDENTIALS_PATH on disk (e.g. credentials/firebase_service_account.json)
-    3. Application Default Credentials (ADC)
-    """
-    global _firestore_client
-    if _firestore_client is not None:
-        return _firestore_client
-
+def _create_single_firestore_client(project_id: str, database: str, env_key: Optional[str], cred_path: Optional[str], label: str):
     try:
         from google.cloud import firestore
         from google.oauth2 import service_account
 
-        project_id = settings.FIRESTORE_PROJECT_ID or "varsovia-8c135"
-        database = settings.FIRESTORE_DATABASE or "(default)"
-
-        # Check raw JSON string in environment variable
-        env_key = getattr(settings, "FIREBASE_SERVICE_ACCOUNT_KEY", None)
+        # 1. Check raw JSON or base64 string in env_key
         if env_key:
             env_key_str = env_key.strip()
-            # If base64 encoded
             if not env_key_str.startswith("{"):
                 try:
                     env_key_str = base64.b64decode(env_key_str).decode("utf-8")
@@ -51,51 +36,124 @@ def get_firestore_client():
             key_data = json.loads(env_key_str)
             target_project = key_data.get("project_id") or project_id
             creds = service_account.Credentials.from_service_account_info(key_data)
-            _firestore_client = firestore.Client(project=target_project, database=database, credentials=creds)
-            logger.info(f"Firestore client initialized via FIREBASE_SERVICE_ACCOUNT_KEY (project: {target_project}).")
-            return _firestore_client
+            cl = firestore.Client(project=target_project, database=database, credentials=creds)
+            logger.info(f"[{label.upper()}] Firestore client initialized via service account key (project: {target_project}, db: {database}).")
+            return cl
 
-        # Check file path on disk
-        cred_path = getattr(settings, "FIREBASE_CREDENTIALS_PATH", "credentials/firebase_service_account.json")
-        if not os.path.isabs(cred_path):
-            base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-            cred_path = os.path.join(base_dir, cred_path)
+        # 2. Check file path on disk
+        if cred_path:
+            p = cred_path
+            if not os.path.isabs(p):
+                base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+                p = os.path.join(base_dir, p)
+            if os.path.exists(p):
+                with open(p, "r", encoding="utf-8") as f:
+                    key_data = json.load(f)
+                target_project = key_data.get("project_id") or project_id
+                creds = service_account.Credentials.from_service_account_info(key_data)
+                cl = firestore.Client(project=target_project, database=database, credentials=creds)
+                logger.info(f"[{label.upper()}] Firestore client initialized from key file: {p} (project: {target_project}, db: {database}).")
+                return cl
 
-        if os.path.exists(cred_path):
-            with open(cred_path, "r", encoding="utf-8") as f:
-                key_data = json.load(f)
-            target_project = key_data.get("project_id") or project_id
-            creds = service_account.Credentials.from_service_account_info(key_data)
-            _firestore_client = firestore.Client(project=target_project, database=database, credentials=creds)
-            logger.info(f"Firestore client initialized from key file: {cred_path} (project: {target_project})")
-            return _firestore_client
-
-        # Fallback to Application Default Credentials
-        _firestore_client = firestore.Client(project=project_id, database=database)
-        logger.info("Firestore client initialized via Application Default Credentials.")
-        return _firestore_client
-
+        # 3. Fallback to Application Default Credentials (ADC)
+        cl = firestore.Client(project=project_id, database=database)
+        logger.info(f"[{label.upper()}] Firestore client initialized via Application Default Credentials (project: {project_id}, db: {database}).")
+        return cl
     except Exception as e:
-        logger.error(f"Failed to initialize Firestore client: {e}")
+        logger.error(f"[{label.upper()}] Failed to initialize Firestore client: {e}")
         return None
 
 
+def get_admin_firestore_client():
+    """Returns the dedicated Admin Firestore client (for admin_authentication, staff audits & admin ops)."""
+    global _admin_firestore_client
+    if _admin_firestore_client is not None:
+        return _admin_firestore_client
+    _admin_firestore_client = _create_single_firestore_client(
+        project_id=settings.get_admin_firestore_project_id(),
+        database=settings.get_admin_firestore_database(),
+        env_key=settings.get_admin_firebase_service_account_key(),
+        cred_path=settings.get_admin_firebase_credentials_path(),
+        label="admin"
+    )
+    return _admin_firestore_client
+
+
+def get_user_firestore_client():
+    """Returns the dedicated User/Public Firestore client (for public chatbot conversations, leads & property catalog)."""
+    global _user_firestore_client
+    if _user_firestore_client is not None:
+        return _user_firestore_client
+    _user_firestore_client = _create_single_firestore_client(
+        project_id=settings.get_user_firestore_project_id(),
+        database=settings.get_user_firestore_database(),
+        env_key=settings.get_user_firebase_service_account_key(),
+        cred_path=settings.get_user_firebase_credentials_path(),
+        label="user"
+    )
+    return _user_firestore_client
+
+
+def get_firestore_client(target: str = "user"):
+    """
+    Universal Firestore client getter.
+    Defaults to get_user_firestore_client() for customer chat & catalog queries,
+    or get_admin_firestore_client() for admin operations.
+    """
+    if target == "admin":
+        cl = get_admin_firestore_client()
+        if cl:
+            return cl
+        return get_user_firestore_client()
+    else:
+        cl = get_user_firestore_client()
+        if cl:
+            return cl
+        return get_admin_firestore_client()
+
+
 def check_firestore_health() -> Dict[str, Any]:
-    """Tests live connectivity to Firestore."""
-    client = get_firestore_client()
-    if not client:
-        return {"connected": False, "error": "Firestore client not initialized"}
-    try:
-        # Test lightweight read
-        cols = list(client.collections())
-        return {
-            "connected": True,
-            "project_id": getattr(client, "project", "varsovia-8c135"),
-            "database": getattr(client, "_database", "(default)"),
-            "collections_count": len(cols)
-        }
-    except Exception as e:
-        return {"connected": False, "error": str(e)}
+    """Tests live connectivity to both user and admin Firestore databases."""
+    res = {"connected": False}
+    
+    admin_cl = get_admin_firestore_client()
+    user_cl = get_user_firestore_client()
+    
+    admin_info = {"connected": False}
+    if admin_cl:
+        try:
+            admin_cols = list(admin_cl.collections())
+            admin_info = {
+                "connected": True,
+                "project_id": getattr(admin_cl, "project", ""),
+                "database": getattr(admin_cl, "_database", "(default)"),
+                "collections_count": len(admin_cols)
+            }
+        except Exception as ae:
+            admin_info = {"connected": False, "error": str(ae)}
+
+    user_info = {"connected": False}
+    if user_cl:
+        try:
+            user_cols = list(user_cl.collections())
+            user_info = {
+                "connected": True,
+                "project_id": getattr(user_cl, "project", ""),
+                "database": getattr(user_cl, "_database", "(default)"),
+                "collections_count": len(user_cols)
+            }
+        except Exception as ue:
+            user_info = {"connected": False, "error": str(ue)}
+
+    res["connected"] = admin_info["connected"] or user_info["connected"]
+    res["admin_firestore"] = admin_info
+    res["user_firestore"] = user_info
+    
+    primary = user_info if user_info["connected"] else admin_info
+    res["project_id"] = primary.get("project_id", "")
+    res["database"] = primary.get("database", "(default)")
+    res["collections_count"] = primary.get("collections_count", 0)
+    return res
 
 
 # ==============================================================================

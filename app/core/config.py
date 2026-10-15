@@ -64,8 +64,10 @@ class Settings(BaseSettings):
 
         return f"{base}/oferty/{clean_slug}"
     
-    # Database
+    # Database Configuration (Multi-Database Support for Admin vs User Side)
     DATABASE_URL: str = "postgresql://postgres:xyz123%4024@127.0.0.1:5432/tajlandia_db"
+    ADMIN_DATABASE_URL: Optional[str] = None
+    USER_DATABASE_URL: Optional[str] = None
     
     # AI Configuration (Model is strictly configurable, not hardcoded)
     OPENAI_API_KEY: str = ""
@@ -99,12 +101,66 @@ class Settings(BaseSettings):
     # Report Generation Storage
     REPORT_STORAGE_DIR: str = "data/reports"
 
-    # Cloud Firestore & Firebase Settings
+    # Universal / Fallback Cloud Firestore & Firebase Settings
     FIRESTORE_PROJECT_ID: str = "varsovia-8c135"
     FIRESTORE_DATABASE: str = "(default)"
     FIREBASE_SERVICE_ACCOUNT_KEY: Optional[str] = None
     FIREBASE_CREDENTIALS_PATH: str = "credentials/firebase_service_account.json"
     ENABLE_FIRESTORE_SYNC: bool = True
+
+    # Dedicated Admin Cloud Firestore Settings (Admin Auth, Audit Logs & Management)
+    ADMIN_FIRESTORE_PROJECT_ID: Optional[str] = None
+    ADMIN_FIRESTORE_DATABASE: Optional[str] = None
+    ADMIN_FIREBASE_SERVICE_ACCOUNT_KEY: Optional[str] = None
+    ADMIN_FIREBASE_CREDENTIALS_PATH: Optional[str] = None
+    ADMIN_ENABLE_FIRESTORE_SYNC: Optional[bool] = None
+
+    # Dedicated User Cloud Firestore Settings (Public Chatbot, Leads & Property Catalog)
+    USER_FIRESTORE_PROJECT_ID: Optional[str] = None
+    USER_FIRESTORE_DATABASE: Optional[str] = None
+    USER_FIREBASE_SERVICE_ACCOUNT_KEY: Optional[str] = None
+    USER_FIREBASE_CREDENTIALS_PATH: Optional[str] = None
+    USER_ENABLE_FIRESTORE_SYNC: Optional[bool] = None
+
+    def get_admin_db_url(self) -> str:
+        return self.ADMIN_DATABASE_URL or self.DATABASE_URL
+
+    def get_user_db_url(self) -> str:
+        return self.USER_DATABASE_URL or self.DATABASE_URL
+
+    def get_admin_firestore_project_id(self) -> str:
+        return self.ADMIN_FIRESTORE_PROJECT_ID or self.FIRESTORE_PROJECT_ID or "varsovia-8c135"
+
+    def get_admin_firestore_database(self) -> str:
+        return self.ADMIN_FIRESTORE_DATABASE or self.FIRESTORE_DATABASE or "(default)"
+
+    def get_admin_firebase_service_account_key(self) -> Optional[str]:
+        return self.ADMIN_FIREBASE_SERVICE_ACCOUNT_KEY or self.FIREBASE_SERVICE_ACCOUNT_KEY
+
+    def get_admin_firebase_credentials_path(self) -> str:
+        return self.ADMIN_FIREBASE_CREDENTIALS_PATH or self.FIREBASE_CREDENTIALS_PATH
+
+    def get_admin_enable_firestore_sync(self) -> bool:
+        if self.ADMIN_ENABLE_FIRESTORE_SYNC is not None:
+            return self.ADMIN_ENABLE_FIRESTORE_SYNC
+        return self.ENABLE_FIRESTORE_SYNC
+
+    def get_user_firestore_project_id(self) -> str:
+        return self.USER_FIRESTORE_PROJECT_ID or self.FIRESTORE_PROJECT_ID or "varsovia-8c135"
+
+    def get_user_firestore_database(self) -> str:
+        return self.USER_FIRESTORE_DATABASE or self.FIRESTORE_DATABASE or "(default)"
+
+    def get_user_firebase_service_account_key(self) -> Optional[str]:
+        return self.USER_FIREBASE_SERVICE_ACCOUNT_KEY or self.FIREBASE_SERVICE_ACCOUNT_KEY
+
+    def get_user_firebase_credentials_path(self) -> str:
+        return self.USER_FIREBASE_CREDENTIALS_PATH or self.FIREBASE_CREDENTIALS_PATH
+
+    def get_user_enable_firestore_sync(self) -> bool:
+        if self.USER_ENABLE_FIRESTORE_SYNC is not None:
+            return self.USER_ENABLE_FIRESTORE_SYNC
+        return self.ENABLE_FIRESTORE_SYNC
     
     # Vector Search Configuration
     EMBEDDING_DIMENSION: int = 1536
@@ -125,8 +181,8 @@ class Settings(BaseSettings):
 
 
 
-    @field_validator("DATABASE_URL", mode="before")
-    def assemble_db_url(cls, v: str) -> str:
+    @field_validator("DATABASE_URL", "ADMIN_DATABASE_URL", "USER_DATABASE_URL", mode="before")
+    def assemble_db_url(cls, v: Optional[str]) -> Optional[str]:
         if isinstance(v, str):
             if v.startswith("postgres://"):
                 return v.replace("postgres://", "postgresql+psycopg2://", 1)

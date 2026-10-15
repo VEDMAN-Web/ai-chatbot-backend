@@ -11,36 +11,37 @@ sys.path.insert(0, BASE_DIR)
 def init_database():
     """Initializes tables and extensions with retries for cloud databases."""
     import sqlalchemy as sa
-    from app.db.session import engine, Base
+    from app.db.session import admin_engine, user_engine, Base
     import app.db.models  # Ensure all SQLAlchemy models are registered
 
     print("--> 1. Connecting to PostgreSQL and creating schema...")
     max_retries = 5
     for attempt in range(1, max_retries + 1):
         try:
-            with engine.connect() as conn:
-                try:
-                    conn.execute(sa.text("CREATE EXTENSION IF NOT EXISTS vector;"))
-                    conn.commit()
-                    print("    [OK] pgvector extension checked/enabled.")
-                except Exception as ve:
-                    print(f"    [NOTICE] pgvector extension: {ve}")
+            for eng in {admin_engine, user_engine}:
+                with eng.connect() as conn:
+                    try:
+                        conn.execute(sa.text("CREATE EXTENSION IF NOT EXISTS vector;"))
+                        conn.commit()
+                        print(f"    [OK] pgvector extension checked/enabled on {eng.url.database or 'database'}.")
+                    except Exception as ve:
+                        print(f"    [NOTICE] pgvector extension: {ve}")
 
-            # 1. Safe DDL synchronization for existing tables
-            with engine.begin() as conn:
-                conn.execute(sa.text("""
-                    ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE;
-                    ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash VARCHAR(255);
-                    ALTER TABLE users ADD COLUMN IF NOT EXISTS google_email VARCHAR(255);
-                    ALTER TABLE users ADD COLUMN IF NOT EXISTS google_refresh_token TEXT;
-                    ALTER TABLE users ADD COLUMN IF NOT EXISTS allowed_websites JSONB DEFAULT '[]'::jsonb;
-                    ALTER TABLE properties ADD COLUMN IF NOT EXISTS websites JSONB DEFAULT '[]'::jsonb;
-                """))
-                print("    [OK] Checked and synchronized users & properties table columns.")
+                # 1. Safe DDL synchronization for existing tables
+                with eng.begin() as conn:
+                    conn.execute(sa.text("""
+                        ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE;
+                        ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash VARCHAR(255);
+                        ALTER TABLE users ADD COLUMN IF NOT EXISTS google_email VARCHAR(255);
+                        ALTER TABLE users ADD COLUMN IF NOT EXISTS google_refresh_token TEXT;
+                        ALTER TABLE users ADD COLUMN IF NOT EXISTS allowed_websites JSONB DEFAULT '[]'::jsonb;
+                        ALTER TABLE users ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT 'active';
+                        ALTER TABLE properties ADD COLUMN IF NOT EXISTS websites JSONB DEFAULT '[]'::jsonb;
+                    """))
 
-            # 2. Ensure all tables exist
-            Base.metadata.create_all(bind=engine)
-            print("    [OK] All database tables successfully created.")
+                # 2. Ensure all tables exist
+                Base.metadata.create_all(bind=eng)
+            print("    [OK] All database tables successfully created for admin and user databases.")
 
             # 3. Upgrade alembic migrations to head
             try:

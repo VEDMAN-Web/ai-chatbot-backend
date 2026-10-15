@@ -5,8 +5,8 @@ from sqlalchemy.orm import Session
 
 from app.core.security import hash_password, verify_password
 from app.db.models import User
-from app.services.firestore_service import get_firestore_client
 from app.core.tenant import get_current_env_domain
+from app.services.firestore_service import get_admin_firestore_client as get_firestore_client
 
 logger = logging.getLogger(__name__)
 

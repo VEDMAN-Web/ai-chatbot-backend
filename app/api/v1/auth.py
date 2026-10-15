@@ -1,3 +1,4 @@
+import os
 import hmac
 import hashlib
 import json
@@ -678,27 +679,29 @@ def user_login(
             user_domain = getattr(user, "domain", None) or env_domain
 
 
-    # 6. Enforce Multi-Tenant Domain Isolation (.env decided)
-    active_env_key = get_current_env_domain_key()
-    user_dom_key = get_user_domain_key(user)
-    
-    # Check if user's allowed_websites grants access to this server's active domain
-    has_site_permission = any(
-        normalize_tenant_domain_key(s) == active_env_key
-        for s in user_allowed_sites
-    )
-
-    is_cross_tenant = (
-        not has_site_permission
-        and user_dom_key in ("tajlandia", "varsovia", "thai")
-        and user_dom_key != active_env_key
-    )
-
-    if is_cross_tenant and not is_privileged_admin:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Access denied: Account belongs to domain '{user_dom_key}', but this server instance is configured for '{active_env_key}'."
+    # 6. Enforce Multi-Tenant Domain Isolation (.env decided, only if ENFORCE_TENANT_ISOLATION is explicitly configured)
+    enforce_isolation = getattr(settings, "ENFORCE_TENANT_ISOLATION", False) or os.getenv("ENFORCE_TENANT_ISOLATION", "").lower() in ["1", "true", "yes"]
+    if enforce_isolation:
+        active_env_key = get_current_env_domain_key()
+        user_dom_key = get_user_domain_key(user)
+        
+        # Check if user's allowed_websites grants access to this server's active domain
+        has_site_permission = any(
+            normalize_tenant_domain_key(s) == active_env_key
+            for s in user_allowed_sites
         )
+
+        is_cross_tenant = (
+            not has_site_permission
+            and user_dom_key in ("tajlandia", "varsovia", "thai")
+            and user_dom_key != active_env_key
+        )
+
+        if is_cross_tenant and not is_privileged_admin:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Access denied: Account belongs to domain '{user_dom_key}', but this server instance is configured for '{active_env_key}'."
+            )
 
     # Generate session token
     session_token = generate_session_token()

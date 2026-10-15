@@ -547,7 +547,7 @@ def create_property_endpoint(
     payload = {
         "property_id": pid,
         "mode": "create",
-        "fields": req.model_dump(exclude_unset=True, exclude={"images", "cover_image"}),
+        "fields": req.model_dump(exclude={"images", "cover_image"}),
         "images": req.images or [],
         "cover_image": req.cover_image,
         "websites": assigned_websites,
