@@ -79,8 +79,8 @@ class Settings(BaseSettings):
     # Action Confirmation & Security
     ACTION_EXPIRATION_MINUTES: int = 15
     INTERNAL_API_SECRET: str = "tajlandia-internal-secret-token"
-    ADMIN_EMAIL: str = "admin@tajlandia.com"
-    ADMIN_PASSWORD: str = "Admin@1234"
+    ADMIN_EMAIL: Optional[str] = None
+    ADMIN_PASSWORD: Optional[str] = None
     SESSION_EXPIRE_HOURS: int = 168  # 7 days session validity
 
     # Google Workspace Integrations (OAuth2, Maps, SMTP)

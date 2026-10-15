@@ -52,34 +52,6 @@ def init_database():
             except Exception as ae:
                 print(f"    [NOTICE] Alembic upgrade: {ae}")
 
-            # 4. Seed/verify admin@tajlandia.com in PostgreSQL
-            try:
-                from app.db.session import SessionLocal
-                from app.db.models import User
-                from app.core.config import settings
-                from app.core.security import hash_password
-                with SessionLocal() as db:
-                    admin = db.query(User).filter(User.email.ilike(settings.ADMIN_EMAIL)).first()
-                    if not admin:
-                        admin = User(
-                            email=settings.ADMIN_EMAIL.lower(),
-                            name="Admin Staff",
-                            role="super_admin",
-                            password_hash=hash_password(settings.ADMIN_PASSWORD),
-                            is_active=True
-                        )
-                        db.add(admin)
-                        db.commit()
-                        print(f"    [OK] Seeded super admin account '{settings.ADMIN_EMAIL}' in database.")
-                    else:
-                        admin.password_hash = hash_password(settings.ADMIN_PASSWORD)
-                        admin.is_active = True
-                        admin.role = "super_admin"
-                        db.commit()
-                        print(f"    [OK] Synchronized super admin password in database.")
-            except Exception as se:
-                print(f"    [NOTICE] Admin seed: {se}")
-
             return True
         except Exception as e:
             print(f"    [ATTEMPT {attempt}/{max_retries}] Database not ready yet: {e}")

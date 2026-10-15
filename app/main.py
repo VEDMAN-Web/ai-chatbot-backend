@@ -45,47 +45,13 @@ def startup_db_init():
                 ALTER TABLE users ADD COLUMN IF NOT EXISTS google_email VARCHAR(255);
                 ALTER TABLE users ADD COLUMN IF NOT EXISTS google_refresh_token TEXT;
                 ALTER TABLE users ADD COLUMN IF NOT EXISTS allowed_websites JSONB DEFAULT '[]'::jsonb;
+                ALTER TABLE users ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT 'active';
                 ALTER TABLE properties ADD COLUMN IF NOT EXISTS websites JSONB DEFAULT '[]'::jsonb;
             """))
 
         # 2. Ensure all tables (including user_sessions) exist
         Base.metadata.create_all(bind=engine)
         print("FastAPI Startup: Verified all database tables and columns.")
-
-        with SessionLocal() as db:
-            for admin_email in [settings.ADMIN_EMAIL, "admin@tajlandia.com"]:
-                clean_email = admin_email.strip().lower()
-                admin = db.query(User).filter(func.lower(User.email) == clean_email).first()
-                if not admin:
-                    admin = User(
-                        email=clean_email,
-                        name="Super Admin",
-                        role="super_admin",
-                        password_hash=hash_password(settings.ADMIN_PASSWORD),
-                        is_active=True
-                    )
-                    db.add(admin)
-                    db.commit()
-                    print(f"FastAPI Startup: Provisioned super-admin account '{clean_email}'.")
-                else:
-                    admin.password_hash = hash_password(settings.ADMIN_PASSWORD)
-                    admin.is_active = True
-                    admin.role = "super_admin"
-                    db.commit()
-                    print(f"FastAPI Startup: Updated password hash for super-admin '{clean_email}'.")
-
-            try:
-                from app.services.firestore_auth_service import add_or_update_admin_in_firestore
-                add_or_update_admin_in_firestore(
-                    email="admin@tajlandia.com",
-                    password=settings.ADMIN_PASSWORD,
-                    role="super_admin",
-                    name="Super Admin",
-                    is_active=True
-                )
-                print("FastAPI Startup: Synced admin@tajlandia.com to Firestore admin_authentication.")
-            except Exception as fe:
-                print(f"FastAPI Startup Firestore sync notice: {fe}")
     except Exception as e:
         print(f"FastAPI Startup DB Notice: {e}")
 
@@ -129,6 +95,7 @@ from app.api.v1.auth import (
     get_admin_user_details,
     update_admin_user,
     delete_admin_user,
+    block_admin_user,
     UserLoginResponse,
     UserLogoutResponse,
     AdminUserDirectoryItem
@@ -161,6 +128,8 @@ app.patch("/api/v1/users/{user_id}", response_model=AdminUserDirectoryItem, tags
 app.put("/api/v1/users/{user_id}", response_model=AdminUserDirectoryItem, tags=["Admin Directory"], include_in_schema=False)(update_admin_user)
 app.delete("/api/v1/admin/users/{user_id}", tags=["Admin Directory"], include_in_schema=False)(delete_admin_user)
 app.delete("/api/v1/users/{user_id}", tags=["Admin Directory"], include_in_schema=False)(delete_admin_user)
+app.post("/api/v1/admin/users/{user_id}/block", response_model=AdminUserDirectoryItem, tags=["Admin Directory"], include_in_schema=False)(block_admin_user)
+app.post("/api/v1/users/{user_id}/block", response_model=AdminUserDirectoryItem, tags=["Admin Directory"], include_in_schema=False)(block_admin_user)
 
 @app.get("/health", tags=["System"])
 def health_check(db: Session = Depends(get_db)):
@@ -221,6 +190,8 @@ def list_properties(
     status: Optional[str] = Query(None),
     websites: Optional[str] = Query(None, description="Comma-separated website domains or single domain"),
     site_origin: Optional[str] = Query(None, description="Tenant site origin domain"),
+    limit: Optional[int] = Query(50, ge=1, le=500, description="Max properties to return"),
+    offset: Optional[int] = Query(0, ge=0, description="Pagination offset"),
     db: Session = Depends(get_db)
 ):
     """Direct property filtering endpoint using safe SQLAlchemy query builder with website scoping."""
@@ -244,7 +215,9 @@ def list_properties(
         has_pool=has_pool,
         beach_access=beach_access,
         status=status,
-        websites=target_websites
+        websites=target_websites,
+        limit=limit or 50,
+        offset=offset or 0
     )
     results = search_properties_safe(db, params)
     

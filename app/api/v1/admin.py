@@ -13,6 +13,7 @@ from app.core.auth import (
     AuthenticatedStaff,
     require_admin_or_employee,
     require_admin_or_employee_with_sites,
+    require_admin_or_super_admin,
     require_admin_or_super_admin_with_sites,
     require_super_admin_with_sites
 )
@@ -240,7 +241,7 @@ def download_report_endpoint(
 async def execute_batch_file_endpoint(
     file: UploadFile = File(..., description="Uploaded Excel (.xlsx/.xls), CSV, PDF, or Word (.docx) file containing property list"),
     action: str = Form(..., description="Action to perform on target properties: 'delete', 'update', or 'create'"),
-    staff: AuthenticatedStaff = Depends(require_admin_or_employee),
+    staff: AuthenticatedStaff = Depends(require_admin_or_super_admin),
     db: Session = Depends(get_db)
 ):
     """
@@ -287,7 +288,7 @@ async def execute_batch_file_endpoint(
 @router.post("/operations/{operation_id}/undo")
 def undo_batch_operation_endpoint(
     operation_id: str,
-    staff: AuthenticatedStaff = Depends(require_admin_or_employee),
+    staff: AuthenticatedStaff = Depends(require_admin_or_super_admin),
     db: Session = Depends(get_db)
 ):
     """
@@ -511,12 +512,13 @@ def get_admin_property_endpoint(
 @router.post("/properties", status_code=status.HTTP_201_CREATED)
 def create_property_endpoint(
     req: PropertyCreateRequest,
-    staff: AuthenticatedStaff = Depends(require_admin_or_employee_with_sites),
+    staff: AuthenticatedStaff = Depends(require_admin_or_super_admin_with_sites),
     db: Session = Depends(get_db)
 ):
     """
     Direct REST API to create a new property listing.
     Scoped strictly to the staff member's active selected websites.
+    Restricted to Admins and Super Admins (Workers are read-only).
     Instantly saves to PostgreSQL and synchronizes with Cloud Firestore `projects` collection.
     """
     import uuid
@@ -565,12 +567,13 @@ def create_property_endpoint(
 def update_property_endpoint(
     property_id: str,
     req: PropertyUpdateRequest,
-    staff: AuthenticatedStaff = Depends(require_admin_or_employee_with_sites),
+    staff: AuthenticatedStaff = Depends(require_admin_or_super_admin_with_sites),
     db: Session = Depends(get_db)
 ):
     """
     Direct REST API to update an existing property listing.
     Strictly verifies that the property belongs to the staff member's currently selected websites.
+    Restricted to Admins and Super Admins (Workers are read-only).
     Updates fields, pricing, bedrooms, and images in PostgreSQL and Cloud Firestore.
     """
     from app.services.action_service import _execute_update_listing
@@ -634,7 +637,7 @@ def update_property_endpoint(
 def delete_property_endpoint(
     property_id: str,
     hard_delete: bool = False,
-    staff: AuthenticatedStaff = Depends(require_admin_or_employee_with_sites),
+    staff: AuthenticatedStaff = Depends(require_admin_or_super_admin_with_sites),
     db: Session = Depends(get_db)
 ):
     """
