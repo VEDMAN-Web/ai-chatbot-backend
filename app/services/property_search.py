@@ -180,9 +180,9 @@ def build_property_query(db: Session, filters: PropertyFilterParams):
     return query.order_by(Property.price_numeric_min.asc().nulls_last())
 
 
-def property_belongs_to_websites(prop: Optional[Property], target_websites: List[str]) -> bool:
+def property_belongs_to_websites(prop: Optional[Any], target_websites: List[str]) -> bool:
     """
-    Verifies if a Property record belongs to ANY of the given target_websites.
+    Verifies if a Property record or Firestore property dict belongs to ANY of the given target_websites.
     Used for verifying RBAC authorization during GET, PUT, and DELETE operations.
     """
     if not prop or not target_websites:
@@ -191,8 +191,14 @@ def property_belongs_to_websites(prop: Optional[Property], target_websites: List
     target_keys = [normalize_tenant_domain_key(w) for w in target_websites if w]
 
     prop_sites = []
-    if getattr(prop, "websites", None):
-        raw = prop.websites
+    if isinstance(prop, dict):
+        raw = prop.get("websites") or prop.get("domains") or prop.get("allowed_websites")
+        if not raw and prop.get("siteOrigin"):
+            raw = [prop["siteOrigin"]]
+    else:
+        raw = getattr(prop, "websites", None)
+
+    if raw:
         if isinstance(raw, list):
             prop_sites = [normalize_website_domain(s) for s in raw if s]
         elif isinstance(raw, str):

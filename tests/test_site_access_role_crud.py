@@ -13,11 +13,12 @@ client = TestClient(app)
 
 
 @pytest.fixture(autouse=True)
-def clean_db(monkeypatch):
-    """Setup clean test users and test properties without network ADC delays."""
+def mock_firestore_for_tests(monkeypatch):
+    """Setup test users and test properties without network ADC delays."""
     monkeypatch.setattr(settings, "ENABLE_FIRESTORE_SYNC", False)
-    monkeypatch.setattr("app.services.firestore_auth_service.get_firestore_client", lambda: None)
-    monkeypatch.setattr("app.services.firestore_service.get_firestore_client", lambda: None)
+    monkeypatch.setattr("app.services.firestore_auth_service.get_firestore_client", lambda *a, **kw: None)
+    monkeypatch.setattr("app.services.firestore_service.get_firestore_client", lambda *a, **kw: None)
+    monkeypatch.setattr("app.services.admin_batch_service.get_firestore_client", lambda *a, **kw: None)
     db = SessionLocal()
     try:
         from sqlalchemy import text

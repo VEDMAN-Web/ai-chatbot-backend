@@ -2544,44 +2544,40 @@ def _execute_admin_tool(
     # 1. Read Tool: search_properties_full
     if tool_name == "search_properties_full":
         selected_websites = getattr(staff_user, "selected_websites", None)
-        params = PropertyFilterParams(
-            location=tool_args.get("location"),
-            property_type=tool_args.get("property_type"),
-            min_price=tool_args.get("min_price"),
-            max_price=tool_args.get("max_price"),
-            bedrooms=tool_args.get("bedrooms"),
-            has_pool=tool_args.get("has_pool"),
-            status=tool_args.get("status"),
-            limit=tool_args.get("limit", 10),
-            websites=selected_websites
-        )
-        props = search_properties_safe(db, params)
-        res = [_prop_to_dict(p) for p in props]
+        res = []
+        try:
+            from app.services.firestore_service import search_properties_firestore
+            fs_props = search_properties_firestore(
+                location=tool_args.get("location"),
+                property_type=tool_args.get("property_type"),
+                min_price=float(tool_args["min_price"]) if tool_args.get("min_price") else None,
+                max_price=float(tool_args["max_price"]) if tool_args.get("max_price") else None,
+                bedrooms=tool_args.get("bedrooms"),
+                has_pool=tool_args.get("has_pool"),
+                websites=selected_websites,
+                target="admin",
+                limit=tool_args.get("limit", 10)
+            )
+            if fs_props:
+                res = [_clean_property_for_admin_tool(fp) for fp in fs_props]
+        except Exception as e:
+            logger.warning(f"Error querying Firestore in search_properties_full: {e}")
 
-        if getattr(settings, "ENABLE_FIRESTORE_SYNC", False):
-            try:
-                from app.services.firestore_service import search_properties_firestore
-                fs_props = search_properties_firestore(
-                    location=tool_args.get("location"),
-                    property_type=tool_args.get("property_type"),
-                    min_price=float(tool_args["min_price"]) if tool_args.get("min_price") else None,
-                    max_price=float(tool_args["max_price"]) if tool_args.get("max_price") else None,
-                    bedrooms=tool_args.get("bedrooms"),
-                    has_pool=tool_args.get("has_pool"),
-                    limit=tool_args.get("limit", 10)
-                )
-                if fs_props:
-                    existing_ids = {p.get("property_id") for p in res}
-                    for fp in fs_props:
-                        pid = fp.get("property_id")
-                        if selected_websites:
-                            fp_sites = fp.get("websites") or fp.get("allowed_websites")
-                            if fp_sites and not any(s in selected_websites for s in fp_sites):
-                                continue
-                        if pid and pid not in existing_ids:
-                            res.append(_clean_property_for_admin_tool(fp))
-            except Exception as e:
-                logger.warning(f"Error querying Firestore in search_properties_full: {e}")
+        # Fallback only if Firestore returned no properties (e.g. offline unit testing without GCP credentials)
+        if not res and db is not None:
+            params = PropertyFilterParams(
+                location=tool_args.get("location"),
+                property_type=tool_args.get("property_type"),
+                min_price=tool_args.get("min_price"),
+                max_price=tool_args.get("max_price"),
+                bedrooms=tool_args.get("bedrooms"),
+                has_pool=tool_args.get("has_pool"),
+                status=tool_args.get("status"),
+                limit=tool_args.get("limit", 10),
+                websites=selected_websites
+            )
+            props = search_properties_safe(db, params)
+            res = [_prop_to_dict(p) for p in props]
 
         record_audit_log(
             db=db,
@@ -2596,12 +2592,11 @@ def _execute_admin_tool(
     # 1.5 Read Tool: get_database_inventory_stats
     elif tool_name == "get_database_inventory_stats":
         fs_count = 0
-        if getattr(settings, "ENABLE_FIRESTORE_SYNC", False):
-            try:
-                from app.services.firestore_service import get_firestore_properties_count
-                fs_count = get_firestore_properties_count()
-            except Exception as e:
-                logger.warning(f"Error getting Firestore properties count in admin tool: {e}")
+        try:
+            from app.services.firestore_service import get_firestore_properties_count
+            fs_count = get_firestore_properties_count(target="admin")
+        except Exception as e:
+            logger.warning(f"Error getting Firestore properties count in admin tool: {e}")
 
         pg_count = 0
         try:
@@ -2613,7 +2608,7 @@ def _execute_admin_tool(
         props_sample = []
         try:
             from app.services.firestore_service import fetch_properties_from_firestore
-            props_sample = fetch_properties_from_firestore(limit=250, active_only=True)
+            props_sample = fetch_properties_from_firestore(limit=250, active_only=True, target="admin")
         except Exception:
             props_sample = []
 

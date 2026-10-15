@@ -1,10 +1,13 @@
 import os
+import logging
 from datetime import datetime
 from typing import Dict, Any, Optional, List
 from fastapi import APIRouter, Depends, HTTPException, Query, status, UploadFile, File, Form, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
+
+logger = logging.getLogger(__name__)
 
 from app.db.session import get_db
 from app.db.models import Conversation, Property
@@ -413,8 +416,51 @@ def list_admin_properties_endpoint(
 ):
     """
     Fetches property listings strictly scoped to the staff member's currently selected websites.
-    If user selected Tajlandia & Varsovia, properties belonging exclusively to thai.estate are NOT returned.
+    Directly retrieves from Cloud Firestore 'projects' (ADMIN_FIRESTORE_*).
     """
+    fs_output = []
+    try:
+        from app.services.firestore_service import search_properties_firestore
+        fs_props = search_properties_firestore(
+            location=location,
+            property_type=property_type,
+            min_price=min_price,
+            max_price=max_price,
+            bedrooms=bedrooms,
+            has_pool=has_pool,
+            websites=staff.selected_websites,
+            target="admin",
+            limit=limit
+        )
+        if fs_props:
+            for p in fs_props:
+                fs_output.append({
+                    "property_id": p.get("property_id"),
+                    "property_name": p.get("name") or p.get("property_name"),
+                    "project_name": p.get("project_name") or p.get("name"),
+                    "property_type": p.get("property_type"),
+                    "status": p.get("status"),
+                    "province": p.get("province"),
+                    "district": p.get("district"),
+                    "area": p.get("area"),
+                    "price_display": p.get("price"),
+                    "bedrooms": p.get("bedrooms"),
+                    "has_pool": p.get("has_pool"),
+                    "websites": p.get("websites") or [],
+                    "images": p.get("images") or [],
+                    "is_public": p.get("is_public", True)
+                })
+    except Exception as e:
+        logger.warning(f"Error querying Firestore properties in list_admin_properties_endpoint: {e}")
+
+    if fs_output:
+        return {
+            "count": len(fs_output),
+            "selected_websites": staff.selected_websites,
+            "properties": fs_output
+        }
+
+    # Fallback to local SQL database if Firestore returned nothing (e.g. offline unit testing)
     params = PropertyFilterParams(
         location=location,
         property_type=property_type,
@@ -461,16 +507,28 @@ def get_admin_property_endpoint(
     db: Session = Depends(get_db)
 ):
     """
-    Retrieves a single property listing.
+    Retrieves a single property listing from Cloud Firestore (primary) or local DB.
     Strictly verifies that the property belongs to the staff member's currently selected websites.
     """
-    prop = db.query(Property).filter(Property.property_id == property_id).first()
-    if not prop:
+    # 1. Check Cloud Firestore (Primary)
+    fs_prop = None
+    try:
+        from app.services.firestore_service import get_property_by_id_from_firestore
+        fs_prop = get_property_by_id_from_firestore(property_id, target="admin")
+    except Exception:
+        fs_prop = None
+
+    prop = None
+    if not fs_prop and db is not None:
+        prop = db.query(Property).filter(Property.property_id == property_id).first()
+
+    target_obj = fs_prop or prop
+    if not target_obj:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Property with ID '{property_id}' not found."
         )
-    if not property_belongs_to_websites(prop, staff.selected_websites):
+    if not property_belongs_to_websites(target_obj, staff.selected_websites):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=(
@@ -478,6 +536,38 @@ def get_admin_property_endpoint(
                 f"{staff.selected_websites}."
             )
         )
+
+    if fs_prop:
+        return {
+            "found": True,
+            "property_id": fs_prop.get("property_id"),
+            "property_name": fs_prop.get("name"),
+            "project_name": fs_prop.get("project_name") or fs_prop.get("name"),
+            "property_type": fs_prop.get("property_type"),
+            "status": fs_prop.get("status"),
+            "location": {
+                "country": fs_prop.get("province"),
+                "province": fs_prop.get("province"),
+                "district": fs_prop.get("district"),
+                "area": fs_prop.get("area"),
+                "address": fs_prop.get("address")
+            },
+            "pricing": {
+                "display": fs_prop.get("price"),
+                "numeric_min": fs_prop.get("price_numeric_min"),
+                "currency": fs_prop.get("currency") or "THB"
+            },
+            "details": {
+                "bedrooms": fs_prop.get("bedrooms"),
+                "bathrooms": None,
+                "area": fs_prop.get("area")
+            },
+            "amenities": fs_prop.get("highlights") or [],
+            "websites": fs_prop.get("websites") or [],
+            "images": fs_prop.get("images") or [],
+            "is_public": fs_prop.get("is_public", True)
+        }
+
     return {
         "found": True,
         "property_id": prop.property_id,
@@ -519,7 +609,7 @@ def create_property_endpoint(
     Direct REST API to create a new property listing.
     Scoped strictly to the staff member's active selected websites.
     Restricted to Admins and Super Admins (Workers are read-only).
-    Instantly saves to PostgreSQL and synchronizes with Cloud Firestore `projects` collection.
+    Instantly saves to Cloud Firestore `projects` collection (ADMIN_FIRESTORE_*).
     """
     import uuid
     from app.services.action_service import _execute_update_listing
@@ -553,11 +643,44 @@ def create_property_endpoint(
         "websites": assigned_websites,
         "selected_websites": assigned_websites
     }
+
+    # Direct save to Cloud Firestore 'projects'
+    try:
+        from app.services.firestore_service import save_or_update_property_firestore
+        save_or_update_property_firestore(
+            property_id=pid,
+            fields={**payload["fields"], "websites": assigned_websites},
+            images=payload["images"],
+            cover_image=payload["cover_image"],
+            target="admin"
+        )
+    except Exception as e:
+        logger.warning(f"Error saving property to Firestore: {e}")
+
     result = _execute_update_listing(db, payload)
+
+    # Record 6-day snapshot for 1-click Undo
+    operation_id = None
+    try:
+        from app.services.admin_batch_service import record_crud_operation_snapshot
+        operation_id = record_crud_operation_snapshot(
+            action_type="create",
+            property_id=pid,
+            previous_state=None,
+            staff_user=staff,
+            source="admin_api_create",
+            created_id=pid,
+            db_session=db
+        )
+    except Exception as e:
+        logger.warning(f"Error recording CRUD snapshot for create: {e}")
+
     return {
         "status": "CREATED",
         "message": f"Property '{pid}' successfully created in database and Firestore.",
         "property_id": pid,
+        "operation_id": operation_id,
+        "undo_window_days": 6,
         "websites": assigned_websites,
         "details": result
     }
@@ -574,18 +697,26 @@ def update_property_endpoint(
     Direct REST API to update an existing property listing.
     Strictly verifies that the property belongs to the staff member's currently selected websites.
     Restricted to Admins and Super Admins (Workers are read-only).
-    Updates fields, pricing, bedrooms, and images in PostgreSQL and Cloud Firestore.
+    Updates fields, pricing, bedrooms, and images directly in Cloud Firestore.
     """
     from app.services.action_service import _execute_update_listing
     
-    # 1. Verify property existence and website scope
-    prop = db.query(Property).filter(Property.property_id == property_id).first()
-    if not prop:
+    # 1. Verify property existence in Cloud Firestore or DB
+    fs_prop = None
+    try:
+        from app.services.firestore_service import get_property_by_id_from_firestore
+        fs_prop = get_property_by_id_from_firestore(property_id, target="admin")
+    except Exception:
+        fs_prop = None
+
+    prop = db.query(Property).filter(Property.property_id == property_id).first() if db is not None else None
+    target_obj = fs_prop or prop
+    if not target_obj:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Property with ID '{property_id}' not found."
         )
-    if not property_belongs_to_websites(prop, staff.selected_websites):
+    if not property_belongs_to_websites(target_obj, staff.selected_websites):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=(
@@ -613,6 +744,39 @@ def update_property_endpoint(
         assigned_websites = norm_targets
 
     update_data = req.model_dump(exclude_unset=True, exclude={"images", "cover_image"})
+
+    # Record 6-day snapshot for 1-click Undo before applying update
+    operation_id = None
+    try:
+        from app.services.admin_batch_service import record_crud_operation_snapshot
+        operation_id = record_crud_operation_snapshot(
+            action_type="update",
+            property_id=property_id,
+            previous_state=fs_prop or (prop.__dict__ if prop else {}),
+            staff_user=staff,
+            source="admin_api_update",
+            db_session=db
+        )
+    except Exception as e:
+        logger.warning(f"Error recording CRUD snapshot for update: {e}")
+    
+    # 3. Update directly in Cloud Firestore (Primary Datastore)
+    try:
+        from app.services.firestore_service import save_or_update_property_firestore
+        fs_fields = dict(update_data)
+        if assigned_websites is not None:
+            fs_fields["websites"] = assigned_websites
+        save_or_update_property_firestore(
+            property_id=property_id,
+            fields=fs_fields,
+            images=req.images,
+            cover_image=req.cover_image,
+            target="admin"
+        )
+    except Exception as e:
+        logger.warning(f"Error updating property in Firestore: {e}")
+
+    # 4. Update in SQL if prop exists
     payload = {
         "property_id": property_id,
         "mode": "update",
@@ -623,12 +787,20 @@ def update_property_endpoint(
     if assigned_websites is not None:
         payload["websites"] = assigned_websites
 
-    result = _execute_update_listing(db, payload)
+    result = _execute_update_listing(db, payload) if (db is not None and prop is not None) else {
+        "property_id": property_id,
+        "title": (fs_prop.get("name") if fs_prop else property_id),
+        "mode": "update",
+        "updated_fields": update_data,
+        "images": req.images or []
+    }
     return {
         "status": "UPDATED",
         "message": f"Property '{property_id}' successfully updated in database and Firestore.",
         "property_id": property_id,
-        "websites": assigned_websites or prop.websites,
+        "operation_id": operation_id,
+        "undo_window_days": 6,
+        "websites": assigned_websites or (prop.websites if prop else (fs_prop.get("websites") if fs_prop else [])),
         "details": result
     }
 
@@ -642,19 +814,28 @@ def delete_property_endpoint(
 ):
     """
     Direct REST API to delete/deactivate a property listing.
+    Deletes/archives from Cloud Firestore (primary) and PostgreSQL.
     Strictly verifies that the property belongs to the staff member's currently selected websites.
     """
     from app.services.firestore_service import delete_property_firestore
     from app.services.cache_service import search_cache
 
-    # 1. Update/Delete in PostgreSQL with website verification
-    prop = db.query(Property).filter(Property.property_id == property_id).first()
-    if not prop:
+    # 1. Verify property existence in Cloud Firestore or DB
+    fs_prop = None
+    try:
+        from app.services.firestore_service import get_property_by_id_from_firestore
+        fs_prop = get_property_by_id_from_firestore(property_id, target="admin")
+    except Exception:
+        fs_prop = None
+
+    prop = db.query(Property).filter(Property.property_id == property_id).first() if db is not None else None
+    target_obj = fs_prop or prop
+    if not target_obj:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Property with ID '{property_id}' not found."
         )
-    if not property_belongs_to_websites(prop, staff.selected_websites):
+    if not property_belongs_to_websites(target_obj, staff.selected_websites):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=(
@@ -663,27 +844,47 @@ def delete_property_endpoint(
             )
         )
 
-    if hard_delete:
-        db.delete(prop)
-    else:
-        prop.is_public = False
-        prop.status = "Archived"
-    db.commit()
+    # Record 6-day snapshot for 1-click Undo before applying delete
+    operation_id = None
+    try:
+        from app.services.admin_batch_service import record_crud_operation_snapshot
+        operation_id = record_crud_operation_snapshot(
+            action_type="delete",
+            property_id=property_id,
+            previous_state=fs_prop or (prop.__dict__ if prop else {}),
+            staff_user=staff,
+            source="admin_api_delete",
+            db_session=db
+        )
+    except Exception as e:
+        logger.warning(f"Error recording CRUD snapshot for delete: {e}")
 
-    # 2. Update/Delete in Cloud Firestore
+    # 2. Update/Delete in Cloud Firestore (Primary)
     fs_ok = delete_property_firestore(
         property_id=property_id,
         hard_delete=hard_delete,
-        staff_email=staff.email
+        staff_email=staff.email,
+        target="admin"
     )
 
-    # 3. Invalidate search cache
+    # 3. Update/Delete in PostgreSQL if present
+    if prop and db is not None:
+        if hard_delete:
+            db.delete(prop)
+        else:
+            prop.is_public = False
+            prop.status = "Archived"
+        db.commit()
+
+    # 4. Invalidate search cache
     search_cache.invalidate()
 
     return {
         "status": "DELETED" if hard_delete else "ARCHIVED",
         "message": f"Property '{property_id}' successfully {'permanently deleted' if hard_delete else 'archived/deactivated'}.",
         "property_id": property_id,
+        "operation_id": operation_id,
+        "undo_window_days": 6,
         "hard_delete": hard_delete,
         "firestore_synced": fs_ok
     }

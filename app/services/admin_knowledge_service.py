@@ -21,11 +21,27 @@ def get_property_knowledge(db: Session, property_id: str) -> Optional[Dict[str, 
     if "PHU" in clean_id:
         id_aliases.add(clean_id.replace("PHU", "PHK"))
 
-    # 1. Query Property and PropertySpec from DB
-    prop = db.query(Property).filter(Property.property_id.in_(list(id_aliases))).first()
+    # 1. Query property from Cloud Firestore (primary datastore)
+    fs_prop = None
+    try:
+        from app.services.firestore_service import get_property_by_id_from_firestore
+        for alias in id_aliases:
+            fs_prop = get_property_by_id_from_firestore(alias, target="admin")
+            if fs_prop:
+                break
+    except Exception:
+        fs_prop = None
+
+    # 1.5 Query Property and PropertySpec from DB (fallback / specs store)
+    prop = None
     spec = None
-    if prop:
-        spec = db.query(PropertySpec).filter(PropertySpec.property_id == prop.property_id).first()
+    if db is not None:
+        try:
+            prop = db.query(Property).filter(Property.property_id.in_(list(id_aliases))).first()
+            if prop:
+                spec = db.query(PropertySpec).filter(PropertySpec.property_id == prop.property_id).first()
+        except Exception:
+            pass
 
     # 2. Query internal JSON specs
     json_spec = {}
@@ -41,7 +57,7 @@ def get_property_knowledge(db: Session, property_id: str) -> Optional[Dict[str, 
         except Exception:
             pass
 
-    if not prop and not json_spec:
+    if not fs_prop and not prop and not json_spec:
         return None
 
     # Merge specs
@@ -59,11 +75,16 @@ def get_property_knowledge(db: Session, property_id: str) -> Optional[Dict[str, 
     arch_style = (spec.architectural_style if spec and spec.architectural_style else merged_specs.get("architectural_style")) or "N/A"
     internal_notes = (spec.internal_notes if spec and spec.internal_notes else json_spec.get("internal_notes")) or "No private notes available."
 
+    prop_id_val = (fs_prop.get("property_id") if fs_prop else None) or (prop.property_id if prop else json_spec.get("property_id"))
+    prop_name_val = (fs_prop.get("name") if fs_prop else None) or (prop.property_name if prop else json_spec.get("property_name"))
+    prop_status = (fs_prop.get("status") if fs_prop else None) or (prop.status if prop else "Available")
+    prop_loc = (fs_prop.get("location") if fs_prop else None) or (f"{prop.district or ''}, {prop.province or ''}".strip(", ") if prop else "Thailand")
+
     return {
-        "property_id": prop.property_id if prop else json_spec.get("property_id"),
-        "property_name": prop.property_name if prop else json_spec.get("property_name"),
-        "status": prop.status if prop else "Available",
-        "location": f"{prop.district or ''}, {prop.province or ''}".strip(", ") if prop else "Thailand",
+        "property_id": prop_id_val,
+        "property_name": prop_name_val,
+        "status": prop_status,
+        "location": prop_loc,
         "specifications": {
             "roof_material": roof_material,
             "roof_colour": roof_colour,

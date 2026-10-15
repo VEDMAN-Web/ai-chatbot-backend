@@ -8,12 +8,13 @@ from app.core.security import hash_password
 client = TestClient(app)
 
 @pytest.fixture(autouse=True)
-def clean_db(monkeypatch):
-    """Setup clean test environment without ADC delays."""
+def mock_firestore_for_tests(monkeypatch):
+    """Disable live Firestore network calls during fast local test execution."""
     from app.core.config import settings
     monkeypatch.setattr(settings, "ENABLE_FIRESTORE_SYNC", False)
-    monkeypatch.setattr("app.services.firestore_auth_service.get_firestore_client", lambda: None)
-    monkeypatch.setattr("app.services.firestore_service.get_firestore_client", lambda: None)
+    monkeypatch.setattr("app.services.firestore_auth_service.get_firestore_client", lambda *a, **kw: None)
+    monkeypatch.setattr("app.services.firestore_service.get_firestore_client", lambda *a, **kw: None)
+    monkeypatch.setattr("app.services.admin_batch_service.get_firestore_client", lambda *a, **kw: None)
     yield
 
 
