@@ -16,6 +16,11 @@ jobs:
         ports: ["5432:5432"]
         options: >-
           --health-cmd "pg_isready -U ci" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgresql://ci:ci@localhost:5432/ci
+      ENABLE_FIRESTORE_SYNC: "false"
+      OPENAI_API_KEY: ci-dummy
+      ANTHROPIC_API_KEY: ci-dummy
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -23,12 +28,17 @@ jobs:
           python-version: "3.11"
           cache: pip
       - run: pip install -r requirements.txt pytest
+      - name: Create database schema (same as run.py)
+        run: |
+          python - <<'PY'
+          import sqlalchemy as sa
+          from app.db.session import engine, Base
+          import app.db.models
+          with engine.begin() as c:
+              c.execute(sa.text("CREATE EXTENSION IF NOT EXISTS vector"))
+          Base.metadata.create_all(bind=engine)
+          PY
       - run: python -m pytest -q tests
-        env:
-          DATABASE_URL: postgresql://ci:ci@localhost:5432/ci
-          ENABLE_FIRESTORE_SYNC: "false"
-          OPENAI_API_KEY: ci-dummy
-          ANTHROPIC_API_KEY: ci-dummy
   docker-build:
     runs-on: ubuntu-latest
     steps:
