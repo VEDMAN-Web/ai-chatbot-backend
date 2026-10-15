@@ -46,6 +46,9 @@ tests/*
 !tests/test_admin_auth_and_audit_apis.py
 !tests/test_anti_pressure_and_admin_validation.py
 !tests/test_site_access_role_crud.py
+!tests/test_role_hierarchy_and_workers.py
+!tests/test_dual_database_and_firestore.py
+!tests/test_rich_recommendations_and_followups.py
 *.cover
 
 # 3. Python & Virtual Environments

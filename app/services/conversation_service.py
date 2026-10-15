@@ -18,7 +18,12 @@ def get_or_create_conversation(
     clean_site_origin = (site_origin or getattr(settings, "SITE_ORIGIN", "varsoviaestate.com")).strip()
 
     # 1. Fetch from Firestore if enabled
-    if getattr(settings, "ENABLE_FIRESTORE_SYNC", False):
+    sync_enabled = (
+        settings.get_admin_enable_firestore_sync()
+        if agent_type == "admin"
+        else settings.get_user_enable_firestore_sync()
+    )
+    if sync_enabled:
         try:
             from app.services.firestore_service import get_or_create_conversation_firestore
             return get_or_create_conversation_firestore(
@@ -66,7 +71,13 @@ def append_conversation_turn(
     from app.core.config import settings
 
     # Sync to Firestore conversations collection
-    if getattr(settings, "ENABLE_FIRESTORE_SYNC", False):
+    c_agent_type = getattr(conversation, "agent_type", "public")
+    sync_enabled = (
+        settings.get_admin_enable_firestore_sync()
+        if c_agent_type == "admin"
+        else settings.get_user_enable_firestore_sync()
+    )
+    if sync_enabled:
         try:
             from app.services.firestore_service import append_conversation_turn_firestore
             append_conversation_turn_firestore(

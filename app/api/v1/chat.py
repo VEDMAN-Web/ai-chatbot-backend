@@ -5,10 +5,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse, FileResponse
 from sqlalchemy.orm import Session
 from pydantic import BaseModel, Field, EmailStr, field_validator
-from typing import Optional, List, Dict, Any
 import io
+from typing import Optional, List, Dict, Any
 from app.core.config import settings
-from app.db.session import get_db
+from app.db.session import get_user_db as get_db
 from app.services.conversation_service import get_or_create_conversation, append_conversation_turn
 from app.services.public_agent import public_agent, format_property_card
 from app.services.lead_service import record_or_update_lead

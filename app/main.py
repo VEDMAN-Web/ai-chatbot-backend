@@ -6,7 +6,7 @@ from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from app.core.config import settings
-from app.db.session import get_db
+from app.db.session import get_db, get_admin_db, get_user_db
 from app.services.property_search import PropertyFilterParams, search_properties_safe, get_property_by_id, property_belongs_to_websites
 from app.core.tenant import normalize_website_list
 from app.db.models import Property
@@ -29,29 +29,30 @@ if os.path.exists(static_dir):
 
 @app.on_event("startup")
 def startup_db_init():
-    """Ensure all PostgreSQL tables and extensions exist on boot and seed admin user."""
+    """Ensure all PostgreSQL tables and extensions exist on boot for both admin and user databases."""
     try:
         import sqlalchemy as sa
-        from app.db.session import engine, Base, SessionLocal
+        from app.db.session import admin_engine, user_engine, Base
         import app.db.models  # noqa
-        from app.db.models import User
-        from app.core.security import hash_password
 
-        # 1. Safe DDL synchronization for existing users & properties tables
-        with engine.begin() as conn:
-            conn.execute(sa.text("""
-                ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE;
-                ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash VARCHAR(255);
-                ALTER TABLE users ADD COLUMN IF NOT EXISTS google_email VARCHAR(255);
-                ALTER TABLE users ADD COLUMN IF NOT EXISTS google_refresh_token TEXT;
-                ALTER TABLE users ADD COLUMN IF NOT EXISTS allowed_websites JSONB DEFAULT '[]'::jsonb;
-                ALTER TABLE users ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT 'active';
-                ALTER TABLE properties ADD COLUMN IF NOT EXISTS websites JSONB DEFAULT '[]'::jsonb;
-            """))
-
-        # 2. Ensure all tables (including user_sessions) exist
-        Base.metadata.create_all(bind=engine)
-        print("FastAPI Startup: Verified all database tables and columns.")
+        # Safe DDL synchronization for existing users & properties tables across both database instances
+        engines_to_verify = {admin_engine, user_engine}
+        for eng in engines_to_verify:
+            try:
+                with eng.begin() as conn:
+                    conn.execute(sa.text("""
+                        ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE;
+                        ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash VARCHAR(255);
+                        ALTER TABLE users ADD COLUMN IF NOT EXISTS google_email VARCHAR(255);
+                        ALTER TABLE users ADD COLUMN IF NOT EXISTS google_refresh_token TEXT;
+                        ALTER TABLE users ADD COLUMN IF NOT EXISTS allowed_websites JSONB DEFAULT '[]'::jsonb;
+                        ALTER TABLE users ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT 'active';
+                        ALTER TABLE properties ADD COLUMN IF NOT EXISTS websites JSONB DEFAULT '[]'::jsonb;
+                    """))
+                Base.metadata.create_all(bind=eng)
+            except Exception as eng_e:
+                print(f"Startup notice for engine {eng}: {eng_e}")
+        print("FastAPI Startup: Verified all admin and user database tables and columns.")
     except Exception as e:
         print(f"FastAPI Startup DB Notice: {e}")
 
@@ -132,12 +133,20 @@ app.post("/api/v1/admin/users/{user_id}/block", response_model=AdminUserDirector
 app.post("/api/v1/users/{user_id}/block", response_model=AdminUserDirectoryItem, tags=["Admin Directory"], include_in_schema=False)(block_admin_user)
 
 @app.get("/health", tags=["System"])
-def health_check(db: Session = Depends(get_db)):
-    """System health check, PostgreSQL, and Firestore connection test."""
+def health_check(
+    admin_db: Session = Depends(get_admin_db),
+    user_db: Session = Depends(get_user_db)
+):
+    """System health check, PostgreSQL (admin and user instances), and Firestore connection test."""
     try:
-        count = db.query(Property).count()
+        admin_count = admin_db.query(Property).count()
+        user_count = user_db.query(Property).count()
         fs_health = {"connected": False}
-        if getattr(settings, "ENABLE_FIRESTORE_SYNC", False):
+        if (
+            getattr(settings, "ENABLE_FIRESTORE_SYNC", False)
+            or settings.get_admin_enable_firestore_sync()
+            or settings.get_user_enable_firestore_sync()
+        ):
             try:
                 from app.services.firestore_service import check_firestore_health
                 fs_health = check_firestore_health()
@@ -148,13 +157,15 @@ def health_check(db: Session = Depends(get_db)):
             "status": "healthy",
             "environment": settings.ENVIRONMENT,
             "database": "connected",
-            "total_properties": count,
+            "admin_database": {"connected": True, "properties_count": admin_count},
+            "user_database": {"connected": True, "properties_count": user_count},
+            "total_properties": user_count or admin_count,
             "firestore": fs_health
         }
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Database connection failed."
+            detail=f"Database connection failed: {e}"
         )
 
 @app.get("/api/v1/branding", tags=["System"])
@@ -192,7 +203,7 @@ def list_properties(
     site_origin: Optional[str] = Query(None, description="Tenant site origin domain"),
     limit: Optional[int] = Query(50, ge=1, le=500, description="Max properties to return"),
     offset: Optional[int] = Query(0, ge=0, description="Pagination offset"),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_user_db)
 ):
     """Direct property filtering endpoint using safe SQLAlchemy query builder with website scoping."""
     raw_sites = (
@@ -248,7 +259,7 @@ def get_property(
     request: Request,
     websites: Optional[str] = Query(None, description="Optional website filter"),
     site_origin: Optional[str] = Query(None, description="Tenant site origin domain"),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_user_db)
 ):
     """Lookup property by exact Property ID with optional website scope check."""
     raw_sites = (
