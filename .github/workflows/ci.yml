@@ -1,0 +1,36 @@
+name: Backend CI
+on:
+  pull_request:
+  push:
+    branches: [staging]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg15
+        env:
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: ci
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U ci" --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt pytest
+      - run: python -m pytest -q tests
+        env:
+          DATABASE_URL: postgresql://ci:ci@localhost:5432/ci
+          ENABLE_FIRESTORE_SYNC: "false"
+          OPENAI_API_KEY: ci-dummy
+          ANTHROPIC_API_KEY: ci-dummy
+  docker-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t chatbot-backend:ci .
