@@ -62,6 +62,10 @@ class PropertyCard(BaseModel):
     images: List[str] = Field(default_factory=list, example=["https://tajlandia.com/api/img?..."])
     detail_page_url: str = Field(..., example="https://tajlandia.com/oferty/phuket/aileen-residence-villas")
     highlights: List[str] = Field(default_factory=list, example=["54 exclusive pool villas", "Completion Q4 2027"])
+    latitude: Optional[float] = Field(None, example=7.9519)
+    longitude: Optional[float] = Field(None, example=98.3381)
+    maps_url: Optional[str] = Field(None, example="https://www.google.com/maps/search/?api=1&query=7.9519,98.3381")
+    maps_embed_url: Optional[str] = Field(None)
 
 class PublicChatResponse(BaseModel):
     type: str = Field(..., example="property_cards", description="Response type: 'property_cards', 'text', or 'brochure'")
