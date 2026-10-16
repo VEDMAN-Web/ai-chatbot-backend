@@ -1570,7 +1570,8 @@ class PublicAgentService:
                 limit=6
             )
             seen_ids = get_session_seen_property_ids(conversation)
-            matched_cards = search_properties_unified(db, params, limit=6, exclude_property_ids=seen_ids)
+            # Do not exclude seen IDs on a fresh tool search — that caused unrelated new cards
+            matched_cards = search_properties_unified(db, params, limit=6, exclude_property_ids=None)
             if not matched_cards and not query_term:
                 has_strict_criteria = bool(args.get("bedrooms") or args.get("min_price") or args.get("max_price"))
                 if not has_strict_criteria:
@@ -1578,7 +1579,7 @@ class PublicAgentService:
                         property_type=p_type,
                         limit=4
                     )
-                    matched_cards = search_properties_unified(db, fallback_params, limit=4, exclude_property_ids=seen_ids)
+                    matched_cards = search_properties_unified(db, fallback_params, limit=4, exclude_property_ids=None)
                     if not matched_cards:
                         matched_cards = search_properties_unified(db, PropertyFilterParams(limit=4), limit=4)
 
@@ -2388,6 +2389,7 @@ class PublicAgentService:
     ) -> Dict[str, Any]:
         """Fetches property details directly from database without LLM tokens."""
         pid = args.get("property_id") or args.get("property_name")
+        pname = args.get("property_name") or pid
         card = None
         p_name = None
         p_id = None
@@ -2400,12 +2402,16 @@ class PublicAgentService:
         p_high = []
         p_desc = ""
 
-        # 1. Primary Datastore: Cloud Firestore
-        if getattr(settings, "ENABLE_FIRESTORE_SYNC", True) and pid:
+        # 1. Primary Datastore: Cloud Firestore (supports ID and human property names)
+        if getattr(settings, "ENABLE_FIRESTORE_SYNC", True) and (pid or pname):
             from app.services.firestore_service import get_property_by_id_from_firestore
-            fs_prop = get_property_by_id_from_firestore(str(pid))
-            if not fs_prop and args.get("property_name"):
-                fs_prop = get_property_by_id_from_firestore(str(args["property_name"]))
+            fs_prop = None
+            for candidate in [pid, pname]:
+                if not candidate:
+                    continue
+                fs_prop = get_property_by_id_from_firestore(str(candidate))
+                if fs_prop:
+                    break
             if fs_prop:
                 card = fs_prop
                 p_name = fs_prop.get("name")
@@ -2438,15 +2444,45 @@ class PublicAgentService:
                 p_desc = prop.description or ""
 
         if card:
-            if language == "th":
+            focus_q = (args.get("focus_question") or user_message or "").lower()
+            has_pool = bool(card.get("has_pool")) if isinstance(card, dict) else False
+            beach = bool(card.get("beach_access")) if isinstance(card, dict) else False
+
+            # Focused amenity/price answers from verified fields only — never invent
+            if any(k in focus_q for k in ["pool", "swimming", "basen", "สระ"]):
+                if language == "th":
+                    reply_text = (
+                        f"**{p_name}**: {'มีสระว่ายน้ำส่วนตัวในข้อมูลที่ตรวจสอบแล้วครับ' if has_pool else 'ในฐานข้อมูลที่ตรวจสอบแล้วยังไม่มีข้อมูลว่ามีสระว่ายน้ำส่วนตัว'}\n\n"
+                        f"• **ราคา:** {p_price}\n• **ทำเล:** {p_loc}\n• **ห้องนอน:** {p_beds}"
+                    )
+                elif language == "pl":
+                    reply_text = (
+                        f"**{p_name}**: {'Tak — według zweryfikowanych danych posiada prywatny basen.' if has_pool else 'W zweryfikowanej bazie nie ma potwierdzenia prywatnego basenu.'}\n\n"
+                        f"• **Cena:** {p_price}\n• **Lokalizacja:** {p_loc}\n• **Sypialnie:** {p_beds}"
+                    )
+                else:
+                    reply_text = (
+                        f"**{p_name}**: {'Yes — verified data confirms a private pool.' if has_pool else 'Verified data does not confirm a private pool for this listing.'}\n\n"
+                        f"• **Price:** {p_price}\n• **Location:** {p_loc}\n• **Bedrooms:** {p_beds}"
+                    )
+            elif any(k in focus_q for k in ["price", "cost", "how much", "cena", "ราคา"]):
+                if language == "th":
+                    reply_text = f"**{p_name}** มีราคาในฐานข้อมูลที่ตรวจสอบแล้ว: **{p_price}**\n\n• **ทำเล:** {p_loc}\n• **ห้องนอน / พื้นที่:** {p_beds} | {p_area}"
+                elif language == "pl":
+                    reply_text = f"**{p_name}** — zweryfikowana cena: **{p_price}**\n\n• **Lokalizacja:** {p_loc}\n• **Sypialnie / Powierzchnia:** {p_beds} | {p_area}"
+                else:
+                    reply_text = f"**{p_name}** — verified price: **{p_price}**\n\n• **Location:** {p_loc}\n• **Bedrooms / Area:** {p_beds} | {p_area}"
+            elif language == "th":
                 reply_text = (
                     f"ข้อมูลจำเพาะที่ผ่านการตรวจสอบสำหรับ **{p_name}** ({p_id}):\n\n"
                     f"• **ทำเล:** {p_loc}\n"
                     f"• **ราคา:** {p_price}\n"
                     f"• **ห้องนอน / พื้นที่ใช้สอย:** {p_beds} | {p_area}\n"
                     f"• **สถานะ:** {p_status}\n"
+                    f"• **สระว่ายน้ำ:** {'มี' if has_pool else 'ไม่ระบุในฐานข้อมูล'}\n"
+                    f"• **ใกล้ชายหาด:** {'มี' if beach else 'ไม่ระบุในฐานข้อมูล'}\n"
                     f"• **รูปแบบกรรมสิทธิ์:** {p_owner}\n"
-                    f"• **จุดเด่น:** {', '.join(p_high) if p_high else 'มาตรฐานการก่อสร้างคุณภาพ ทำเลสะดวกสบาย'}\n\n"
+                    f"• **จุดเด่น:** {', '.join(p_high) if p_high else 'Not documented in verified database'}\n\n"
                     f"{p_desc}\n\n"
                     f"คุณต้องการดูผังอาคาร (Floor Plan) เพิ่มเติม หรือต้องการให้นัดหมายเข้าชมโครงการไหมครับ?"
                 )
@@ -2457,8 +2493,10 @@ class PublicAgentService:
                     f"• **Cena:** {p_price}\n"
                     f"• **Sypialnie / Powierzchnia:** {p_beds} | {p_area}\n"
                     f"• **Status:** {p_status}\n"
+                    f"• **Prywatny basen:** {'Tak' if has_pool else 'Brak w bazie'}\n"
+                    f"• **Dostęp do plaży:** {'Tak' if beach else 'Brak w bazie'}\n"
                     f"• **Forma własności:** {p_owner}\n"
-                    f"• **Główne atuty:** {', '.join(p_high) if p_high else 'Wysoki standard wykończenia, dogodna lokalizacja'}\n\n"
+                    f"• **Główne atuty:** {', '.join(p_high) if p_high else 'Brak w bazie'}\n\n"
                     f"{p_desc}\n\n"
                     f"Czy chcesz uzyskać więcej szczegółów na temat rzutów pięter lub umówić termin prezentacji z naszym doradcą?"
                 )
@@ -2469,8 +2507,10 @@ class PublicAgentService:
                     f"• **Price:** {p_price}\n"
                     f"• **Bedrooms / Area:** {p_beds} | {p_area}\n"
                     f"• **Status:** {p_status}\n"
+                    f"• **Private pool:** {'Yes' if has_pool else 'Not documented in verified database'}\n"
+                    f"• **Beach access:** {'Yes' if beach else 'Not documented in verified database'}\n"
                     f"• **Ownership:** {p_owner}\n"
-                    f"• **Key Highlights:** {', '.join(p_high) if p_high else 'Quality finishes, convenient location'}\n\n"
+                    f"• **Key Highlights:** {', '.join(p_high) if p_high else 'Not documented in verified database'}\n\n"
                     f"{p_desc}\n\n"
                     f"Would you like more details regarding floor plans or assistance scheduling a viewing tour?"
                 )
@@ -2637,7 +2677,7 @@ class PublicAgentService:
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt}
                     ],
-                    temperature=0.2,
+                    temperature=0.0,
                     max_tokens=500
                 )
                 reply_text = resp.choices[0].message.content or ""
@@ -3227,7 +3267,9 @@ class PublicAgentService:
                 offset=0,
                 limit=4
             )
-            cards = search_properties_unified(db, params, limit=4, exclude_property_ids=seen_ids)
+            # Fresh searches must NOT exclude previously seen IDs — exclusion is only for "show more".
+            # Excluding on every search caused unrelated new listings and felt like hallucination.
+            cards = search_properties_unified(db, params, limit=4, exclude_property_ids=None)
 
             # Smart fresh criteria recovery: If merged search yielded 0 results because of stale constraints
             # from earlier turns, retry with ONLY the fresh criteria specified in this turn.
@@ -3248,7 +3290,7 @@ class PublicAgentService:
                     offset=0,
                     limit=4
                 )
-                matched_fresh = search_properties_unified(db, fresh_params, limit=4, exclude_property_ids=seen_ids)
+                matched_fresh = search_properties_unified(db, fresh_params, limit=4, exclude_property_ids=None)
                 if matched_fresh:
                     cards = matched_fresh
                     loc, p_type, bedrooms, max_p, has_pool = fresh_loc, fresh_type, fresh_bed, fresh_max_p, fresh_pool
@@ -3272,7 +3314,7 @@ class PublicAgentService:
                     offset=0,
                     limit=4
                 )
-                broad_matched = search_properties_unified(db, broad_params, limit=4, exclude_property_ids=seen_ids)
+                broad_matched = search_properties_unified(db, broad_params, limit=4, exclude_property_ids=None)
                 for bm in broad_matched:
                     if bm.get("property_id") not in [c.get("property_id") for c in cards]:
                         cards.append(bm)
@@ -4085,7 +4127,7 @@ class PublicAgentService:
             has_pool=has_pool,
             limit=4
         )
-        cards = search_properties_unified(db, params, limit=4, exclude_property_ids=seen_ids)
+        cards = search_properties_unified(db, params, limit=4, exclude_property_ids=None)
 
         # Smart fresh criteria recovery: If merged search yielded 0 results because of stale constraints
         # from earlier turns, retry with ONLY the fresh criteria specified in this turn.
@@ -4105,7 +4147,7 @@ class PublicAgentService:
                 has_pool=fresh_pool,
                 limit=4
             )
-            matched_fresh = search_properties_unified(db, fresh_params, limit=4, exclude_property_ids=seen_ids)
+            matched_fresh = search_properties_unified(db, fresh_params, limit=4, exclude_property_ids=None)
             if matched_fresh:
                 cards = matched_fresh
                 loc, p_type, bed, max_p, has_pool = fresh_loc, fresh_type, fresh_bed, fresh_max_p, fresh_pool

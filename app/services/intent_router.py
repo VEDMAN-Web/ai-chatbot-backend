@@ -50,10 +50,14 @@ DETAILS_PATTERNS = [
     r"(?:tell\s+me\s+more\s+about|details\s+for|specs\s+for|show\s+me|info\s+on)\s+(PROP-[A-Z0-9\-]+)",
     r"(?:tell\s+me\s+more\s+about|details\s+for|specs\s+for)\s+(?:the\s+)?(first|second|third|1st|2nd|3rd)\s+(?:one|property|villa|condo)",
     r"^(?:the\s+)?(first|second|third|1st|2nd|3rd)\s+one$",
+    # Named property follow-ups: "tell me more about ParQ Villa Phuket"
+    r"(?:tell\s+me\s+more\s+about|tell\s+me\s+about|more\s+(?:details|info)\s+(?:about|on|for)|details\s+(?:about|for|on)|specs\s+for|info\s+(?:about|on))\s+(?:the\s+)?([a-z0-9][\w\s\-'&.]{2,80}?)\s*$",
     r"(?:pokaż|pokaz|szczegóły|szczegoly|informacje\s+o)\s+(PROP-[A-Z0-9\-]+)",
+    r"(?:pokaż|pokaz|szczegóły|szczegoly|więcej\s+o|opowiedz\s+o|powiedz\s+więcej\s+o)\s+(?:tę|ta|tą|o\s+)?([a-ząćęłńóśźż0-9][\w\s\-'&.]{2,80}?)\s*$",
     r"(?:pokaż|pokaz|szczegóły|szczegoly)\s+(?:tę|ta|tą)\s+(?:pierwszą|druga|trzecią|1|2|3)",
     r"^(?:ta\s+)?(pierwsza|druga|trzecia)\s+oferta$",
     r"(?:ดูรายละเอียด|ขอรายละเอียด|ข้อมูล)\s+(PROP-[A-Z0-9\-]+)",
+    r"(?:ดูรายละเอียด|ขอข้อมูล|บอกเพิ่มเติมเกี่ยวกับ|รายละเอียด)\s+([a-z0-9ก-๙][\w\s\-'&.ก-๙]{2,80}?)\s*$",
     r"(?:ดูรายละเอียด|ขอข้อมูล|ดู)\s+(?:อันแรก|อันที่สอง|อันที่สาม|1|2|3)",
     r"^(?:อันแรก|อันที่สอง|อันที่สาม)$"
 ]
@@ -168,28 +172,36 @@ def detect_deterministic_intent(
     # 1.2 PDF / Brochure request — detect and extract target property ID
     for pat in PDF_EXPORT_PATTERNS:
         if re.search(pat, msg_low):
-            # Try to extract explicit property ID from message (e.g. "brochure for PROP-PHK-001")
+            # Try to extract explicit property ID from message
             pid_match = re.search(r"(prop-[a-z0-9\-]+)", msg_low)
             prop_id = pid_match.group(1).upper() if pid_match else None
+            prop_name = None
 
-            # Fallback: resolve ordinal references ("brochure for the first one")
+            # Fallback: resolve ordinal / named references
             if not prop_id:
-                if any(k in msg_low for k in ["first", "1st", "1", "อันแรก", "pierwsz", "รายการแรก"]):
+                if any(k in msg_low for k in ["first", "1st", "อันแรก", "pierwsz", "รายการแรก"]):
                     prop_id = last_result_ids[0] if last_result_ids else None
-                elif any(k in msg_low for k in ["second", "2nd", "2", "อันที่สอง", "drug", "รายการที่สอง"]):
+                elif any(k in msg_low for k in ["second", "2nd", "อันที่สอง", "drug", "รายการที่สอง"]):
                     prop_id = last_result_ids[1] if len(last_result_ids) >= 2 else None
-                elif any(k in msg_low for k in ["third", "3rd", "3", "อันที่สาม", "trzeci", "รายการที่สาม"]):
+                elif any(k in msg_low for k in ["third", "3rd", "อันที่สาม", "trzeci", "รายการที่สาม"]):
                     prop_id = last_result_ids[2] if len(last_result_ids) >= 3 else None
                 else:
-                    # Check if user mentioned a potential named target (e.g. "brochure for Aileen Residence")
-                    # If there are additional descriptive words after "for/of/about", leave prop_id None
-                    # so the database name resolver in public_agent can match the exact property!
-                    has_named_target = bool(re.search(r"\b(?:for|of|about|dla|do|o|สำหรับ|ของ)\s+([a-zA-Z0-9\s]{3,})", msg_low))
-                    if not has_named_target:
-                        prop_id = last_result_ids[0] if len(last_result_ids) == 1 else None
+                    named = re.search(
+                        r"\b(?:for|of|about|dla|do|o|สำหรับ|ของ)\s+([A-Za-z0-9][\w\s\-'&.]{2,80})",
+                        msg_clean,
+                        flags=re.IGNORECASE
+                    )
+                    if named:
+                        prop_name = named.group(1).strip(" .,?!")
+                        prop_id = prop_name  # resolve via Firestore/SQL by name
+                    elif len(last_result_ids) == 1:
+                        prop_id = last_result_ids[0]
+                    elif state.get("selected_property_ids"):
+                        prop_id = state["selected_property_ids"][0]
 
             return IntentType.BROCHURE_REQUEST, {
                 "property_id": prop_id,
+                "property_name": prop_name,
                 "needs_clarification": prop_id is None
             }
 
@@ -233,10 +245,16 @@ def detect_deterministic_intent(
             "property_id": prop_matches[0].upper()
         }
 
+    _DETAIL_SKIP_NAMES = {
+        "phuket", "samui", "koh samui", "bangkok", "pattaya", "thailand", "tajlandia",
+        "villas", "villa", "condo", "condominium", "properties", "property", "more",
+        "options", "results", "listings"
+    }
     for pat in DETAILS_PATTERNS:
-        m = re.search(pat, msg_low)
+        m = re.search(pat, msg_low, flags=re.IGNORECASE)
         if m:
-            target = m.group(1).upper()
+            target_raw = (m.group(1) or "").strip()
+            target = target_raw.upper()
             target_id = None
             if target.startswith("PROP-"):
                 target_id = target
@@ -246,6 +264,14 @@ def detect_deterministic_intent(
                 target_id = last_result_ids[1]
             elif target in ["THIRD", "3RD", "3", "อันที่สาม"] and len(last_result_ids) >= 3:
                 target_id = last_result_ids[2]
+            elif target_raw and target_raw.lower() not in _DETAIL_SKIP_NAMES and len(target_raw) >= 3:
+                # Named project follow-up — resolve via Firestore/SQL by name (preserve original casing from message)
+                name_match = re.search(pat, msg_clean, flags=re.IGNORECASE)
+                named = (name_match.group(1).strip() if name_match else target_raw).strip(" .,?!")
+                return IntentType.PROPERTY_DETAILS, {
+                    "property_name": named,
+                    "property_id": named,
+                }
 
             if target_id:
                 return IntentType.PROPERTY_DETAILS, {
@@ -257,6 +283,70 @@ def detect_deterministic_intent(
         return IntentType.PROPERTY_DETAILS, {
             "property_id": last_result_ids[0]
         }
+
+    # Attribute / fact questions about a focused or named property (prevents false new searches)
+    # e.g. "Does this property have a swimming pool?", "what is the price of the first one",
+    # "Does ParQ Villa Phuket have a pool?"
+    attr_q = bool(re.search(
+        r"(?:does|do|has|have|is|are|what(?:'s| is)|how much|price of|cena|czy|ile|มี|ราคา|เท่าไหร่)",
+        msg_low
+    ))
+    amenity_or_fact = bool(re.search(
+        r"(?:pool|swimming|beach|price|cost|bedroom|bedrooms|area|size|sqm|location|status|"
+        r"amenit|available|availability|basen|sypialn|cena|สระ|ห้องนอน|ราคา|ทำเล)",
+        msg_low
+    ))
+    selected_ids = state.get("selected_property_ids") or []
+    if attr_q and amenity_or_fact:
+        # Ordinal reference
+        if any(k in msg_low for k in ["first one", "1st one", "the first", "pierwsz", "อันแรก"]) and last_result_ids:
+            return IntentType.PROPERTY_DETAILS, {"property_id": last_result_ids[0], "focus_question": msg_clean}
+        if any(k in msg_low for k in ["second one", "2nd one", "the second", "drug", "อันที่สอง"]) and len(last_result_ids) >= 2:
+            return IntentType.PROPERTY_DETAILS, {"property_id": last_result_ids[1], "focus_question": msg_clean}
+        if any(k in msg_low for k in ["third one", "3rd one", "the third", "trzeci", "อันที่สาม"]) and len(last_result_ids) >= 3:
+            return IntentType.PROPERTY_DETAILS, {"property_id": last_result_ids[2], "focus_question": msg_clean}
+        # "this/that property" with session focus
+        if any(k in msg_low for k in ["this property", "that property", "this villa", "that villa", "this one", "tej nieruchomości", "ta willa", "โครงการนี้", "วิลล่านี้"]):
+            focus = (selected_ids[0] if selected_ids else (last_result_ids[0] if last_result_ids else None))
+            if focus:
+                return IntentType.PROPERTY_DETAILS, {"property_id": focus, "focus_question": msg_clean}
+        # Named property fact question: "Does ParQ Villa Phuket have a pool?"
+        named_fact = re.search(
+            r"(?:does|do|has|have|what(?:'s| is)|how much|price of|cena|czy)\s+(.+?)\s+(?:have|has|include|with|cost|price|pool|beach|bedroom|อยู่|มี)",
+            msg_low
+        )
+        if not named_fact:
+            named_fact = re.search(
+                r"(?:does|do)\s+(.+?)\s+have\s+",
+                msg_low
+            )
+        if named_fact:
+            named = named_fact.group(1).strip(" .,?!")
+            named = re.sub(r"^(?:the|a|an)\s+", "", named).strip()
+            if named and len(named) >= 3 and named.lower() not in _DETAIL_SKIP_NAMES and "property" not in named.lower():
+                return IntentType.PROPERTY_DETAILS, {
+                    "property_name": named,
+                    "property_id": named,
+                    "focus_question": msg_clean,
+                }
+
+    # Named property comparison: "Compare Larimar Villa and Nile Residence"
+    if any(k in msg_low for k in ["compare", "comparison", "vs", "versus", "porównaj", "porownaj", "เปรียบเทียบ"]):
+        named_vs = re.search(
+            r"(?:compare|comparison|porównaj|porownaj|เปรียบเทียบ)\s+(.+?)\s+(?:and|with|to|vs|versus|i|z|oraz|กับ|และ)\s+(.+?)(?:\s*\?|$)",
+            msg_clean,
+            flags=re.IGNORECASE
+        )
+        if named_vs:
+            a = named_vs.group(1).strip(" .,?!")
+            b = named_vs.group(2).strip(" .,?!")
+            a = re.sub(r"^(?:the|a|an)\s+", "", a, flags=re.I).strip()
+            b = re.sub(r"^(?:the|a|an)\s+", "", b, flags=re.I).strip()
+            if a and b and a.lower() not in _DETAIL_SKIP_NAMES and b.lower() not in _DETAIL_SKIP_NAMES:
+                return IntentType.PROPERTY_COMPARISON, {
+                    "property_ids": [a, b],
+                    "raw_query": msg_clean,
+                }
 
     # 4. Filter Refinement on active search
     has_refine_clue = any(re.search(p, msg_low) for p in REFINE_PATTERNS)
