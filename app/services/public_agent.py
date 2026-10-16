@@ -47,6 +47,7 @@ from app.services.property_context_service import (
     fetch_authorized_property,
     clear_active_if_new_conversation,
     recover_active_from_history,
+    resolve_name_against_context,
 )
 
 logger = logging.getLogger(__name__)
@@ -2554,6 +2555,7 @@ class PublicAgentService:
 
         # Prefer explicit args, else resolve from persistent context
         pid = args.get("property_id") or args.get("property_name")
+        pname = args.get("property_name")
         if not pid or args.get("from_property_context"):
             resolved = resolve_property_reference(user_message, pctx, language=language)
             if resolved.ambiguous:
@@ -2575,6 +2577,26 @@ class PublicAgentService:
                 pid = resolved.property_id
             elif pctx.active_property_id and args.get("from_property_context"):
                 pid = pctx.active_property_id
+
+        # Named follow-up like "tell me more about Mono Champaca" — map shown card name → id
+        for candidate in [pname, pid, user_message]:
+            if not candidate:
+                continue
+            mapped = resolve_name_against_context(str(candidate), pctx, conversation)
+            if mapped:
+                pid = mapped
+                break
+            # Also try extracting quoted / trailing project name from the user message
+            m_name = re.search(
+                r"(?:about|regarding|for|on)\s+(.+?)\s*$",
+                str(candidate),
+                flags=re.IGNORECASE,
+            )
+            if m_name:
+                mapped = resolve_name_against_context(m_name.group(1).strip(" .,?!"), pctx, conversation)
+                if mapped:
+                    pid = mapped
+                    break
 
         pname = args.get("property_name") or pid
         card = None

@@ -49,17 +49,17 @@ COMPARISON_PATTERNS = [
 DETAILS_PATTERNS = [
     r"(?:tell\s+me\s+more\s+about|details\s+for|specs\s+for|show\s+me|info\s+on)\s+(PROP-[A-Z0-9\-]+)",
     r"(?:tell\s+me\s+more\s+about|details\s+for|specs\s+for)\s+(?:the\s+)?(first|second|third|1st|2nd|3rd)\s+(?:one|property|villa|condo)",
-    r"^(?:the\s+)?(first|second|third|1st|2nd|3rd)\s+one$",
-    # Named property follow-ups: "tell me more about ParQ Villa Phuket"
-    r"(?:tell\s+me\s+more\s+about|tell\s+me\s+about|more\s+(?:details|info)\s+(?:about|on|for)|details\s+(?:about|for|on)|specs\s+for|info\s+(?:about|on))\s+(?:the\s+)?([a-z0-9][\w\s\-'&.]{2,80}?)\s*$",
+    r"^(?:the\s+)?(first|second|third|1st|2nd|3rd)\s+one\s*[\?\!\.]*$",
+    # Named property follow-ups: "can you tell me more about Mono Champaca?"
+    r"(?:(?:can\s+you|could\s+you|please)\s+)?(?:tell\s+me\s+more\s+about|tell\s+me\s+about|more\s+(?:details|info)\s+(?:about|on|for)|details\s+(?:about|for|on)|specs\s+for|info\s+(?:about|on))\s+(?:the\s+)?([a-z0-9][\w\s\-'&.]{2,80}?)\s*[\?\!\.]*$",
     r"(?:pokaż|pokaz|szczegóły|szczegoly|informacje\s+o)\s+(PROP-[A-Z0-9\-]+)",
-    r"(?:pokaż|pokaz|szczegóły|szczegoly|więcej\s+o|opowiedz\s+o|powiedz\s+więcej\s+o)\s+(?:tę|ta|tą|o\s+)?([a-ząćęłńóśźż0-9][\w\s\-'&.]{2,80}?)\s*$",
+    r"(?:pokaż|pokaz|szczegóły|szczegoly|więcej\s+o|opowiedz\s+o|powiedz\s+więcej\s+o)\s+(?:tę|ta|tą|o\s+)?([a-ząćęłńóśźż0-9][\w\s\-'&.]{2,80}?)\s*[\?\!\.]*$",
     r"(?:pokaż|pokaz|szczegóły|szczegoly)\s+(?:tę|ta|tą)\s+(?:pierwszą|druga|trzecią|1|2|3)",
-    r"^(?:ta\s+)?(pierwsza|druga|trzecia)\s+oferta$",
+    r"^(?:ta\s+)?(pierwsza|druga|trzecia)\s+oferta\s*[\?\!\.]*$",
     r"(?:ดูรายละเอียด|ขอรายละเอียด|ข้อมูล)\s+(PROP-[A-Z0-9\-]+)",
-    r"(?:ดูรายละเอียด|ขอข้อมูล|บอกเพิ่มเติมเกี่ยวกับ|รายละเอียด)\s+([a-z0-9ก-๙][\w\s\-'&.ก-๙]{2,80}?)\s*$",
+    r"(?:ดูรายละเอียด|ขอข้อมูล|บอกเพิ่มเติมเกี่ยวกับ|รายละเอียด)\s+([a-z0-9ก-๙][\w\s\-'&.ก-๙]{2,80}?)\s*[\?\!\.]*$",
     r"(?:ดูรายละเอียด|ขอข้อมูล|ดู)\s+(?:อันแรก|อันที่สอง|อันที่สาม|1|2|3)",
-    r"^(?:อันแรก|อันที่สอง|อันที่สาม)$"
+    r"^(?:อันแรก|อันที่สอง|อันที่สาม)\s*[\?\!\.]*$"
 ]
 
 REFINE_PATTERNS = [
@@ -283,12 +283,27 @@ def detect_deterministic_intent(
             elif target in ["THIRD", "3RD", "3", "อันที่สาม"] and len(last_result_ids) >= 3:
                 target_id = last_result_ids[2]
             elif target_raw and target_raw.lower() not in _DETAIL_SKIP_NAMES and len(target_raw) >= 3:
-                # Named project follow-up — resolve via Firestore/SQL by name (preserve original casing from message)
+                # Named project follow-up — map to known session property_id when possible
                 name_match = re.search(pat, msg_clean, flags=re.IGNORECASE)
                 named = (name_match.group(1).strip() if name_match else target_raw).strip(" .,?!")
+                mapped_id = None
+                ref_map = (pctx or {}).get("reference_map") or {}
+                named_l = named.lower()
+                for ref, rid in sorted(ref_map.items(), key=lambda kv: len(str(kv[0])), reverse=True):
+                    ref_l = str(ref).lower()
+                    if len(ref_l) >= 3 and (named_l == ref_l or named_l in ref_l or ref_l in named_l):
+                        mapped_id = str(rid)
+                        break
+                if not mapped_id:
+                    for rid in (last_result_ids or []):
+                        if named_l.replace(" ", "-") in str(rid).lower() or all(
+                            t in str(rid).lower() for t in named_l.split() if len(t) >= 3
+                        ):
+                            mapped_id = str(rid)
+                            break
                 return IntentType.PROPERTY_DETAILS, {
                     "property_name": named,
-                    "property_id": named,
+                    "property_id": mapped_id or named,
                 }
 
             if target_id:
