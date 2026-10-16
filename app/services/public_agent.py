@@ -2472,7 +2472,7 @@ class PublicAgentService:
                 cards=cards,
                 language=language,
                 is_alternative=False,
-                is_sparse=False,
+                is_sparse=(not loc) or (not max_p) or (not bedrooms),
                 searched_location=loc,
                 searched_bedrooms=bedrooms,
                 searched_budget=float(max_p) if max_p else None,
@@ -3392,7 +3392,7 @@ class PublicAgentService:
                     cards=cards,
                     language=language,
                     is_alternative=False,
-                    is_sparse=False,
+                    is_sparse=(not loc) or (not max_p) or (not bedrooms),
                     location=loc,
                     budget=max_p,
                     bedrooms=bedrooms,
@@ -3586,6 +3586,7 @@ class PublicAgentService:
         comp_tokens = 0
         llm_calls = 0
         reply_text = ""
+        is_sparse = (not loc) or (not max_p) or (not bedrooms)
 
         if cards:
             stored_prefs["seen_property_ids"] = list(set(seen_ids + [c["property_id"] for c in cards]))
@@ -3675,22 +3676,25 @@ class PublicAgentService:
                             f"NEVER output markdown tables. Conclude with **Recommended next steps** using • bullets."
                         )
 
-                    is_sparse = (not loc) or (not max_p) or (not bedrooms)
                     if is_sparse:
                         if language == "th":
                             prompt_content += (
                                 "\n\nคำแนะนำเพิ่มเติม: ผู้ใช้ยังไม่ได้ระบุรายละเอียดครบถ้วน (เช่น ทำเล งบประมาณ หรือจำนวนห้องนอน) "
-                                "ให้สอบถามคำถามเพิ่มเติม 2-3 ข้ออย่างชาญฉลาดในตอนท้าย เพื่อทำความเข้าใจความต้องการและช่วยคัดกรองอสังหาริมทรัพย์ที่ตรงใจที่สุด"
+                                "ให้สอบถามคำถามเพิ่มเติม 2 ข้ออย่างชาญฉลาดในตอนท้าย เพื่อทำความเข้าใจความต้องการ "
+                                "(งบประมาณ / จำนวนห้องนอน / ทำเล เช่น ภูเก็ต เกาะสมุย กรุงเทพฯ) — ห้ามข้ามขั้นตอนนี้"
                             )
                         elif language == "pl":
                             prompt_content += (
                                 "\n\nWAŻNE: Użytkownik nie podał jeszcze kluczowych szczegółów (np. preferowanej lokalizacji, budżetu lub liczby sypialni). "
-                                "Na końcu prezentacji ofert ZAWSZE zadaj 2-3 konkretne, inteligentne pytania doprecyzowujące (np. preferowany rejon: Phuket, Koh Samui czy Bangkok; orientacyjny budżet; cel zakupu)."
+                                "Na końcu prezentacji ofert ZAWSZE zadaj dokładnie 2 konkretne pytania doprecyzowujące "
+                                "(budżet, liczba sypialni lub lokalizacja: Phuket / Koh Samui / Bangkok). Nie pomijaj tego kroku."
                             )
                         else:
                             prompt_content += (
-                                "\n\nCRITICAL FOLLOW-UP INSTRUCTION: The user provided limited initial details (e.g., did not specify location, budget, or preferred island/bedrooms). "
-                                "Along with presenting the verified options above, ALWAYS conclude by asking 2-3 smart, consultative follow-up questions to understand their exact preferences (e.g. preferred destination in Thailand, target budget range, and primary purpose)."
+                                "\n\nCRITICAL FOLLOW-UP INSTRUCTION: The user provided limited details "
+                                "(missing location, budget, and/or bedrooms). After the listings, ALWAYS ask exactly "
+                                "2 short consultative questions (budget range, bedrooms, or preferred island/city). "
+                                "Do not end only with brochure/viewing CTAs — questions first."
                             )
 
                     resp = _safe_openai_create(
@@ -3708,6 +3712,30 @@ class PublicAgentService:
                     if resp.usage:
                         prompt_tokens = resp.usage.prompt_tokens
                         comp_tokens = resp.usage.completion_tokens
+                    # If sparse and LLM skipped clarifying questions, append them deterministically
+                    if reply_text and is_sparse:
+                        q_lines = [ln for ln in reply_text.splitlines() if "?" in ln]
+                        if len(q_lines) < 2:
+                            followups = build_consultative_followup_questions(
+                                language=language,
+                                location=loc,
+                                budget=max_p,
+                                bedrooms=bedrooms,
+                            )[:2]
+                            if followups:
+                                if language == "pl":
+                                    q_hdr = "Aby dopasować oferty precyzyjniej, powiedz proszę:"
+                                elif language == "th":
+                                    q_hdr = "เพื่อคัดกรองให้ตรงกับคุณมากขึ้น ขออนุญาตถามเพิ่มเติม:"
+                                else:
+                                    q_hdr = "To narrow this down to the best fit, may I ask:"
+                                reply_text = (
+                                    reply_text.rstrip()
+                                    + "\n\n"
+                                    + q_hdr
+                                    + "\n"
+                                    + "\n".join(f"• {q}" for q in followups)
+                                )
                 except Exception as e:
                     logger.error(f"Error in search LLM synthesis: {e}")
                     reply_text = ""

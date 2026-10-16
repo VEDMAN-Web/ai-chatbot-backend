@@ -882,19 +882,17 @@ def build_rich_property_recommendation_text(
         else:
             intro = "Based on your preferences, I am delighted to present these verified luxury properties in Thailand that offer exceptional living spaces and prime lifestyle amenities:"
 
-    # 2. Descriptions for featured cards
+    # 2. Descriptions for featured cards (plain • lines — avoid nested ** that break UI rendering)
     property_descriptions: List[str] = []
     for idx, c in enumerate(cards[:3], 1):
-        name = c.get("name", "Featured Property")
-        loc = c.get("location", "Thailand")
-        price = str(c.get("price") or "Price on request").strip()
+        name = str(c.get("name") or "Featured Property").replace("*", "").strip()
+        loc = str(c.get("location") or "Thailand").replace("*", "").strip()
+        price = str(c.get("price") or "Price on request").strip().replace("*", "")
         # Avoid "Starting from from 17.80M THB"
-        if price.lower().startswith("from "):
-            price_display = price
-        elif price.lower() == "price on request":
+        if price.lower().startswith("from ") or price.lower() == "price on request":
             price_display = price
         else:
-            price_display = price
+            price_display = f"from {price}" if language == "en" else price
         beds = c.get("bedrooms")
         beds_raw = str(beds).strip() if beds and str(beds) != "N/A" else ""
         # Avoid "1-4 Beds bedrooms"
@@ -907,7 +905,7 @@ def build_rich_property_recommendation_text(
             elif language == "th":
                 beds_str = f"{beds_raw} ห้องนอน"
             else:
-                beds_str = f"{beds_raw} bedrooms"
+                beds_str = f"{beds_raw} Beds"
         else:
             beds_str = ""
 
@@ -923,39 +921,80 @@ def build_rich_property_recommendation_text(
 
         if language == "pl":
             property_descriptions.append(
-                f"• **{name}** ({loc}): Cena **{price_display}**{feat_str} – doskonały wybór gwarantujący najwyższy standard i bezpieczeństwo transakcji."
+                f"• {name} ({loc}): {price_display}{feat_str} – doskonały wybór gwarantujący najwyższy standard i bezpieczeństwo transakcji."
             )
         elif language == "th":
             property_descriptions.append(
-                f"• **{name}** ({loc}): **{price_display}**{feat_str} – โครงการคุณภาพสูงพร้อมสิทธิ์การถือครองที่โปร่งใสและปลอดภัย"
+                f"• {name} ({loc}): {price_display}{feat_str} – โครงการคุณภาพสูงพร้อมสิทธิ์การถือครองที่โปร่งใสและปลอดภัย"
             )
         else:
-            if price_display.lower().startswith("from ") or price_display.lower() == "price on request":
-                price_line = f"**{price_display}**"
-            else:
-                price_line = f"Starting from **{price_display}**"
             property_descriptions.append(
-                f"• **{name}** ({loc}): {price_line}{feat_str} – an outstanding selection offering premium finishes and strong lifestyle value."
+                f"• {name} ({loc}): {price_display}{feat_str} – an outstanding selection offering premium finishes and strong lifestyle value."
             )
 
     body = "\n".join(property_descriptions) if property_descriptions else ""
 
-    # 3. Closing / next steps (no static follow-up questions here — the LLM generates those dynamically)
+    # Treat inquiry as sparse when key filters are missing (e.g. "Show me villas")
+    loc_missing = (not location) or str(location).strip().lower() in {
+        "thailand", "tajlandia", "ไทย", "ประเทศไทย", ""
+    }
+    sparse = bool(is_sparse) or loc_missing or (budget is None) or (bedrooms is None)
+
+    # 3. Consultative follow-ups when details are sparse — ask 2 questions, then soft next steps
+    followups = []
+    if sparse and cards:
+        followups = build_consultative_followup_questions(
+            language=language,
+            location=None if loc_missing else location,
+            budget=budget,
+            bedrooms=bedrooms,
+        )[:2]
+
     if language == "pl":
-        closing = (
-            f"\n\nCzy chcesz przejrzeć szczegółowe rzuty pięter, otrzymać oficjalną broszurę PDF lub umówić prywatną prezentację?\n"
-            f"Nasz zespół doradców ({tenant.advisor_email}) z przyjemnością odpowie na wszystkie pytania."
-        )
+        if followups:
+            q_block = "Aby dopasować oferty precyzyjniej, powiedz proszę:\n" + "\n".join(
+                f"• {q}" for q in followups
+            )
+            closing = (
+                f"{q_block}\n\n"
+                f"Chętnie także prześlę broszurę PDF lub umówię prezentację — "
+                f"napisz do naszego zespołu ({tenant.advisor_email})."
+            )
+        else:
+            closing = (
+                f"Czy chcesz przejrzeć rzuty pięter, otrzymać oficjalną broszurę PDF lub umówić prywatną prezentację?\n"
+                f"Nasz zespół doradców ({tenant.advisor_email}) z przyjemnością pomoże."
+            )
     elif language == "th":
-        closing = (
-            f"\n\nคุณต้องการดูผังโครงการ ขอรับโบรชัวร์ PDF หรือนัดหมายเข้าชมโครงการไหมครับ?\n"
-            f"ทีมที่ปรึกษาอสังหาริมทรัพย์ของเรา ({tenant.advisor_email}) พร้อมดูแลและให้คำปรึกษาอย่างใกล้ชิดครับ"
-        )
+        if followups:
+            q_block = "เพื่อคัดกรองให้ตรงกับคุณมากขึ้น ขออนุญาตถามเพิ่มเติม:\n" + "\n".join(
+                f"• {q}" for q in followups
+            )
+            closing = (
+                f"{q_block}\n\n"
+                f"หากต้องการโบรชัวร์ PDF หรือนัดหมายเข้าชม "
+                f"ทีมที่ปรึกษา ({tenant.advisor_email}) พร้อมช่วยเหลือครับ"
+            )
+        else:
+            closing = (
+                f"คุณต้องการดูผังโครงการ ขอรับโบรชัวร์ PDF หรือนัดหมายเข้าชมโครงการไหมครับ?\n"
+                f"ทีมที่ปรึกษา ({tenant.advisor_email}) พร้อมดูแลครับ"
+            )
     else:
-        closing = (
-            f"\n\nWould you like to review floor plans, request an official PDF brochure, or schedule a private viewing?\n"
-            f"Our senior property advisory team ({tenant.advisor_email}) is also on hand to assist with tailored requests."
-        )
+        if followups:
+            q_block = "To narrow this down to the best fit, may I ask:\n" + "\n".join(
+                f"• {q}" for q in followups
+            )
+            closing = (
+                f"{q_block}\n\n"
+                f"I can also send an official brochure or arrange a private viewing — "
+                f"our advisory team ({tenant.advisor_email}) is ready to help."
+            )
+        else:
+            closing = (
+                f"Would you like to review floor plans, request an official PDF brochure, or schedule a private viewing?\n"
+                f"Our senior property advisory team ({tenant.advisor_email}) is also on hand to assist."
+            )
 
     parts = [intro]
     if body:
