@@ -1,0 +1,224 @@
+"""
+Pure, fast reply validation against retrieved listing data.
+No network calls. Used by the public chatbot only.
+"""
+
+from __future__ import annotations
+
+import re
+from typing import Any, Dict, List, Optional, Tuple
+
+from app.services.approved_statements import APPROVED_STATEMENTS
+
+
+def _card_price_numeric(card: Dict[str, Any]) -> Optional[float]:
+    for key in ("price_numeric_min", "price_min", "min_price", "price_thb", "price_numeric"):
+        val = card.get(key)
+        if val is None or val == "":
+            continue
+        try:
+            return float(val)
+        except (TypeError, ValueError):
+            continue
+    raw = str(card.get("price") or card.get("price_display") or "").lower()
+    if not raw or "request" in raw or raw in ("n/a", "na"):
+        return None
+    m = re.search(r"(\d+(?:\.\d+)?)\s*m\b", raw)
+    if m:
+        return float(m.group(1)) * 1_000_000
+    digits = re.sub(r"[^\d.]", "", raw.replace(",", ""))
+    try:
+        return float(digits) if digits else None
+    except ValueError:
+        return None
+
+
+def _is_price_on_request(card: Dict[str, Any]) -> bool:
+    raw = str(card.get("price") or card.get("price_display") or "").strip().lower()
+    return (not raw) or ("request" in raw) or raw in ("n/a", "na", "-")
+
+
+def _location_ok(card: Dict[str, Any], location: Optional[str]) -> bool:
+    if not location:
+        return True
+    want = str(location).strip().lower()
+    if want in ("thailand", "tajlandia", "ไทย", "ประเทศไทย"):
+        return True
+    blob = " ".join(
+        str(card.get(k) or "")
+        for k in ("location", "city", "province", "district", "name", "property_name")
+    ).lower()
+    # Allow broader matches (e.g. filter Phuket, card says "Phuket, Layan")
+    tokens = [t for t in re.split(r"[^a-z0-9]+", want) if len(t) >= 3]
+    if not tokens:
+        return True
+    return any(t in blob for t in tokens)
+
+
+def _type_ok(card: Dict[str, Any], property_type: Optional[str]) -> bool:
+    if not property_type:
+        return True
+    want = str(property_type).strip().lower()
+    got = str(card.get("property_type") or card.get("type") or "").strip().lower()
+    if not got:
+        return True  # missing type: do not invent a fail on incomplete records
+    return want in got or got in want
+
+
+def _beds_ok(card: Dict[str, Any], bedrooms: Optional[Any]) -> bool:
+    if bedrooms is None or bedrooms == "":
+        return True
+    try:
+        want = int(float(bedrooms))
+    except (TypeError, ValueError):
+        return True
+    raw = card.get("bedrooms")
+    if raw is None or raw == "":
+        return True
+    text = str(raw)
+    nums = [int(x) for x in re.findall(r"\d+", text)]
+    if not nums:
+        return True
+    return min(nums) <= want <= max(nums) or want in nums
+
+
+def _allowed_text_blob(cards: List[Dict[str, Any]], tool_results: Optional[List[Any]]) -> str:
+    parts: List[str] = []
+    for c in cards or []:
+        if not isinstance(c, dict):
+            continue
+        for v in c.values():
+            if v is None:
+                continue
+            if isinstance(v, (list, dict)):
+                parts.append(str(v))
+            else:
+                parts.append(str(v))
+    for tr in tool_results or []:
+        parts.append(str(tr))
+    for s in APPROVED_STATEMENTS or []:
+        parts.append(str(s))
+    return " ".join(parts).lower()
+
+
+def validate_reply(
+    reply_text: str,
+    cards: Optional[List[Dict[str, Any]]] = None,
+    tool_results: Optional[List[Any]] = None,
+    applied_filters: Optional[Dict[str, Any]] = None,
+    language: str = "en",
+    tenant_advisor_email: Optional[str] = None,
+) -> Tuple[bool, List[str]]:
+    """
+    Returns (ok, reasons). Pure and fast. No network I/O.
+    """
+    reasons: List[str] = []
+    text = reply_text or ""
+    cards = [c for c in (cards or []) if isinstance(c, dict)]
+    filters = applied_filters or {}
+    max_price = filters.get("max_price")
+    min_price = filters.get("min_price")
+    location = filters.get("location")
+    property_type = filters.get("property_type")
+    bedrooms = filters.get("bedrooms")
+
+    try:
+        max_p = float(max_price) if max_price is not None else None
+    except (TypeError, ValueError):
+        max_p = None
+    try:
+        min_p = float(min_price) if min_price is not None else None
+    except (TypeError, ValueError):
+        min_p = None
+
+    budget_search = max_p is not None or min_p is not None
+
+    # a. Cards must respect applied filters
+    for c in cards:
+        pid = c.get("property_id") or c.get("name") or "?"
+        price_num = _card_price_numeric(c)
+        if budget_search and price_num is None:
+            if not _is_price_on_request(c):
+                reasons.append(f"null_price_on_budget_search:{pid}")
+            elif "price on request" not in text.lower() and "cena na zapytanie" not in text.lower() and "สอบถามราคา" not in text:
+                reasons.append(f"price_on_request_unlabelled:{pid}")
+        if max_p is not None and price_num is not None and price_num > max_p * 1.001:
+            reasons.append(f"over_max_price:{pid}")
+        if min_p is not None and price_num is not None and price_num < min_p * 0.999:
+            reasons.append(f"under_min_price:{pid}")
+        if not _location_ok(c, location):
+            reasons.append(f"location_mismatch:{pid}")
+        if not _type_ok(c, property_type):
+            reasons.append(f"type_mismatch:{pid}")
+        if not _beds_ok(c, bedrooms):
+            reasons.append(f"bedrooms_mismatch:{pid}")
+
+    allowed = _allowed_text_blob(cards, tool_results)
+
+    # b. Percentages / yields only if in retrieved data or APPROVED_STATEMENTS
+    for m in re.finditer(r"(\d+(?:\.\d+)?)\s*%", text):
+        token = m.group(0).lower().replace(" ", "")
+        span_ctx = text[max(0, m.start() - 24): m.end() + 24].lower()
+        if any(k in span_ctx for k in ("yield", "roi", "return", "zwrot", "ผลตอบแทน")):
+            approved_hit = any(token in str(s).lower().replace(" ", "") for s in (APPROVED_STATEMENTS or []))
+            in_data = token in allowed.replace(" ", "")
+            if not approved_hit and not in_data:
+                reasons.append(f"unapproved_percentage:{m.group(0)}")
+
+    # Currency / large money amounts mentioned must appear in allowed blob (digits)
+    for m in re.finditer(
+        r"(?:THB|USD|EUR|PLN|฿|€|\$)\s*[\d,.]+(?:\s*[Mm](?:illion)?)?|[\d,.]+\s*(?:M\s*)?(?:THB|USD|EUR|PLN|฿)",
+        text,
+        flags=re.IGNORECASE,
+    ):
+        chunk = m.group(0)
+        digits = re.sub(r"[^\d]", "", chunk)
+        if len(digits) < 3:
+            continue
+        if digits not in re.sub(r"[^\d]", "", allowed) and chunk.lower() not in allowed:
+            # Allow rounded display like 28.5M when 28500000 in data
+            ok_round = False
+            if re.search(r"(\d+(?:\.\d+)?)\s*m", chunk, flags=re.I):
+                mill = float(re.search(r"(\d+(?:\.\d+)?)\s*m", chunk, flags=re.I).group(1))
+                approx = int(mill * 1_000_000)
+                if str(approx)[:4] in re.sub(r"[^\d]", "", allowed):
+                    ok_round = True
+            if not ok_round:
+                reasons.append(f"price_not_in_data:{chunk[:40]}")
+
+    # Property names from cards that appear partially invented: if reply names a card-like
+    # Title Case phrase of 2+ tokens, require it match a known card name (or be a known filter word)
+    known_names = [
+        str(c.get("name") or c.get("property_name") or "").strip().lower()
+        for c in cards
+        if c.get("name") or c.get("property_name")
+    ]
+    skip_name_bits = {
+        "thailand", "phuket", "samui", "bangkok", "pattaya", "koh", "villa", "condo",
+        "verified", "listings", "criteria", "private", "pool", "beach", "access",
+    }
+    for m in re.finditer(r"\b([A-Z][a-zA-Z0-9]+(?:\s+[A-Z][a-zA-Z0-9]+){1,6})\b", text):
+        name = m.group(1).strip()
+        low = name.lower()
+        if all(tok in skip_name_bits for tok in low.split()):
+            continue
+        if any(low == kn or low in kn or kn in low for kn in known_names):
+            continue
+        if not known_names:
+            # No cards: invented named projects are not allowed
+            if any(k in low for k in ("villa", "condo", "residence", "residences", "estate")):
+                reasons.append(f"invented_property_name:{name}")
+        else:
+            # Has cards but mentions an unknown project-like name
+            if any(k in low for k in ("villa", "condo", "residence", "residences", "estate")):
+                reasons.append(f"unknown_property_name:{name}")
+
+    # c. Advisor email must be the current tenant's (if any email is shown)
+    emails = re.findall(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", text)
+    if tenant_advisor_email:
+        allowed_email = tenant_advisor_email.strip().lower()
+        for em in emails:
+            if em.lower() != allowed_email:
+                reasons.append(f"wrong_advisor_email:{em}")
+
+    return (len(reasons) == 0, reasons)

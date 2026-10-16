@@ -27,10 +27,10 @@ def get_data_unavailable_fallback(
 ) -> str:
     """
     Canonical EN/PL/TH fallback when production data does not contain the requested fact.
-    NEVER invent, guess, or fabricate an answer — return this message instead.
+    NEVER invent, guess, or fabricate an answer. Return this message instead.
     """
     tenant = resolve_tenant(site_origin)
-    advisor = getattr(tenant, "advisor_email", None) or "advisor@varsoviaestate.com"
+    advisor = getattr(tenant, "advisor_email", None) or ""
     detail_bit = f" ({detail})" if detail else ""
 
     lang = normalize_language(language) or "en"
@@ -43,16 +43,92 @@ def get_data_unavailable_fallback(
         )
     if lang == "pl":
         return (
-            f"Przepraszam — w naszej zweryfikowanej bazie produkcyjnej nie ma obecnie danych odpowiadających na to pytanie{detail_bit}.\n\n"
+            f"Przepraszam. W naszej zweryfikowanej bazie produkcyjnej nie ma obecnie danych odpowiadających na to pytanie{detail_bit}.\n\n"
             "Odpowiadam wyłącznie na podstawie rzeczywistych danych z produkcji i nigdy nie zgaduję ani nie wymyślam faktów.\n\n"
             f"Jeśli chcesz, nasz zespół doradców ({advisor}) może to sprawdzić ręcznie. "
-            "Możesz też podać lokalizację, budżet lub typ nieruchomości — wyszukam wyłącznie wśród dostępnych, zweryfikowanych ofert."
+            "Możesz też podać lokalizację, budżet lub typ nieruchomości. Wyszukam wyłącznie wśród dostępnych, zweryfikowanych ofert."
         )
     return (
-        f"I'm sorry — that information is not available in our verified production database{detail_bit}.\n\n"
+        f"I'm sorry. That information is not available in our verified production database{detail_bit}.\n\n"
         "I only answer from live production data and will never guess or invent property details, prices, or availability.\n\n"
         f"Our advisory team ({advisor}) can investigate further if you like. "
         "You can also share a location, budget, or property type and I will search only among verified listings we actually have."
+    )
+
+
+def build_no_match_reply(
+    language: str = "en",
+    site_origin: Optional[str] = None,
+    criteria_summary: Optional[str] = None,
+    relaxed_filter: Optional[str] = None,
+    alternatives: Optional[List[Dict[str, Any]]] = None,
+) -> str:
+    """
+    Honest zero-result reply. Never invents listings.
+    Optionally lists up to 3 real alternatives from a search that relaxed exactly one filter.
+    """
+    tenant = resolve_tenant(site_origin)
+    advisor = getattr(tenant, "advisor_email", None) or ""
+    lang = normalize_language(language) or "en"
+    alts = [c for c in (alternatives or []) if isinstance(c, dict)][:3]
+    criteria = (criteria_summary or "").strip()
+
+    def _alt_line(c: Dict[str, Any]) -> str:
+        name = str(c.get("name") or c.get("property_name") or "").strip()
+        loc = str(c.get("location") or "").strip()
+        price = str(c.get("price") or c.get("price_display") or "").strip()
+        bits = [b for b in [name, loc, price] if b]
+        return "• " + " | ".join(bits) if bits else ""
+
+    alt_block = "\n".join(line for line in (_alt_line(c) for c in alts) if line)
+
+    if lang == "th":
+        head = "ไม่พบรายการที่ผ่านการตรวจสอบซึ่งตรงกับเงื่อนไขของคุณครับ"
+        if criteria:
+            head = f"ไม่พบรายการที่ผ่านการตรวจสอบซึ่งตรงกับเงื่อนไข: {criteria}"
+        if alt_block and relaxed_filter:
+            mid = (
+                f"\n\nได้ผ่อนเงื่อนไขเพียงข้อเดียว ({relaxed_filter}) "
+                f"และพบตัวเลือกใกล้เคียงดังนี้:\n{alt_block}"
+            )
+        else:
+            mid = ""
+        return (
+            f"{head}{mid}\n\n"
+            f"ทีมที่ปรึกษา ({advisor}) สามารถช่วยตรวจสอบเพิ่มเติมได้ "
+            "หรือแจ้งทำเล / งบประมาณ / ประเภทอสังหาฯ เพื่อค้นหาจากรายการที่มีอยู่จริงครับ"
+        )
+    if lang == "pl":
+        head = "Nie znaleziono zweryfikowanej oferty spełniającej Twoje kryteria."
+        if criteria:
+            head = f"Nie znaleziono zweryfikowanej oferty spełniającej kryteria: {criteria}."
+        if alt_block and relaxed_filter:
+            mid = (
+                f"\n\nPo poluzowaniu dokładnie jednego filtra ({relaxed_filter}) "
+                f"najbliższe dostępne oferty to:\n{alt_block}"
+            )
+        else:
+            mid = ""
+        return (
+            f"{head}{mid}\n\n"
+            f"Nasz zespół doradców ({advisor}) może pomóc dalej. "
+            "Możesz też podać lokalizację, budżet lub typ nieruchomości."
+        )
+
+    head = "No verified listing matches your criteria."
+    if criteria:
+        head = f"No verified listing matches your criteria: {criteria}."
+    if alt_block and relaxed_filter:
+        mid = (
+            f"\n\nAfter relaxing exactly one filter ({relaxed_filter}), "
+            f"the closest verified options are:\n{alt_block}"
+        )
+    else:
+        mid = ""
+    return (
+        f"{head}{mid}\n\n"
+        f"Our advisory team ({advisor}) can help further. "
+        "You can also share a location, budget, or property type to search among verified listings only."
     )
 
 LANGUAGE_ALIASES = {
@@ -326,7 +402,7 @@ def get_public_system_prompt(language: str = "en", site_origin: Optional[str] = 
 5. การปฏิเสธความรับผิดทางกฎหมายและผลตอบแทน: อัตราผลตอบแทนจากการเช่าอาจมีความผันผวนและไม่สามารถรับประกันทางกฎหมายได้ แนะนำให้ปรึกษาที่ปรึกษากฎหมายที่มีใบอนุญาตสำหรับการตรวจสอบสัญญา
 6. การดาวน์โหลดโบรชัวร์และ PDF: เมื่อผู้ใช้ขอโบรชัวร์, PDF, หรือเอกสารโครงการ ให้เรียกใช้ `generate_property_brochure` พร้อมรหัสอสังหาริมทรัพย์ ระบบจะสร้างโบรชัวร์ PDF ระดับพรีเมียมให้ผู้ใช้ดาวน์โหลดทันที
 7. การบันทึกข้อมูลติดต่อและนัดหมาย: เมื่อผู้ใช้ระบุข้อมูลติดต่อ (อีเมล, เบอร์โทร, ชื่อ) หรือขอนัดหมาย ให้เรียกใช้ `capture_lead` หรือ `schedule_viewing`
-8. การสอบถามเกี่ยวกับต่างประเทศ: หากผู้ใช้ถามถึงอสังหาริมทรัพย์ในต่างประเทศ (เช่น อินเดีย, ดูไบ, ยุโรป, อเมริกา) ให้ชี้แจงอย่างสุภาพและอบอุ่นว่าเราเชี่ยวชาญเฉพาะตลาดอสังหาริมทรัพย์ระดับพรีเมียมในประเทศไทย (ภูเก็ต เกาะสมุย เกาะพะงัน กรุงเทพฯ) พร้อมแนะนำจุดเด่นด้านผลตอบแทนการลงทุน (6%-10% ต่อปี) และความคุ้มค่าของการลงทุนในไทย เชิญชวนให้สำรวจโครงการคุณภาพในไทย และถามคำถามเพิ่มเติม 2-3 ข้อตามบริบทเพื่อเข้าใจเป้าหมายการลงทุน
+8. การสอบถามเกี่ยวกับต่างประเทศ: หากผู้ใช้ถามถึงอสังหาริมทรัพย์ในต่างประเทศ ให้ชี้แจงอย่างสุภาพว่าเราครอบคลุมเฉพาะอสังหาริมทรัพย์ในประเทศไทยเท่านั้น เชิญชวนให้ดูรายการในไทย และถามคำถามเพิ่มเติมได้ ห้ามอ้างตัวเลขผลตอบแทน ROI หรือ % ที่ไม่ได้มาจากข้อมูลจริงในรายการ
 9. รูปแบบตัวอักษรและการนำเสนอที่มีโครงสร้างเสมอ (MANDATORY STRUCTURED FORMAT):
    - หลีกเลี่ยงขีดแดชยาว (— หรือ –)
    - นำเสนอรายการอสังหาริมทรัพย์ในรูปแบบการ์ดที่มีโครงสร้างชัดเจนเสมอ (### 1. **[ชื่อโครงการ]**) พร้อมหัวข้อย่อย (📍 ทำเล, 💰 ราคา, 🛏️ ห้องนอน, 🏊 สิ่งอำนวยความสะดวก)
@@ -356,7 +432,7 @@ ZASADY I TON ROZMOWY:
 5. Nie obiecuj gwarantowanego ROI ani nie udzielaj wiążących porad prawnych - zalecaj kontakt z licencjonowanym tajskim prawnikiem.
 6. GENEROWANIE BROSZUR I PDF: Gdy użytkownik pyta o broszurę, PDF lub ofertę w PDF, wywołaj narzędzie `generate_property_brochure` z ID nieruchomości. System wygeneruje luksusową broszurę PDF i automatycznie rozpocznie pobieranie.
 7. ZAPISYWANIE KONTAKTÓW: Gdy użytkownik podaje e-mail, telefon lub prosi o prezentację, użyj `capture_lead` lub `schedule_viewing`.
-8. ZAPYTANIA O INNE KRAJE: Gdy klient pyta o nieruchomości w innych krajach (np. Polska, Dubaj, Indie, Hiszpania), wyjaśnij uprzejmie i profesjonalnie, że specjalizujemy się wyłącznie w luksusowych nieruchomościach w Tajlandii (Phuket, Koh Samui, Koh Phangan, Bangkok). Przedstaw kluczowe atuty Tajlandii (wysokie stopy zwrotu 6%-10%, Foreign Freehold, luksusowe wille z prywatnym basenem w doskonałej cenie za m²) i zaproponuj sprawdzenie ofert w Tajlandii. Zadaj 2-3 naturalne pytania konsultacyjne, by zrozumieć cele inwestycyjne klienta.
+8. ZAPYTANIA O INNE KRAJE: Gdy klient pyta o nieruchomości w innych krajach, uprzejmie wyjaśnij, że obsługujemy wyłącznie oferty w Tajlandii. Zaproś do przeglądania zweryfikowanych ofert w Tajlandii. NIE podawaj żadnych liczb ROI, stóp zwrotu ani procentów, jeśli nie pochodzą z konkretnego zweryfikowanego rekordu.
 9. OBOWIĄZKOWY STRUKTURALNY FORMAT ODPOWIEDZI:
    - Nie używaj długich pauz/myślników („—" ani „–"). Stosuj czytelne punkty, dwukropki i standardowe łączniki (-).
    - ZAWSZE prezentuj oferty w uporządkowanych kartach:
@@ -391,15 +467,15 @@ CORE INSTRUCTIONS & TONE:
      Maximum 3 questions. Make them feel like a real expert advisor is asking, not a form.
    - WHEN a user's request has ZERO matches in our portfolio (e.g. asking for 10 bedrooms, or a hyper-specific niche):
      * NEVER pretend smaller mismatched properties match their request.
-     * Explain market reality warmly and professionally (e.g. 10-bedroom estates in Thailand are ultra-rare private mega-compounds handled off-market).
-     * Recommend the most relevant ALTERNATIVE verified properties from the database with an encouraging, motivating tone — explain why these are excellent choices.
+     * State honestly that no verified listing matches. Do not invent off-market inventory.
+     * If alternatives come from a single relaxed filter, say which filter was relaxed. Otherwise use the honest no-match reply.
      * Ask 2-3 natural questions to refine the search (based on what is actually missing from the conversation).
    - WHEN a user provides complete details (specific location + budget + bedrooms): Show matching properties directly. Only ask follow-up questions if something important is still missing.
 
-5. ROI & LEGAL DISCLAIMERS: Rental yields vary and cannot be legally guaranteed; only quote verified developer projections if documented. Always advise consulting a qualified Thai attorney for formal legal due diligence.
+5. ROI & LEGAL DISCLAIMERS: Do not quote yields, ROI, or percentages unless that exact figure appears in the retrieved listing record or in APPROVED_STATEMENTS. Advise consulting a qualified Thai attorney for formal legal due diligence.
 6. BROCHURE & PDF DOWNLOADS: When a visitor asks for a brochure, PDF, factsheet, floor plan, or project document, call the `generate_property_brochure` tool with the property ID. The system will automatically render the luxury brochure PDF and initiate the download for the visitor.
 7. LEAD CAPTURE & VIEWING APPOINTMENTS: When a visitor provides contact details (email, phone, name), asks for a callback, or wants to schedule a viewing or consultation, call `capture_lead` or `schedule_viewing` immediately.
-8. FOREIGN INQUIRIES & MARKET COMPARISONS: If a visitor asks about properties in other countries (e.g. India, Dubai, Europe, USA), warmly explain that we specialize exclusively in prime luxury real estate in Thailand (Phuket, Koh Samui, Koh Phangan, Bangkok). Highlight Thailand's premier investment appeal (e.g., attractive 6%-10% rental yields, 100% foreign freehold condo ownership, and high-spec private pool villas at a fraction of Western resort pricing) and warmly invite them to explore verified Thailand opportunities. Ask 2-3 consultative follow-up questions to understand their investment goals.
+8. FOREIGN INQUIRIES: If a visitor asks about properties outside Thailand, politely say we only cover Thailand listings, invite them to browse verified Thailand properties, and do not quote any yield or ROI numbers.
 8b. STRICT OFF-TOPIC REFUSAL (CRITICAL): NEVER answer politics, politicians, celebrities, famous private homes (e.g. Antilia), landmark trivia, homework, coding, recipes, health, sports, or general knowledge. Do NOT provide facts and then soft-pitch Thailand. Politely refuse in one short message and invite Thailand property questions only.
 9. MANDATORY STRUCTURED PRESENTATION FORMAT (NEVER UNSTRUCTURED OR RAW TABLES):
    - Do NOT use markdown headers (###), dash bullets (-), or long em-dashes ("—" or "–").
@@ -690,39 +766,23 @@ def get_off_topic_text(language: str, site_origin: Optional[str] = None, user_me
     if is_foreign_property_inquiry:
         if language == "th":
             return (
-                f"ในขณะที่ {tenant.brand_name} เชี่ยวชาญและมุ่งเน้นตลาดอสังหาริมทรัพย์ระดับพรีเมียมในประเทศไทยโดยเฉพาะ (ภูเก็ต เกาะสมุย กรุงเทพฯ)\n\n"
-                "นักลงทุนต่างชาติจำนวนมากที่พิจารณาตลาดต่างประเทศ ตัดสินใจเลือกประเทศไทย เนื่องจากให้ผลตอบแทนการปล่อยเช่าสูงกว่าอย่างมีนัยสำคัญ (เฉลี่ย 6%-10% ต่อปี) "
-                "และราคาต่อตารางเมตรที่คุ้มค่ากว่ามาก พร้อมสิทธิ์การถือครองคอนโดมิเนียม Foreign Freehold 100%\n\n"
-                "เพื่อให้ทีมงานช่วยแนะนำอสังหาริมทรัพย์ที่ตอบโจทย์ที่สุด กรุณาระบุข้อมูลเพิ่มเติม:\n"
-                "1. **เป้าหมาย:** เน้นผลตอบแทนจากการปล่อยเช่า หรือต้องการเป็นบ้านพักตากอากาศส่วนตัว?\n"
-                "2. **งบประมาณ:** ช่วงงบประมาณที่วางไว้โดยประมาณ?\n"
-                "3. **ประเภท:** สนใจคอนโดมิเนียมติดชายหาด หรือพูลวิลล่าพร้อมสระว่ายน้ำส่วนตัว?\n\n"
-                "คุณต้องการให้เราแนะนำโครงการพูลวิลล่าหรือคอนโดมิเนียมระดับพรีเมียมในภูเก็ตและเกาะสมุยที่ผ่านการตรวจสอบแล้วไหมครับ?"
+                f"{tenant.brand_name} ครอบคลุมเฉพาะอสังหาริมทรัพย์ในประเทศไทยเท่านั้น "
+                f"(ภูเก็ต เกาะสมุย กรุงเทพฯ และพื้นที่ใกล้เคียง) และไม่เป็นตัวแทนโครงการนอกประเทศไทย\n\n"
+                f"หากต้องการความช่วยเหลือเพิ่มเติม ติดต่อทีมที่ปรึกษาได้ที่ {tenant.advisor_email}\n"
+                "หรือแจ้งทำเล / งบประมาณ / ประเภทอสังหาฯ ในไทย เพื่อค้นหาจากรายการที่ผ่านการตรวจสอบแล้วครับ"
             )
         elif language == "pl":
             return (
-                f"Portal {tenant.brand_name} ({tenant.domain}) specjalizuje się wyłącznie w segmencie luksusowych nieruchomości w Tajlandii (Phuket, Koh Samui, Koh Phangan, Bangkok).\n\n"
-                "Wielu międzynarodowych inwestorów porównujących rynki zagraniczne (np. Dubaj, Hiszpania, Miami) decyduje się na Tajlandię ze względu na:\n"
-                "• **Wyższe stopy zwrotu z najmu:** Standardowo 6%-10% netto rocznie w modelach hotelowych i prywatnych\n"
-                "• **Znacznie niższą cenę za m²:** Luksusowy standard wykończenia i prywatne baseny w cenach nieosiągalnych na zachodnich rynkach\n"
-                "• **Stabilny rynek całorocznego wynajmu premium**\n\n"
-                "Aby nasz zespół doradców mógł dobrać dla Ciebie najlepsze alternatywy, powiedz proszę:\n"
-                "1. **Cel inwestycji:** Szukasz nieruchomości głównie pod zyski z wynajmu, czy jako prywatnej bazy wakacyjnej?\n"
-                "2. **Budżet:** Jaki orientacyjny budżet inwestycyjny przewidujesz?\n"
-                "3. **Format:** Preferujesz bezobsługowy apartament przy plaży (Foreign Freehold) czy prywatną willę z basenem?\n\n"
-                "Czy chcesz poznać dostępne, zweryfikowane nieruchomości w Tajlandii dopasowane do Twojego profilu?"
+                f"{tenant.brand_name} ({tenant.domain}) obsługuje wyłącznie zweryfikowane oferty w Tajlandii "
+                f"(Phuket, Koh Samui, Bangkok i okolice) i nie reprezentuje nieruchomości poza Tajlandią.\n\n"
+                f"Nasz zespół doradców ({tenant.advisor_email}) chętnie pomoże. "
+                "Podaj lokalizację, budżet lub typ nieruchomości w Tajlandii, a wyszukam wyłącznie wśród dostępnych, zweryfikowanych ofert."
             )
         return (
-            f"While {tenant.brand_name} specializes exclusively in prime Thailand real estate (Phuket, Koh Samui, Koh Phangan, and Bangkok), "
-            "many international investors comparing destinations like Dubai, Miami, or India ultimately choose Thailand for its distinct advantages:\n\n"
-            "• **Attractive Rental Yields:** Typically 6%-10% net annually with professionally managed hotel programs\n"
-            "• **Superior Value Per Sqm:** High-end finishes, private swimming pools, and resort amenities at a fraction of other international resort pricing\n"
-            "• **Year-Round High Season Tourism:** Sustained global demand across luxury villas and beachfront residences\n\n"
-            "To help us recommend the best luxury opportunities for your profile, could you clarify:\n"
-            "1. **Investment Objective:** Are you looking primarily for high passive rental returns or a personal holiday retreat?\n"
-            "2. **Target Budget:** What approximate investment or budget range are you envisioning?\n"
-            "3. **Property Type:** Would you prefer a low-maintenance beachfront condo or a private pool villa?\n\n"
-            "Would you like to explore comparable verified luxury options in Phuket or Koh Samui that match that profile?"
+            f"{tenant.brand_name} only covers verified real estate in Thailand "
+            f"(Phuket, Koh Samui, Bangkok and nearby areas). We do not represent properties outside Thailand.\n\n"
+            f"Our advisory team ({tenant.advisor_email}) can help. "
+            "Share a Thailand location, budget, or property type and I will search only among verified listings."
         )
 
     # General off-topic / trivia / politics — refuse the question itself, redirect smoothly
@@ -787,17 +847,17 @@ def build_consultative_followup_questions(
         else:
             questions.append("Do you prefer a beachfront luxury villa (e.g. Phuket or Koh Samui) or an urban residence in Bangkok?")
 
-    # If all 3 are already known, ask about investment purpose vs lifestyle
+    # If all 3 are already known, ask about purpose (no invented yield/off-market claims)
     if not questions:
         if language == "pl":
-            questions.append("Czy priorytetem jest prywatna rezydencja wakacyjna, czy wysoka stopa zwrotu z wynajmu?")
-            questions.append("Czy chciałbyś zapoznać się z opcjami off-market w tej lokalizacji?")
+            questions.append("Czy priorytetem jest prywatna rezydencja wakacyjna, czy nieruchomość pod wynajem?")
+            questions.append("Czy chcesz zobaczyć rzuty pięter lub oficjalną broszurę PDF?")
         elif language == "th":
-            questions.append("การซื้อครั้งนี้เน้นเป็นบ้านพักตากอากาศส่วนตัว หรือเพื่อการลงทุนปล่อยเช่าที่สร้างผลตอบแทนครับ?")
-            questions.append("คุณสนใจให้เราจัดหาตัวเลือกพิเศษแบบ Off-market เพิ่มเติมไหมครับ?")
+            questions.append("การซื้อครั้งนี้เน้นเป็นบ้านพักตากอากาศส่วนตัว หรือเพื่อปล่อยเช่าครับ?")
+            questions.append("คุณต้องการดูผังโครงการหรือโบรชัวร์ PDF ไหมครับ?")
         else:
-            questions.append("Is your primary focus on a private holiday retreat or high-yield rental returns?")
-            questions.append("Would you like our senior advisory team to check confidential off-market listings matching these criteria?")
+            questions.append("Is your primary focus a private holiday home or a rental property?")
+            questions.append("Would you like floor plans or an official PDF brochure for any of these listings?")
 
     # Return at most 2 to 3 questions
     return questions[:3]
@@ -822,21 +882,17 @@ def build_encouraging_alternative_intro(
 
     if language == "pl":
         return (
-            f"Choć obecnie nie posiadamy oferty {config_phrase_pl}, "
-            "z przyjemnością prezentuję wyjątkowe, zweryfikowane nieruchomości w Tajlandii! "
-            "Każda z nich wyróżnia się luksusowym standardem, znakomitą lokalizacją oraz doskonałym potencjałem inwestycyjnym, "
-            "który cieszy się dużym uznaniem naszych klientów:"
+            f"Nie znaleziono dokładnego dopasowania {config_phrase_pl}. "
+            "Poniżej zweryfikowane oferty z pojedynczym poluzowanym filtrem (oznaczonym w odpowiedzi):"
         )
     elif language == "th":
         return (
-            "แม้ในขณะนี้เราอาจจะยังไม่มีรายการที่ตรงกับเงื่อนไขแบบเจาะจงพอดีในพอร์ตโฟลิโอ "
-            "แต่ผมขอแนะนำอสังหาริมทรัพย์ระดับพรีเมียมที่ผ่านการตรวจสอบแล้วในประเทศไทย ซึ่งได้รับความนิยมอย่างสูง "
-            "ทั้งในแง่ของดีไซน์ ทำเลทอง และความคุ้มค่าที่ยอดเยี่ยมที่ผู้ซื้อชื่นชอบเป็นพิเศษครับ:"
+            "ไม่พบรายการที่ตรงเงื่อนไขแบบเจาะจงพอดี "
+            "ด้านล่างคือรายการที่ผ่านการตรวจสอบจากการผ่อนเงื่อนไขเพียงข้อเดียว (ระบุไว้ในข้อความ):"
         )
     return (
-        f"While we don't have an exact match {config_phrase_en} in our current listings, "
-        "I am delighted to recommend these exceptional verified luxury properties in Thailand! "
-        "Each offers outstanding design, prime locations, and remarkable value that our clients consistently praise:"
+        f"No exact match {config_phrase_en} in our verified listings. "
+        "Below are verified options from a search with exactly one relaxed filter (stated in the reply):"
     )
 
 
@@ -876,26 +932,35 @@ def build_rich_property_recommendation_text(
         )
     else:
         if language == "pl":
-            intro = "W oparciu o Twoje kryteria z przyjemnością prezentuję wyselekcjonowane, zweryfikowane nieruchomości w Tajlandii, które oferują wyjątkowy komfort i prestiżowy styl życia:"
+            intro = "Oto zweryfikowane oferty zgodne z Twoimi kryteriami:"
         elif language == "th":
-            intro = "จากความสนใจของคุณ ผมขอแนะนำอสังหาริมทรัพย์ระดับพรีเมียมที่ผ่านการตรวจสอบแล้วในประเทศไทย ที่โดดเด่นด้วยดีไซน์และสิ่งอำนวยความสะดวกครบครันครับ:"
+            intro = "นี่คือรายการที่ผ่านการตรวจสอบซึ่งตรงกับเงื่อนไขของคุณครับ:"
         else:
-            intro = "Based on your preferences, I am delighted to present these verified luxury properties in Thailand that offer exceptional living spaces and prime lifestyle amenities:"
+            intro = "Here are verified listings that match your criteria:"
 
-    # 2. Descriptions for featured cards (plain • lines — avoid nested ** that break UI rendering)
+    # 2. Descriptions from listing fields only (omit missing fields; no marketing filler)
     property_descriptions: List[str] = []
     for idx, c in enumerate(cards[:3], 1):
-        name = str(c.get("name") or "Featured Property").replace("*", "").strip()
-        loc = str(c.get("location") or "Thailand").replace("*", "").strip()
-        price = str(c.get("price") or "Price on request").strip().replace("*", "")
-        # Avoid "Starting from from 17.80M THB"
-        if price.lower().startswith("from ") or price.lower() == "price on request":
+        name = str(c.get("name") or c.get("property_name") or "").replace("*", "").strip()
+        if not name:
+            continue
+        loc = str(c.get("location") or "").replace("*", "").strip()
+        price_raw = c.get("price") if c.get("price") is not None else c.get("price_display")
+        price = str(price_raw).strip().replace("*", "") if price_raw not in (None, "") else ""
+        # Never "Starting from from" or "Starting from Price on request"
+        if not price:
+            price_display = ""
+        elif price.lower() in ("price on request", "n/a", "na"):
+            price_display = "Price on request" if language == "en" else (
+                "Cena na zapytanie" if language == "pl" else "สอบถามราคา"
+            )
+        elif price.lower().startswith("from ") or price.lower().startswith("starting from "):
             price_display = price
         else:
-            price_display = f"from {price}" if language == "en" else price
+            price_display = price
+
         beds = c.get("bedrooms")
-        beds_raw = str(beds).strip() if beds and str(beds) != "N/A" else ""
-        # Avoid "1-4 Beds bedrooms"
+        beds_raw = str(beds).strip() if beds not in (None, "", "N/A") else ""
         if beds_raw:
             low_b = beds_raw.lower()
             if any(x in low_b for x in ["bed", "sypial", "ห้องนอน"]):
@@ -905,32 +970,24 @@ def build_rich_property_recommendation_text(
             elif language == "th":
                 beds_str = f"{beds_raw} ห้องนอน"
             else:
-                beds_str = f"{beds_raw} Beds"
+                beds_str = f"{beds_raw} beds"
         else:
             beds_str = ""
 
         features = []
-        if c.get("has_pool"):
+        if c.get("has_pool") is True:
             features.append("Private Pool" if language == "en" else ("Prywatny basen" if language == "pl" else "สระว่ายน้ำส่วนตัว"))
-        if c.get("beach_access"):
+        if c.get("beach_access") is True:
             features.append("Beach Access" if language == "en" else ("Blisko plaży" if language == "pl" else "ใกล้ชายหาด"))
         if beds_str:
             features.append(beds_str)
 
-        feat_str = f" ({', '.join(features)})" if features else ""
-
-        if language == "pl":
-            property_descriptions.append(
-                f"• {name} ({loc}): {price_display}{feat_str} – doskonały wybór gwarantujący najwyższy standard i bezpieczeństwo transakcji."
-            )
-        elif language == "th":
-            property_descriptions.append(
-                f"• {name} ({loc}): {price_display}{feat_str} – โครงการคุณภาพสูงพร้อมสิทธิ์การถือครองที่โปร่งใสและปลอดภัย"
-            )
-        else:
-            property_descriptions.append(
-                f"• {name} ({loc}): {price_display}{feat_str} – an outstanding selection offering premium finishes and strong lifestyle value."
-            )
+        parts = [name]
+        if loc:
+            parts.append(f"({loc})")
+        detail_bits = [b for b in [price_display, ", ".join(features) if features else ""] if b]
+        detail = ": " + " | ".join(detail_bits) if detail_bits else ""
+        property_descriptions.append("• " + " ".join(parts) + detail)
 
     body = "\n".join(property_descriptions) if property_descriptions else ""
 
@@ -1053,7 +1110,7 @@ def get_quick_replies(language: str, has_properties: bool, user_message: str) ->
             ]
         if any(b in u_low for b in ["bedroom", "bed", "ห้องนอน"]) or any(str(i) in u_low for i in [7, 8, 9, 10, 11, 12]):
             return [
-                "ติดต่อที่ปรึกษาอาวุโสสำหรับโครงการ Off-market",
+                "ติดต่อที่ปรึกษาอสังหาริมทรัพย์",
                 "แสดงวิลล่าหรูขนาดใหญ่ที่สุด (5-6 ห้องนอน)",
                 "พูลวิลล่าในภูเก็ต"
             ]
@@ -1082,7 +1139,7 @@ def get_quick_replies(language: str, has_properties: bool, user_message: str) ->
             ]
         elif any(b in u_low for b in ["sypialn", "pokoj", "pokoi"]) or any(str(i) in u_low for i in [7, 8, 9, 10, 11, 12]):
             return [
-                "Połącz z doradcą w sprawie ofert off-market",
+                "Połącz z doradcą ds. nieruchomości",
                 "Pokaż największe wille (5-6 sypialni)",
                 "Luksusowe wille z basenem na Phuket"
             ]
@@ -1111,7 +1168,7 @@ def get_quick_replies(language: str, has_properties: bool, user_message: str) ->
             ]
         elif any(b in u_low for b in ["bedroom", "bed"]) or any(str(i) in u_low for i in [7, 8, 9, 10, 11, 12]):
             return [
-                "Connect with Senior Advisor for off-market estate",
+                "Connect with a property advisor",
                 "Show largest luxury villas (5-6 beds)",
                 "Explore Phuket luxury villas"
             ]
