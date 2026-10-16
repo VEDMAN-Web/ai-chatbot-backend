@@ -83,6 +83,9 @@ class Settings(BaseSettings):
 
     # Property catalog / name-index in-memory cache (stale-while-revalidate)
     CATALOG_CACHE_TTL_SEC: float = 900.0  # 15 minutes
+    # Fixed FX used ONLY to compare listing prices against THB budgets (a few listings are priced in USD/EUR)
+    FX_USD_THB: float = 35.0
+    FX_EUR_THB: float = 38.0
     NAME_INDEX_TTL_SEC: float = 600.0  # 10 minutes
 
     # In-session memory: support 100+ consecutive property follow-ups

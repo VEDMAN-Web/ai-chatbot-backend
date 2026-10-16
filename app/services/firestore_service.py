@@ -24,6 +24,19 @@ _CATALOG_REFRESHING: set = set()
 # Legacy module constant (tests may read); runtime TTL comes from settings
 _CATALOG_TTL_SEC = 900
 
+def to_thb(amount: Optional[float], currency: Optional[str]) -> Optional[float]:
+    """Convert a listing price to THB so budget filters compare like with like.
+    Uses fixed, configurable rates (settings.FX_*_THB). Unknown currency -> None (never guessed)."""
+    if amount is None:
+        return None
+    cur = (currency or "THB").strip().upper()
+    if cur in ("THB", "BAHT", "฿"):
+        return float(amount)
+    rate = {"USD": settings.FX_USD_THB, "EUR": settings.FX_EUR_THB}.get(cur)
+    return float(amount) * float(rate) if rate else None
+
+
+
 
 def _catalog_ttl_sec() -> float:
     try:
@@ -269,7 +282,7 @@ def normalize_firestore_project(doc_id: str, data: Dict[str, Any]) -> Dict[str, 
 
     # Bedrooms & Area
     layouts = data.get("layouts") or []
-    bedrooms_str = "1-4 Beds"
+    bedrooms_str = ""  # unknown unless the listing has layout data: never invent a bedroom count
     if layouts and isinstance(layouts, list):
         bed_nums = [l.get("bedrooms") for l in layouts if isinstance(l, dict) and l.get("bedrooms") is not None]
         if bed_nums:
@@ -339,7 +352,9 @@ def normalize_firestore_project(doc_id: str, data: Dict[str, Any]) -> Dict[str, 
         desc_str = data.get("_descriptionRu") or data.get("_shortDescriptionRu") or ""
 
     if not desc_str:
-        desc_str = f"Exclusive development '{name_str}' in {location_str}. Featuring {bedrooms_str}, {area_str}, with pricing starting from {price_display}."
+        _facts = [f for f in (bedrooms_str, area_str if area_str != "N/A" else "") if f]
+        _feat = f" Featuring {', '.join(_facts)}." if _facts else ""
+        desc_str = f"Development '{name_str}' in {location_str}.{_feat} Pricing: {price_display}."
     desc_str = sanitize_marketing_claims(desc_str, mode="description")
 
     # Websites & Domains Scope
@@ -358,6 +373,8 @@ def normalize_firestore_project(doc_id: str, data: Dict[str, Any]) -> Dict[str, 
         "price": price_display,
         "price_numeric_min": price_num_min,
         "price_numeric_max": price_num_max,
+        "price_thb_min": to_thb(price_num_min, currency),
+        "price_thb_max": to_thb(price_num_max, currency),
         "currency": currency,
         "bedrooms": bedrooms_str,
         "area": area_str,
@@ -669,7 +686,7 @@ def score_property_relevance(
             # Prefer tighter bedroom ranges
             span = max(b_nums) - min(b_nums)
             score += max(0.0, 5.0 - span)
-    p_min = prop.get("price_numeric_min")
+    p_min = prop.get("price_thb_min")
     try:
         p_min_f = float(p_min) if p_min is not None else None
     except (TypeError, ValueError):
@@ -888,13 +905,19 @@ def search_properties_firestore(
     # Known regions must never trigger direct single-property resolution
     known_regions = [
         "phuket", "samui", "koh samui", "pattaya", "bangkok", "phangan", "koh phangan",
-        "hua hin", "hua-hin", "krabi", "chiang mai", "thailand", "tajlandia"
+        "hua hin", "hua-hin", "krabi", "chiang mai", "thailand", "tajlandia",
+        # Cambodia (priority market), Vietnam, Maldives: places, never property names
+        "cambodia", "kambodza", "kambodża", "phnom penh", "phnom-penh", "sihanoukville", "siem reap",
+        "kampot", "kep", "vietnam", "wietnam", "ho chi minh", "da nang", "danang", "nha trang",
+        "maldives", "malediwy", "tajlandia", "tajska", "thai",
     ]
+    # Normalised comparison (hyphen/space and case-insensitive)
+    loc_clean = loc_clean.replace("-", " ") if loc_clean.replace("-", " ") in [r.replace("-", " ") for r in known_regions] else loc_clean
 
     # If location looks like a specific project name rather than a region, same matcher as query
     name_like_location = (
         bool(loc_clean)
-        and loc_clean not in known_regions
+        and loc_clean not in [r.replace('-', ' ') for r in known_regions]
         and len(loc_clean) >= 3
         and bool(distinctive_tokens(location or loc_clean))
     )
@@ -957,7 +980,9 @@ def search_properties_firestore(
             p_name = (p.get("name") or "").lower()
             p_addr = (p.get("address") or "").lower()
             p_dist = (p.get("district") or "").lower()
-            if not any(loc_clean in field for field in [p_loc, p_name, p_addr, p_dist]):
+            p_prov = (p.get("province") or "").lower()
+            _lc_h = loc_clean.replace(" ", "-")
+            if not any((loc_clean in field) or (_lc_h in field) for field in [p_loc, p_name, p_addr, p_dist, p_prov]):
                 continue
 
         # Property type filter
@@ -995,9 +1020,13 @@ def search_properties_firestore(
         if min_price is not None or max_price is not None:
             if is_por:
                 continue
-        if min_price is not None and p_min is not None and p_min < min_price:
+        # Compare in THB (a few listings are priced in USD/EUR); unknown-currency listings are excluded
+        p_thb = p.get("price_thb_min")
+        if (min_price is not None or max_price is not None) and p_thb is None:
             continue
-        if max_price is not None and p_min is not None and p_min > max_price:
+        if min_price is not None and p_thb < min_price:
+            continue
+        if max_price is not None and p_thb > max_price:
             continue
 
         # Amenities filter (legacy flags + canonical amenity keys)
