@@ -82,11 +82,13 @@ class ToolRoutingGuardrail:
         last_result_ids = state.get("last_result_ids", [])
         selected_ids = state.get("selected_property_ids", [])
 
-        # 1. Direct Property ID in text (e.g. "PROP-PHK-001")
-        pid_match = re.search(r"(prop-[a-z0-9\-]+)", msg_low)
+        from app.services.property_search import get_property_by_id, get_property_by_name
+
+        # 1. Direct Property ID in text (e.g. "PROP-PHK-001" or "9d-cozy-villas")
+        pid_match = re.search(r"((?:prop-[a-z0-9\-]+)|(?:[a-z0-9]+(?:-[a-z0-9]+){2,}))", msg_low)
         if pid_match:
-            pid = pid_match.group(1).upper()
-            prop = db.query(Property).filter(Property.property_id == pid).first()
+            pid = pid_match.group(1).strip()
+            prop = get_property_by_id(db, pid)
             if prop:
                 return prop.property_id, prop.property_name, False
             return pid, None, False
@@ -94,33 +96,32 @@ class ToolRoutingGuardrail:
         # 2. Ordinal references ("first one", "2nd villa", "pierwsza oferta", "อันแรก")
         if any(k in msg_low for k in ["first", "1st", "1", "อันแรก", "pierwsz", "รายการแรก"]):
             if last_result_ids:
-                prop = db.query(Property).filter(Property.property_id == last_result_ids[0]).first()
+                prop = get_property_by_id(db, last_result_ids[0])
                 if prop:
                     return prop.property_id, prop.property_name, False
         elif any(k in msg_low for k in ["second", "2nd", "2", "อันที่สอง", "drug", "รายการที่สอง"]):
             if len(last_result_ids) >= 2:
-                prop = db.query(Property).filter(Property.property_id == last_result_ids[1]).first()
+                prop = get_property_by_id(db, last_result_ids[1])
                 if prop:
                     return prop.property_id, prop.property_name, False
         elif any(k in msg_low for k in ["third", "3rd", "3", "อันที่สาม", "trzeci", "รายการที่สาม"]):
             if len(last_result_ids) >= 3:
-                prop = db.query(Property).filter(Property.property_id == last_result_ids[2]).first()
+                prop = get_property_by_id(db, last_result_ids[2])
                 if prop:
                     return prop.property_id, prop.property_name, False
 
-        # 3. Fuzzy matching project name from database
-        all_props = db.query(Property).all()
-        for p in all_props:
-            if p.property_name and len(p.property_name) > 3 and p.property_name.lower() in msg_low:
-                return p.property_id, p.property_name, False
+        # 3. Fuzzy matching project name from live Firestore / database
+        matched_by_name = get_property_by_name(db, msg_low)
+        if matched_by_name:
+            return matched_by_name.property_id, matched_by_name.property_name, False
 
         # 4. Single-property session context (if user just inspected 1 property or 1 card is in focus)
         if len(selected_ids) == 1:
-            prop = db.query(Property).filter(Property.property_id == selected_ids[0]).first()
+            prop = get_property_by_id(db, selected_ids[0])
             if prop:
                 return prop.property_id, prop.property_name, False
         elif len(last_result_ids) == 1:
-            prop = db.query(Property).filter(Property.property_id == last_result_ids[0]).first()
+            prop = get_property_by_id(db, last_result_ids[0])
             if prop:
                 return prop.property_id, prop.property_name, False
 

@@ -1247,9 +1247,9 @@ def append_conversation_turn_firestore(
 
     history.append(asst_turn)
 
-    # Bound history length to last 30 turns max
-    if len(history) > 30:
-        history = history[-30:]
+    # Bound history length to 120 turns to support 50+ back-to-back questions
+    if len(history) > 120:
+        history = history[-120:]
 
     # For turns older than the last 4 turns, remove bulky tool metadata
     for i in range(max(0, len(history) - 4)):

@@ -229,7 +229,7 @@ class DossierPropertyFallback:
 def _get_default_dossier_properties() -> List[DossierPropertyFallback]:
     return [
         DossierPropertyFallback(
-            property_id="PROP-PHK-001",
+            property_id="the-pavilions-grand-ocean-villa",
             property_name="The Pavilions Grand Ocean Villa",
             project_name="The Pavilions Phuket Luxury Estates",
             province="Phuket",

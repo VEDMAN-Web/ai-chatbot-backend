@@ -40,7 +40,7 @@ router = APIRouter(prefix="/admin", tags=["Admin Agent"])
 # Schemas
 class AdminChatRequest(BaseModel):
     session_id: str = Field(..., example="admin-session-001", description="Admin session identifier")
-    message: Optional[str] = Field(None, example="What is the roof material of PROP-PHK-001?", description="Admin message")
+    message: Optional[str] = Field(None, example="What is the roof material of 15 Sukhumvit Residences?", description="Admin message")
     site_origin: str = Field("tajlandia.com", example="tajlandia.com", description="Admin origin client")
     selected_websites: Optional[List[str]] = Field(None, description="Active selected websites from UI checkboxes, e.g. ['tajlandia.com', 'varsoviaestate.com']")
     language: Optional[str] = Field("en", description="Language code for conversation ('en' or 'pl'). Default is 'en'", example="en")

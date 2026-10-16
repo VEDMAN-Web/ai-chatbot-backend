@@ -74,12 +74,12 @@ const UI_STRINGS = {
     ],
     heroTitleAdmin: "Tajlandia AI — Admin Intelligence",
     heroSubtitleAdmin: "Privileged access to confidential developer specs, structural materials, bulk file operations with 6-day undo, and staged write actions.",
-    inputPlaceholderAdmin: "Ask internal intelligence (e.g. private specs for PROP-PHK-001, upload bulk file, generate PDF report)...",
+    inputPlaceholderAdmin: "Ask internal intelligence (e.g. upload bulk file, generate PDF report, inventory stats)...",
     samplePromptsAdmin: [
       "📂 Upload property Excel/PDF to bulk update or remove listings",
       "🕒 Show batch operations history & rollback within 6-day window",
-      "What are the private developer specs and roof material for PROP-PHK-001?",
-      "Generate a comprehensive PDF report for PROP-PHK-001"
+      "What are the private developer specs and roof material for 15 Sukhumvit Residences?",
+      "Generate a comprehensive PDF report for 15 Sukhumvit Residences"
     ]
   },
   pl: {
@@ -112,12 +112,12 @@ const UI_STRINGS = {
     ],
     heroTitleAdmin: "Tajlandia AI — Panel Administracyjny",
     heroSubtitleAdmin: "Poufny dostęp do specyfikacji deweloperskich, operacji masowych z 6-dniowym cofaniem zmian i analizy leadów.",
-    inputPlaceholderAdmin: "Zapytaj asystenta zarządczego (np. wgraj plik Excel, specyfikacja PROP-PHK-001, wygeneruj raport PDF)...",
+    inputPlaceholderAdmin: "Zapytaj asystenta zarządczego (np. wgraj plik Excel, raport PDF, stan portfolio)...",
     samplePromptsAdmin: [
       "📂 Wgraj plik Excel/PDF z nieruchomościami, aby zaktualizować lub usunąć oferty",
       "🕒 Pokaż historię operacji masowych i cofnij zmiany (okno 6 dni)",
-      "Jakie są specyfikacje techniczne i materiał dachu dla PROP-PHK-001?",
-      "Wygeneruj oficjalny raport PDF dla inwestora dla PROP-PHK-001"
+      "Jakie są specyfikacje techniczne i materiał dachu dla 15 Sukhumvit Residences?",
+      "Wygeneruj oficjalny raport PDF dla inwestora dla 15 Sukhumvit Residences"
     ]
   },
   th: {
@@ -151,12 +151,12 @@ const UI_STRINGS = {
     ],
     heroTitleAdmin: "Tajlandia AI — ระบบข่าวกรองผู้ดูแลระบบ",
     heroSubtitleAdmin: "สิทธิ์เข้าถึงข้อมูลเชิงลึกของผู้พัฒนาโครงการ การจัดการไฟล์ชุดใหญ่พร้อมระบบย้อนกลับ 6 วัน และการออกรายงาน",
-    inputPlaceholderAdmin: "สอบถามข้อมูลภายใน (เช่น อัปโหลดไฟล์ Excel, สเปก PROP-PHK-001, สร้างรายงาน PDF)...",
+    inputPlaceholderAdmin: "สอบถามข้อมูลภายใน (เช่น อัปโหลดไฟล์ Excel, สร้างรายงาน PDF, สถิติอสังหาริมทรัพย์)...",
     samplePromptsAdmin: [
       "📂 อัปโหลดไฟล์ Excel/PDF เพื่ออัปเดตหรือลบรายการอสังหาริมทรัพย์แบบกลุ่ม",
       "🕒 แสดงประวัติการดำเนินการแบบกลุ่มและย้อนกลับข้อมูลภายใน 6 วัน",
-      "สเปกเชิงลึกและวัสดุหลังคาของโครงการ PROP-PHK-001 คืออะไร?",
-      "สร้างรายงาน PDF สำหรับโครงการ PROP-PHK-001"
+      "สเปกเชิงลึกและวัสดุหลังคาของโครงการ 15 Sukhumvit Residences คืออะไร?",
+      "สร้างรายงาน PDF สำหรับโครงการ 15 Sukhumvit Residences"
     ]
   }
 };
@@ -448,7 +448,7 @@ function triggerQuickAction(action) {
   const input = document.getElementById('chatInput');
   if (!input) return;
   if (action === 'report') {
-    input.value = "Generate a comprehensive investment and structural dossier PDF report for PROP-PHK-001";
+    input.value = "Generate a comprehensive investment and structural dossier PDF report for 15 Sukhumvit Residences";
     handleSendMessage();
   } else if (action === 'listing') {
     openBatchOpsModal('upload');

@@ -249,13 +249,9 @@ def fetch_drive_file(
                     file_content = sample["content"]
                     break
 
-    # 4. Default fallback specification
+    # 4. If no content found
     if not file_content:
-        file_content = (
-            f"Standard Project Technical Specification for {clean_id}.\n"
-            f"Structural frames: Reinforced C35 concrete.\n"
-            f"Insulation: Rockwool 50mm."
-        )
+        file_content = f"No document content found for '{clean_id}' in Google Drive or verified files."
 
     # Wrap in strict untrusted document isolation tags
     isolated_block = (

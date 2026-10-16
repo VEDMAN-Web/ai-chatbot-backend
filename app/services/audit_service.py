@@ -69,13 +69,18 @@ def record_audit_log(
         created_at=datetime.now(timezone.utc)
     )
 
+    from app.core.config import settings
+    if not getattr(settings, "ENABLE_AUDIT_LOGGING", True):
+        # Audit logging permanently OFF per user instruction
+        log_entry.id = f"audit_ephemeral_{datetime.now(timezone.utc).timestamp()}"
+        return log_entry
+
     try:
         db.add(log_entry)
         db.commit()
         db.refresh(log_entry)
 
         # Sync to Firestore admin_audit_log collection
-        from app.core.config import settings
         if getattr(settings, "ENABLE_FIRESTORE_SYNC", False):
             try:
                 from app.services.firestore_service import create_audit_log_in_firestore

@@ -45,6 +45,10 @@ def record_or_update_lead(
             self.contact_phone = contact_phone
             self.contact_name = contact_name
 
+    from app.core.config import settings
+    if not getattr(settings, "ENABLE_LEAD_SAVING", True):
+        return DummyLead(score_val=0.8)
+
     # If this is a Firestore conversation (string ID) or local DB is skipped
     conv_id = getattr(conversation, "id", None)
     lead = None
