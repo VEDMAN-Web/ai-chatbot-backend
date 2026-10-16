@@ -46,6 +46,7 @@ from app.services.property_context_service import (
     is_property_followup_message,
     fetch_authorized_property,
     clear_active_if_new_conversation,
+    recover_active_from_history,
 )
 
 logger = logging.getLogger(__name__)
@@ -575,32 +576,32 @@ def ensure_structured_response(
         if language == "pl":
             ownership_str = "100% Foreign Freehold (w ramach kwoty 49%)" if is_condo else "Własność budynku (Freehold) + 30-letni rejestrowany Leasehold gruntu"
             card_md = (
-                f"### {idx}. **{name}**\n"
-                f"- 📍 **Lokalizacja:** {loc}\n"
-                f"- 💰 **Cena wyjściowa:** **{price}**{currency_info}\n"
-                f"- 🛏️ **Sypialnie:** {beds} | 📐 **Typ:** {prop_type}\n"
-                f"- 🏊 **Udogodnienia:** {amenities}\n"
-                f"- 📜 **Forma własności:** {ownership_str}"
+                f"**{idx}. {name}**\n"
+                f"• 📍 **Lokalizacja:** {loc}\n"
+                f"• 💰 **Cena wyjściowa:** **{price}**{currency_info}\n"
+                f"• 🛏️ **Sypialnie:** {beds} | 📐 **Typ:** {prop_type}\n"
+                f"• 🏊 **Udogodnienia:** {amenities}\n"
+                f"• 📜 **Forma własności:** {ownership_str}"
             )
         elif language == "th":
             ownership_str = "Foreign Freehold 100% (โควต้าต่างชาติ 49%)" if is_condo else "กรรมสิทธิ์ตัวอาคาร Freehold 100% + สิทธิการเช่าที่ดินระยะยาว 30 ปี (Leasehold)"
             card_md = (
-                f"### {idx}. **{name}**\n"
-                f"- 📍 **ทำเล:** {loc}\n"
-                f"- 💰 **ราคาเริ่มต้น:** **{price}**\n"
-                f"- 🛏️ **ห้องนอน:** {beds} | 📐 **ประเภท:** {prop_type}\n"
-                f"- 🏊 **สิ่งอำนวยความสะดวก:** {amenities}\n"
-                f"- 📜 **กรรมสิทธิ์:** {ownership_str}"
+                f"**{idx}. {name}**\n"
+                f"• 📍 **ทำเล:** {loc}\n"
+                f"• 💰 **ราคาเริ่มต้น:** **{price}**\n"
+                f"• 🛏️ **ห้องนอน:** {beds} | 📐 **ประเภท:** {prop_type}\n"
+                f"• 🏊 **สิ่งอำนวยความสะดวก:** {amenities}\n"
+                f"• 📜 **กรรมสิทธิ์:** {ownership_str}"
             )
         else:
             ownership_str = "100% Foreign Freehold (within 49% Quota)" if is_condo else "100% Freehold Villa Building + 30-Year Registered Renewable Land Lease"
             card_md = (
-                f"### {idx}. **{name}**\n"
-                f"- 📍 **Location:** {loc}\n"
-                f"- 💰 **Starting Price:** **{price}**{currency_info}\n"
-                f"- 🛏️ **Bedrooms:** {beds} | 📐 **Type:** {prop_type}\n"
-                f"- 🏊 **Amenities & Highlights:** {amenities}\n"
-                f"- 📜 **Ownership Structure:** {ownership_str}"
+                f"**{idx}. {name}**\n"
+                f"• 📍 **Location:** {loc}\n"
+                f"• 💰 **Starting Price:** **{price}**{currency_info}\n"
+                f"• 🛏️ **Bedrooms:** {beds} | 📐 **Type:** {prop_type}\n"
+                f"• 🏊 **Amenities & Highlights:** {amenities}\n"
+                f"• 📜 **Ownership Structure:** {ownership_str}"
             )
         card_sections.append(card_md)
 
@@ -715,24 +716,44 @@ def _format_legal_and_next_steps(text: str, user_message: str = "", language: st
 def _default_next_steps(language: str = "en") -> str:
     if language == "pl":
         return (
-            "🎯 **Kolejne kroki:**\n"
-            "- 📄 Pobierz oficjalną broszurę PDF i rzuty pięter\n"
-            "- 📅 Zaplanuj prywatną prezentację (na żywo lub online)\n"
-            "- 💬 Skonsultuj się z naszym doradcą inwestycyjnym"
+            "**Kolejne kroki**\n"
+            "• Pobierz oficjalną broszurę PDF i rzuty pięter\n"
+            "• Zaplanuj prywatną prezentację (na żywo lub online)\n"
+            "• Skonsultuj się z naszym doradcą inwestycyjnym"
         )
     elif language == "th":
         return (
-            "🎯 **ขั้นตอนถัดไป:**\n"
-            "- 📄 ขอรับโบรชัวร์และผังโครงการอย่างเป็นทางการ\n"
-            "- 📅 นัดหมายเข้าชมโครงการแบบส่วนตัว\n"
-            "- 💬 ปรึกษาผู้เชี่ยวชาญด้านอสังหาริมทรัพย์"
+            "**ขั้นตอนถัดไป**\n"
+            "• ขอรับโบรชัวร์และผังโครงการอย่างเป็นทางการ\n"
+            "• นัดหมายเข้าชมโครงการแบบส่วนตัว\n"
+            "• ปรึกษาผู้เชี่ยวชาญด้านอสังหาริมทรัพย์"
         )
     return (
-        "🎯 **Next Steps:**\n"
-        "- 📄 Request official brochure & floor plans\n"
-        "- 📅 Schedule a private viewing tour\n"
-        "- 💬 Connect with a senior property advisor"
+        "**Recommended next steps**\n"
+        "• Request the official brochure and floor plans\n"
+        "• Schedule a private viewing tour\n"
+        "• Speak with a senior property advisor"
     )
+
+
+def _professionalize_chat_text(text: str) -> str:
+    """Strip markdown headers (###) and convert dash bullets to professional • bullets."""
+    if not text:
+        return text
+    lines = []
+    for line in text.splitlines():
+        # Remove markdown AT headings: ### 1. **Name** -> 1. Name
+        line = re.sub(r"^#{1,6}\s*", "", line)
+        # Leading markdown/list dashes -> bullet
+        line = re.sub(r"^(\s*)[-–—]\s+", r"\1• ", line)
+        # "🎯 Next Steps:" style → clean label
+        line = re.sub(r"^🎯\s*\*?\*?Next Steps\*?\*?:?\s*", "**Recommended next steps**\n", line, flags=re.IGNORECASE)
+        line = re.sub(r"^🎯\s*\*?\*?Recommended Next Steps\*?\*?:?\s*", "**Recommended next steps**\n", line, flags=re.IGNORECASE)
+        lines.append(line)
+    out = "\n".join(lines)
+    # Collapse accidental double blank lines from header stripping
+    out = re.sub(r"\n{3,}", "\n\n", out)
+    return out.strip()
 
 
 def get_session_seen_property_ids(conversation: Any) -> List[str]:
@@ -1976,7 +1997,7 @@ class PublicAgentService:
                     response_text=resp["text"],
                     language=lang
                 )
-            resp["text"] = clean_response_text(resp["text"])
+            resp["text"] = _professionalize_chat_text(clean_response_text(resp["text"]))
         if "preferences" in resp and isinstance(resp["preferences"], dict):
             focus = resp["preferences"].get("focus_summary")
             if focus and isinstance(focus, str):
@@ -3292,38 +3313,38 @@ class PublicAgentService:
                             f"ผู้ใช้ปรับเงื่อนไขการค้นหา: \"{user_message}\"\n"
                             f"พบ {len(cards)} อสังหาริมทรัพย์ที่ตรวจสอบแล้ว:\n"
                             f"{json.dumps(projections, ensure_ascii=False)}\n"
-                            f"ทำหน้าที่เป็นที่ปรึกษาอสังหาริมทรัพย์มืออาชีพ Tajlandia นำเสนอรายการทั้งหมดในรูปแบบการ์ดที่มีโครงสร้างชัดเจน (### 1. **[ชื่อโครงการ]**) "
-                            f"พร้อมหัวข้อย่อย (📍 ทำเล, 💰 ราคา, 🛏️ ห้องนอน, 🏊 สิ่งอำนวยความสะดวก, 📜 กรรมสิทธิ์) "
-                            f"ห้ามใช้ตาราง Markdown (| ... |) และห้ามแสดงข้อความติดกันเป็นก้อน ปิดท้ายด้วยขั้นตอนถัดไป"
+                            f"ทำหน้าที่เป็นที่ปรึกษาอสังหาริมทรัพย์มืออาชีพ Tajlandia นำเสนอรายการแบบมืออาชีพ "
+                            f"ใช้ **1. [ชื่อโครงการ]** และจุด • เท่านั้น (ห้าม ### และห้าม '-') "
+                            f"หัวข้อย่อย: 📍 ทำเล, 💰 ราคา, 🛏️ ห้องนอน, 🏊 สิ่งอำนวยความสะดวก, 📜 กรรมสิทธิ์ "
+                            f"ห้ามตาราง Markdown ปิดท้ายด้วย **ขั้นตอนถัดไป**"
                         )
                     elif language == "pl":
                         user_content = (
                             f"Użytkownik zaktualizował kryteria: \"{user_message}\".\n"
                             f"Znaleziono {len(cards)} zweryfikowanych nieruchomości:\n"
                             f"{json.dumps(projections)}\n"
-                            f"Działaj jako profesjonalny doradca ds. nieruchomości Tajlandia. Zaprezentuj oferty w uporządkowanych kartach z punktorami:\n"
-                            f"### 1. **[Nazwa nieruchomości]**\n"
-                            f"- 📍 **Lokalizacja:** [Lokalizacja]\n"
-                            f"- 💰 **Cena wyjściowa:** **[Cena w THB]** (~€[EUR] / ~[PLN] PLN)\n"
-                            f"- 🛏️ **Sypialnie:** [Sypialnie] | 📐 **Typ:** [Typ]\n"
-                            f"- 🏊 **Udogodnienia:** [Basen itp.]\n"
-                            f"- 📜 **Forma własności:** [Foreign Freehold w condo / Leasehold na willę]\n"
-                            f"NIGDY nie generuj tabel markdown (| ... |). NIE dodawaj nieproszonych porad prawnych, chyba że użytkownik o nie zapyta. Zakończ punktami kolejnych kroków."
+                            f"Działaj jako profesjonalny doradca ds. nieruchomości Tajlandia. Zaprezentuj oferty numerowane z punktorami • (NIGDY ### ani '-'):\n"
+                            f"**1. [Nazwa nieruchomości]**\n"
+                            f"• 📍 **Lokalizacja:** [Lokalizacja]\n"
+                            f"• 💰 **Cena wyjściowa:** **[Cena w THB]** (~€[EUR] / ~[PLN] PLN)\n"
+                            f"• 🛏️ **Sypialnie:** [Sypialnie] | 📐 **Typ:** [Typ]\n"
+                            f"• 🏊 **Udogodnienia:** [Basen itp.]\n"
+                            f"• 📜 **Forma własności:** [Foreign Freehold w condo / Leasehold na willę]\n"
+                            f"NIGDY nie generuj tabel markdown. Zakończ sekcją **Kolejne kroki** z punktorami •."
                         )
                     else:
                         user_content = (
                             f"The user refined their search: \"{user_message}\".\n"
                             f"Found {len(cards)} verified properties:\n"
                             f"{json.dumps(projections)}\n"
-                            f"Act as a professional real estate advisor for Tajlandia. Present ALL verified properties in clean, elegant numbered cards with bullet points:\n"
-                            f"### 1. **[Property Name]**\n"
-                            f"- 📍 **Location:** [Location]\n"
-                            f"- 💰 **Starting Price:** **[Price in THB]** (~€[EUR] / ~[PLN] PLN)\n"
-                            f"- 🛏️ **Bedrooms:** [Bedrooms] | 📐 **Type:** [Type]\n"
-                            f"- 🏊 **Amenities & Highlights:** [Pool, Sea View, etc.]\n"
-                            f"- 📜 **Ownership Structure:** [Foreign Freehold Condominium / 30-Year Registered Leasehold Villa]\n"
-                            f"NEVER output markdown tables (`| Property | Location | ... |`). NEVER output unstructured line blobs. "
-                            f"Do NOT add unsolicited foreign ownership or legal advice unless specifically requested by the user. Conclude with clear bullet points for next steps."
+                            f"Act as a professional real estate advisor for Tajlandia. Present ALL verified properties in clean numbered blocks with • bullets only (NEVER use ### headers or dash '-' bullets):\n"
+                            f"**1. [Property Name]**\n"
+                            f"• 📍 **Location:** [Location]\n"
+                            f"• 💰 **Starting Price:** **[Price in THB]** (~€[EUR] / ~[PLN] PLN)\n"
+                            f"• 🛏️ **Bedrooms:** [Bedrooms] | 📐 **Type:** [Type]\n"
+                            f"• 🏊 **Amenities & Highlights:** [Pool, Sea View, etc.]\n"
+                            f"• 📜 **Ownership Structure:** [Foreign Freehold Condominium / 30-Year Registered Leasehold Villa]\n"
+                            f"NEVER output markdown tables. Conclude with **Recommended next steps** using • bullets."
                         )
                     resp = _safe_openai_create(
                         self.client,
@@ -3591,9 +3612,10 @@ class PublicAgentService:
                             f"คำขอของผู้ใช้: \"{user_message}\"\n\n"
                             f"รายการอสังหาริมทรัพย์ที่ตรงเงื่อนไขในไทย:\n"
                             f"{json.dumps(projections, ensure_ascii=False)}\n\n"
-                            f"ทำหน้าที่เป็นที่ปรึกษาอสังหาริมทรัพย์มืออาชีพ Tajlandia นำเสนอรายการทั้งหมดในรูปแบบการ์ดที่มีโครงสร้างชัดเจน (### 1. **[ชื่อโครงการ]**) "
-                            f"พร้อมหัวข้อย่อย (📍 ทำเล, 💰 ราคา, 🛏️ ห้องนอน, 🏊 สิ่งอำนวยความสะดวก, 📜 กรรมสิทธิ์) "
-                            f"ห้ามใช้ตาราง Markdown (| ... |) และห้ามแสดงข้อความติดกันเป็นก้อน ปิดท้ายด้วยขั้นตอนถัดไป"
+                            f"ทำหน้าที่เป็นที่ปรึกษาอสังหาริมทรัพย์มืออาชีพ Tajlandia นำเสนอรายการแบบมืออาชีพ "
+                            f"ใช้ **1. [ชื่อโครงการ]** และจุด • เท่านั้น (ห้าม ### และห้าม '-') "
+                            f"หัวข้อย่อย: 📍 ทำเล, 💰 ราคา, 🛏️ ห้องนอน, 🏊 สิ่งอำนวยความสะดวก, 📜 กรรมสิทธิ์ "
+                            f"ห้ามตาราง Markdown ปิดท้ายด้วย **ขั้นตอนถัดไป**"
                         )
                     elif language == "pl":
                         prompt_content = (
@@ -3603,14 +3625,14 @@ class PublicAgentService:
                             f"{json.dumps(projections)}\n\n"
                             f"Kontekst walutowy: 1 EUR ≈ 38 THB, 1 PLN ≈ 8.5 THB, 1 USD ≈ 35 THB (np. 8.5M THB to ok. 1.0M PLN / 224,000 EUR). "
                             f"Wszystkie powyższe nieruchomości MIESZCZĄ SIĘ w budżecie klienta. Nigdy nie twierdz, że oferta przekracza budżet. "
-                            f"Działaj jako profesjonalny doradca ds. nieruchomości Tajlandia. Zaprezentuj oferty w uporządkowanych kartach z punktorami:\n"
-                            f"### 1. **[Nazwa nieruchomości]**\n"
-                            f"- 📍 **Lokalizacja:** [Lokalizacja]\n"
-                            f"- 💰 **Cena wyjściowa:** **[Cena w THB]** (~€[EUR] / ~[PLN] PLN)\n"
-                            f"- 🛏️ **Sypialnie:** [Sypialnie] | 📐 **Typ:** [Typ]\n"
-                            f"- 🏊 **Udogodnienia:** [Basen itp.]\n"
-                            f"- 📜 **Forma własności:** [Foreign Freehold w condo / Leasehold na willę]\n"
-                            f"NIGDY nie generuj tabel markdown (| ... |). NIE dodawaj porad prawnych ani informacji o prawie własności dla cudzoziemców, chyba że klient wprost o to zapytał. Zakończ punktami kolejnych kroków."
+                            f"Działaj jako profesjonalny doradca ds. nieruchomości Tajlandia. Zaprezentuj oferty z punktorami • (NIGDY ### ani '-'):\n"
+                            f"**1. [Nazwa nieruchomości]**\n"
+                            f"• 📍 **Lokalizacja:** [Lokalizacja]\n"
+                            f"• 💰 **Cena wyjściowa:** **[Cena w THB]** (~€[EUR] / ~[PLN] PLN)\n"
+                            f"• 🛏️ **Sypialnie:** [Sypialnie] | 📐 **Typ:** [Typ]\n"
+                            f"• 🏊 **Udogodnienia:** [Basen itp.]\n"
+                            f"• 📜 **Forma własności:** [Foreign Freehold w condo / Leasehold na willę]\n"
+                            f"NIGDY nie generuj tabel markdown. Zakończ sekcją **Kolejne kroki** z punktorami •."
                         )
                     else:
                         prompt_content = (
@@ -3621,15 +3643,14 @@ class PublicAgentService:
                             f"Currency conversion context: 1 EUR ≈ 38 THB, 1 PLN ≈ 8.5 THB, 1 USD ≈ 35 THB. "
                             f"(For example, 8.5M THB is only ~€224,000 / ~1.0M PLN, which is well below a 1 million EUR or 4.5M PLN budget; 19.5M THB is ~€513,000). "
                             f"ALL properties in the list above are strictly WITHIN the user's budget. Never state that a returned property exceeds budget. "
-                            f"Act as a professional real estate advisor for Tajlandia. Present ALL verified properties in clean, elegant numbered cards with bullet points:\n"
-                            f"### 1. **[Property Name]**\n"
-                            f"- 📍 **Location:** [Location]\n"
-                            f"- 💰 **Starting Price:** **[Price in THB]** (~€[EUR] / ~[PLN] PLN)\n"
-                            f"- 🛏️ **Bedrooms:** [Bedrooms] | 📐 **Type:** [Type]\n"
-                            f"- 🏊 **Amenities & Highlights:** [Pool, Sea View, etc.]\n"
-                            f"- 📜 **Ownership Structure:** [Foreign Freehold Condominium / 30-Year Registered Leasehold Villa]\n"
-                            f"NEVER output markdown tables (`| Property | Location | ... |`). NEVER output unstructured line blobs. "
-                            f"Do NOT add unsolicited foreign ownership or legal advice unless specifically requested by the user. Conclude with clear bullet points for next steps."
+                            f"Act as a professional real estate advisor for Tajlandia. Present ALL verified properties in clean numbered blocks with • bullets only (NEVER use ### headers or dash '-' bullets):\n"
+                            f"**1. [Property Name]**\n"
+                            f"• 📍 **Location:** [Location]\n"
+                            f"• 💰 **Starting Price:** **[Price in THB]** (~€[EUR] / ~[PLN] PLN)\n"
+                            f"• 🛏️ **Bedrooms:** [Bedrooms] | 📐 **Type:** [Type]\n"
+                            f"• 🏊 **Amenities & Highlights:** [Pool, Sea View, etc.]\n"
+                            f"• 📜 **Ownership Structure:** [Foreign Freehold Condominium / 30-Year Registered Leasehold Villa]\n"
+                            f"NEVER output markdown tables. Conclude with **Recommended next steps** using • bullets."
                         )
 
                     is_sparse = (not loc) or (not max_p) or (not bedrooms)
@@ -4030,18 +4051,17 @@ class PublicAgentService:
                     messages_for_second.append({
                         "role": "user",
                         "content": (
-                            "Present the verified properties using the mandatory structured presentation format:\n"
-                            "Each property must be formatted as a numbered card:\n"
-                            "### 1. **[Property Name]**\n"
-                            "- 📍 **Location:** [Location]\n"
-                            "- 💰 **Starting Price:** **[Price in THB]** (~€[EUR] / ~[PLN] PLN)\n"
-                            "- 🛏️ **Bedrooms:** [Bedrooms] | 📐 **Type:** [Type]\n"
-                            "- 🏊 **Amenities & Highlights:** [Amenities]\n"
-                            "- 📜 **Ownership Structure:** [Foreign Freehold Condominium / 30-Year Registered Leasehold Villa]\n"
-                            "NEVER output markdown tables (`| Property | Location | ... |`).\n"
-                            "NEVER output plain unstructured line dumps.\n"
-                            "Do NOT add unsolicited foreign ownership or legal advice unless the user specifically asked about legal/ownership regulations.\n"
-                            "CRITICAL: Include rich, informative descriptions for each property. If the user provided sparse or minimal initial details (e.g. did not specify location, budget, or preferred island), ALWAYS conclude by asking at most 2-3 smart consultative follow-up questions to clarify their requirements, followed by clear next steps."
+                            "Present the verified properties in a professional format.\n"
+                            "NEVER use ### markdown headers or dash (-) bullets. Use • bullets only:\n"
+                            "**1. [Property Name]**\n"
+                            "• 📍 **Location:** [Location]\n"
+                            "• 💰 **Starting Price:** **[Price in THB]** (~€[EUR] / ~[PLN] PLN)\n"
+                            "• 🛏️ **Bedrooms:** [Bedrooms] | 📐 **Type:** [Type]\n"
+                            "• 🏊 **Amenities & Highlights:** [Amenities]\n"
+                            "• 📜 **Ownership Structure:** [Foreign Freehold Condominium / 30-Year Registered Leasehold Villa]\n"
+                            "NEVER output markdown tables.\n"
+                            "If follow-up is about 'it/this property', keep the same active listing.\n"
+                            "If the user provided sparse details, ask at most 2-3 clarifying questions, then **Recommended next steps** with • bullets."
                         )
                     })
                 else:
@@ -4122,8 +4142,28 @@ class PublicAgentService:
                 tool_args=search_args
             )
             if all_cards:
+                card_ids = [c["property_id"] for c in all_cards if c.get("property_id")]
                 seen_ids = get_session_seen_property_ids(conversation)
-                updated_prefs["seen_property_ids"] = list(set(seen_ids + [c["property_id"] for c in all_cards if c.get("property_id")]))
+                updated_prefs["seen_property_ids"] = list(set(seen_ids + card_ids))
+                updated_prefs["last_result_ids"] = card_ids
+                # Persist active property context so "does it have a pool?" follow-ups work
+                _pctx = load_property_context(conversation)
+                names = {
+                    str(c.get("property_id")): str(c.get("name") or c.get("property_name") or "")
+                    for c in all_cards if c.get("property_id")
+                }
+                _pctx = touch_discussed(_pctx, card_ids, names, refresh_ordinals=True)
+                if len(card_ids) == 1:
+                    _pctx = set_active_property(_pctx, card_ids[0], reference=names.get(card_ids[0]))
+                elif card_ids:
+                    # Location / single-focus follow-ups after multi-card: keep first as soft active
+                    # only if user message is about one property via "it/this"
+                    um = (raw_user_message or user_message or "").lower()
+                    if any(k in um for k in ["it ", " its", "this property", "that property", "this villa", "where is it", "located"]):
+                        _pctx = set_active_property(_pctx, card_ids[0], reference=names.get(card_ids[0]))
+                updated_prefs.update(save_property_context(conversation, _pctx))
+
+            final_text = _professionalize_chat_text(final_text)
 
             append_conversation_turn(
                 db=db,
