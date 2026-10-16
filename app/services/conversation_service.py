@@ -185,9 +185,10 @@ def append_conversation_turn(
     safe_turn = _clean_for_json(asst_turn)
     history.append(safe_turn)
 
-    # Bound message history length to 120 messages (60 turns) to easily support 50+ back-to-back questions
-    if len(history) > 120:
-        history = history[-120:]
+    # Bound message history to support 50+ back-to-back in-session questions
+    max_msgs = int(getattr(settings, "SESSION_MEMORY_MESSAGES", 120) or 120)
+    if len(history) > max_msgs:
+        history = history[-max_msgs:]
 
     # For turns older than the last 4 turns, remove bulky tool metadata to conserve tokens while preserving conversation
     for i in range(max(0, len(history) - 4)):

@@ -758,7 +758,7 @@ def process_admin_chat(
         if settings.ANTHROPIC_API_KEY:
             try:
                 import anthropic
-                c_client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY, timeout=getattr(settings, "OPENAI_TIMEOUT", 180.0))
+                c_client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY, timeout=getattr(settings, "ANTHROPIC_TIMEOUT", getattr(settings, "OPENAI_TIMEOUT", 600.0)))
                 decision_res = _safe_anthropic_create(
                     c_client,
                     model=getattr(settings, "ANTHROPIC_MODEL", "claude-opus-5-5"),
@@ -919,7 +919,7 @@ def process_admin_chat(
     if settings.ANTHROPIC_API_KEY:
         try:
             import anthropic
-            client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY, timeout=getattr(settings, "OPENAI_TIMEOUT", 180.0))
+            client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY, timeout=getattr(settings, "ANTHROPIC_TIMEOUT", getattr(settings, "OPENAI_TIMEOUT", 600.0)))
         except Exception:
             client = None
 
@@ -1001,7 +1001,7 @@ def _call_anthropic_claude(
     import anthropic
 
     if not client:
-        client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY, timeout=getattr(settings, "OPENAI_TIMEOUT", 180.0))
+        client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY, timeout=getattr(settings, "ANTHROPIC_TIMEOUT", getattr(settings, "OPENAI_TIMEOUT", 600.0)))
 
     # Build message history for Claude with a safe sliding window and per-turn truncation
     claude_messages = []
@@ -2817,44 +2817,16 @@ def _execute_admin_tool(
         leads = query.order_by(Lead.lead_score.desc(), Lead.created_at.desc()).limit(limit).all()
 
         if not leads:
-            res = [
-                {
-                    "lead_id": "lead-001",
-                    "contact_name": "Alexander Smith",
-                    "contact_email": "alexander.smith@investor.eu",
-                    "contact_phone": "+48 501 234 567",
-                    "preferred_location": "Bang Tao, Phuket",
-                    "budget": "25,000,000 THB",
-                    "lead_score": 92.0,
-                    "status": "qualified",
-                    "notes": "Interested in 3-bedroom luxury pool villa. Cash buyer, planning site visit in Q4 2026.",
-                    "buying_signals": ["Explicit budget 25M THB", "Requested floor plan", "Direct WhatsApp contact provided"]
-                },
-                {
-                    "lead_id": "lead-002",
-                    "contact_name": "Elena Rostova",
-                    "contact_email": "elena.r@luxuryestate.ch",
-                    "contact_phone": "+41 79 123 4567",
-                    "preferred_location": "Bophut / Chaweng, Koh Samui",
-                    "budget": "40,000,000 THB",
-                    "lead_score": 96.0,
-                    "status": "new",
-                    "notes": "Looking for sea-view villa with rental management program. High net worth investor.",
-                    "buying_signals": ["Inquired about guaranteed rental return", "Requested contracts", "Ready to sign"]
-                },
-                {
-                    "lead_id": "lead-003",
-                    "contact_name": "Michael Chang",
-                    "contact_email": "mchang@venture-sg.com",
-                    "contact_phone": "+65 9123 4567",
-                    "preferred_location": "Layan, Phuket",
-                    "budget": "18,000,000 THB",
-                    "lead_score": 85.0,
-                    "status": "new",
-                    "notes": "Inquiring about foreign freehold ownership and company setup in Thailand.",
-                    "buying_signals": ["Asked about 30+30+30 lease vs Freehold", "High engagement"]
-                }
-            ]
+            # Never invent sample leads — production only. Lead persistence may be OFF.
+            return {
+                "total": 0,
+                "leads": [],
+                "message": (
+                    "No verified production leads found. "
+                    "Permanent lead saving is currently OFF (ENABLE_LEAD_SAVING=false); "
+                    "no placeholder or demo leads are returned."
+                ),
+            }, False, None
         else:
             res = []
             for l in leads:

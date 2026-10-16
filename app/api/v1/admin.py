@@ -342,7 +342,7 @@ def get_batch_operations_history_endpoint(
 # ==============================================================================
 
 class PropertyCreateRequest(BaseModel):
-    property_id: Optional[str] = Field(None, example="PROP-PHK-101", description="Unique property ID. If omitted, will be auto-generated.")
+    property_id: Optional[str] = Field(None, example="villa-horizon-phuket", description="Unique property ID. If omitted, will be auto-generated.")
     property_name: str = Field(..., example="Villa Horizon Luxury Residences", description="Property title/name")
     project_name: Optional[str] = Field(None, example="Villa Horizon")
     property_type: Optional[str] = Field("Villa", example="Villa", description="'Villa', 'Condominium', 'Townhouse'")
@@ -351,7 +351,7 @@ class PropertyCreateRequest(BaseModel):
     province: Optional[str] = Field("Phuket", example="Phuket")
     district: Optional[str] = Field(None, example="Thalang")
     address: Optional[str] = Field(None, example="123 Lagoon Road, Choeng Thale")
-    price_display: Optional[str] = Field("from 18.50M THB", example="from 18.50M THB")
+    price_display: Optional[str] = Field(None, example="from 18.5 million THB")
     price_numeric_min: Optional[float] = Field(None, example=18500000.0)
     price_numeric_max: Optional[float] = Field(None, example=24000000.0)
     currency: Optional[str] = Field("THB", example="THB")
@@ -365,8 +365,8 @@ class PropertyCreateRequest(BaseModel):
     beach_access: Optional[bool] = Field(False, example=True)
     sea_view: Optional[bool] = Field(False, example=True)
     description: Optional[str] = Field(None, example="Stunning luxury pool villa with panoramic sea views.")
-    images: Optional[List[str]] = Field(default_factory=list, example=["https://example.com/pool.jpg", "https://example.com/bedroom.jpg"])
-    cover_image: Optional[str] = Field(None, example="https://example.com/pool.jpg")
+    images: Optional[List[str]] = Field(default_factory=list, example=["https://varsoviaestate.com/media/pool.jpg", "https://varsoviaestate.com/media/bedroom.jpg"])
+    cover_image: Optional[str] = Field(None, example="https://varsoviaestate.com/media/pool.jpg")
     websites: Optional[List[str]] = Field(None, example=["tajlandia.com", "varsoviaestate.com"], description="Specific website domains for this property: 'varsoviaestate.com', 'tajlandia.com', 'thai.estate'")
     is_public: Optional[bool] = Field(True, example=True)
 
@@ -394,8 +394,8 @@ class PropertyUpdateRequest(BaseModel):
     beach_access: Optional[bool] = Field(None, example=True)
     sea_view: Optional[bool] = Field(None, example=True)
     description: Optional[str] = Field(None, example="Updated description with new villa details.")
-    images: Optional[List[str]] = Field(None, example=["https://example.com/new-image.jpg"])
-    cover_image: Optional[str] = Field(None, example="https://example.com/new-cover.jpg")
+    images: Optional[List[str]] = Field(None, example=["https://varsoviaestate.com/media/new-image.jpg"])
+    cover_image: Optional[str] = Field(None, example="https://varsoviaestate.com/media/new-cover.jpg")
     websites: Optional[List[str]] = Field(None, example=["tajlandia.com"], description="Update website domains for this property")
     is_public: Optional[bool] = Field(None, example=True)
 
@@ -930,7 +930,7 @@ def get_admin_activity_logs_endpoint(
 @router.get("/data-history", tags=["Admin Logs & Audit Trail"])
 def get_data_change_history_endpoint(
     target_type: Optional[str] = Query(None, description="Filter by entity type ('property', 'user', 'batch_operation')"),
-    target_id: Optional[str] = Query(None, description="Filter by entity ID (e.g. 'PROP-PHK-101' or user email)"),
+    target_id: Optional[str] = Query(None, description="Filter by entity ID (e.g. property slug or user email)"),
     updated_by: Optional[str] = Query(None, description="Filter by admin email/ID who performed the update"),
     limit: int = Query(50, ge=1, le=500, description="Page limit"),
     offset: int = Query(0, ge=0, description="Offset for pagination"),

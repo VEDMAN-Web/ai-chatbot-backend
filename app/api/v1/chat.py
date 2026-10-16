@@ -28,7 +28,7 @@ class PublicChatRequest(BaseModel):
 
     # Optional lead / contact submission fields (allows frontend to submit contact forms directly through this single API!)
     contact_name: Optional[str] = Field(None, max_length=200, description="Visitor's full name", example="Alexander Smith")
-    contact_email: Optional[str] = Field(None, max_length=200, description="Visitor's email address", example="alexander.smith@example.com")
+    contact_email: Optional[str] = Field(None, max_length=200, description="Visitor's email address", example="alexander.smith@varsoviaestate.com")
     contact_phone: Optional[str] = Field(None, max_length=100, description="Visitor's phone or WhatsApp number", example="+48 501 234 567")
     preferred_location: Optional[str] = Field(None, max_length=200, description="Preferred area or island", example="Bang Tao, Phuket")
     budget: Optional[float] = Field(None, ge=0, description="Stated budget in THB", example=25000000)
@@ -244,13 +244,12 @@ def handle_public_chat(
             db.rollback()
         except Exception:
             pass
+        from app.services.i18n_service import get_data_unavailable_fallback
         lang = (req.language or "en").lower()
-        if lang == "pl":
-            err_text = "Obecnie występuje tymczasowy problem z serwerem bazy danych. Prosimy spróbować ponownie za chwilę."
-        elif lang == "th":
-            err_text = "ขณะนี้เกิดข้อผิดพลาดชั่วคราวจากเซิร์ฟเวอร์ โปรดลองใหม่อีกครั้งในภายหลังครับ"
-        else:
-            err_text = "We are currently experiencing a temporary server error from our data server. We will be back soon! Please try again in a few moments."
+        err_text = get_data_unavailable_fallback(
+            language=lang if lang in ("en", "pl", "th") else "en",
+            site_origin=req.site_origin,
+        )
 
         return {
             "type": "text",
@@ -292,7 +291,7 @@ def get_chat_history(
                 st = turn_copy["structured_data"]
                 props = st.get("properties") or st.get("property_cards") or []
 
-            # If props contains string IDs (e.g. ['PROP-PHK-001']), hydrate them from database
+            # If props contains string IDs, hydrate them from production database
             if props and isinstance(props, list) and len(props) > 0 and isinstance(props[0], str):
                 db_props = db.query(Property).filter(Property.property_id.in_(props)).all()
                 # Maintain original ID ordering

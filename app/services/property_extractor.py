@@ -19,7 +19,7 @@ def extract_property_data_with_llm(untrusted_text: str, filename: Optional[str] 
 
     try:
         import anthropic
-        client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY, timeout=getattr(settings, "OPENAI_TIMEOUT", 180.0))
+        client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY, timeout=getattr(settings, "ANTHROPIC_TIMEOUT", getattr(settings, "OPENAI_TIMEOUT", 600.0)))
         system_prompt = (
             "You are a specialized real estate document data extractor.\n"
             "Your task is to analyze technical property brochures, specifications, and listings, and extract property fields into a single JSON object.\n"

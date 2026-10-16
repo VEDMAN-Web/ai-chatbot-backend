@@ -69,17 +69,22 @@ class Settings(BaseSettings):
     ADMIN_DATABASE_URL: Optional[str] = None
     USER_DATABASE_URL: Optional[str] = None
     
-    # AI Configuration (Model is strictly configurable, not hardcoded)
+    # AI Configuration — accuracy over speed/cost: strongest models, low temperature, long timeouts
     OPENAI_API_KEY: str = ""
-    OPENAI_MODEL: str = "gpt-4o"
+    OPENAI_MODEL: str = "gpt-5.5"
     OPENAI_TEMPERATURE: float = 0.0
-    OPENAI_TIMEOUT: float = 180.0
-    
+    OPENAI_TIMEOUT: float = 600.0  # 10 minutes — prevent premature "Service temporarily unavailable"
+
     ANTHROPIC_API_KEY: str = ""
     ANTHROPIC_MODEL: str = "claude-opus-5-5"
     ANTHROPIC_TEMPERATURE: float = 0.0
+    ANTHROPIC_TIMEOUT: float = 600.0  # 10 minutes — same for admin bot
 
-    # Persistence & Audit Flags (In-session memory stays ON, permanent persistence OFF until enabled)
+    # In-session memory: keep full chat context for 50+ back-to-back questions
+    SESSION_MEMORY_TURNS: int = 50
+    SESSION_MEMORY_MESSAGES: int = 120  # 60 turns (user+assistant) buffered in memory
+
+    # Persistence & Audit Flags (In-session memory stays ON; permanent saves OFF until explicitly enabled)
     ENABLE_LEAD_SAVING: bool = False
     ENABLE_CHAT_LOGGING: bool = False
     ENABLE_AUDIT_LOGGING: bool = False

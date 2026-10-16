@@ -520,18 +520,31 @@ async function handleSendMessage() {
     language: currentLanguage
   };
 
+  // Long client timeout (10 min) so multi-turn LLM + Firestore never shows premature "unavailable"
+  const CHAT_TIMEOUT_MS = 600000;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), CHAT_TIMEOUT_MS);
+
+  const fallbackByLang = {
+    en: "I'm sorry — that information is not available right now from our verified production data. Please try again in a moment, or share a location/budget and I will search only verified listings.",
+    pl: "Przepraszam — obecnie nie mogę pobrać zweryfikowanych danych produkcyjnych. Spróbuj ponownie za chwilę albo podaj lokalizację/budżet — wyszukam wyłącznie wśród dostępnych ofert.",
+    th: "ขออภัยครับ ขณะนี้ยังดึงข้อมูลจากระบบ production ไม่ได้ชั่วคราว กรุณาลองใหม่อีกครั้ง หรือแจ้งทำเล/งบประมาณ เพื่อให้ผมค้นหาจากรายการที่ตรวจสอบแล้วเท่านั้นครับ"
+  };
+
   try {
     const res = await fetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
+      body: JSON.stringify(payload),
+      signal: controller.signal
     });
 
     removeTypingIndicator(typingId);
 
     if (!res.ok) {
       const errData = await res.json().catch(() => ({}));
-      appendMessageRow('assistant', `⚠️ **Error (${res.status}):** ${errData.detail || 'Unable to process request.'}`);
+      const fb = fallbackByLang[currentLanguage] || fallbackByLang.en;
+      appendMessageRow('assistant', errData.detail ? `⚠️ **Error (${res.status}):** ${errData.detail}` : fb);
       return;
     }
 
@@ -541,8 +554,14 @@ async function handleSendMessage() {
 
   } catch (err) {
     removeTypingIndicator(typingId);
-    appendMessageRow('assistant', `⚠️ **Connection Error:** Could not reach the server at ${endpoint}. Please ensure the backend is running.`);
+    const fb = fallbackByLang[currentLanguage] || fallbackByLang.en;
+    if (err && err.name === 'AbortError') {
+      appendMessageRow('assistant', fb);
+    } else {
+      appendMessageRow('assistant', fb);
+    }
   } finally {
+    clearTimeout(timeoutId);
     scrollToBottom();
   }
 }
