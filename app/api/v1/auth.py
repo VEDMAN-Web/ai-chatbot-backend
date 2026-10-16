@@ -364,7 +364,7 @@ def _get_user_google_info(user: Optional[User]) -> GoogleAuthInfo:
 
 class UserLoginRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="ignore")
-    email: str = Field(..., description="User email address", json_schema_extra={"example": "user@example.com"})
+    email: str = Field(..., description="User email address", json_schema_extra={"example": "advisor@varsoviaestate.com"})
     password: str = Field(..., description="Account password", json_schema_extra={"example": "Password123!"})
     domain: Optional[str] = Field(None, description="Optional target website domain: 'varsoviaestate.com', 'thai.estate', or 'tajlandia.com'")
     site_origin: Optional[str] = Field(None, alias="siteOrigin")
@@ -526,7 +526,7 @@ class RegisterRequest(BaseModel):
 
 
 class ForgotPasswordRequest(BaseModel):
-    email: str = Field(..., example="user@example.com", description="User email address requesting password reset")
+    email: str = Field(..., example="advisor@varsoviaestate.com", description="User email address requesting password reset")
 
 
 class ForgotPasswordResponse(BaseModel):
@@ -538,7 +538,7 @@ class ForgotPasswordResponse(BaseModel):
 
 
 class ResetPasswordRequest(BaseModel):
-    email: str = Field(..., example="user@example.com", description="User email address")
+    email: str = Field(..., example="advisor@varsoviaestate.com", description="User email address")
     reset_token: str = Field(..., description="Cryptographic reset token received from forgot-password")
     new_password: str = Field(..., min_length=4, description="New password (minimum 4 characters)")
 

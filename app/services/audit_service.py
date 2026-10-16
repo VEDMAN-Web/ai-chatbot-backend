@@ -70,8 +70,8 @@ def record_audit_log(
     )
 
     from app.core.config import settings
-    if not getattr(settings, "ENABLE_AUDIT_LOGGING", True):
-        # Audit logging permanently OFF per user instruction
+    if not getattr(settings, "ENABLE_AUDIT_LOGGING", False):
+        # Permanent audit logging OFF until explicitly enabled; in-session work continues
         log_entry.id = f"audit_ephemeral_{datetime.now(timezone.utc).timestamp()}"
         return log_entry
 

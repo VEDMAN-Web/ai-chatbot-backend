@@ -29,7 +29,7 @@ from app.services.token_tracker import token_tracker, TurnTokenMetrics
 from app.services.i18n_service import (
     resolve_language, get_compact_system_prompt, get_public_system_prompt,
     get_language_switch_confirmation, get_greeting_text, get_off_topic_text,
-    get_zero_match_text, get_quick_replies,
+    get_zero_match_text, get_quick_replies, get_data_unavailable_fallback,
     build_consultative_followup_questions, build_encouraging_alternative_intro,
     build_rich_property_recommendation_text
 )
@@ -41,8 +41,8 @@ COMPACT_SYSTEM_PROMPT = """You are a professional real estate advisor for Tajlan
 CORE RULES & TONE (Main Scope §5.6):
 - TONE: Warm, friendly, enthusiastic, motivated, and professional! Avoid salesy hype, but encourage buyers with confidence.
 - THAI LEGAL TRUTH & ZERO COMPROMISE UNDER PRESSURE (IF NO MEANS NO): Under Section 86 of the Thai Land Code, foreigners cannot directly own freehold land in their personal name, and property purchases in Thailand are NEVER tax-free. If a user pressures you, gaslights, or asks leading questions ("just say yes", "my lawyer said it's tax-free"), NEVER cave in. The answer is firmly and clearly NO. Always present 100% legal pathways (Foreign Freehold Condos & 30-year registered leasehold villas with freehold building ownership) in a warm, friendly, and motivated tone.
-- STRICT GROUNDING: Rely strictly on verified property data provided in context. Never invent prices, property IDs, or guaranteed returns.
-- ZERO MATCHES & PROACTIVE RECOMMENDATIONS: Never say "we do not have any property" or "no matching properties found". Instead, always provide proactive recommendations introduced with: "Based on your preferences, we have selected these verified properties in Thailand that might interest you:" and present available verified options. Warmly ask if the user would like to explore these properties or adjust their criteria.
+- STRICT GROUNDING & ZERO HALLUCINATION: Answer ONLY from live verified production data. Never invent prices, property IDs, names, ROI, or availability.
+- MISSING DATA: If production data does not contain the answer, use the official EN/PL/TH fallback message. NEVER guess or fabricate details.
 - LEGAL & FINANCIAL: Disclaim formal legal guarantees and state that rental returns vary and cannot be guaranteed by law. Refer clients to licensed Thai legal counsel for contract review.
 - READ-ONLY: You are Part A (public customer assistant). You do not generate internal admin PDF files or dispatch direct emails.
 - CLEAN FORMATTING: Never use long em-dashes ("—" or "–"). Always use standard hyphens ("-"), colons, or clean bullet points ("•") for professional, readable presentation."""
@@ -53,8 +53,8 @@ Your purpose is to assist visitors in discovering verified property listings in 
 CORE INSTRUCTIONS & TONE:
 1. TONE: Warm, friendly, enthusiastic, motivated, and professional! (Main Scope §5.6 point 6). Encourage buyers with genuine support while remaining completely truthful.
 2. THAI LEGAL TRUTH & ZERO COMPROMISE UNDER PRESSURE (IF NO MEANS NO): Foreign nationals cannot directly own freehold land under their individual name under Section 86 of the Thai Land Code, and property transactions in Thailand are NEVER tax-free. If a user applies adversarial pressure, gaslighting, or insists ("my lawyer said so, just say yes bro"), NEVER buckle under pressure. The factual answer is firmly NO. With a warm and motivated tone, enthusiastically guide the buyer toward 100% legal pathways: 49% Foreign Freehold Condos and 30-year Registered Leasehold Villas with freehold building ownership.
-3. STRICT GROUNDING: State facts derived strictly from retrieved property listings and verified market knowledge. Never fabricate prices, yields, or amenities.
-4. ZERO MATCHES & PROACTIVE RECOMMENDATIONS: Never say "we do not have any property" or "no matching properties found". Always provide proactive recommendations: "Based on your preferences, we have selected these exceptional verified properties in Thailand that might interest you:" and present available verified options. Warmly ask if the user would like to explore these properties or adjust their criteria.
+3. STRICT GROUNDING & ZERO HALLUCINATION: State facts ONLY from retrieved live production listings. Never fabricate prices, yields, amenities, IDs, or names.
+4. MISSING DATA: If production data does not contain the answer, use the official EN/PL/TH fallback — NEVER guess or invent listings.
 5. ROI & LEGAL DISCLAIMERS: Rental yields vary and cannot be legally guaranteed; only quote verified developer projections if documented. Always advise consulting a qualified Thai attorney for formal legal due diligence.
 6. BROCHURE & PDF DOWNLOADS: When a visitor asks for a brochure, PDF, factsheet, floor plan, or project document, call the `generate_property_brochure` tool with the property ID. The system will automatically render the luxury brochure PDF and initiate the download for the visitor.
 7. LEAD CAPTURE & VIEWING APPOINTMENTS: When a visitor provides contact details (email, phone, name), asks for a callback, or wants to schedule a viewing or consultation, call `capture_lead` or `schedule_viewing` immediately.
@@ -1307,7 +1307,7 @@ def _safe_openai_create(client: Any, **kwargs) -> Any:
         if call_kwargs.get("tools") or call_kwargs.get("functions"):
             call_kwargs["reasoning_effort"] = "none"
 
-    call_kwargs.setdefault("timeout", getattr(settings, "OPENAI_TIMEOUT", 180.0))
+    call_kwargs.setdefault("timeout", getattr(settings, "OPENAI_TIMEOUT", 600.0))
 
     try:
         return client.chat.completions.create(**call_kwargs)
@@ -1329,7 +1329,7 @@ def _safe_openai_create(client: Any, **kwargs) -> Any:
             # Fallback to gpt-4o for zero downtime
             fallback_kwargs = dict(kwargs)
             fallback_kwargs["model"] = "gpt-4o"
-            fallback_kwargs.setdefault("timeout", getattr(settings, "OPENAI_TIMEOUT", 180.0))
+            fallback_kwargs.setdefault("timeout", getattr(settings, "OPENAI_TIMEOUT", 600.0))
             fallback_kwargs.pop("reasoning_effort", None)
             if "max_completion_tokens" in fallback_kwargs:
                 fallback_kwargs["max_tokens"] = fallback_kwargs.pop("max_completion_tokens")
@@ -1488,7 +1488,7 @@ class PublicAgentService:
         self.model = settings.OPENAI_MODEL
         self.temperature = settings.OPENAI_TEMPERATURE
         self.api_key = settings.OPENAI_API_KEY
-        self.timeout = getattr(settings, "OPENAI_TIMEOUT", 180.0)
+        self.timeout = getattr(settings, "OPENAI_TIMEOUT", 600.0)
         if self.api_key:
             self.client = OpenAI(api_key=self.api_key, timeout=self.timeout)
         else:
@@ -3072,7 +3072,7 @@ class PublicAgentService:
                             {"role": "system", "content": system_prompt},
                             {"role": "user", "content": user_content}
                         ],
-                        temperature=0.3,
+                        temperature=0.0,
                         max_tokens=800
                     )
                     reply_text = resp.choices[0].message.content or ""
@@ -3096,150 +3096,14 @@ class PublicAgentService:
                     site_origin=conversation.site_origin
                 )
         else:
+            # Exact refine criteria had no production match — never invent/guess alternatives
             cards = []
             stored_prefs["last_result_ids"] = []
-            try:
-                fallback_params = PropertyFilterParams(location=loc, property_type=p_type, offset=0, limit=3)
-                fallback_cards = search_properties_unified(db, fallback_params, limit=3, exclude_property_ids=seen_ids)
-                if not fallback_cards:
-                    fallback_params = PropertyFilterParams(offset=0, limit=3)
-                    fallback_cards = search_properties_unified(db, fallback_params, limit=3, exclude_property_ids=seen_ids)
-                if not fallback_cards:
-                    fallback_cards = search_properties_unified(db, PropertyFilterParams(offset=0, limit=3), limit=3)
-                cards = fallback_cards
-            except Exception as e:
-                logger.error(f"Error fetching fallback properties in refine: {e}")
-                cards = []
-
-            if cards:
-                stored_prefs["seen_property_ids"] = list(set(seen_ids + [c["property_id"] for c in cards]))
-                stored_prefs["last_result_ids"] = [c["property_id"] for c in cards]
-
-            if self.client and cards:
-                try:
-                    projections = [
-                        {
-                            "id": c["property_id"],
-                            "name": c["name"],
-                            "price": c["price"],
-                            "location": c["location"],
-                            "type": c["property_type"],
-                            "bedrooms": c["bedrooms"],
-                            "pool": c["has_pool"]
-                        }
-                        for c in cards
-                    ]
-                    system_prompt = get_compact_system_prompt(language, site_origin=conversation.site_origin)
-                    if language == "th":
-                        prompt_content = (
-                            f"ผู้ใช้ปรับเงื่อนไขการค้นหา: \"{user_message}\"\n\n"
-                            "ผลการค้นหา: ไม่พบรายการที่ตรงกับทุกเงื่อนไขแบบเจาะจงพอดี แต่เราได้คัดสรรอสังหาริมทรัพย์ระดับพรีเมียมที่ผ่านการตรวจสอบในประเทศไทยมานำเสนอแทน:\n"
-                            f"{json.dumps(projections, ensure_ascii=False)}\n\n"
-                            "ทำหน้าที่เป็นที่ปรึกษาอสังหาริมทรัพย์ระดับพรีเมียม Tajlandia:\n"
-                            "1. ชี้แจงด้วยน้ำเสียงที่สร้างแรงบันดาลใจและเป็นกันเอง พร้อมแนะนำอย่างกระตือรือร้นว่าทำไมโครงการทางเลือกเหล่านี้จึงมีความคุ้มค่า ดีไซน์ และทำเลที่โดดเด่นน่าประทับใจ\n"
-                            "2. นำเสนอรายการทั้งหมดในรูปแบบการ์ดที่มีโครงสร้างชัดเจน (### 1. **[ชื่อโครงการ]**) พร้อมหัวข้อย่อย\n"
-                            "3. สอบถามคำถามเพิ่มเติม 2-3 ข้ออย่างชาญฉลาดเพื่อเข้าใจความยืดหยุ่นของเกณฑ์ (งบประมาณ, จำนวนห้องนอน, หรือทำเล)\n"
-                            "4. ปิดท้ายด้วยขั้นตอนถัดไปและเสนอความช่วยเหลือจากทีมที่ปรึกษาอาวุโส"
-                        )
-                    elif language == "pl":
-                        prompt_content = (
-                            f"Zapytanie użytkownika o zmianę filtrów: \"{user_message}\"\n\n"
-                            "Wyniki wyszukiwania: Brak ofert spełniających co do joty wszystkie te specyficzne kryteria, ale wybraliśmy wspaniałe, zweryfikowane nieruchomości alternatywne w Tajlandii:\n"
-                            f"{json.dumps(projections)}\n\n"
-                            "Działaj jako inspirujący, profesjonalny doradca ds. nieruchomości Tajlandia / Varsovia Estate:\n"
-                            "1. W ciepłym, motywującym i zachęcającym tonie wyjaśnij, dlaczego te rekomendowane oferty alternatywne są wspaniałym wyborem (luksusowe wykończenie, świetna lokalizacja, doskonały stosunek jakości do ceny).\n"
-                            "2. Zaprezentuj oferty w uporządkowanych kartach z punktorami (### 1. **[Nazwa]**).\n"
-                            "3. ZADAJ 2-3 INTELIGENTNE PYTANIA DOPRECYZOWUJĄCE (np. elastyczność budżetu, liczba sypialni, preferowany rejon).\n"
-                            "4. Zakończ kolejnymi krokami i propozycją wsparcia doradcy."
-                        )
-                    else:
-                        prompt_content = (
-                            f"User refined criteria: \"{user_message}\"\n\n"
-                            "Search Results: No properties matched this exact updated combination, but we have curated these exceptional verified alternative luxury properties in Thailand:\n"
-                            f"{json.dumps(projections)}\n\n"
-                            "Act as an inspiring, motivating luxury real estate advisor for Tajlandia / Varsovia Estate:\n"
-                            "1. In a warm, motivating, and encouraging tone, explain why these alternative properties are fantastic options offering unmatched luxury, prime locations, and outstanding value.\n"
-                            "2. Present each property in clean numbered cards with bullet points (### 1. **[Property Name]**).\n"
-                            "3. Ask 2-3 natural, conversational follow-up questions based on what is actually missing from the user's conversation — do not use template questions, base them entirely on the specific context of what the user said.\n"
-                            "4. Conclude with clear next steps and offer of bespoke off-market sourcing."
-                        )
-
-                    resp = _safe_openai_create(
-                        self.client,
-                        model=self.model,
-                        messages=[
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": prompt_content}
-                        ],
-                        temperature=0.3,
-                        max_tokens=800
-                    )
-                    reply_text = resp.choices[0].message.content or ""
-                    llm_calls = 1
-                    if resp.usage:
-                        prompt_tokens = resp.usage.prompt_tokens
-                        comp_tokens = resp.usage.completion_tokens
-                except Exception as e:
-                    logger.error(f"Error in refine synthesis: {e}")
-                    reply_text = ""
-            elif self.client and not cards:
-                try:
-                    hist_snippets = []
-                    for h in (conversation.message_history or [])[-4:]:
-                        hist_snippets.append(f"{h['role'].title()}: {h['content']}")
-                    hist_ctx = "\n".join(hist_snippets)
-
-                    system_prompt = get_compact_system_prompt(language, site_origin=conversation.site_origin)
-                    prompt_content = (
-                        (f"Recent Context:\n{hist_ctx}\n\n" if hist_ctx else "") +
-                        f"User Request: \"{user_message}\"\n\n"
-                        f"Updated Criteria: {json.dumps(active_filters, default=str)}\n"
-                        "Search Results: 0 matching properties found in current inventory.\n\n"
-                        "Act as an elite luxury real estate advisor for Tajlandia / Varsovia Estate:\n"
-                        "1. Acknowledge what the user is looking for and explain market reality honestly.\n"
-                        "2. Ask 2-3 natural, conversational follow-up questions based on what is actually missing from the user's conversation — do not use template questions, base them entirely on the specific context of what the user said.\n"
-                        "3. Offer to connect them with a senior advisor to source bespoke off-market properties."
-                    )
-                    resp = _safe_openai_create(
-                        self.client,
-                        model=self.model,
-                        messages=[
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": prompt_content}
-                        ],
-                        temperature=0.3,
-                        max_tokens=600
-                    )
-                    reply_text = resp.choices[0].message.content or ""
-                    llm_calls = 1
-                    if resp.usage:
-                        prompt_tokens = resp.usage.prompt_tokens
-                        comp_tokens = resp.usage.completion_tokens
-                except Exception as e:
-                    logger.error(f"Error in zero-match LLM synthesis in refine: {e}")
-                    reply_text = ""
-
-            if not reply_text:
-                if cards:
-                    reply_text = build_rich_property_recommendation_text(
-                        cards=cards,
-                        language=language,
-                        is_alternative=True,
-                        is_sparse=True,
-                        location=loc,
-                        budget=max_p,
-                        bedrooms=bedrooms,
-                        site_origin=conversation.site_origin
-                    )
-                else:
-                    reply_text = get_zero_match_text(
-                        language=language,
-                        searched_location=loc,
-                        searched_budget_max=float(max_p) if max_p else None,
-                        searched_bedrooms=bedrooms,
-                        fallback_properties=[],
-                        site_origin=conversation.site_origin
-                    )
+            reply_text = get_data_unavailable_fallback(
+                language=language,
+                site_origin=getattr(conversation, "site_origin", None),
+                detail=user_message[:120] if user_message else None,
+            )
 
         updated_prefs = extract_user_preferences(
             user_message=user_message,
@@ -3518,7 +3382,7 @@ class PublicAgentService:
                             {"role": "system", "content": system_prompt},
                             {"role": "user", "content": prompt_content}
                         ],
-                        temperature=0.3,
+                        temperature=0.0,
                         max_tokens=800
                     )
                     reply_text = resp.choices[0].message.content or ""
@@ -3546,233 +3410,19 @@ class PublicAgentService:
                         site_origin=conversation.site_origin
                     )
         else:
+            # No exact production match — never invent listings; EN/PL/TH fallback only
             cards = []
             stored_prefs["last_result_ids"] = []
-
-            # Retrieve alternative verified properties from inventory if not a foreign country query
-            if not foreign_loc:
-                try:
-                    fallback_params = PropertyFilterParams(location=loc, property_type=p_type, offset=0, limit=3)
-                    fallback_cards = search_properties_unified(db, fallback_params, limit=3, exclude_property_ids=seen_ids)
-                    if not fallback_cards:
-                        fallback_params = PropertyFilterParams(offset=0, limit=3)
-                        fallback_cards = search_properties_unified(db, fallback_params, limit=3, exclude_property_ids=seen_ids)
-                    if not fallback_cards:
-                        fallback_cards = search_properties_unified(db, PropertyFilterParams(offset=0, limit=3), limit=3)
-                    cards = fallback_cards
-                except Exception as e:
-                    logger.error(f"Error fetching fallback properties in search: {e}")
-                    cards = []
-
-                if cards:
-                    stored_prefs["seen_property_ids"] = list(set(seen_ids + [c["property_id"] for c in cards]))
-                    stored_prefs["last_result_ids"] = [c["property_id"] for c in cards]
-
-            if self.client:
-                try:
-                    hist_snippets = []
-                    for h in (conversation.message_history or [])[-4:]:
-                        hist_snippets.append(f"{h['role'].title()}: {h['content']}")
-                    hist_ctx = "\n".join(hist_snippets)
-
-                    system_prompt = get_compact_system_prompt(language, site_origin=conversation.site_origin)
-                    if foreign_loc:
-                        if language == "th":
-                            prompt_content = (
-                                (f"บริบทการสนทนา:\n{hist_ctx}\n\n" if hist_ctx else "") +
-                                f"คำขอของผู้ใช้: \"{user_message}\"\n\n"
-                                f"ทำเลต่างประเทศที่สอบถาม: {foreign_loc}\n\n"
-                                "ทำหน้าที่เป็นที่ปรึกษาอสังหาริมทรัพย์ระดับพรีเมียม Tajlandia / Varsovia Estate:\n"
-                                f"1. ชี้แจงอย่างสุภาพและเป็นมืออาชีพว่า Varsovia Estate เชี่ยวชาญและมุ่งเน้นเฉพาะตลาดอสังหาริมทรัพย์ระดับพรีเมียมในประเทศไทย (ภูเก็ต เกาะสมุย พัทยา กรุงเทพฯ) และไม่มีโครงการใน {foreign_loc}\n"
-                                f"2. ให้คำแนะนำเปรียบเทียบตลาดเชิงกลยุทธ์: ทำไมนักลงทุนที่พิจารณา {foreign_loc} หรือตลาดตากอากาศสากลจึงหันมาเลือกลงทุนในไทย (ผลตอบแทนค่าเช่า 6%-10% ต่อปี, สิทธิ์ Foreign Freehold 100% ในคอนโดมิเนียม, พูลวิลล่าหรูพร้อมสระว่ายน้ำส่วนตัวในราคาคุ้มค่ากว่ามาก, การท่องเที่ยวตลอดทั้งปี)\n"
-                                "3. ถามคำถามเพิ่มเติม 2-3 ข้ออย่างชาญฉลาดเพื่อเข้าใจความต้องการ (เช่น งบประมาณที่ตั้งไว้, วัตถุประสงค์เพื่ออยู่อาศัยหรือปล่อยเช่า, รูปแบบอสังหาริมทรัพย์ที่สนใจ)\n"
-                                "4. เสนอแนะนำโครงการพรีเมียมในไทยที่ผ่านการตรวจสอบ"
-                            )
-                        elif language == "pl":
-                            prompt_content = (
-                                (f"Kontekst rozmowy:\n{hist_ctx}\n\n" if hist_ctx else "") +
-                                f"Zapytanie użytkownika: \"{user_message}\"\n\n"
-                                f"Poszukiwana lokalizacja zagraniczna: {foreign_loc}\n\n"
-                                "Działaj jako profesjonalny, prestiżowy doradca ds. nieruchomości Tajlandia / Varsovia Estate:\n"
-                                f"1. Rzetelnie i uprzejmie wyjaśnij, że Varsovia Estate specjalizuje się wyłącznie w segmencie luksusowych nieruchomości w Tajlandii (Phuket, Koh Samui, Koh Phangan, Bangkok, Pattaya) i nie prowadzimy sprzedaży w {foreign_loc}.\n"
-                                f"2. Przedstaw konsultacyjne porównanie rynku: dlaczego międzynarodowi inwestorzy porównujący rynki zagraniczne (w tym {foreign_loc}) decydują się na Tajlandię (wyższe stopy zwrotu z najmu 6%-10% netto rocznie, 100% Foreign Freehold w kondominiach, luksusowe wille z prywatnym basenem w cenach nieosiągalnych na innych rynkach, całoroczny rynek premium).\n"
-                                "3. ZADAJ 2-3 INTELIGENTNE PYTANIA DOPRECYZOWUJĄCE:\n"
-                                "   - Jaki orientacyjny budżet inwestycyjny przewidujesz?\n"
-                                "   - Czy priorytetem jest stopa zwrotu z wynajmu, czy prywatna rezydencja wakacyjna?\n"
-                                "   - Czy chciałbyś poznać porównywalne luksusowe apartamenty lub wille z basenem w Phuket lub Koh Samui?\n"
-                                "4. Zaproponuj dedykowaną pomoc w doborze zweryfikowanych nieruchomości w Tajlandii."
-                            )
-                        else:
-                            prompt_content = (
-                                (f"Recent Context:\n{hist_ctx}\n\n" if hist_ctx else "") +
-                                f"User Request: \"{user_message}\"\n\n"
-                                f"Inquired Foreign Location: {foreign_loc}\n\n"
-                                "Act as an elite luxury real estate advisor for Varsovia Estate / Tajlandia:\n"
-                                f"1. Politely and prestigiously clarify that Varsovia Estate specializes exclusively in prime luxury real estate in Thailand (Phuket, Koh Samui, Koh Phangan, Bangkok, Pattaya), and we do not represent properties in {foreign_loc}.\n"
-                                f"2. Provide a consultative market comparison: Explain why many international investors comparing {foreign_loc} or global resort markets choose Thailand (e.g. attractive rental yields of 6%-10% net annually, 100% Foreign Freehold condominium ownership under personal name, private luxury pool villas offering superior value-per-sqm, and thriving year-round tourism).\n"
-                                "3. Ask 2-3 natural, conversational follow-up questions based on what is actually missing from the user's conversation — do not use template questions, base them entirely on the specific context of what the user said.\n"
-                                "4. Offer that our senior advisory team can guide them to verified luxury properties in Thailand."
-                            )
-                    elif cards:
-                        projections = [
-                            {
-                                "id": c["property_id"],
-                                "name": c["name"],
-                                "price": c["price"],
-                                "location": c["location"],
-                                "type": c["property_type"],
-                                "bedrooms": c["bedrooms"],
-                                "pool": c["has_pool"]
-                            }
-                            for c in cards
-                        ]
-                        if language == "th":
-                            prompt_content = (
-                                (f"บริบทการสนทนา:\n{hist_ctx}\n\n" if hist_ctx else "") +
-                                f"คำขอของผู้ใช้: \"{user_message}\"\n\n"
-                                f"เงื่อนไขการค้นหา: {json.dumps(search_filters, default=str, ensure_ascii=False)}\n"
-                                "ผลการค้นหา: ไม่พบรายการที่ตรงกับทุกเงื่อนไขแบบเจาะจงพอดี แต่เราได้คัดสรรอสังหาริมทรัพย์ระดับพรีเมียมที่ผ่านการตรวจสอบในประเทศไทยมานำเสนอแทน:\n"
-                                f"{json.dumps(projections, ensure_ascii=False)}\n\n"
-                                "ทำหน้าที่เป็นที่ปรึกษาอสังหาริมทรัพย์ระดับพรีเมียม Tajlandia:\n"
-                                "1. ชี้แจงด้วยน้ำเสียงที่สร้างแรงบันดาลใจและให้กำลังใจ แนะนำอย่างกระตือรือร้นว่าทำไมโครงการทางเลือกเหล่านี้จึงเป็นตัวเลือกที่ยอดเยี่ยม ทั้งดีไซน์ ทำเล และความคุ้มค่า\n"
-                                "2. นำเสนอรายการทั้งหมดในรูปแบบการ์ดที่มีโครงสร้างชัดเจน (### 1. **[ชื่อโครงการ]**) พร้อมหัวข้อย่อย\n"
-                                "3. สอบถามคำถามเพิ่มเติม 2-3 ข้ออย่างชาญฉลาดเพื่อเข้าใจความยืดหยุ่นของเงื่อนไข (เช่น งบประมาณ, จำนวนห้องนอน, หรือทำเลเกาะ)\n"
-                                "4. เสนอทางเลือกให้ทีมที่ปรึกษาอาวุโสช่วยจัดหาพอร์ตโฟลิโอแบบ Off-market และปิดท้ายด้วยขั้นตอนถัดไป"
-                            )
-                        elif language == "pl":
-                            prompt_content = (
-                                (f"Kontekst rozmowy:\n{hist_ctx}\n\n" if hist_ctx else "") +
-                                f"Zapytanie użytkownika: \"{user_message}\"\n\n"
-                                f"Kryteria wyszukiwania: {json.dumps(search_filters, default=str)}\n"
-                                "Wyniki wyszukiwania: Brak ofert spełniających co do joty wszystkie te specyficzne kryteria, ale wybraliśmy wspaniałe, zweryfikowane nieruchomości alternatywne w Tajlandii:\n"
-                                f"{json.dumps(projections)}\n\n"
-                                "Działaj jako inspirujący, profesjonalny doradca ds. nieruchomości Tajlandia / Varsovia Estate:\n"
-                                "1. W ciepłym, motywującym i zachęcającym tonie wyjaśnij, dlaczego te rekomendowane oferty alternatywne są znakomitym wyborem (luksusowy standard, świetna lokalizacja, znakomity stosunek jakości do ceny).\n"
-                                "2. Zaprezentuj oferty w uporządkowanych kartach z punktorami (### 1. **[Nazwa]**).\n"
-                                "3. ZADAJ 2-3 INTELIGENTNE PYTANIA DOPRECYZOWUJĄCE (elastyczność budżetu, liczba sypialni, preferowany rejon).\n"
-                                "4. Zaproponuj pomoc zespołu doradców lub pozyskanie dedykowanej oferty off-market i zakończ kolejnymi krokami."
-                            )
-                        else:
-                            prompt_content = (
-                                (f"Recent Context:\n{hist_ctx}\n\n" if hist_ctx else "") +
-                                f"User Request: \"{user_message}\"\n\n"
-                                f"Search Criteria: {json.dumps(search_filters, default=str)}\n"
-                                "Search Results: No properties matched this exact search combination, but we have curated these exceptional verified alternative luxury properties in Thailand:\n"
-                                f"{json.dumps(projections)}\n\n"
-                                "Act as an inspiring, motivating luxury real estate advisor for Tajlandia / Varsovia Estate:\n"
-                                "1. In a warm, motivating, and encouraging tone, explain why these alternative properties are fantastic options offering unmatched luxury, prime locations, and outstanding value.\n"
-                                "2. Present each property in clean numbered cards with bullet points (### 1. **[Property Name]**).\n"
-                                "3. Ask 2-3 natural, conversational follow-up questions based on what is actually missing from the user's conversation — do not use template questions, base them entirely on the specific context of what the user said.\n"
-                                "4. Offer that our senior advisory team can arrange confidential off-market sourcing. Conclude with clear next steps."
-                            )
-                    elif language == "th":
-                        prompt_content = (
-                            (f"บริบทการสนทนา:\n{hist_ctx}\n\n" if hist_ctx else "") +
-                            f"คำขอของผู้ใช้: \"{user_message}\"\n\n"
-                            f"เงื่อนไขการค้นหา: {json.dumps(search_filters, default=str, ensure_ascii=False)}\n"
-                            "ผลการค้นหา: ไม่พบอสังหาริมทรัพย์ที่ตรงกับเงื่อนไขนี้ในฐานข้อมูลปัจจุบัน\n\n"
-                            "ทำหน้าที่เป็นที่ปรึกษาอสังหาริมทรัพย์ Tajlandia ระดับพรีเมียม:\n"
-                            "1. ชี้แจงตามความเป็นจริงอย่างสุภาพ (เช่น หากขอ 10 ห้องนอน ให้ระบุว่าอสังหาริมทรัพย์ขนาด 10 ห้องนอนขึ้นไปในไทยมักเป็นคฤหาสน์ส่วนตัวขนาดใหญ่พิเศษ หรือโครงการวิลล่าส่วนตัวหลายหลังในพื้นที่เดียวกัน ซึ่งบริหารจัดการแบบ Off-market)\n"
-                            "2. ห้ามแต่งข้อมูลหรืออ้างว่ามีรายการ 10 ห้องนอนในพอร์ตมาตรฐานเด็ดขาด\n"
-                            "3. ถามคำถามเพิ่มเติม 2-3 ข้ออย่างชาญฉลาดเพื่อเข้าใจความต้องการ (เช่น ทำเลที่สนใจในไทย, ช่วงงบประมาณ, เปิดรับรูปแบบวิลล่าหรูหลายหลังติดกันใน Private Compound หรือไม่, วัตถุประสงค์ในการใช้งาน)\n"
-                            "4. เสนอให้ทีมที่ปรึกษาอาวุโสช่วยจัดหาพอร์ตโฟลิโอแบบ Off-market หรือแนะนำวิลล่าหรูขนาดใหญ่ที่สุดของเรา (5-6 ห้องนอน)"
-                        )
-                    elif language == "pl":
-                        prompt_content = (
-                            (f"Kontekst rozmowy:\n{hist_ctx}\n\n" if hist_ctx else "") +
-                            f"Zapytanie użytkownika: \"{user_message}\"\n\n"
-                            f"Kryteria wyszukiwania: {json.dumps(search_filters, default=str)}\n"
-                            "Wyniki wyszukiwania: Brak nieruchomości spełniających dokładnie te kryteria w naszej bazie.\n\n"
-                            "Działaj jako profesjonalny, prestiżowy doradca ds. nieruchomości Tajlandia / Varsovia Estate:\n"
-                            "1. Rzetelnie i profesjonalnie wyjaśnij realia rynku (np. dla 10 sypialni: wyjaśnij, że posiadłości z 10 sypialniami w Tajlandii to unikalne mega-rezydencje lub prywatne kompleksy kilku sąsiadujących willi, obsługiwane w trybie poufnym off-market).\n"
-                            "2. NIGDY nie udawaj, że mniejsze nieruchomości spełniają to kryterium. Nie pokazuj fałszywych dopasowań.\n"
-                            "3. ZADAJ 2-3 INTELIGENTNE PYTANIA DOPRECYZOWUJĄCE:\n"
-                            "   - Preferowana lokalizacja w Tajlandii (np. Phuket przy plaży, wzgórza Koh Samui, Bangkok)?\n"
-                            "   - Orientacyjny budżet inwestycyjny?\n"
-                            "   - Układ: Czy klient bierze pod uwagę prywatny kompleks sąsiadujących willi z basenami, czy wyłącznie jedną potężną rezydencję?\n"
-                            "   - Cel zakupu: rezydencja rodzinna czy komercyjny wynajem luksusowy?\n"
-                            "4. Zaproponuj dedykowane pozyskanie off-market przez nasz zespół senior doradców lub zapoznanie się z naszymi największymi willami (5-6 sypialni)."
-                        )
-                    else:
-                        prompt_content = (
-                            (f"Recent Context:\n{hist_ctx}\n\n" if hist_ctx else "") +
-                            f"User Request: \"{user_message}\"\n\n"
-                            f"Search Criteria: {json.dumps(search_filters, default=str)}\n"
-                            "Search Results: 0 matching properties found in current inventory.\n\n"
-                            "Act as an elite luxury real estate advisor for Tajlandia / Varsovia Estate:\n"
-                            "1. Acknowledge what the user is looking for with prestigious market authority (e.g. for 10 bedrooms, explain that standalone 10-bedroom estates in Thailand are rare private mega-residences or private multi-villa compounds handled off-market; for extreme budgets, explain realistic market price tiers).\n"
-                            "2. NEVER pretend that smaller or mismatched properties match their request. Do not output misleading listings.\n"
-                            "3. Ask 2-3 natural, conversational follow-up questions based on what is actually missing from the user's conversation — do not use template questions, base them entirely on the specific context of what the user said.\n"
-                            "4. Warmly offer that our senior advisory team can arrange confidential off-market sourcing, or offer to explore our largest verified luxury pool villas (5-6 bedrooms).\n"
-                            "Conclude with clear, helpful next steps."
-                        )
-
-                    resp = _safe_openai_create(
-                        self.client,
-                        model=self.model,
-                        messages=[
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": prompt_content}
-                        ],
-                        temperature=0.3,
-                        max_tokens=600
-                    )
-                    reply_text = resp.choices[0].message.content or ""
-                    llm_calls = 1
-                    if resp.usage:
-                        prompt_tokens = resp.usage.prompt_tokens
-                        comp_tokens = resp.usage.completion_tokens
-                except Exception as e:
-                    logger.error(f"Error in zero-match LLM synthesis: {e}")
-                    reply_text = ""
-
-            if not reply_text:
-                if foreign_loc:
-                    reply_text = get_off_topic_text(language, site_origin=conversation.site_origin, user_message=user_message)
-                elif cards:
-                    reply_text = build_rich_property_recommendation_text(
-                        cards=cards,
-                        language=language,
-                        is_alternative=True,
-                        is_sparse=True,
-                        location=loc,
-                        budget=max_p,
-                        bedrooms=bedrooms,
-                        site_origin=conversation.site_origin
-                    )
-                elif language == "pl":
-                    reply_text = (
-                        f"Nie znaleźliśmy obecnie w naszym publicznym portfolio nieruchomości spełniających dokładnie te kryteria"
-                        + (f" ({bedrooms} sypialni)" if bedrooms else "") + ".\n\n"
-                        "Posiadłości o tak dużej skali w Tajlandii (np. 10 sypialni) to unikalne mega-rezydencje lub prywatne kompleksy kilku sąsiadujących willi, które są zazwyczaj obsługiwane w trybie poufnym (off-market).\n\n"
-                        "Aby nasz zespół doradców mógł przygotować dla Ciebie dedykowaną propozycję, powiedz proszę:\n"
-                        "1. **Lokalizacja:** Który rejon Tajlandii Cię interesuje (np. Phuket przy plaży, wzgórza Koh Samui, Bangkok)?\n"
-                        "2. **Budżet:** Jaki orientacyjny budżet inwestycyjny przewidujesz?\n"
-                        "3. **Układ:** Czy bierzesz pod uwagę prywatny kompleks sąsiadujących willi, czy wyłącznie jedną potężną rezydencję?\n\n"
-                        "Nasz doradca chętnie przedstawi również nasze największe dostępne wille (5-6 sypialni) lub zorganizuje dedykowane pozyskanie off-market."
-                    )
-                elif language == "th":
-                    reply_text = (
-                        f"ไม่พบอสังหาริมทรัพย์ที่ตรงกับเงื่อนไขนี้ในฐานข้อมูลปัจจุบัน"
-                        + (f" ({bedrooms} ห้องนอน)" if bedrooms else "") + " ครับ\n\n"
-                        "อสังหาริมทรัพย์ขนาดใหญ่ระดับ 10 ห้องนอนในไทยมักเป็นคฤหาสน์ส่วนตัวขนาดใหญ่พิเศษ หรือ Private Compound ที่ประกอบด้วยพูลวิลล่าหลายหลังในพื้นที่เดียวกัน ซึ่งบริหารจัดการแบบ Off-market\n\n"
-                        "เพื่อให้ทีมงานช่วยคัดสรรได้อย่างตรงจุด กรุณาระบุข้อมูลเพิ่มเติม:\n"
-                        "1. **ทำเล:** สนใจทำเลใดเป็นพิเศษ (เช่น ติดทะเลภูเก็ต, วิวทะเลเกาะสมุย, กรุงเทพฯ)?\n"
-                        "2. **งบประมาณ:** ช่วงงบประมาณที่วางไว้โดยประมาณ?\n"
-                        "3. **รูปแบบ:** เปิดรับ Private Compound ที่ประกอบด้วยวิลล่าหลายหลัง หรือต้องการหลังเดี่ยวขนาดใหญ่เท่านั้น?\n\n"
-                        "ทีมที่ปรึกษาอาวุโสของเราพร้อมช่วยจัดหาอสังหาริมทรัพย์นอกตลาดที่ตรงกับความต้องการของคุณครับ"
-                    )
-                else:
-                    reply_text = (
-                        f"We currently do not have properties in our public listings matching these exact criteria"
-                        + (f" ({bedrooms} bedrooms)" if bedrooms else "") + ".\n\n"
-                        "Properties of this scale in Thailand (such as 10 bedrooms) are rare luxury mega-estates or private multi-villa compounds, which are typically managed confidentially off-market.\n\n"
-                        "To help our advisory team source or structure the ideal opportunity for you, could you please clarify:\n"
-                        "1. **Location:** Which destination in Thailand do you prefer (e.g., Phuket beachfront, Koh Samui ocean-view hills, or Bangkok)?\n"
-                        "2. **Budget:** What approximate investment or budget range are you planning?\n"
-                        "3. **Layout:** Would you consider an exclusive private compound of adjacent luxury pool villas (e.g., combining two 5-bedroom villas), or are you strictly seeking a single mega-residence?\n\n"
-                        "Our senior advisory team can also curate off-market estates for you, or we can explore our largest verified luxury pool villas (5-6 bedrooms). What would you prefer?"
-                    )
+            if foreign_loc:
+                reply_text = get_off_topic_text(
+                    language, site_origin=conversation.site_origin, user_message=user_message
+                )
+            else:
+                reply_text = get_data_unavailable_fallback(
+                    language=language,
+                    site_origin=getattr(conversation, "site_origin", None),
+                    detail=user_message[:120] if user_message else None,
+                )
 
         updated_prefs = extract_user_preferences(
             user_message=user_message,
@@ -3885,7 +3535,7 @@ class PublicAgentService:
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_content}
                     ],
-                    temperature=0.3,
+                    temperature=0.0,
                     max_tokens=500
                 )
                 reply_text = resp.choices[0].message.content or ""
@@ -4133,63 +3783,31 @@ class PublicAgentService:
                             )
                         })
                     else:
-                        seen_ids = get_session_seen_property_ids(conversation)
-                        try:
-                            fallback_cards = search_properties_unified(db, PropertyFilterParams(offset=0, limit=3), limit=3, exclude_property_ids=seen_ids)
-                            if not fallback_cards:
-                                fallback_cards = search_properties_unified(db, PropertyFilterParams(offset=0, limit=3), limit=3)
-                        except Exception:
-                            fallback_cards = []
-
-                        if fallback_cards:
-                            all_cards = fallback_cards
-                            messages_for_second.append({
-                                "role": "user",
-                                "content": (
-                                    f"No properties matched the exact search criteria. However, we have verified alternative properties in Thailand to recommend: {json.dumps(all_cards, ensure_ascii=False)}\n\n"
-                                    "Act as an intelligent, high-end real estate advisor for Tajlandia / Varsovia Estate:\n"
-                                    "1. Explain politely that while an exact match is not currently in the database, you are pleased to present these verified luxury alternative options that represent outstanding lifestyle and investment value.\n"
-                                    "2. Recommend these alternative properties with an encouraging, highly motivating, and positive tone explaining why these verified properties are fantastic choices.\n"
-                                    "3. Format each property as a numbered card:\n"
-                                    "### 1. **[Property Name]**\n"
-                                    "- 📍 **Location:** [Location]\n"
-                                    "- 💰 **Starting Price:** **[Price in THB]** (~€[EUR] / ~[PLN] PLN)\n"
-                                    "- 🛏️ **Bedrooms:** [Bedrooms] | 📐 **Type:** [Type]\n"
-                                    "- 🏊 **Amenities & Highlights:** [Amenities]\n"
-                                    "- 📜 **Ownership Structure:** [Foreign Freehold Condominium / 30-Year Registered Leasehold Villa]\n"
-                                    "NEVER output markdown tables (`| Property | Location | ... |`).\n"
-                                    "NEVER output plain unstructured line dumps.\n"
-                                    "4. CRITICAL: Conclude by asking at most 2-3 smart consultative follow-up questions to help narrow their search (e.g. preferred location, target budget range, bedroom requirements), followed by clear next steps."
-                                )
-                            })
-                        else:
-                            messages_for_second.append({
-                                "role": "user",
-                                "content": (
-                                    "No verified properties matched the exact search criteria in our database.\n"
-                                    "Act as an intelligent, high-end real estate advisor for Tajlandia / Varsovia Estate:\n"
-                                    "1. Acknowledge what the user is looking for (e.g. for 10 bedrooms, explain that standalone 10-bedroom estates in Thailand are rare private mega-estates or custom multi-villa compounds handled off-market).\n"
-                                    "2. NEVER pretend that smaller or mismatched listings match their request. Do not output fake matches.\n"
-                                    "3. Ask 2-3 natural, conversational follow-up questions based on what is actually missing from the user's conversation — do not use template questions, base them entirely on the specific context of what the user said.\n"
-                                    "4. Offer that our senior advisory team can source bespoke off-market properties or arrange adjacent villa acquisitions, or offer to explore our largest available verified luxury pool villas (5-6 bedrooms)."
-                                )
-                            })
-                second_resp = _safe_openai_create(
-                    self.client,
-                    model=self.model,
-                    messages=messages_for_second,
-                    temperature=self.temperature,
-                    max_tokens=800
-                )
-                final_text = second_resp.choices[0].message.content or ""
-                if not final_text and all_cards:
-                    final_text = build_rich_property_recommendation_text(
-                        cards=all_cards,
-                        language=language,
-                        is_alternative=True,
-                        is_sparse=True,
-                        site_origin=conversation.site_origin
+                        # No production match — honest fallback only; never invent or inject random listings
+                        all_cards = []
+                        final_text = get_data_unavailable_fallback(
+                            language=language,
+                            site_origin=getattr(conversation, "site_origin", None),
+                            detail=(raw_user_message or user_message or "")[:120] or None,
+                        )
+                        messages_for_second = None
+                if messages_for_second is not None:
+                    second_resp = _safe_openai_create(
+                        self.client,
+                        model=self.model,
+                        messages=messages_for_second,
+                        temperature=self.temperature,
+                        max_tokens=800
                     )
+                    final_text = second_resp.choices[0].message.content or ""
+                    if not final_text and all_cards:
+                        final_text = build_rich_property_recommendation_text(
+                            cards=all_cards,
+                            language=language,
+                            is_alternative=False,
+                            is_sparse=True,
+                            site_origin=conversation.site_origin
+                        )
             else:
                 final_text = resp_msg.content or ""
                 if not final_text:
@@ -4526,15 +4144,8 @@ class PublicAgentService:
                 site_origin=conversation.site_origin
             )
         else:
-            try:
-                fallback_params = PropertyFilterParams(offset=0, limit=3)
-                fallback_cards = search_properties_unified(db, fallback_params, limit=3, exclude_property_ids=seen_ids)
-                if not fallback_cards:
-                    fallback_cards = search_properties_unified(db, fallback_params, limit=3)
-            except Exception:
-                fallback_cards = []
-
-            cards = fallback_cards
+            # No production match — honest EN/PL/TH fallback, never guess listings
+            cards = []
 
             def _safe_int(val):
                 if not val:
@@ -4558,10 +4169,9 @@ class PublicAgentService:
                 searched_location=loc,
                 searched_budget_max=_safe_float(max_p),
                 searched_bedrooms=_safe_int(bed),
-                fallback_properties=fallback_cards,
+                fallback_properties=[],
                 site_origin=conversation.site_origin
             )
-            reply_text = ensure_structured_response(reply_text, cards=cards, user_message=user_message, language=language)
 
         if lead_captured:
             contact_parts = []

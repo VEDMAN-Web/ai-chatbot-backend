@@ -47,7 +47,7 @@ class Property(Base):
     developer_description = Column(Text, nullable=True)
 
     # Pricing
-    price_display = Column(String(100), nullable=True)             # e.g., "from 8.xx million THB"
+    price_display = Column(String(100), nullable=True)             # e.g., "from 8.5 million THB"
     price_numeric_min = Column(Numeric(14, 2), nullable=True, index=True)
     price_numeric_max = Column(Numeric(14, 2), nullable=True)
     currency = Column(String(10), default="THB")

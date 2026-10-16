@@ -227,76 +227,11 @@ class DossierPropertyFallback:
 
 
 def _get_default_dossier_properties() -> List[DossierPropertyFallback]:
-    return [
-        DossierPropertyFallback(
-            property_id="the-pavilions-grand-ocean-villa",
-            property_name="The Pavilions Grand Ocean Villa",
-            project_name="The Pavilions Phuket Luxury Estates",
-            province="Phuket",
-            district="Choeng Thale",
-            area="Layan Beach",
-            property_type="Villa",
-            price_display="32 500 000 THB",
-            price_numeric_min=32500000.0,
-            bedrooms_display="3-4 Sypialnie",
-            area_display="420 m²",
-            status="Gotowe do odbioru / Ready",
-            has_pool=True,
-            description="Spektakularna willa na wzgórzu z panoramicznym widokiem na Morze Andamańskie. Posiada prywatny basen bezkrawędziowy (infinity pool), przestronny taras słoneczny, luksusowe wykończenie w drewnie tekowym oraz całodobowy serwis hotelowy 5-gwiazdkowego resortu.",
-            rental_information="Program hotelowego poolu najmu generujący prognozowany zysk 8-10% rocznie, z możliwością 45 dni pobytu właścicielskiego rocznie."
-        ),
-        DossierPropertyFallback(
-            property_id="PROP-PHK-002",
-            property_name="Botanica Four Seasons Luxury Pool Villa",
-            project_name="Botanica Luxury Villas Phase IV",
-            province="Phuket",
-            district="Thalang",
-            area="Bang Tao",
-            property_type="Villa",
-            price_display="28 000 000 THB",
-            price_numeric_min=28000000.0,
-            bedrooms_display="3-4 Sypialnie",
-            area_display="380 m²",
-            status="W budowie (Odbiór Q4 2026)",
-            has_pool=True,
-            description="Ekskluzywna prywatna rezydencja w prestiżowej dolinie Bang Tao w sąsiedztwie Laguna Phuket. Nowoczesna architektura tropikalna, wysokie sufity, prywatny ogród krajobrazowy oraz basen o długości 12 metrów.",
-            rental_information="Gwarantowany zwrot z najmu lub w pełni zarządzany model najmu premium dla wymagających ekspatów i turystów."
-        ),
-        DossierPropertyFallback(
-            property_id="PROP-SAM-003",
-            property_name="Samujana Sea-View Executive Villa",
-            project_name="Samujana Estate Koh Samui",
-            province="Koh Samui",
-            district="Bophut",
-            area="Choeng Mon",
-            property_type="Villa",
-            price_display="35 000 000 THB",
-            price_numeric_min=35000000.0,
-            bedrooms_display="4 Sypialnie",
-            area_display="510 m²",
-            status="Gotowe do zamieszkania",
-            has_pool=True,
-            description="Jedna z najbardziej prestiżowych lokalizacji na Koh Samui. Bezpośredni widok na zatokę, prywatne kino domowe, basen ze słoną wodą, prywatny dostęp do plaży oraz dedykowany konsjerż rezydencji.",
-            rental_information="Wysoki popyt w segmencie Ultra-Luxury. Średni roczny zysk operacyjny z najmu wynosi 8.5% netto."
-        ),
-        DossierPropertyFallback(
-            property_id="PROP-PHK-004",
-            property_name="Anantara Residences Panorama Suite",
-            project_name="Anantara Layan Phuket Residences",
-            province="Phuket",
-            district="Thalang",
-            area="Layan",
-            property_type="Condominium",
-            price_display="22 000 000 THB",
-            price_numeric_min=22000000.0,
-            bedrooms_display="2-3 Pokoje",
-            area_display="210 m²",
-            status="Gotowe do odbioru",
-            has_pool=True,
-            description="Luksusowy penthouse z pełną własnością Foreign Freehold w standardzie 5-gwiazdkowej sieci Anantara. Prywatny basen na dachu, wykwintne restauracje na terenie kompleksu, spa i bezpośrednie zejście na plażę.",
-            rental_information="Hotelowy program najmu z renomowaną globalną marką zapewniający bezproblemowe zarządzanie i stabilny przychód dewizowy."
-        ),
-    ]
+    """
+    Production-only: never return hardcoded PROP-PHK / placeholder listings.
+    Dossier generation must use live Firestore/SQL inventory only.
+    """
+    return []
 
 
 def fetch_property_image_reader(prop: Any) -> ImageReader:
@@ -419,26 +354,63 @@ def generate_offer_dossier_pdf(
 
     logo_path = resolve_logo_path(brand)
 
-    # 2. Fetch 4 properties from PostgreSQL
+    # 2. Fetch properties from live production Firestore first, then SQL — never invent placeholders
     props: List[Any] = []
+    try:
+        from app.services.property_search import get_property_by_id, FirestorePropertyAdapter
+        from app.services.firestore_service import fetch_properties_from_firestore
+    except Exception:
+        get_property_by_id = None
+        fetch_properties_from_firestore = None
+        FirestorePropertyAdapter = None
+
     if property_ids:
         for pid in property_ids[:4]:
             if not pid:
                 continue
             pid_clean = str(pid).strip()
-            p = (
-                db.query(Property)
-                .filter(
-                    (Property.property_id.ilike(pid_clean))
-                    | (Property.property_name.ilike(f"%{pid_clean}%"))
-                    | (Property.project_name.ilike(f"%{pid_clean}%"))
+            p = None
+            if get_property_by_id:
+                try:
+                    p = get_property_by_id(db, pid_clean)
+                except Exception:
+                    p = None
+            if p is None and db is not None:
+                p = (
+                    db.query(Property)
+                    .filter(
+                        (Property.property_id.ilike(pid_clean))
+                        | (Property.property_name.ilike(f"%{pid_clean}%"))
+                        | (Property.project_name.ilike(f"%{pid_clean}%"))
+                    )
+                    .first()
                 )
-                .first()
-            )
             if p and p not in props:
                 props.append(p)
 
-    if len(props) < 4:
+    if len(props) < 4 and fetch_properties_from_firestore:
+        needed = 4 - len(props)
+        existing_ids = {
+            str(getattr(p, "property_id", "") or "").strip().lower()
+            for p in props
+            if getattr(p, "property_id", None)
+        }
+        try:
+            fs_list = fetch_properties_from_firestore(limit=needed + len(existing_ids), active_only=True, target="admin")
+            for fp in fs_list or []:
+                if len(props) >= 4:
+                    break
+                pid = str(fp.get("property_id") or fp.get("id") or "").strip().lower()
+                if pid and pid in existing_ids:
+                    continue
+                if FirestorePropertyAdapter:
+                    props.append(FirestorePropertyAdapter(fp))
+                    if pid:
+                        existing_ids.add(pid)
+        except Exception as e:
+            logger.warning(f"Firestore dossier property fetch failed: {e}")
+
+    if len(props) < 4 and db is not None:
         needed = 4 - len(props)
         existing_ids = [p.property_id for p in props if getattr(p, "property_id", None)]
         query = db.query(Property)
@@ -449,14 +421,11 @@ def generate_offer_dossier_pdf(
             if p not in props:
                 props.append(p)
 
-    # If database has fewer than 4 properties, supplement with realistic luxury portfolio options
-    if len(props) < 4:
-        sample_props = _get_default_dossier_properties()
-        for sp in sample_props:
-            if len(props) >= 4:
-                break
-            if not any(getattr(p, "property_name", "") == sp.property_name for p in props):
-                props.append(sp)
+    if not props:
+        raise ValueError(
+            "No verified production properties available to build the offer dossier. "
+            "Cannot generate PDF with placeholder or invented listings."
+        )
 
     # Formatting variables
     client_display = client_name.strip()
