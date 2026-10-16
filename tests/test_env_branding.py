@@ -63,11 +63,14 @@ def test_dynamic_env_override(monkeypatch):
     assert url == "https://new-realestate-brand.com/en/oferty/modern-condo"
 
 
-def test_tajlandia_redirects_to_env_default():
-    """Verifies that incoming requests specifying 'tajlandia.com' map directly to the active env tenant."""
+def test_tajlandia_resolves_to_tajlandia_tenant():
+    """Explicit tajlandia.com site_origin must use Tajlandia branding and advisor email."""
     profile = resolve_tenant("tajlandia.com")
-    assert profile.website_url == settings.BASE_WEBSITE_URL
-    assert profile.brand_name == settings.BRAND_NAME
+    assert profile.site_origin == "tajlandia.com"
+    assert profile.advisor_email == "advisor@tajlandia.com"
+    assert "Tajlandia" in profile.brand_name
+    # Must not leak Varsovia advisor onto Tajlandia chats
+    assert profile.advisor_email != "advisor@varsoviaestate.com"
 
 
 def test_hello_greeting_with_firestore_conversation():

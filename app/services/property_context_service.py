@@ -92,11 +92,89 @@ class ResolveResult:
     used_active_context: bool = False
 
 
+def _cards_from_history_turn(turn: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Extract property card dicts from an assistant history turn."""
+    cards: List[Dict[str, Any]] = []
+    sd = turn.get("structured_data") or {}
+    if isinstance(sd, dict):
+        for p in sd.get("properties") or []:
+            if isinstance(p, dict) and (p.get("property_id") or p.get("id")):
+                cards.append(p)
+    for p in turn.get("properties") or []:
+        if isinstance(p, dict) and (p.get("property_id") or p.get("id")):
+            cards.append(p)
+    return cards
+
+
+def hydrate_names_from_history(conversation: Any, ctx: PropertyContext) -> PropertyContext:
+    """
+    Always merge shown card names + ordinals from the latest assistant listing turn.
+    Fixes follow-ups like 'tell me more about Fantasea Condo' when prefs lost names
+    but cards are still in message history / UI.
+    """
+    history = list(getattr(conversation, "message_history", None) or [])
+    for turn in reversed(history[-40:]):
+        if not isinstance(turn, dict) or turn.get("role") != "assistant":
+            continue
+        cards = _cards_from_history_turn(turn)
+        if not cards:
+            # Also accept bare property_ids on structured_data
+            sd = turn.get("structured_data") or {}
+            raw_ids = list((sd.get("property_ids") or []) if isinstance(sd, dict) else [])
+            if not raw_ids:
+                continue
+            ordered = []
+            seen = set()
+            for pid in raw_ids:
+                s = str(pid).strip()
+                if s and s not in seen:
+                    seen.add(s)
+                    ordered.append(s)
+            if ordered:
+                need_ordinals = not any(
+                    ctx.reference_map.get(lbl) for lbl in ("first property", "second property")
+                )
+                ctx = touch_discussed(ctx, ordered, refresh_ordinals=need_ordinals)
+                if not ctx.active_property_id:
+                    ctx = set_active_property(ctx, ordered[0])
+            return ctx
+
+        ordered: List[str] = []
+        names: Dict[str, str] = {}
+        seen = set()
+        for c in cards:
+            pid = str(c.get("property_id") or c.get("id") or "").strip()
+            if not pid or pid in seen:
+                continue
+            seen.add(pid)
+            ordered.append(pid)
+            nm = str(c.get("name") or c.get("property_name") or "").strip()
+            if nm:
+                names[pid] = nm
+        if not ordered:
+            continue
+        need_ordinals = not any(
+            ctx.reference_map.get(lbl) for lbl in ("first property", "second property")
+        )
+        ctx = touch_discussed(ctx, ordered, names, refresh_ordinals=need_ordinals or bool(names))
+        # Ensure ordinals always reflect this latest batch when we have cards
+        ctx.reference_map.update(_build_ordinal_map(ordered))
+        for pid, nm in names.items():
+            ctx.reference_map[nm] = pid
+            ctx.reference_map[nm.lower()] = pid
+        if not ctx.active_property_id:
+            ctx = set_active_property(ctx, ordered[0], reference=names.get(ordered[0]))
+        return ctx
+    return ctx
+
+
 def recover_active_from_history(conversation: Any, ctx: PropertyContext) -> PropertyContext:
     """
     If active_property_id is missing, recover from the most recent assistant turn
     that showed property cards / IDs. Prevents lost follow-ups after location/maps turns.
+    Always hydrates names/ordinals from history when possible.
     """
+    ctx = hydrate_names_from_history(conversation, ctx)
     if ctx.active_property_id:
         return ctx
     history = list(getattr(conversation, "message_history", None) or [])
@@ -162,7 +240,7 @@ def load_property_context(conversation: Any) -> PropertyContext:
         # Prefer last_result_ids order for ordinals when available
         batch = list(prefs.get("last_result_ids") or []) or list(ctx.recently_discussed_ids)
         ctx.reference_map.update(_build_ordinal_map([str(x) for x in batch if x]))
-    # Last resort: recover from chat history cards
+    # Always hydrate names/ordinals from latest shown cards (even if active already set)
     ctx = recover_active_from_history(conversation, ctx)
     return ctx
 
@@ -290,6 +368,14 @@ def _extract_explicit_prop_id(msg: str) -> Optional[str]:
 
 def _extract_ordinal_index(msg: str) -> Optional[int]:
     low = msg.lower()
+    # Prefer explicit "the first property/properties/ones" before bare "first" scans
+    m = re.search(
+        r"\b(?:the\s+)?(first|second|third|fourth|fifth|1st|2nd|3rd|4th|5th)\s+"
+        r"(?:ones?|propert(?:y|ies)|villas?|condos?|listings?|ofert[ay]?|รายการ)?\b",
+        low,
+    )
+    if m:
+        return _ORDINAL_MAP.get(m.group(1))
     for key, idx in _ORDINAL_MAP.items():
         if key.isdigit():
             continue
@@ -297,10 +383,6 @@ def _extract_ordinal_index(msg: str) -> Optional[int]:
             # avoid matching "first" inside unrelated words poorly — word-ish check
             if re.search(rf"\b{re.escape(key)}\b", low) or key.startswith("อัน") or key.startswith("pierwsz") or key.startswith("drug") or key.startswith("trzec"):
                 return idx
-    # "the first property", "1st one"
-    m = re.search(r"\b(?:the\s+)?(first|second|third|fourth|fifth|1st|2nd|3rd|4th|5th)\s+(?:one|property|villa|condo|listing|oferta)?\b", low)
-    if m:
-        return _ORDINAL_MAP.get(m.group(1))
     return None
 
 

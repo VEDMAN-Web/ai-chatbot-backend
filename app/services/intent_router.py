@@ -48,8 +48,9 @@ COMPARISON_PATTERNS = [
 
 DETAILS_PATTERNS = [
     r"(?:tell\s+me\s+more\s+about|details\s+for|specs\s+for|show\s+me|info\s+on)\s+(PROP-[A-Z0-9\-]+)",
-    r"(?:tell\s+me\s+more\s+about|details\s+for|specs\s+for)\s+(?:the\s+)?(first|second|third|1st|2nd|3rd)\s+(?:one|property|villa|condo)",
-    r"^(?:the\s+)?(first|second|third|1st|2nd|3rd)\s+one\s*[\?\!\.]*$",
+    # Ordinals (singular + plural): "first property", "first properties", "the first ones"
+    r"(?:tell\s+me\s+more\s+about|tell\s+me\s+about|details\s+for|specs\s+for|more\s+(?:details|info)\s+(?:about|on)|info\s+on)\s+(?:the\s+)?(first|second|third|fourth|fifth|1st|2nd|3rd|4th|5th)\s+(?:ones?|propert(?:y|ies)|villas?|condos?|listings?)",
+    r"^(?:the\s+)?(first|second|third|fourth|fifth|1st|2nd|3rd|4th|5th)\s+(?:ones?|propert(?:y|ies)|villas?|condos?|listings?)?\s*[\?\!\.]*$",
     # Named property follow-ups: "can you tell me more about Mono Champaca?"
     r"(?:(?:can\s+you|could\s+you|please)\s+)?(?:tell\s+me\s+more\s+about|tell\s+me\s+about|more\s+(?:details|info)\s+(?:about|on|for)|details\s+(?:about|for|on)|specs\s+for|info\s+(?:about|on))\s+(?:the\s+)?([a-z0-9][\w\s\-'&.]{2,80}?)\s*[\?\!\.]*$",
     r"(?:pokaż|pokaz|szczegóły|szczegoly|informacje\s+o)\s+(PROP-[A-Z0-9\-]+)",
@@ -266,7 +267,15 @@ def detect_deterministic_intent(
     _DETAIL_SKIP_NAMES = {
         "phuket", "samui", "koh samui", "bangkok", "pattaya", "thailand", "tajlandia",
         "villas", "villa", "condo", "condominium", "properties", "property", "more",
-        "options", "results", "listings"
+        "options", "results", "listings", "first properties", "second properties",
+        "third properties", "first ones", "second ones", "third ones",
+    }
+    _ORDINAL_WORD_TO_IDX = {
+        "FIRST": 0, "1ST": 0, "1": 0, "อันแรก": 0,
+        "SECOND": 1, "2ND": 1, "2": 1, "อันที่สอง": 1,
+        "THIRD": 2, "3RD": 2, "3": 2, "อันที่สาม": 2,
+        "FOURTH": 3, "4TH": 3, "4": 3,
+        "FIFTH": 4, "5TH": 4, "5": 4,
     }
     for pat in DETAILS_PATTERNS:
         m = re.search(pat, msg_low, flags=re.IGNORECASE)
@@ -276,12 +285,18 @@ def detect_deterministic_intent(
             target_id = None
             if target.startswith("PROP-"):
                 target_id = target
-            elif target in ["FIRST", "1ST", "1", "อันแรก"] and len(last_result_ids) >= 1:
-                target_id = last_result_ids[0]
-            elif target in ["SECOND", "2ND", "2", "อันที่สอง"] and len(last_result_ids) >= 2:
-                target_id = last_result_ids[1]
-            elif target in ["THIRD", "3RD", "3", "อันที่สาม"] and len(last_result_ids) >= 3:
-                target_id = last_result_ids[2]
+            elif target in _ORDINAL_WORD_TO_IDX:
+                idx = _ORDINAL_WORD_TO_IDX[target]
+                if len(last_result_ids) > idx:
+                    target_id = last_result_ids[idx]
+                else:
+                    # Ordinal intent even if prefs empty — public_agent hydrates from history cards
+                    return IntentType.PROPERTY_DETAILS, {
+                        "property_id": None,
+                        "ordinal_index": idx,
+                        "focus_question": msg_clean,
+                        "from_property_context": True,
+                    }
             elif target_raw and target_raw.lower() not in _DETAIL_SKIP_NAMES and len(target_raw) >= 3:
                 # Named project follow-up — map to known session property_id when possible
                 name_match = re.search(pat, msg_clean, flags=re.IGNORECASE)
@@ -304,11 +319,13 @@ def detect_deterministic_intent(
                 return IntentType.PROPERTY_DETAILS, {
                     "property_name": named,
                     "property_id": mapped_id or named,
+                    "from_property_context": True,
                 }
 
             if target_id:
                 return IntentType.PROPERTY_DETAILS, {
-                    "property_id": target_id
+                    "property_id": target_id,
+                    "from_property_context": True,
                 }
 
     # Anaphoric + active property context (supports 100+ follow-ups without renaming the property)
@@ -441,7 +458,54 @@ def detect_deterministic_intent(
         if refinements:
             return IntentType.REFINE_FILTER, refinements
 
-    # 5. General Real Estate Informational Questions (Priority over broad search triggers)
+    # 5. Named listing fact lookup BEFORE general legal/ROI topics
+    # e.g. "Tell me the price, bedrooms and ownership of Fantasea Condo"
+    _named_fact_keys = (
+        "price", "bedroom", "ownership", "status", "area", "location", "pool",
+        "cena", "sypialn", "własno", "wlasno", "ราคา", "ห้องนอน", "กรรมสิทธิ์", "สถานะ"
+    )
+    if any(k in msg_low for k in _named_fact_keys):
+        named = None
+        m_of = re.search(
+            r"(?:of|for|about|regarding|o|dla|ของ|เกี่ยวกับ)\s+([A-Za-z0-9][\w\s\-'&.]{2,80}?)\s*[\?\!\.]*$",
+            msg_clean,
+            flags=re.IGNORECASE,
+        )
+        if m_of:
+            named = m_of.group(1).strip(" .,?!")
+            named = re.sub(r"^(?:the|a|an)\s+", "", named, flags=re.I).strip()
+        if not named:
+            # Title-case project name inside the message
+            m_title = re.search(r"\b([A-Z][a-zA-Z0-9]+(?:\s+[A-Z][a-zA-Z0-9]+){1,6})\b", msg_clean)
+            if m_title:
+                named = m_title.group(1).strip()
+        if not named and pctx:
+            ref_map = pctx.get("reference_map") or {}
+            for ref in sorted(ref_map.keys(), key=lambda x: len(str(x)), reverse=True):
+                ref_s = str(ref).strip()
+                if len(ref_s) >= 4 and ref_s.lower() in msg_low and ref_s.lower() not in (
+                    "first property", "second property", "third property", "fourth property", "fifth property"
+                ):
+                    named = ref_s
+                    break
+        if named and len(named) >= 3 and named.lower() not in _DETAIL_SKIP_NAMES:
+            # Prefer known session id when available
+            mapped_id = None
+            ref_map = (pctx or {}).get("reference_map") or {}
+            named_l = named.lower()
+            for ref, rid in sorted(ref_map.items(), key=lambda kv: len(str(kv[0])), reverse=True):
+                ref_l = str(ref).lower()
+                if len(ref_l) >= 3 and (named_l == ref_l or named_l in ref_l or ref_l in named_l):
+                    mapped_id = str(rid)
+                    break
+            return IntentType.PROPERTY_DETAILS, {
+                "property_name": named,
+                "property_id": mapped_id or named,
+                "focus_question": msg_clean,
+                "from_property_context": True,
+            }
+
+    # 6. General Real Estate Informational Questions (only when no named listing)
     general_topics = [
         "foreign freehold", "leasehold", "foreign ownership", "can a foreigner", "can foreigners",
         "buying process", "taxes", "chanote", "due diligence", "rental yield",
@@ -455,7 +519,7 @@ def detect_deterministic_intent(
     if any(t in msg_low for t in general_topics) and not any(k in msg_low for k in ["find villa", "show me villa", "find condo", "show me condo", "search for", "ค้นหาวิลล่า", "ค้นหาคอนโด"]):
         return IntentType.GENERAL_QUESTION, {}
 
-    # 6. Direct search keywords and structured filter presence check
+    # 7. Direct search keywords and structured filter presence check
     search_keywords = [
         "show me", "find", "search", "looking for", "villas in", "condos in",
         "properties in", "apartments in", "pool villa", "luxury villa", "penthouse",

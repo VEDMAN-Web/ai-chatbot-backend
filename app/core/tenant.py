@@ -238,8 +238,8 @@ def resolve_tenant(site_origin: Optional[str] = None) -> TenantProfile:
     """
     Resolves the appropriate TenantProfile based on incoming site_origin or environment.
     Priority:
-    1. If explicit site_origin matches an alternate tenant (e.g. thai.estate), return it.
-    2. Otherwise, return the dynamic default profile loaded directly from .env / settings!
+    1. Explicit site_origin matching a registry tenant (tajlandia / thai.estate / varsovia).
+    2. Otherwise, the dynamic default profile from .env / settings.
     """
     raw = (site_origin or "").strip().lower()
 
@@ -248,12 +248,16 @@ def resolve_tenant(site_origin: Optional[str] = None) -> TenantProfile:
         raw = raw.split("://")[1]
     raw = raw.split("/")[0].split(":")[0]
 
-    # Explicit match for other multi-tenant options if requested
     if raw:
-        if "thai" in raw:
-            return _apply_custom_bot_name(TENANT_REGISTRY.get("thai.estate", get_default_tenant_profile()))
+        key = normalize_tenant_domain_key(raw)
+        if key == "tajlandia":
+            return _apply_custom_bot_name(TENANT_REGISTRY["tajlandia.com"])
+        if key == "thai":
+            return _apply_custom_bot_name(TENANT_REGISTRY["thai.estate"])
+        if key == "varsovia":
+            return _apply_custom_bot_name(TENANT_REGISTRY["varsoviaestate.com"])
         for domain, profile in TENANT_REGISTRY.items():
-            if domain not in ("tajlandia.com", "varsoviaestate.com") and (domain == raw or domain in raw):
+            if domain == raw or raw.endswith(domain) or domain in raw:
                 return _apply_custom_bot_name(profile)
 
     # Return dynamic default tenant loaded purely from .env

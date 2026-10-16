@@ -29,12 +29,13 @@ def test_build_consultative_followup_questions_max_limit():
 def test_build_encouraging_alternative_intro():
     intro_en = build_encouraging_alternative_intro("en", searched_location="Phuket", searched_bedrooms=10)
     assert "phuket" in intro_en.lower() or "10" in intro_en.lower()
-    # Check encouraging/motivating tone
-    assert any(w in intro_en.lower() for w in ["delighted", "curated", "exceptional", "verified", "pleasure", "proud"])
+    assert "verified" in intro_en.lower() or "exact match" in intro_en.lower()
+    assert "6%-10%" not in intro_en
+    assert "delighted" not in intro_en.lower()
 
     intro_pl = build_encouraging_alternative_intro("pl", searched_location="Samui", searched_bedrooms=6)
     assert "samui" in intro_pl.lower() or "6" in intro_pl.lower()
-    assert any(w in intro_pl.lower() for w in ["przyjemnością", "wyselekcjonowaliśmy", "wyjątkow", "atrakcyjn"])
+    assert "6%-10%" not in intro_pl
 
 
 def test_build_rich_property_recommendation_text():
@@ -112,5 +113,7 @@ def test_build_rich_property_recommendation_text():
         searched_location="Koh Samui",
         searched_bedrooms=8
     )
-    assert any(w in rich_alt_text.lower() for w in ["delighted", "recommend", "handpicked", "exceptional", "pleasure"])
+    assert "outstanding selection" not in rich_alt_text.lower()
+    assert "6%-10%" not in rich_alt_text
     assert "?" in rich_alt_text
+    assert "Ocean Vista Luxury Villa" in rich_alt_text

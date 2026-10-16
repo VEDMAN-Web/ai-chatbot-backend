@@ -4,7 +4,7 @@ import re
 import json
 import logging
 from decimal import Decimal
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 from sqlalchemy.orm import Session
 from openai import OpenAI
 from app.core.config import settings
@@ -30,9 +30,12 @@ from app.services.i18n_service import (
     resolve_language, get_compact_system_prompt, get_public_system_prompt,
     get_language_switch_confirmation, get_greeting_text, get_off_topic_text,
     get_zero_match_text, get_quick_replies, get_data_unavailable_fallback,
+    build_no_match_reply,
     build_consultative_followup_questions, build_encouraging_alternative_intro,
     build_rich_property_recommendation_text
 )
+from app.services.reply_validator import validate_reply
+from app.core.tenant import resolve_tenant as _resolve_tenant_for_validation
 from app.services.guardrails import ThaiPropertyLegalGuardrail
 from app.services.property_context_service import (
     load_property_context,
@@ -1582,6 +1585,54 @@ class PublicAgentService:
         else:
             self.client = None
 
+    def _validate_or_fallback(
+        self,
+        reply_text: str,
+        cards: Optional[List[Dict[str, Any]]],
+        *,
+        language: str,
+        site_origin: Optional[str],
+        applied_filters: Optional[Dict[str, Any]] = None,
+        tool_results: Optional[List[Any]] = None,
+        criteria_summary: Optional[str] = None,
+    ) -> Tuple[str, List[Dict[str, Any]]]:
+        """Drop unsafe replies; return honest no-match text and empty cards on failure."""
+        cards = list(cards or [])
+        tenant = _resolve_tenant_for_validation(site_origin)
+        # Drop null-price cards from budget searches before validation when possible
+        filters = dict(applied_filters or {})
+        if filters.get("max_price") is not None or filters.get("min_price") is not None:
+            kept = []
+            for c in cards:
+                raw = str(c.get("price") or c.get("price_display") or "").strip().lower()
+                num = c.get("price_numeric_min")
+                if num is None and (not raw or "request" in raw or raw in ("n/a", "na", "")):
+                    continue  # exclude null-price from budget results
+                kept.append(c)
+            cards = kept
+
+        ok, reasons = validate_reply(
+            reply_text=reply_text,
+            cards=cards,
+            tool_results=tool_results,
+            applied_filters=filters,
+            language=language,
+            tenant_advisor_email=getattr(tenant, "advisor_email", None),
+        )
+        if ok:
+            return reply_text, cards
+        logger.warning("reply_validation_failed reasons=%s", reasons)
+        fallback = build_no_match_reply(
+            language=language,
+            site_origin=site_origin,
+            criteria_summary=criteria_summary,
+        )
+        if not fallback:
+            fallback = (
+                f"I could not verify that information. Our advisor can help: {tenant.advisor_email}"
+            )
+        return fallback, []
+
     def execute_tool(
         self,
         db: Session,
@@ -1660,16 +1711,7 @@ class PublicAgentService:
             seen_ids = get_session_seen_property_ids(conversation)
             # Do not exclude seen IDs on a fresh tool search — that caused unrelated new cards
             matched_cards = search_properties_unified(db, params, limit=6, exclude_property_ids=None)
-            if not matched_cards and not query_term:
-                has_strict_criteria = bool(args.get("bedrooms") or args.get("min_price") or args.get("max_price"))
-                if not has_strict_criteria:
-                    fallback_params = PropertyFilterParams(
-                        property_type=p_type,
-                        limit=4
-                    )
-                    matched_cards = search_properties_unified(db, fallback_params, limit=4, exclude_property_ids=None)
-                    if not matched_cards:
-                        matched_cards = search_properties_unified(db, PropertyFilterParams(limit=4), limit=4)
+            # Honest zero-result: never run an unfiltered / empty-filter search as fallback
 
             # Save explicitly stated new preferences
             new_prefs = {
@@ -2316,22 +2358,24 @@ class PublicAgentService:
             limit=4
         )
         cards = search_properties_unified(db, params, limit=4)
+        relaxed_filter_label = None
         if not cards and pref_loc:
-            # Fallback to broader Phuket / Samui search with the budget
+            # Exactly one relaxed filter: broaden sub-district to Phuket, keep type + budget
             is_phuket = any(k in (pref_loc or "").lower() for k in ["layan", "bang tao", "karon", "rawai", "kamala", "surin"])
-            broad_loc = "Phuket" if is_phuket else None
-            if broad_loc:
+            if is_phuket:
                 params_broad = PropertyFilterParams(
-                    location=broad_loc,
+                    location="Phuket",
                     property_type=args.get("property_type", "Villa"),
                     max_price=budget_dec,
                     offset=0,
-                    limit=4
+                    limit=3
                 )
-                cards = search_properties_unified(db, params_broad, limit=4)
-        if not cards:
-            fallback_params = PropertyFilterParams(offset=0, limit=3)
-            cards = search_properties_unified(db, fallback_params, limit=3)
+                cards = search_properties_unified(db, params_broad, limit=3)
+                if cards:
+                    relaxed_filter_label = "location -> Phuket" if language == "en" else (
+                        "lokalizacja -> Phuket" if language == "pl" else "ทำเล -> ภูเก็ต"
+                    )
+        # Never run an empty-filter search for lead confirmation listings
 
         # Localized confirmation
         if language == "th":
@@ -2339,24 +2383,42 @@ class PublicAgentService:
                 f"ขอบคุณครับ{', คุณ' + c_name if c_name else ''}! "
                 f"ระบบได้ลงทะเบียนการนัดหมายเข้าชมโครงการส่วนตัวสำหรับวิลล่าใน{pref_loc or 'ภูเก็ต'}เรียบร้อยแล้วครับ\n\n"
                 f"ที่ปรึกษาอาวุโสของ {tenant.brand_name} ({tenant.advisor_email}) จะติดต่อกลับผ่านทาง "
-                f"**{c_phone or c_email or 'ข้อมูลที่ระบุ'}** ภายใน 15-30 นาทีเพื่อยืนยันกำหนดการและอำนวยความสะดวกเรื่องการเดินทางครับ\n\n"
-                f"ระหว่างนี้ นี่คือโครงการพูลวิลล่าระดับพรีเมียมที่ผ่านการตรวจสอบตรงตามงบประมาณของคุณ:"
+                f"**{c_phone or c_email or 'ข้อมูลที่ระบุ'}** ภายใน 15-30 นาทีเพื่อยืนยันกำหนดการและอำนวยความสะดวกเรื่องการเดินทางครับ"
             )
         elif language == "pl":
             opening = (
                 f"Dziękujemy{', ' + c_name if c_name else ''}! "
                 f"Twoje zgłoszenie na prywatną prezentację willi w rejonie **{pref_loc or 'Phuket'}** zostało pomyślnie zarejestrowane.\n\n"
                 f"Dedykowany doradca {tenant.brand_name} ({tenant.advisor_email}) skontaktuje się z Tobą pod adresem "
-                f"**{c_phone or c_email or 'Twoim kontaktem'}** w celu potwierdzenia dogodnego terminu wizyty i organizacji transportu.\n\n"
-                f"Poniżej przygotowaliśmy wyselekcjonowane luksusowe wille spełniające Twoje kryteria i budżet:"
+                f"**{c_phone or c_email or 'Twoim kontaktem'}** w celu potwierdzenia dogodnego terminu wizyty i organizacji transportu."
             )
         else:
             opening = (
                 f"Thank you{', ' + c_name if c_name else ''}! "
                 f"Your request for a private property viewing in **{pref_loc or 'Phuket'}** has been successfully registered.\n\n"
                 f"A senior advisor from {tenant.brand_name} ({tenant.advisor_email}) will contact you directly via "
-                f"**{c_phone or c_email or 'your contact details'}** to confirm your schedule, arrange private VIP transport, and prepare property access.\n\n"
-                f"In the meantime, here are verified luxury properties matching your criteria and budget:"
+                f"**{c_phone or c_email or 'your contact details'}** to confirm your schedule, arrange private VIP transport, and prepare property access."
+            )
+        if cards and relaxed_filter_label:
+            opening = opening + "\n\n" + build_no_match_reply(
+                language=language,
+                site_origin=conversation.site_origin,
+                criteria_summary=pref_loc or None,
+                relaxed_filter=relaxed_filter_label,
+                alternatives=cards,
+            )
+        elif cards:
+            if language == "th":
+                opening += "\n\nระหว่างนี้ นี่คือโครงการที่ผ่านการตรวจสอบตรงตามเงื่อนไขของคุณ:"
+            elif language == "pl":
+                opening += "\n\nPoniżej oferty zweryfikowane spełniające Twoje kryteria:"
+            else:
+                opening += "\n\nIn the meantime, here are verified listings matching your criteria:"
+        else:
+            opening = opening + "\n\n" + build_no_match_reply(
+                language=language,
+                site_origin=conversation.site_origin,
+                criteria_summary=pref_loc or None,
             )
 
         stored_prefs = dict(conversation.preferences or {})
@@ -2438,8 +2500,10 @@ class PublicAgentService:
             limit=4
         )
         cards = search_properties_unified(db, params, limit=4, exclude_property_ids=seen_ids)
+        relaxed_filter_label = None
+        used_relaxed_alternatives = False
 
-        # If 0 new cards found for the narrow location, broaden to wider province / Thailand without shown properties
+        # Exactly one relaxed filter when narrow sub-district yields nothing: broaden to Phuket
         if not cards and loc in ["Bang Tao", "Choeng Thale", "Layan", "Kamala", "Surin", "Rawai", "Karon", "Patong"]:
             broad_params = PropertyFilterParams(
                 location="Phuket",
@@ -2447,27 +2511,29 @@ class PublicAgentService:
                 bedrooms=bedrooms,
                 max_price=max_p,
                 has_pool=has_pool,
-                limit=4
+                limit=3
             )
-            cards = search_properties_unified(db, broad_params, limit=4, exclude_property_ids=seen_ids)
+            relaxed = search_properties_unified(db, broad_params, limit=3, exclude_property_ids=seen_ids)
+            if relaxed:
+                cards = relaxed
+                used_relaxed_alternatives = True
+                relaxed_filter_label = "location -> Phuket" if language == "en" else (
+                    "lokalizacja -> Phuket" if language == "pl" else "ทำเล -> ภูเก็ต"
+                )
+        # Never run empty-filter or Thailand-wide unfiltered searches as fallback
 
-        if not cards:
-            # Fallback across Thailand luxury properties excluding already shown
-            fallback_params = PropertyFilterParams(
-                property_type=p_type,
-                bedrooms=bedrooms,
-                max_price=max_p,
-                has_pool=has_pool,
-                limit=4
-            )
-            cards = search_properties_unified(db, fallback_params, limit=4, exclude_property_ids=seen_ids)
+        criteria_bits = []
+        if loc:
+            criteria_bits.append(str(loc))
+        if p_type:
+            criteria_bits.append(str(p_type))
+        if bedrooms:
+            criteria_bits.append(f"{bedrooms} bed")
+        if max_p is not None:
+            criteria_bits.append(f"budget <= {max_p}")
+        criteria_summary = ", ".join(criteria_bits) if criteria_bits else None
 
-        if not cards:
-            # Proactively recommend other verified luxury properties across Thailand
-            general_params = PropertyFilterParams(limit=4)
-            cards = search_properties_unified(db, general_params, limit=4, exclude_property_ids=seen_ids)
-
-        if cards:
+        if cards and not used_relaxed_alternatives:
             reply_text = build_rich_property_recommendation_text(
                 cards=cards,
                 language=language,
@@ -2478,37 +2544,49 @@ class PublicAgentService:
                 searched_budget=float(max_p) if max_p else None,
                 site_origin=conversation.site_origin
             )
-
-            # Enforce clean structured cards formatting
             reply_text = ensure_structured_response(reply_text, cards=cards, user_message=user_message, language=language)
-
-            # Update seen_property_ids in stored preferences
+            new_seen = list(set(seen_ids + [c["property_id"] for c in cards]))
+            stored_prefs["seen_property_ids"] = new_seen
+            stored_prefs["last_result_ids"] = [c["property_id"] for c in cards]
+        elif cards and used_relaxed_alternatives:
+            reply_text = build_no_match_reply(
+                language=language,
+                site_origin=conversation.site_origin,
+                criteria_summary=criteria_summary,
+                relaxed_filter=relaxed_filter_label,
+                alternatives=cards,
+            )
             new_seen = list(set(seen_ids + [c["property_id"] for c in cards]))
             stored_prefs["seen_property_ids"] = new_seen
             stored_prefs["last_result_ids"] = [c["property_id"] for c in cards]
         else:
-            if language == "th":
-                reply_text = (
-                    "จากความต้องการของคุณ เราได้นำเสนอรายการอสังหาริมทรัพย์ที่ผ่านการตรวจสอบทั้งหมดในพอร์ตโฟลิโอปัจจุบันเรียบร้อยแล้วครับ\n\n"
-                    f"คุณต้องการปรับเปลี่ยนเงื่อนไขการค้นหา หรือสนใจให้ทีมที่ปรึกษาของเรา ({settings.ADVISOR_EMAIL}) ช่วยจัดหาโครงการนอกตลาด (Off-Market) เพิ่มเติมไหมครับ?"
-                )
-            elif language == "pl":
-                reply_text = (
-                    "W oparciu o Twoje preferencje zaprezentowaliśmy wszystkie aktualnie dostępne zweryfikowane nieruchomości z naszego portfolio.\n\n"
-                    f"Czy chcesz dostosować kryteria wyszukiwania lub skontaktować się z naszym doradcą ({settings.ADVISOR_EMAIL}) w sprawie nowych ofert off-market?"
-                )
-            else:
-                reply_text = (
-                    "Based on your preferences, we have presented all currently available verified listings from our active portfolio.\n\n"
-                    f"Would you like to adjust your search criteria, or connect with our advisory team at {settings.ADVISOR_EMAIL} to explore upcoming off-market opportunities?"
-                )
+            cards = []
+            reply_text = build_no_match_reply(
+                language=language,
+                site_origin=conversation.site_origin,
+                criteria_summary=criteria_summary,
+            )
+
+        reply_text, cards = self._validate_or_fallback(
+            reply_text,
+            cards,
+            language=language,
+            site_origin=conversation.site_origin,
+            applied_filters={
+                "location": loc,
+                "property_type": p_type,
+                "bedrooms": bedrooms,
+                "max_price": float(max_p) if max_p is not None else None,
+            },
+            criteria_summary=criteria_summary,
+        )
 
         append_conversation_turn(
             db=db,
             conversation=conversation,
             user_message=user_message,
             assistant_message=reply_text,
-            structured_data={"properties": cards, "property_ids": [c["property_id"] for c in cards]},
+            structured_data={"properties": cards, "property_ids": [c.get("property_id") for c in cards if c.get("property_id")]},
             new_preferences=stored_prefs
         )
 
@@ -2556,7 +2634,24 @@ class PublicAgentService:
         # Prefer explicit args, else resolve from persistent context
         pid = args.get("property_id") or args.get("property_name")
         pname = args.get("property_name")
-        if not pid or args.get("from_property_context"):
+        ordinal_index = args.get("ordinal_index")
+        if ordinal_index is not None:
+            batch = []
+            for label in ("first property", "second property", "third property", "fourth property", "fifth property"):
+                if pctx.reference_map.get(label):
+                    batch.append(pctx.reference_map[label])
+            if not batch:
+                batch = list(pctx.recently_discussed_ids or [])
+            try:
+                idx = int(ordinal_index)
+            except (TypeError, ValueError):
+                idx = -1
+            if 0 <= idx < len(batch):
+                pid = batch[idx]
+
+        if not pid or args.get("from_property_context") or (
+            isinstance(pid, str) and not re.match(r"(?i)^prop-", str(pid)) and (" " in str(pid) or not re.search(r"\d", str(pid)))
+        ):
             resolved = resolve_property_reference(user_message, pctx, language=language)
             if resolved.ambiguous:
                 clarify = resolved.clarification or "Which property do you mean?"
@@ -2578,7 +2673,7 @@ class PublicAgentService:
             elif pctx.active_property_id and args.get("from_property_context"):
                 pid = pctx.active_property_id
 
-        # Named follow-up like "tell me more about Mono Champaca" — map shown card name → id
+        # Named follow-up like "tell me more about Fantasea Condo" — map shown card name → id
         for candidate in [pname, pid, user_message]:
             if not candidate:
                 continue
@@ -2598,6 +2693,17 @@ class PublicAgentService:
                     pid = mapped
                     break
 
+        # Ordinal phrases that slipped through as names ("first properties")
+        if isinstance(pid, str) and re.search(
+            r"^(?:the\s+)?(first|second|third|fourth|fifth|1st|2nd|3rd|4th|5th)\s+"
+            r"(?:ones?|propert(?:y|ies)|villas?|condos?|listings?)$",
+            pid.strip(),
+            flags=re.IGNORECASE,
+        ):
+            ord_resolved = resolve_property_reference(user_message, pctx, language=language)
+            if ord_resolved.property_id:
+                pid = ord_resolved.property_id
+
         pname = args.get("property_name") or pid
         card = None
         p_name = None
@@ -2612,40 +2718,58 @@ class PublicAgentService:
         p_desc = ""
 
         # Live authorized fetch only — never use prior assistant text as factual source
-        _rec, live_card, _src = fetch_authorized_property(db, str(pid) if pid else "")
-        if live_card and isinstance(live_card, dict):
-            card = live_card
-            p_name = live_card.get("name") or live_card.get("property_name")
-            p_id = live_card.get("property_id") or pid
-            p_loc = live_card.get("location")
-            p_price = live_card.get("price") or live_card.get("price_display")
-            p_beds = live_card.get("bedrooms") or live_card.get("bedrooms_display")
-            p_area = live_card.get("area") or live_card.get("area_display")
-            p_status = live_card.get("status") or "Available"
-            p_owner = live_card.get("ownership") or live_card.get("ownership_type") or "Foreign Freehold / Leasehold available"
-            p_high = live_card.get("highlights") or []
-            p_desc = live_card.get("description") or ""
-        elif _rec is not None and not isinstance(_rec, dict):
-            card = format_property_card(_rec)
-            p_name = getattr(_rec, "property_name", None)
-            p_id = getattr(_rec, "property_id", pid)
-            p_loc = card.get("location")
-            p_price = getattr(_rec, "price_display", None) or "Price on request"
-            p_beds = getattr(_rec, "bedrooms_display", None) or "N/A"
-            p_area = getattr(_rec, "area_display", None) or "N/A"
-            p_status = getattr(_rec, "status", None) or "Available"
-            p_owner = getattr(_rec, "ownership_type", None) or "Foreign Freehold / Leasehold available"
-            p_high = getattr(_rec, "highlights", None) or []
-            p_desc = getattr(_rec, "description", None) or ""
-        else:
-            # Legacy dual-path fallback (ID then name)
-            if getattr(settings, "ENABLE_FIRESTORE_SYNC", True) and (pid or pname):
+        lookup_keys = []
+        for candidate in [pid, pname, args.get("property_name")]:
+            s = str(candidate or "").strip()
+            if s and s not in lookup_keys:
+                lookup_keys.append(s)
+
+        for key in lookup_keys:
+            try:
+                _rec, live_card, _src = fetch_authorized_property(db, key)
+            except Exception as fetch_err:
+                logger.warning(f"Authorized property fetch failed for '{key}': {fetch_err}")
+                _rec, live_card = None, None
+            if live_card and isinstance(live_card, dict):
+                card = live_card
+                p_name = live_card.get("name") or live_card.get("property_name")
+                p_id = live_card.get("property_id") or key
+                p_loc = live_card.get("location")
+                p_price = live_card.get("price") or live_card.get("price_display")
+                p_beds = live_card.get("bedrooms") or live_card.get("bedrooms_display")
+                p_area = live_card.get("area") or live_card.get("area_display")
+                p_status = live_card.get("status") or "Available"
+                p_owner = live_card.get("ownership") or live_card.get("ownership_type") or "Foreign Freehold / Leasehold available"
+                p_high = live_card.get("highlights") or []
+                p_desc = live_card.get("description") or ""
+                pid = p_id
+                break
+            if _rec is not None and not isinstance(_rec, dict):
+                card = format_property_card(_rec)
+                p_name = getattr(_rec, "property_name", None)
+                p_id = getattr(_rec, "property_id", key)
+                p_loc = card.get("location")
+                p_price = getattr(_rec, "price_display", None) or "Price on request"
+                p_beds = getattr(_rec, "bedrooms_display", None) or "N/A"
+                p_area = getattr(_rec, "area_display", None) or "N/A"
+                p_status = getattr(_rec, "status", None) or "Available"
+                p_owner = getattr(_rec, "ownership_type", None) or "Foreign Freehold / Leasehold available"
+                p_high = getattr(_rec, "highlights", None) or []
+                p_desc = getattr(_rec, "description", None) or ""
+                pid = p_id
+                break
+
+        if not card:
+            # Legacy dual-path fallback (ID then name) + Firestore fuzzy by display name
+            if getattr(settings, "ENABLE_FIRESTORE_SYNC", True) and lookup_keys:
                 from app.services.firestore_service import get_property_by_id_from_firestore
                 fs_prop = None
-                for candidate in [pid, pname]:
-                    if not candidate:
-                        continue
-                    fs_prop = get_property_by_id_from_firestore(str(candidate))
+                for candidate in lookup_keys:
+                    try:
+                        fs_prop = get_property_by_id_from_firestore(str(candidate))
+                    except Exception as fs_err:
+                        logger.warning(f"Firestore name/id lookup failed for '{candidate}': {fs_err}")
+                        fs_prop = None
                     if fs_prop:
                         break
                 if fs_prop:
@@ -2660,10 +2784,13 @@ class PublicAgentService:
                     p_owner = "Foreign Freehold / Leasehold available"
                     p_high = fs_prop.get("highlights") or []
                     p_desc = fs_prop.get("description") or ""
+                    pid = p_id or pid
             if not card:
                 prop = get_property_by_id(db, pid) if (db and pid) else None
                 if not prop and args.get("property_name") and db:
                     prop = get_property_by_name(db, args["property_name"])
+                if not prop and pname and db and pname != pid:
+                    prop = get_property_by_name(db, str(pname))
                 if prop:
                     card = format_property_card(prop)
                     p_name = prop.property_name
@@ -2718,13 +2845,38 @@ class PublicAgentService:
                         f"**{p_name}**: Parking is not documented in the verified database.\n\n"
                         f"• **Price:** {p_price}\n• **Location:** {p_loc}"
                     )
-            elif any(k in focus_q for k in ["price", "cost", "how much", "cena", "ราคา"]):
+            elif any(k in focus_q for k in ["price", "cost", "how much", "cena", "ราคา"]) and not any(
+                k in focus_q for k in ["bedroom", "ownership", "status", "sypialn", "własno", "wlasno", "กรรมสิทธิ์"]
+            ):
+                price_out = p_price if p_price not in (None, "", "N/A") else "Not documented in verified database"
                 if language == "th":
-                    reply_text = f"**{p_name}** มีราคาในฐานข้อมูลที่ตรวจสอบแล้ว: **{p_price}**\n\n• **ทำเล:** {p_loc}\n• **ห้องนอน / พื้นที่:** {p_beds} | {p_area}"
+                    reply_text = f"**{p_name}** ราคา: **{price_out}**\n\n• **ทำเล:** {p_loc or 'ไม่ระบุในฐานข้อมูล'}\n• **ห้องนอน / พื้นที่:** {p_beds or 'ไม่ระบุในฐานข้อมูล'} | {p_area or 'ไม่ระบุในฐานข้อมูล'}"
                 elif language == "pl":
-                    reply_text = f"**{p_name}** — zweryfikowana cena: **{p_price}**\n\n• **Lokalizacja:** {p_loc}\n• **Sypialnie / Powierzchnia:** {p_beds} | {p_area}"
+                    reply_text = f"**{p_name}** cena: **{price_out}**\n\n• **Lokalizacja:** {p_loc or 'Brak w bazie'}\n• **Sypialnie / Powierzchnia:** {p_beds or 'Brak w bazie'} | {p_area or 'Brak w bazie'}"
                 else:
-                    reply_text = f"**{p_name}** — verified price: **{p_price}**\n\n• **Location:** {p_loc}\n• **Bedrooms / Area:** {p_beds} | {p_area}"
+                    reply_text = f"**{p_name}** verified price: **{price_out}**\n\n• **Location:** {p_loc or 'Not documented in verified database'}\n• **Bedrooms / Area:** {p_beds or 'Not documented in verified database'} | {p_area or 'Not documented in verified database'}"
+            elif sum(1 for k in ("price", "bedroom", "ownership", "cena", "sypialn", "własno", "wlasno", "ราคา", "ห้องนอน", "กรรมสิทธิ์") if k in focus_q) >= 2:
+                # Multi-fact ask: only emit fields that exist; say not available when missing
+                def _field(label_en, label_pl, label_th, value):
+                    missing = value in (None, "", "N/A")
+                    if language == "th":
+                        return f"• **{label_th}:** {'ไม่ระบุในฐานข้อมูล' if missing else value}"
+                    if language == "pl":
+                        return f"• **{label_pl}:** {'Brak w bazie' if missing else value}"
+                    return f"• **{label_en}:** {'Not documented in verified database' if missing else value}"
+                lines = [
+                    f"Verified facts for **{p_name}**:" if language == "en" else (
+                        f"Zweryfikowane dane dla **{p_name}**:" if language == "pl" else f"ข้อมูลที่ยืนยันแล้วสำหรับ **{p_name}**:"
+                    ),
+                    "",
+                    _field("Price", "Cena", "ราคา", p_price),
+                    _field("Bedrooms", "Sypialnie", "ห้องนอน", p_beds),
+                    _field("Ownership", "Forma własności", "กรรมสิทธิ์", p_owner),
+                    _field("Status", "Status", "สถานะ", p_status),
+                ]
+                if "location" in focus_q or "ทำเล" in focus_q:
+                    lines.append(_field("Location", "Lokalizacja", "ทำเล", p_loc))
+                reply_text = "\n".join(lines)
             elif language == "th":
                 reply_text = (
                     f"ข้อมูลจำเพาะที่ผ่านการตรวจสอบสำหรับ **{p_name}** ({p_id}):\n\n"
@@ -2774,23 +2926,26 @@ class PublicAgentService:
                 buying_signal=f"Requested details for {p_id} ({p_name})"
             )
         else:
+            from app.core.tenant import resolve_tenant as _rt_nf
+            _adv = _rt_nf(getattr(conversation, "site_origin", None)).advisor_email
+            label = pid or pname or "that listing"
             if language == "th":
                 reply_text = (
-                    f"ไม่พบอสังหาริมทรัพย์รหัส '{pid}' ในฐานข้อมูลที่ตรวจสอบแล้วของเราครับ\n\n"
-                    f"ทีมที่ปรึกษาของเรา ({settings.ADVISOR_EMAIL}) สามารถตรวจสอบโครงการเฉพาะหรือห้องว่างจากผู้พัฒนาโครงการให้คุณได้ "
-                    f"คุณสนใจเลือกดูรายการที่เปิดขายในภูเก็ตหรือเกาะสมุยแทนไหมครับ?"
+                    f"ไม่พบ '{label}' ในฐานข้อมูลที่ตรวจสอบแล้วครับ\n\n"
+                    f"ทีมที่ปรึกษา ({_adv}) สามารถช่วยตรวจสอบเพิ่มเติมได้ "
+                    "หรือแจ้งทำเล / งบประมาณ / ประเภทอสังหาฯ เพื่อค้นหาจากรายการที่มีอยู่จริงครับ"
                 )
             elif language == "pl":
                 reply_text = (
-                    f"Nie znaleziono nieruchomości o identyfikatorze '{pid}' w naszej zweryfikowanej bazie danych.\n\n"
-                    f"Nasz zespół doradców ({settings.ADVISOR_EMAIL}) może zweryfikować dostępność konkretnych projektów lub sprawdzić oferty deweloperskie. "
-                    f"Czy chciałbyś przejrzeć nasze dostępne oferty na Phuket lub Koh Samui?"
+                    f"Nie znaleziono '{label}' w zweryfikowanej bazie.\n\n"
+                    f"Nasz zespół doradców ({_adv}) może pomóc dalej. "
+                    "Możesz też podać lokalizację, budżet lub typ nieruchomości."
                 )
             else:
                 reply_text = (
-                    f"Property ID '{pid}' was not found in our verified database.\n\n"
-                    f"If you are looking for a specific development, our advisory team ({settings.ADVISOR_EMAIL}) can verify current availability for you. "
-                    f"Would you like to explore our active verified listings in Phuket or Koh Samui instead?"
+                    f"'{label}' was not found in our verified database.\n\n"
+                    f"Our advisory team ({_adv}) can help further. "
+                    "You can also share a location, budget, or property type to search among verified listings only."
                 )
             cards = []
 
@@ -3471,6 +3626,13 @@ class PublicAgentService:
         stored_prefs = dict(conversation.preferences or {})
         extracted = extract_search_filters_deterministic(user_message)
         cache_hit = False
+        search_relaxed_filter = None
+        search_relaxed_alts = None
+        loc = None
+        p_type = None
+        bedrooms = None
+        max_p = None
+        has_pool = None
         is_show_all = bool(extracted.get("show_all")) or any(k in user_message.lower() for k in ["show all", "all properties", "view all", "list all", "wszystkie nieruchomości", "wszystkie oferty"])
         foreign_loc = extracted.get("foreign_location")
         if is_show_all:
@@ -3566,8 +3728,8 @@ class PublicAgentService:
                     }
                     stored_prefs["active_filters"] = search_filters
 
-            # If specific sub-district yielded fewer than 2 results, broaden to Phuket to include adjacent luxury villas
-            if len(cards) < 2 and loc in ["Bang Tao", "Choeng Thale", "Layan", "Kamala", "Surin", "Rawai", "Karon"]:
+            # Zero results only: exactly one relaxed filter (sub-district -> Phuket), never pad silently
+            if not cards and loc in ["Bang Tao", "Choeng Thale", "Layan", "Kamala", "Surin", "Rawai", "Karon"]:
                 broad_params = PropertyFilterParams(
                     location="Phuket",
                     property_type=p_type,
@@ -3575,12 +3737,14 @@ class PublicAgentService:
                     max_price=max_p,
                     has_pool=has_pool,
                     offset=0,
-                    limit=4
+                    limit=3
                 )
-                broad_matched = search_properties_unified(db, broad_params, limit=4, exclude_property_ids=None)
-                for bm in broad_matched:
-                    if bm.get("property_id") not in [c.get("property_id") for c in cards]:
-                        cards.append(bm)
+                broad_matched = search_properties_unified(db, broad_params, limit=3, exclude_property_ids=None)
+                if broad_matched:
+                    search_relaxed_alts = broad_matched[:3]
+                    search_relaxed_filter = "location -> Phuket" if language == "en" else (
+                        "lokalizacja -> Phuket" if language == "pl" else "ทำเล -> ภูเก็ต"
+                    )
 
         prompt_tokens = 0
         comp_tokens = 0
@@ -3756,18 +3920,49 @@ class PublicAgentService:
                         site_origin=conversation.site_origin
                     )
         else:
-            # No exact production match — never invent listings; EN/PL/TH fallback only
-            cards = []
+            # No exact production match — never invent listings; honest no-match only
             stored_prefs["last_result_ids"] = []
             if foreign_loc:
+                cards = []
                 reply_text = get_off_topic_text(
                     language, site_origin=conversation.site_origin, user_message=user_message
                 )
-            else:
-                reply_text = get_data_unavailable_fallback(
+            elif search_relaxed_alts and search_relaxed_filter:
+                cards = list(search_relaxed_alts)
+                criteria_bits = []
+                if loc:
+                    criteria_bits.append(str(loc))
+                if p_type:
+                    criteria_bits.append(str(p_type))
+                if bedrooms:
+                    criteria_bits.append(f"{bedrooms} bed")
+                if max_p is not None:
+                    criteria_bits.append(f"budget <= {max_p}")
+                reply_text = build_no_match_reply(
                     language=language,
                     site_origin=getattr(conversation, "site_origin", None),
-                    detail=user_message[:120] if user_message else None,
+                    criteria_summary=", ".join(criteria_bits) if criteria_bits else None,
+                    relaxed_filter=search_relaxed_filter,
+                    alternatives=cards,
+                )
+                stored_prefs["last_result_ids"] = [c["property_id"] for c in cards if c.get("property_id")]
+            else:
+                cards = []
+                criteria_bits = []
+                if loc:
+                    criteria_bits.append(str(loc))
+                if p_type:
+                    criteria_bits.append(str(p_type))
+                if bedrooms:
+                    criteria_bits.append(f"{bedrooms} bed")
+                if max_p is not None:
+                    criteria_bits.append(f"budget <= {max_p}")
+                reply_text = build_no_match_reply(
+                    language=language,
+                    site_origin=getattr(conversation, "site_origin", None),
+                    criteria_summary=", ".join(criteria_bits) if criteria_bits else (
+                        user_message[:120] if user_message else None
+                    ),
                 )
 
         updated_prefs = extract_user_preferences(
@@ -3781,6 +3976,23 @@ class PublicAgentService:
             user_message=user_message,
             response_text=reply_text,
             language=language
+        )
+        criteria_bits = []
+        if loc:
+            criteria_bits.append(str(loc))
+        if p_type:
+            criteria_bits.append(str(p_type))
+        if bedrooms:
+            criteria_bits.append(f"{bedrooms} bed")
+        if max_p is not None:
+            criteria_bits.append(f"budget <= {max_p}")
+        reply_text, cards = self._validate_or_fallback(
+            reply_text,
+            cards,
+            language=language,
+            site_origin=getattr(conversation, "site_origin", None),
+            applied_filters=search_filters if isinstance(search_filters, dict) else {},
+            criteria_summary=", ".join(criteria_bits) if criteria_bits else None,
         )
 
         append_conversation_turn(
@@ -4125,12 +4337,14 @@ class PublicAgentService:
                         messages_for_second.append({
                             "role": "user",
                             "content": (
-                                "The user is inquiring about real estate in a foreign location outside Thailand.\n"
-                                "Act as an elite luxury real estate advisor for Varsovia Estate / Tajlandia:\n"
-                                "1. Prestigiously and politely clarify that Varsovia Estate specializes exclusively in prime luxury real estate in Thailand (Phuket, Koh Samui, Koh Phangan, Bangkok, Pattaya), and we do not represent properties in foreign markets.\n"
-                                "2. Provide a consultative market comparison: Explain why many international investors comparing global resort markets choose Thailand (e.g. attractive rental yields of 6%-10% net annually, 100% Foreign Freehold condominium ownership under personal name, private luxury pool villas offering superior value-per-sqm, and thriving year-round tourism).\n"
-                                "3. Ask 2-3 natural, conversational follow-up questions based on what is actually missing from the user's conversation — do not use template questions, base them entirely on the specific context of what the user said.\n"
-                                "4. Warmly offer that our senior advisory team can guide them to verified luxury properties in Thailand."
+                                "The user is inquiring about real estate outside Thailand.\n"
+                                "1. Politely clarify that we only cover verified listings in Thailand "
+                                "(Phuket, Koh Samui, Koh Phangan, Bangkok, Pattaya) and do not represent foreign markets.\n"
+                                "2. Invite them to browse verified Thailand listings. "
+                                "Do NOT quote any rental yield percentages, ROI figures, or invented market statistics.\n"
+                                "3. Ask up to 2 short clarifying questions about Thailand preferences "
+                                "(location, budget, or property type) if those details are missing.\n"
+                                "4. Offer the tenant advisory email already in your system prompt for further help."
                             )
                         })
                     else:
@@ -4214,6 +4428,17 @@ class PublicAgentService:
                 updated_prefs.update(save_property_context(conversation, _pctx))
 
             final_text = _professionalize_chat_text(final_text)
+            final_text, all_cards = self._validate_or_fallback(
+                final_text,
+                all_cards,
+                language=language,
+                site_origin=getattr(conversation, "site_origin", None),
+                applied_filters=search_args if isinstance(search_args, dict) else {},
+                tool_results=logged_tool_results,
+                criteria_summary=(raw_user_message or user_message or "")[:120] or None,
+            )
+            if not all_cards:
+                resp_type = "text"
 
             append_conversation_turn(
                 db=db,
@@ -4222,7 +4447,7 @@ class PublicAgentService:
                 assistant_message=final_text,
                 tool_calls=logged_tool_calls,
                 tool_results=logged_tool_results,
-                structured_data={"properties": all_cards, "property_ids": [c["property_id"] for c in all_cards]},
+                structured_data={"properties": all_cards, "property_ids": [c["property_id"] for c in all_cards if c.get("property_id")]},
                 new_preferences=updated_prefs
             )
 
