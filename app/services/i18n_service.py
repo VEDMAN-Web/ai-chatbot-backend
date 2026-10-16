@@ -398,6 +398,7 @@ CORE INSTRUCTIONS & TONE:
 6. BROCHURE & PDF DOWNLOADS: When a visitor asks for a brochure, PDF, factsheet, floor plan, or project document, call the `generate_property_brochure` tool with the property ID. The system will automatically render the luxury brochure PDF and initiate the download for the visitor.
 7. LEAD CAPTURE & VIEWING APPOINTMENTS: When a visitor provides contact details (email, phone, name), asks for a callback, or wants to schedule a viewing or consultation, call `capture_lead` or `schedule_viewing` immediately.
 8. FOREIGN INQUIRIES & MARKET COMPARISONS: If a visitor asks about properties in other countries (e.g. India, Dubai, Europe, USA), warmly explain that we specialize exclusively in prime luxury real estate in Thailand (Phuket, Koh Samui, Koh Phangan, Bangkok). Highlight Thailand's premier investment appeal (e.g., attractive 6%-10% rental yields, 100% foreign freehold condo ownership, and high-spec private pool villas at a fraction of Western resort pricing) and warmly invite them to explore verified Thailand opportunities. Ask 2-3 consultative follow-up questions to understand their investment goals.
+8b. STRICT OFF-TOPIC REFUSAL (CRITICAL): NEVER answer politics, politicians, celebrities, famous private homes (e.g. Antilia), landmark trivia, homework, coding, recipes, health, sports, or general knowledge. Do NOT provide facts and then soft-pitch Thailand. Politely refuse in one short message and invite Thailand property questions only.
 9. MANDATORY STRUCTURED PRESENTATION FORMAT (NEVER UNSTRUCTURED OR RAW TABLES):
    - Do NOT use ChatGPT-style long em-dashes ("—" or "–"). Use clean standard punctuation: colons, bullet points ("-"), or standard hyphens.
    - ALWAYS format property options into clean, elegant numbered cards:
@@ -655,8 +656,18 @@ def get_greeting_text(language: str, user_message: str, site_origin: Optional[st
 def get_off_topic_text(language: str, site_origin: Optional[str] = None, user_message: Optional[str] = None) -> str:
     tenant = resolve_tenant(site_origin)
     u_low = (user_message or "").lower()
-    
-    # Check if user was asking about foreign property markets (Miami, Dubai, Spain, Europe, India, etc.)
+
+    # Pure trivia / politics / celebrity — never answer facts; soft redirect only
+    trivia_markers = [
+        "antilia", "ambani", "modi", "narendra", "president", "prime minister",
+        "how many floors", "how many storeys", "who is", "celebrity", "bollywood",
+        "trump", "biden", "putin", "tusk", "elon", "musk", "burj", "taj mahal",
+        "capital of", "who won", "cricket", "olympics", "bitcoin price",
+    ]
+    is_pure_trivia = any(t in u_low for t in trivia_markers)
+
+    # Foreign property shopping only when user clearly wants to buy/search abroad
+    # (do NOT treat Mumbai trivia about Antilia as a foreign investment inquiry)
     foreign_locs = [
         "dubai", "warsaw", "warszawa", "polsce", "poland", "spain", "hiszpania",
         "miami", "florida", "london", "londyn", "bali", "cyprus", "cypr", "greece",
@@ -665,7 +676,14 @@ def get_off_topic_text(language: str, site_origin: Optional[str] = None, user_me
         "india", "indie", "indii", "mumbai", "delhi", "bangalore", "goa", "singapore",
         "australia", "canada", "usa", "uk", "ดูไบ", "ไมอามี", "สเปน", "อินเดีย"
     ]
-    is_foreign_property_inquiry = any(fl in u_low for fl in foreign_locs) or any(k in u_low for k in ["apartment", "villa", "condo", "for sale", "bedroom", "kupić", "nieruchomo", "property", "properties", "real estate"])
+    buy_signals = [
+        "for sale", "buy", "buying", "invest", "investment", "apartment", "villa", "condo",
+        "bedroom", "kupić", "kupic", "nieruchomo", "property", "properties", "real estate",
+        "looking for", "show me", "available in", "listings"
+    ]
+    has_foreign = any(fl in u_low for fl in foreign_locs)
+    has_buy = any(k in u_low for k in buy_signals)
+    is_foreign_property_inquiry = (not is_pure_trivia) and has_foreign and has_buy
 
     if is_foreign_property_inquiry:
         if language == "th":
@@ -705,24 +723,26 @@ def get_off_topic_text(language: str, site_origin: Optional[str] = None, user_me
             "Would you like to explore comparable verified luxury options in Phuket or Koh Samui that match that profile?"
         )
 
-    # General off-topic fallback
+    # General off-topic / trivia / politics — refuse the question itself, redirect smoothly
     if language == "th":
         return (
-            f"สวัสดีครับ ผมเป็นผู้ช่วยด้านอสังหาริมทรัพย์สำหรับ {tenant.brand_name} โดยเชี่ยวชาญเฉพาะตลาดอสังหาริมทรัพย์ในประเทศไทย\n\n"
-            "ผมพร้อมให้ข้อมูลวิลล่าและคอนโดมิเนียมที่ผ่านการตรวจสอบในภูเก็ต เกาะสมุย เกาะพะงัน พัทยา และกรุงเทพฯ รวมถึงระเบียบการถือกรรมสิทธิ์และขั้นตอนการซื้อ\n\n"
-            "หากคุณสนใจค้นหาอสังหาริมทรัพย์ระดับพรีเมียมในประเทศไทย สามารถสอบถามได้เลยครับ"
+            f"ขออภัยครับ ผมช่วยได้เฉพาะเรื่องอสังหาริมทรัพย์ในประเทศไทยสำหรับ {tenant.brand_name} เท่านั้น "
+            "และไม่สามารถตอบคำถามทั่วไป นอกเรื่อง หรือเรื่องบันเทิง/การเมืองได้ครับ\n\n"
+            "หากคุณสนใจวิลล่าหรือคอนโดที่ผ่านการตรวจสอบในภูเก็ต เกาะสมุย เกาะพะงัน พัทยา หรือกรุงเทพฯ "
+            "บอกงบประมาณ ทำเล หรือจำนวนห้องนอนที่ต้องการได้เลยครับ"
         )
     elif language == "pl":
         return (
-            f"Dzień dobry. Jestem doradcą ds. nieruchomości w Tajlandii dla portalu {tenant.brand_name} ({tenant.domain}).\n\n"
-            "Specjalizuję się wyłącznie w ofertach i procesach zakupu nieruchomości w Tajlandii (Phuket, Koh Samui, Koh Phangan, Pattaya, Bangkok).\n\n"
-            "Chętnie odpowiem na wszelkie pytania dotyczące naszych zweryfikowanych ofert, cen oraz procedur prawnych w Tajlandii.\n\n"
-            "Jakiej nieruchomości w Tajlandii szukasz?"
+            f"Przepraszam — jako doradca {tenant.brand_name} ({tenant.domain}) odpowiadam wyłącznie na pytania "
+            "dotyczące nieruchomości w Tajlandii. Nie mogę pomagać w tematach ogólnych, polityce ani plotkach.\n\n"
+            "Jeśli szukasz willi lub apartamentu w Phuket, Koh Samui, Koh Phangan, Pattaya lub Bangkoku, "
+            "napisz proszę lokalizację, budżet lub liczbę sypialni — chętnie pomogę."
         )
     return (
-        f"Hello. I am the property assistant for {tenant.brand_name} ({tenant.domain}), specializing exclusively in Thailand real estate.\n\n"
-        "I provide information on verified pool villas and condominiums across Phuket, Koh Samui, Koh Phangan, Pattaya, and Bangkok, as well as ownership regulations and purchasing processes.\n\n"
-        "Please let me know if you would like to explore verified Thailand listings or have questions regarding property acquisition in Thailand."
+        f"I'm here only as the Thailand property assistant for {tenant.brand_name} ({tenant.domain}), "
+        "so I can't answer general knowledge, politics, celebrity, or other off-topic questions.\n\n"
+        "If you're exploring verified villas or condominiums in Phuket, Koh Samui, Koh Phangan, Pattaya, or Bangkok, "
+        "tell me a location, budget, or bedroom count and I'll help from there."
     )
 
 

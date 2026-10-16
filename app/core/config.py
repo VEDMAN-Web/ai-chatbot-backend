@@ -80,13 +80,19 @@ class Settings(BaseSettings):
     ANTHROPIC_TEMPERATURE: float = 0.0
     ANTHROPIC_TIMEOUT: float = 600.0  # 10 minutes — same for admin bot
 
-    # In-session memory: keep full chat context for 50+ back-to-back questions
-    SESSION_MEMORY_TURNS: int = 50
-    SESSION_MEMORY_MESSAGES: int = 120  # 60 turns (user+assistant) buffered in memory
+    # In-session memory: support 100+ consecutive property follow-ups
+    SESSION_MEMORY_TURNS: int = 100
+    SESSION_MEMORY_MESSAGES: int = 220  # 110 user+assistant turns buffered in memory
 
-    # Persistence & Audit Flags (In-session memory stays ON; permanent saves OFF until explicitly enabled)
+    # Persistent property context (reference memory separate from live facts)
+    PROPERTY_CONTEXT_RECENT_MESSAGES: int = 20
+    PROPERTY_CONTEXT_SUMMARY_CHARS: int = 4000
+    # Chat history + property_context always go to Firestore (not Postgres)
+    ENABLE_PROPERTY_CONTEXT_PERSISTENCE: bool = True
+
+    # Lead/audit permanent writes (separate from chat memory which is always Firestore when sync is on)
     ENABLE_LEAD_SAVING: bool = False
-    ENABLE_CHAT_LOGGING: bool = False
+    ENABLE_CHAT_LOGGING: bool = False  # legacy flag — chat memory uses Firestore via ENABLE_FIRESTORE_SYNC
     ENABLE_AUDIT_LOGGING: bool = False
 
     # Action Confirmation & Security

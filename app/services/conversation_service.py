@@ -1,158 +1,136 @@
+"""
+Conversation memory for the public/admin chatbots.
+
+ALL history, preferences, and property_context are stored in Cloud Firestore.
+PostgreSQL is NOT used for chat memory (admin RBAC / pending actions still use SQL elsewhere).
+"""
+
 from typing import Optional, List, Dict, Any
-from sqlalchemy.orm import Session
 from datetime import datetime, timezone
-import uuid
-from app.db.models import Conversation
 import logging
 
 logger = logging.getLogger(__name__)
 
-# In-session memory store: keeps conversation sessions active in memory across 50+ back-to-back questions
-# Guarantees that in-session memory stays ON even when permanent database logging is OFF.
+# Hot in-process cache (same Cloud Run instance). Source of truth after restart = Firestore.
 _IN_SESSION_CONVERSATIONS: Dict[str, Any] = {}
 
+
+def _firestore_sync_enabled(agent_type: str) -> bool:
+    from app.core.config import settings
+    if agent_type == "admin":
+        return bool(settings.get_admin_enable_firestore_sync())
+    return bool(settings.get_user_enable_firestore_sync())
+
+
 def get_or_create_conversation(
-    db: Session,
-    session_id: str,
+    db=None,
+    session_id: str = "",
     site_origin: Optional[str] = None,
-    agent_type: str = "public"
-) -> Conversation:
+    agent_type: str = "public",
+):
     """
-    Retrieves an existing conversation session or cleanly initializes a new one.
-    Maintains in-session memory across 50+ back-to-back questions.
-    Respects ENABLE_CHAT_LOGGING flag: if False, permanent persistence stays OFF while in-session memory stays ON.
+    Load or create a conversation. Persists entirely in Firestore (conversations collection).
+    `db` is accepted for API compatibility but is not used for chat storage.
     """
     from app.core.config import settings
+    from app.services.firestore_service import get_or_create_conversation_firestore
+
     clean_session_id = session_id.strip() if session_id else "anonymous"
     clean_site_origin = (site_origin or getattr(settings, "SITE_ORIGIN", "varsoviaestate.com")).strip()
     session_key = f"{agent_type}:{clean_session_id}"
 
-    # 1. Check active in-session memory store
+    # 1. In-process cache
     if session_key in _IN_SESSION_CONVERSATIONS:
         return _IN_SESSION_CONVERSATIONS[session_key]
 
-    chat_logging_on = getattr(settings, "ENABLE_CHAT_LOGGING", False)
-
-    # 2. Fetch from Firestore if permanent chat logging is enabled
-    if chat_logging_on:
-        sync_enabled = (
-            settings.get_admin_enable_firestore_sync()
-            if agent_type == "admin"
-            else settings.get_user_enable_firestore_sync()
-        )
-        if sync_enabled:
-            try:
-                from app.services.firestore_service import get_or_create_conversation_firestore
-                conv = get_or_create_conversation_firestore(
-                    session_id=clean_session_id,
-                    site_origin=clean_site_origin,
-                    agent_type=agent_type
-                )
-                _IN_SESSION_CONVERSATIONS[session_key] = conv
-                return conv
-            except Exception as e:
-                logger.warning(f"Firestore get_or_create_conversation notice: {e}")
-
-    # 3. Check local SQL session if permanent chat logging is enabled
-    if chat_logging_on and db is not None:
+    # 2. Firestore is the durable store for ALL chat history + property_context
+    if _firestore_sync_enabled(agent_type):
         try:
-            conv = db.query(Conversation).filter(
-                Conversation.session_id == clean_session_id,
-                Conversation.agent_type == agent_type
-            ).first()
-            if conv:
-                _IN_SESSION_CONVERSATIONS[session_key] = conv
-                return conv
+            conv = get_or_create_conversation_firestore(
+                session_id=clean_session_id,
+                site_origin=clean_site_origin,
+                agent_type=agent_type,
+            )
+            _IN_SESSION_CONVERSATIONS[session_key] = conv
+            return conv
         except Exception as e:
-            logger.debug(f"SQL get conversation fallback: {e}")
+            logger.error(f"Firestore get_or_create_conversation failed: {e}")
 
-    # 4. Initialize clean conversation object with in-session memory
-    conversation = Conversation(
-        session_id=clean_session_id,
-        site_origin=clean_site_origin,
-        agent_type=agent_type,
-        message_history=[],
-        preferences={},
-        lead_score=0.0
+    # 3. Ephemeral fallback only if Firestore is unavailable (not written to Postgres)
+    from app.services.firestore_service import FirestoreConversation
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    conversation = FirestoreConversation(
+        clean_session_id,
+        {
+            "sessionId": clean_session_id,
+            "siteOrigin": clean_site_origin,
+            "agentType": agent_type,
+            "messageHistory": [],
+            "preferences": {},
+            "leadScore": 0.0,
+            "createdAt": now_iso,
+            "updatedAt": now_iso,
+        },
     )
-    # Ensure ephemeral ID exists
-    if not getattr(conversation, "id", None):
-        conversation.id = uuid.uuid4()
-
-    if chat_logging_on and db is not None:
-        try:
-            db.add(conversation)
-            db.commit()
-            db.refresh(conversation)
-        except Exception:
-            try:
-                db.rollback()
-            except Exception:
-                pass
-
     _IN_SESSION_CONVERSATIONS[session_key] = conversation
+    logger.warning(
+        "Conversation %s created in-memory only — Firestore unavailable. "
+        "History will not survive restart until Firestore is reachable.",
+        session_key,
+    )
     return conversation
 
 
 def append_conversation_turn(
-    db: Session,
-    conversation: Conversation,
-    user_message: str,
-    assistant_message: str,
+    db=None,
+    conversation=None,
+    user_message: str = "",
+    assistant_message: str = "",
     tool_calls: Optional[List[Dict[str, Any]]] = None,
     tool_results: Optional[List[Dict[str, Any]]] = None,
     structured_data: Optional[Dict[str, Any]] = None,
-    new_preferences: Optional[Dict[str, Any]] = None
-) -> Conversation:
+    new_preferences: Optional[Dict[str, Any]] = None,
+):
     """
-    Appends a full conversational turn.
-    Maintains complete in-session memory for 50+ back-to-back questions (up to 120 turns).
-    Permanent database persistence stays OFF when ENABLE_CHAT_LOGGING is False.
+    Append a turn and persist history + preferences (including property_context) to Firestore.
+    Does not write chat memory to PostgreSQL.
     """
     from app.core.config import settings
+    from app.services.firestore_service import append_conversation_turn_firestore
+
+    if conversation is None:
+        raise ValueError("conversation is required")
 
     c_agent_type = getattr(conversation, "agent_type", "public")
-    chat_logging_on = getattr(settings, "ENABLE_CHAT_LOGGING", False)
     clean_session_id = getattr(conversation, "session_id", "anonymous")
     session_key = f"{c_agent_type}:{clean_session_id}"
 
-    # Sync to Firestore conversations collection ONLY if permanent chat logging is ON
-    if chat_logging_on:
-        sync_enabled = (
-            settings.get_admin_enable_firestore_sync()
-            if c_agent_type == "admin"
-            else settings.get_user_enable_firestore_sync()
-        )
-        if sync_enabled:
-            try:
-                from app.services.firestore_service import append_conversation_turn_firestore
-                append_conversation_turn_firestore(
-                    conversation=conversation,
-                    user_message=user_message,
-                    assistant_message=assistant_message,
-                    tool_calls=tool_calls,
-                    tool_results=tool_results,
-                    structured_data=structured_data,
-                    new_preferences=new_preferences
-                )
-            except Exception as e:
-                logger.warning(f"Firestore append_conversation_turn notice: {e}")
+    # Always update in-memory object first (and Firestore when sync enabled)
+    if _firestore_sync_enabled(c_agent_type):
+        try:
+            conversation = append_conversation_turn_firestore(
+                conversation=conversation,
+                user_message=user_message,
+                assistant_message=assistant_message,
+                tool_calls=tool_calls,
+                tool_results=tool_results,
+                structured_data=structured_data,
+                new_preferences=new_preferences,
+            )
+            _IN_SESSION_CONVERSATIONS[session_key] = conversation
+            return conversation
+        except Exception as e:
+            logger.error(f"Firestore append_conversation_turn failed: {e}")
 
-    history = list(conversation.message_history or [])
+    # Firestore down: still keep in-session memory for this process
+    history = list(getattr(conversation, "message_history", None) or [])
     timestamp = datetime.now(timezone.utc).isoformat()
-    
-    # Store user turn
-    history.append({
-        "role": "user",
-        "content": user_message,
-        "timestamp": timestamp
-    })
-
-    # Store assistant turn
-    asst_turn = {
+    history.append({"role": "user", "content": user_message, "timestamp": timestamp})
+    asst_turn: Dict[str, Any] = {
         "role": "assistant",
         "content": assistant_message,
-        "timestamp": timestamp
+        "timestamp": timestamp,
     }
     if tool_calls:
         asst_turn["tool_calls"] = tool_calls
@@ -164,63 +142,25 @@ def append_conversation_turn(
             asst_turn["properties"] = structured_data["properties"]
         elif "property_cards" in structured_data:
             asst_turn["properties"] = structured_data["property_cards"]
+    history.append(asst_turn)
 
-    def _clean_for_json(obj: Any) -> Any:
-        if hasattr(obj, "isoformat"):
-            return obj.isoformat()
-        elif hasattr(obj, "to_dict"):
-            return _clean_for_json(obj.to_dict())
-        elif isinstance(obj, dict):
-            return {
-                k: _clean_for_json(v)
-                for k, v in obj.items()
-                if k not in ("raw_firestore_data", "raw_data", "html_content", "base64", "pdf_bytes")
-            }
-        elif isinstance(obj, (list, tuple, set)):
-            return [_clean_for_json(item) for item in obj]
-        elif isinstance(obj, (int, float, str, bool)) or obj is None:
-            return obj
-        return str(obj)
-
-    safe_turn = _clean_for_json(asst_turn)
-    history.append(safe_turn)
-
-    # Bound message history to support 50+ back-to-back in-session questions
-    max_msgs = int(getattr(settings, "SESSION_MEMORY_MESSAGES", 120) or 120)
+    max_msgs = int(getattr(settings, "SESSION_MEMORY_MESSAGES", 220) or 220)
     if len(history) > max_msgs:
         history = history[-max_msgs:]
+    conversation.message_history = history
 
-    # For turns older than the last 4 turns, remove bulky tool metadata to conserve tokens while preserving conversation
-    for i in range(max(0, len(history) - 4)):
-        if isinstance(history[i], dict):
-            history[i].pop("tool_results", None)
-            history[i].pop("tool_calls", None)
-            history[i].pop("properties", None)
-            history[i].pop("structured_data", None)
-
-    conversation.message_history = _clean_for_json(history)
-
-    # Update session preferences
     if new_preferences:
-        prefs = dict(conversation.preferences or {})
+        prefs = dict(getattr(conversation, "preferences", None) or {})
         for k, v in new_preferences.items():
             if v is not None:
-                prefs[k] = _clean_for_json(v)
+                prefs[k] = v
         conversation.preferences = prefs
 
-    # Keep in-session memory updated
     _IN_SESSION_CONVERSATIONS[session_key] = conversation
-
-    # Only commit to local SQL DB if permanent chat logging is explicitly ON
-    if chat_logging_on and hasattr(conversation, "__table__") and db is not None:
-        try:
-            db.commit()
-            db.refresh(conversation)
-        except Exception as e:
-            logger.warning(f"Local DB commit skipped: {e}")
-            try:
-                db.rollback()
-            except Exception:
-                pass
-
     return conversation
+
+
+def clear_in_session_conversation(session_id: str, agent_type: str = "public") -> None:
+    """Drop process-local cache (Firestore remains source of truth)."""
+    key = f"{agent_type}:{(session_id or '').strip()}"
+    _IN_SESSION_CONVERSATIONS.pop(key, None)
