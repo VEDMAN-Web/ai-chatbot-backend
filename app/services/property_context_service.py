@@ -304,6 +304,63 @@ def _extract_ordinal_index(msg: str) -> Optional[int]:
     return None
 
 
+def resolve_name_against_context(name_query: str, ctx: PropertyContext, conversation: Any = None) -> Optional[str]:
+    """
+    Map a human property name (e.g. 'Mono Champaca') to a property_id using
+    reference_map and recently shown cards — before failing a live DB lookup.
+    """
+    q = (name_query or "").strip().lower()
+    if len(q) < 3:
+        return None
+
+    # 1. reference_map exact / substring (prefer longest key)
+    best_pid = None
+    best_len = 0
+    for ref, pid in (ctx.reference_map or {}).items():
+        ref_l = str(ref).lower().strip()
+        if len(ref_l) < 3:
+            continue
+        if q == ref_l or q in ref_l or ref_l in q:
+            if len(ref_l) >= best_len:
+                best_len = len(ref_l)
+                best_pid = str(pid)
+    if best_pid:
+        return best_pid
+
+    # 2. Recently discussed IDs that look like the name (slug contains tokens)
+    tokens = [t for t in re.sub(r"[^a-z0-9]+", " ", q).split() if len(t) >= 3]
+    for pid in ctx.recently_discussed_ids or []:
+        pid_l = str(pid).lower()
+        if tokens and all(t in pid_l for t in tokens):
+            return str(pid)
+        if q.replace(" ", "-") in pid_l or q.replace(" ", "") in pid_l.replace("-", ""):
+            return str(pid)
+
+    # 3. Scan recent assistant cards in history
+    if conversation is not None:
+        history = list(getattr(conversation, "message_history", None) or [])
+        for turn in reversed(history[-40:]):
+            if not isinstance(turn, dict) or turn.get("role") != "assistant":
+                continue
+            cards = []
+            sd = turn.get("structured_data") or {}
+            if isinstance(sd, dict):
+                cards.extend(sd.get("properties") or [])
+            cards.extend(turn.get("properties") or [])
+            for c in cards:
+                if not isinstance(c, dict):
+                    continue
+                cname = str(c.get("name") or c.get("property_name") or "").lower()
+                cid = str(c.get("property_id") or c.get("id") or "").strip()
+                if not cid:
+                    continue
+                if cname and (q == cname or q in cname or cname in q):
+                    return cid
+                if tokens and all(t in (cname + " " + cid.lower()) for t in tokens):
+                    return cid
+    return None
+
+
 def resolve_property_reference(
     message: str,
     ctx: PropertyContext,
@@ -350,7 +407,9 @@ def resolve_property_reference(
         ref_l = str(ref).lower().strip()
         if len(ref_l) < 4:
             continue
-        if ref_l in msg_low:
+        if ref_l in msg_low or (len(ref_l) >= 6 and any(
+            ref_l in part for part in re.findall(r"[a-z0-9][a-z0-9\s\-']{2,80}", msg_low)
+        )):
             name_hits.append((pid, ref_l))
     # Dedupe by pid
     uniq_pids = []

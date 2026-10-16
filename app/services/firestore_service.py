@@ -511,19 +511,54 @@ def get_property_by_id_from_firestore(property_id: str, target: str = "user") ->
                 city_id = c
                 break
 
+        def _name_blob(data: Dict[str, Any], doc_id: str) -> str:
+            parts = [str(doc_id)]
+            for key in ("name", "title", "seoTitle", "projectName", "slug"):
+                val = data.get(key)
+                if isinstance(val, dict):
+                    parts.extend(str(v) for v in val.values() if v)
+                elif val:
+                    parts.append(str(val))
+            return " ".join(parts).lower()
+
+        query_l = raw_query.lower().strip()
+        slug_tokens = [t for t in slug_cand.split("-") if len(t) >= 3]
+
         if city_id and slug_cand not in city_country_keywords and len(slug_cand) > len(city_id):
             try:
                 from google.cloud.firestore_v1.base_query import FieldFilter
-                city_docs = list(col.where(filter=FieldFilter("cityId", "==", city_id)).limit(100).stream())
+                city_docs = list(col.where(filter=FieldFilter("cityId", "==", city_id)).limit(150).stream())
                 for d in city_docs:
                     data = d.to_dict() or {}
-                    p_slug = str(d.id).lower()
-                    p_name = str(data.get("name") or "").lower()
-                    p_title = str(data.get("title") or "").lower()
-                    if slug_cand in p_slug or (slug_cand and slug_cand in p_name):
+                    blob = _name_blob(data, d.id)
+                    if slug_cand in blob.replace(" ", "-") or query_l in blob:
+                        return normalize_firestore_project(d.id, data)
+                    if slug_tokens and all(t in blob for t in slug_tokens):
                         return normalize_firestore_project(d.id, data)
             except Exception:
                 pass
+
+        # 6. Global fuzzy name match (e.g. "Mono Champaca" without city in the query)
+        # Scans a bounded window so "tell me more about <shown card name>" works.
+        if slug_cand not in city_country_keywords and len(query_l) >= 4:
+            try:
+                scanned = 0
+                best = None
+                for d in col.limit(400).stream():
+                    scanned += 1
+                    data = d.to_dict() or {}
+                    blob = _name_blob(data, d.id)
+                    blob_slug = re.sub(r"[^a-z0-9]+", "-", blob).strip("-")
+                    if query_l == blob or slug_cand == str(d.id).lower():
+                        return normalize_firestore_project(d.id, data)
+                    if query_l in blob or slug_cand in blob_slug:
+                        return normalize_firestore_project(d.id, data)
+                    if slug_tokens and all(t in blob for t in slug_tokens):
+                        best = best or (d.id, data)
+                if best:
+                    return normalize_firestore_project(best[0], best[1])
+            except Exception as fuzzy_err:
+                logger.debug(f"Firestore global fuzzy name lookup failed: {fuzzy_err}")
 
         return None
     except Exception as e:
