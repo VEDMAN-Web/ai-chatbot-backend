@@ -102,9 +102,16 @@ def serve_admin_frontend():
     return {"message": "Tajlandia AI Backend Active"}
 
 # Robust CORS Configuration: allows all frontend ports (Vite 5173, Next 3000, etc.) and deployed domains
+# Only our own sites, our Vercel apps and localhost may call the API from a browser.
+# Emergency switch: set CORS_ALLOW_ALL=true on Cloud Run to restore the old open behaviour without a deploy.
+_CORS_ORIGIN_REGEX = (
+    r"https://(www\.)?(varsoviaestate\.com|tajlandia\.com|tajlandia\.pl|thai\.estate)"
+    r"|https://ai-chatbot-[a-z0-9-]+\.vercel\.app"
+    r"|http://(localhost|127\.0\.0\.1)(:\d+)?"
+)
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=r".*",
+    allow_origin_regex=r".*" if os.getenv("CORS_ALLOW_ALL", "").lower() == "true" else _CORS_ORIGIN_REGEX,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
