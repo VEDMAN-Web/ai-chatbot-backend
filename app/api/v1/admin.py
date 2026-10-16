@@ -124,29 +124,27 @@ def get_admin_history_endpoint(
     db: Session = Depends(get_db)
 ):
     """
-    Retrieves full admin multi-turn conversation history.
+    Retrieves full admin multi-turn conversation history from Firestore.
     Includes tool invocations, results, and action proposals.
     Strictly isolated from public chatbot conversations.
     """
-    conv = db.query(Conversation).filter(
-        Conversation.session_id == session_id,
-        Conversation.agent_type == "admin"
-    ).first()
+    from app.services.conversation_service import get_or_create_conversation
 
-    if not conv:
-        return {
-            "session_id": session_id,
-            "turns_count": 0,
-            "messages": []
-        }
-
+    conv = get_or_create_conversation(
+        db=db,
+        session_id=session_id,
+        agent_type="admin",
+    )
+    history = list(getattr(conv, "message_history", None) or [])
+    created = getattr(conv, "created_at", None)
     return {
         "session_id": session_id,
-        "conversation_id": str(conv.id),
+        "conversation_id": str(getattr(conv, "id", session_id)),
         "agent_type": "admin",
-        "turns_count": len(conv.message_history or []),
-        "messages": conv.message_history or [],
-        "created_at": conv.created_at.isoformat() if conv.created_at else None
+        "turns_count": len(history),
+        "messages": history,
+        "preferences": getattr(conv, "preferences", None) or {},
+        "created_at": created.isoformat() if hasattr(created, "isoformat") else created,
     }
 
 

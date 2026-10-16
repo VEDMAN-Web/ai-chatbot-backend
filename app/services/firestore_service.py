@@ -1110,67 +1110,67 @@ class FirestoreConversation:
         }
 
 
+def _conversation_doc_id(session_id: str, agent_type: str = "public") -> str:
+    """Stable Firestore document id — scoped by agent so public/admin never collide."""
+    clean_sid = (session_id or "anonymous").strip()
+    at = (agent_type or "public").strip() or "public"
+    return f"{at}__{clean_sid}"
+
+
 def get_or_create_conversation_firestore(
     session_id: str,
     site_origin: Optional[str] = None,
     agent_type: str = "public"
 ) -> FirestoreConversation:
     """
-    Retrieves or creates a conversation session directly in Firestore `conversations` collection.
-    Completely eliminates reliance on PostgreSQL!
+    Retrieves or creates a conversation in Firestore `conversations`.
+    Stores full messageHistory + preferences (property_context). No PostgreSQL.
     """
-    client = get_firestore_client()
+    client = get_firestore_client(target="admin" if agent_type == "admin" else "user")
     clean_sid = session_id.strip() if session_id else "anonymous"
     clean_origin = (site_origin or getattr(settings, "SITE_ORIGIN", "varsoviaestate.com")).strip()
     now_iso = datetime.now(timezone.utc).isoformat()
+    doc_id = _conversation_doc_id(clean_sid, agent_type)
+
+    empty = {
+        "sessionId": clean_sid,
+        "siteOrigin": clean_origin,
+        "agentType": agent_type,
+        "messageHistory": [],
+        "preferences": {},
+        "leadScore": 0.0,
+        "createdAt": now_iso,
+        "updatedAt": now_iso,
+    }
 
     if not client:
-        # In-memory fallback if Firestore is disconnected
-        return FirestoreConversation(
-            clean_sid,
-            {
-                "sessionId": clean_sid,
-                "siteOrigin": clean_origin,
-                "agentType": agent_type,
-                "messageHistory": [],
-                "preferences": {},
-                "leadScore": 0.0,
-                "createdAt": now_iso,
-                "updatedAt": now_iso
-            }
-        )
+        return FirestoreConversation(doc_id, empty)
 
     try:
-        doc_ref = client.collection("conversations").document(clean_sid)
+        col = client.collection("conversations")
+        doc_ref = col.document(doc_id)
         doc = doc_ref.get()
         if doc.exists:
             data = doc.to_dict() or {}
             return FirestoreConversation(doc.id, data)
-        else:
-            initial_data = {
-                "sessionId": clean_sid,
-                "siteOrigin": clean_origin,
-                "agentType": agent_type,
-                "messageHistory": [],
-                "preferences": {},
-                "leadScore": 0.0,
-                "createdAt": now_iso,
-                "updatedAt": now_iso
-            }
-            doc_ref.set(initial_data)
-            return FirestoreConversation(clean_sid, initial_data)
+
+        # Backward compatible: legacy docs keyed only by session_id (public)
+        if agent_type == "public":
+            legacy = col.document(clean_sid).get()
+            if legacy.exists:
+                data = legacy.to_dict() or {}
+                data["agentType"] = agent_type
+                data["sessionId"] = clean_sid
+                # Migrate to agent-scoped id
+                doc_ref.set(data, merge=True)
+                return FirestoreConversation(doc_id, data)
+
+        initial_data = dict(empty)
+        doc_ref.set(initial_data)
+        return FirestoreConversation(doc_id, initial_data)
     except Exception as e:
         logger.error(f"Error accessing conversation in Firestore: {e}")
-        return FirestoreConversation(clean_sid, {
-            "sessionId": clean_sid,
-            "siteOrigin": clean_origin,
-            "agentType": agent_type,
-            "messageHistory": [],
-            "preferences": {},
-            "leadScore": 0.0,
-            "createdAt": now_iso,
-            "updatedAt": now_iso
-        })
+        return FirestoreConversation(doc_id, empty)
 
 
 def _compact_card_for_storage(c: Any) -> Any:
@@ -1247,20 +1247,28 @@ def append_conversation_turn_firestore(
 
     history.append(asst_turn)
 
-    # Bound history length to 120 turns to support 50+ back-to-back questions
-    if len(history) > 120:
-        history = history[-120:]
+    # Bound history for 100+ follow-ups (config-driven)
+    max_msgs = int(getattr(settings, "SESSION_MEMORY_MESSAGES", 220) or 220)
+    if len(history) > max_msgs:
+        history = history[-max_msgs:]
 
-    # For turns older than the last 4 turns, remove bulky tool metadata
-    for i in range(max(0, len(history) - 4)):
+    # Older turns: drop bulky cards/tools but KEEP property_ids for reference recovery
+    keep_meta = 8
+    for i in range(max(0, len(history) - keep_meta)):
+        if not isinstance(history[i], dict):
+            continue
         history[i].pop("tool_results", None)
         history[i].pop("tool_calls", None)
         history[i].pop("properties", None)
-        history[i].pop("structured_data", None)
+        sd = history[i].get("structured_data")
+        if isinstance(sd, dict) and sd.get("property_ids"):
+            history[i]["structured_data"] = {"property_ids": list(sd.get("property_ids") or [])[:10]}
+        else:
+            history[i].pop("structured_data", None)
 
     conversation.message_history = history
 
-    # Update preferences
+    # Update preferences (includes property_context)
     if new_preferences:
         prefs = dict(getattr(conversation, "preferences", {}) or {})
         for k, v in new_preferences.items():
@@ -1270,65 +1278,86 @@ def append_conversation_turn_firestore(
 
     conversation.updated_at = timestamp
 
-    # Write to Firestore with document size protection
-    client = get_firestore_client()
-    if client and hasattr(conversation, "session_id"):
+    # Write FULL history + preferences to Firestore (no Postgres)
+    sid = getattr(conversation, "session_id", None)
+    agent_type = getattr(conversation, "agent_type", "public")
+    client = get_firestore_client(target="admin" if agent_type == "admin" else "user")
+    if client and sid:
+        doc_id = _conversation_doc_id(sid, agent_type)
         try:
-            doc_ref = client.collection("conversations").document(conversation.session_id)
+            doc_ref = client.collection("conversations").document(doc_id)
             payload = {
-                "sessionId": conversation.session_id,
+                "sessionId": sid,
                 "siteOrigin": getattr(conversation, "site_origin", getattr(settings, "SITE_ORIGIN", "varsoviaestate.com")),
-                "agentType": getattr(conversation, "agent_type", "public"),
+                "agentType": agent_type,
                 "messageHistory": conversation.message_history,
                 "preferences": conversation.preferences,
                 "leadScore": getattr(conversation, "lead_score", 0.0),
-                "updatedAt": timestamp
+                "updatedAt": timestamp,
             }
 
-            # Proactive Firestore document size guard (Firestore max doc size is 1,048,576 bytes)
+            # Proactive Firestore document size guard (max ~1MB)
             try:
-                raw_bytes = len(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+                raw_bytes = len(json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8"))
             except Exception:
                 raw_bytes = 0
 
             if raw_bytes > 700_000:
-                logger.warning(f"Firestore conversation size ({raw_bytes} bytes) approaching 1MB limit. Compacting history...")
-                # Strip all tool metadata except the very last turn
+                logger.warning(
+                    f"Firestore conversation size ({raw_bytes} bytes) approaching 1MB. Compacting history..."
+                )
                 compacted = []
                 for idx, t in enumerate(history):
-                    t_copy = dict(t)
+                    t_copy = dict(t) if isinstance(t, dict) else {"role": "user", "content": str(t)}
                     if idx < len(history) - 1:
                         t_copy.pop("tool_results", None)
                         t_copy.pop("tool_calls", None)
                         t_copy.pop("properties", None)
-                        t_copy.pop("structured_data", None)
+                        sd = t_copy.get("structured_data")
+                        if isinstance(sd, dict) and sd.get("property_ids"):
+                            t_copy["structured_data"] = {"property_ids": list(sd["property_ids"])[:10]}
+                        else:
+                            t_copy.pop("structured_data", None)
                     compacted.append(t_copy)
-                payload["messageHistory"] = compacted[-20:]
+                # Keep preferences (property_context) always; trim history only
+                keep_n = max(40, min(max_msgs, 120))
+                payload["messageHistory"] = compacted[-keep_n:]
+                conversation.message_history = payload["messageHistory"]
 
             doc_ref.set(payload, merge=True)
+            # Keep wrapper id aligned with Firestore doc id
+            conversation.id = doc_id
         except Exception as e:
             err_str = str(e)
             if any(k in err_str.lower() for k in ["size", "exceeds", "1,048,576", "400"]):
-                logger.warning(f"Firestore document size exceeded maximum (1MB). Aggressively pruning history for {conversation.session_id}...")
+                logger.warning(
+                    f"Firestore document size exceeded for {sid}. Pruning while preserving preferences..."
+                )
                 try:
                     minimal_history = []
-                    for t in history[-10:]:
-                        minimal_history.append({
+                    for t in history[-40:]:
+                        entry = {
                             "role": t.get("role", "user"),
                             "content": (t.get("content") or "")[:1500],
-                            "timestamp": t.get("timestamp", timestamp)
-                        })
+                            "timestamp": t.get("timestamp", timestamp),
+                        }
+                        sd = t.get("structured_data") if isinstance(t, dict) else None
+                        if isinstance(sd, dict) and sd.get("property_ids"):
+                            entry["structured_data"] = {"property_ids": list(sd["property_ids"])[:10]}
+                        minimal_history.append(entry)
+                    doc_ref = client.collection("conversations").document(doc_id)
                     doc_ref.set({
-                        "sessionId": conversation.session_id,
+                        "sessionId": sid,
                         "siteOrigin": getattr(conversation, "site_origin", getattr(settings, "SITE_ORIGIN", "varsoviaestate.com")),
-                        "agentType": getattr(conversation, "agent_type", "public"),
+                        "agentType": agent_type,
                         "messageHistory": minimal_history,
                         "preferences": getattr(conversation, "preferences", {}),
                         "leadScore": getattr(conversation, "lead_score", 0.0),
-                        "updatedAt": timestamp
+                        "updatedAt": timestamp,
                     }, merge=True)
                     conversation.message_history = minimal_history
-                    logger.info(f"Successfully pruned and persisted conversation {conversation.session_id} to Firestore below 1MB.")
+                    conversation.id = doc_id
+                    logger.info(f"Pruned and persisted conversation {sid} to Firestore below 1MB.")
                 except Exception as retry_e:
                     logger.error(f"Fallback pruning for Firestore also failed: {retry_e}")
             else:

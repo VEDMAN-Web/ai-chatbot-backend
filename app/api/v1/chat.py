@@ -287,13 +287,22 @@ def get_chat_history(
                 st = turn_copy["structured_data"]
                 props = st.get("properties") or st.get("property_cards") or []
 
-            # If props contains string IDs, hydrate them from production database
+            # If props contains string IDs, hydrate from Firestore (authorized inventory)
             if props and isinstance(props, list) and len(props) > 0 and isinstance(props[0], str):
-                db_props = db.query(Property).filter(Property.property_id.in_(props)).all()
-                # Maintain original ID ordering
-                prop_map = {p.property_id: format_property_card(p) for p in db_props}
+                from app.services.property_search import get_properties_by_ids
+                hydrated = get_properties_by_ids(db, props) if db is not None else []
+                prop_map = {}
+                for p in hydrated or []:
+                    pid = getattr(p, "property_id", None) or (p.get("property_id") if isinstance(p, dict) else None)
+                    if not pid:
+                        continue
+                    try:
+                        prop_map[str(pid)] = format_property_card(p) if not isinstance(p, dict) else p
+                    except Exception:
+                        if isinstance(p, dict):
+                            prop_map[str(pid)] = p
                 props = [prop_map[pid] for pid in props if pid in prop_map]
-            
+
             turn_copy["properties"] = props
         enriched_history.append(turn_copy)
 

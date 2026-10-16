@@ -131,7 +131,25 @@ def detect_deterministic_intent(
     msg_clean = message.strip()
     msg_low = msg_clean.lower()
     state = stored_state or {}
-    last_result_ids = state.get("last_result_ids", [])
+    last_result_ids = list(state.get("last_result_ids") or [])
+    selected_ids = list(state.get("selected_property_ids") or [])
+
+    # Hydrate from persistent property_context (survives long chats / restarts)
+    pctx = state.get("property_context") if isinstance(state.get("property_context"), dict) else {}
+    if pctx:
+        if not selected_ids and pctx.get("active_property_id"):
+            selected_ids = [pctx["active_property_id"]]
+            state = dict(state)
+            state["selected_property_ids"] = selected_ids
+        if not last_result_ids:
+            ref_map = pctx.get("reference_map") or {}
+            batch = []
+            for label in ("first property", "second property", "third property", "fourth property", "fifth property"):
+                if ref_map.get(label):
+                    batch.append(ref_map[label])
+            last_result_ids = batch or list(pctx.get("recently_discussed_ids") or [])
+            state = dict(state)
+            state["last_result_ids"] = last_result_ids
 
     # 0.1 Lead Contact & Private Viewing Request Detection
     email_match = re.search(r"[\w\.-]+@[\w\.-]+\.\w+", message)
@@ -278,39 +296,54 @@ def detect_deterministic_intent(
                     "property_id": target_id
                 }
 
-    # Anaphoric "that one" / "give me that one"
-    if any(phrase in msg_low for phrase in ["that one", "give me that", "show that", "tell me about it", "อันนั้น", "ขออันนี้", "ดูอันนั้น"]) and last_result_ids:
-        return IntentType.PROPERTY_DETAILS, {
-            "property_id": last_result_ids[0]
-        }
+    # Anaphoric + active property context (supports 100+ follow-ups without renaming the property)
+    active_id = (selected_ids[0] if selected_ids else None) or (pctx.get("active_property_id") if pctx else None)
+    if any(phrase in msg_low for phrase in [
+        "that one", "give me that", "show that", "tell me about it", "อันนั้น", "ขออันนี้", "ดูอันนั้น",
+        "this property", "that property", "this villa", "that villa", "its price", "its amenities",
+        "its location", "does it", "is it ", "has it", "what about it", "does it also",
+    ]):
+        focus = active_id or (last_result_ids[0] if last_result_ids else None)
+        if focus:
+            return IntentType.PROPERTY_DETAILS, {
+                "property_id": focus,
+                "focus_question": msg_clean,
+                "from_property_context": True,
+            }
 
     # Attribute / fact questions about a focused or named property (prevents false new searches)
-    # e.g. "Does this property have a swimming pool?", "what is the price of the first one",
-    # "Does ParQ Villa Phuket have a pool?"
     attr_q = bool(re.search(
         r"(?:does|do|has|have|is|are|what(?:'s| is)|how much|price of|cena|czy|ile|มี|ราคา|เท่าไหร่)",
         msg_low
     ))
     amenity_or_fact = bool(re.search(
-        r"(?:pool|swimming|beach|price|cost|bedroom|bedrooms|area|size|sqm|location|status|"
-        r"amenit|available|availability|basen|sypialn|cena|สระ|ห้องนอน|ราคา|ทำเล)",
+        r"(?:pool|swimming|beach|price|cost|bedroom|bedrooms|area|size|sqm|location|status|parking|"
+        r"amenit|available|availability|basen|sypialn|cena|สระ|ห้องนอน|ราคา|ทำเล|ที่จอด)",
         msg_low
     ))
-    selected_ids = state.get("selected_property_ids") or []
     if attr_q and amenity_or_fact:
-        # Ordinal reference
         if any(k in msg_low for k in ["first one", "1st one", "the first", "pierwsz", "อันแรก"]) and last_result_ids:
             return IntentType.PROPERTY_DETAILS, {"property_id": last_result_ids[0], "focus_question": msg_clean}
         if any(k in msg_low for k in ["second one", "2nd one", "the second", "drug", "อันที่สอง"]) and len(last_result_ids) >= 2:
             return IntentType.PROPERTY_DETAILS, {"property_id": last_result_ids[1], "focus_question": msg_clean}
         if any(k in msg_low for k in ["third one", "3rd one", "the third", "trzeci", "อันที่สาม"]) and len(last_result_ids) >= 3:
             return IntentType.PROPERTY_DETAILS, {"property_id": last_result_ids[2], "focus_question": msg_clean}
-        # "this/that property" with session focus
-        if any(k in msg_low for k in ["this property", "that property", "this villa", "that villa", "this one", "tej nieruchomości", "ta willa", "โครงการนี้", "วิลล่านี้"]):
-            focus = (selected_ids[0] if selected_ids else (last_result_ids[0] if last_result_ids else None))
+        if any(k in msg_low for k in ["fourth one", "4th one", "the fourth"]) and len(last_result_ids) >= 4:
+            return IntentType.PROPERTY_DETAILS, {"property_id": last_result_ids[3], "focus_question": msg_clean}
+        if any(k in msg_low for k in ["fifth one", "5th one", "the fifth"]) and len(last_result_ids) >= 5:
+            return IntentType.PROPERTY_DETAILS, {"property_id": last_result_ids[4], "focus_question": msg_clean}
+        if any(k in msg_low for k in [
+            "this property", "that property", "this villa", "that villa", "this one", "that one",
+            "tej nieruchomości", "ta willa", "โครงการนี้", "วิลล่านี้", "does it", "has it", " its"
+        ]) or (active_id and not re.search(r"\b(?:phuket|samui|bangkok|pattaya|thailand)\b", msg_low)
+               and "prop-" not in msg_low):
+            focus = active_id or (last_result_ids[0] if last_result_ids else None)
             if focus:
-                return IntentType.PROPERTY_DETAILS, {"property_id": focus, "focus_question": msg_clean}
-        # Named property fact question: "Does ParQ Villa Phuket have a pool?"
+                return IntentType.PROPERTY_DETAILS, {
+                    "property_id": focus,
+                    "focus_question": msg_clean,
+                    "from_property_context": True,
+                }
         named_fact = re.search(
             r"(?:does|do|has|have|what(?:'s| is)|how much|price of|cena|czy)\s+(.+?)\s+(?:have|has|include|with|cost|price|pool|beach|bedroom|อยู่|มี)",
             msg_low
