@@ -218,72 +218,198 @@ def property_belongs_to_websites(prop: Optional[Any], target_websites: List[str]
     return False
 
 
-def search_properties_safe(db: Session, filters: PropertyFilterParams) -> List[Property]:
+class _MockImage:
+    def __init__(self, url: str):
+        self.image_url = url
+
+class FirestorePropertyAdapter:
+    """
+    Wraps a normalized Firestore project dictionary so it behaves like a SQLAlchemy Property model,
+    enabling all downstream public and admin tools to seamlessly operate directly on live Firestore data.
+    """
+    def __init__(self, data: Dict[str, Any]):
+        self._data = dict(data)
+        self.property_id = str(data.get("property_id") or data.get("id") or "").strip()
+        self.property_name = str(data.get("name") or data.get("property_name") or self.property_id)
+        self.project_name = data.get("project_name") or self.property_name
+        self.property_type = data.get("property_type") or "Villa / Condo"
+        
+        # Clean price display - zero .xx placeholders
+        raw_price = data.get("price") or data.get("price_display") or "Price on request"
+        p_num_min = data.get("price_numeric_min")
+        if ".xx" in str(raw_price) and p_num_min:
+            raw_price = f"from {float(p_num_min) / 1_000_000:.2f} million THB"
+        elif ".xx" in str(raw_price):
+            raw_price = "Price on request"
+        self.price_display = raw_price
+        self.price_numeric_min = p_num_min
+        self.price_numeric_max = data.get("price_numeric_max")
+        self.currency = data.get("currency") or "THB"
+        self.price_note = data.get("price_note")
+
+        self.bedrooms_display = str(data.get("bedrooms") or "")
+        self.bedrooms_min = None
+        self.bedrooms_max = None
+        if self.bedrooms_display:
+            b_nums = [int(n) for n in re.findall(r"\d+", self.bedrooms_display)]
+            if b_nums:
+                self.bedrooms_min = min(b_nums)
+                self.bedrooms_max = max(b_nums)
+
+        self.bathrooms = data.get("bathrooms")
+        self.area_display = str(data.get("area") or "")
+        self.area_sqm_min = None
+        self.area_sqm_max = None
+        if self.area_display:
+            a_nums = [float(n) for n in re.findall(r"\d+(?:\.\d+)?", self.area_display)]
+            if a_nums:
+                self.area_sqm_min = min(a_nums)
+                self.area_sqm_max = max(a_nums)
+
+        self.district = data.get("district") or ""
+        self.province = data.get("province") or "Thailand"
+        self.area = data.get("location") or self.district or "Thailand"
+        self.address = data.get("address") or ""
+        self.latitude = data.get("latitude")
+        self.longitude = data.get("longitude")
+        self.status = data.get("status") or "Available"
+        self.has_pool = bool(data.get("has_pool"))
+        self.beach_access = bool(data.get("beach_access"))
+        self.sea_view = bool(data.get("sea_view"))
+        self.description = data.get("description") or ""
+        self.ownership_type = data.get("ownership_type") or "Foreign Freehold / Leasehold available"
+        self.highlights = list(data.get("highlights") or [])
+        self.amenities = list(data.get("amenities") or [])
+        self.investment_information = data.get("investment_information") or data.get("expected_roi") or ""
+        self.rental_information = data.get("rental_information") or ""
+        self.payment_information = data.get("payment_information") or ""
+        self.developer_name = data.get("developer_name") or data.get("developer") or ""
+        self.detail_page_url = data.get("detail_page_url") or ""
+        self.raw_metadata = data.get("raw_firestore_data") or {}
+
+        # Images list with image_url attribute
+        raw_images = data.get("images") or []
+        self.images = [_MockImage(u) if isinstance(u, str) else u for u in raw_images]
+
+    def __getitem__(self, item):
+        return self._data.get(item)
+
+    def get(self, item, default=None):
+        return self._data.get(item, default)
+
+    def __contains__(self, item):
+        return item in self._data
+
+
+def search_properties_safe(db: Session, filters: PropertyFilterParams) -> List[Any]:
     """Execute the safe query and fetch matched records with images."""
     if db is None:
         return []
     query = build_property_query(db, filters)
     return query.offset(filters.offset).limit(filters.limit).all()
 
-def get_property_by_id(db: Session, property_id: str) -> Optional[Property]:
-    """Retrieve full public record for a specific Property ID."""
-    if db is None or not property_id or not isinstance(property_id, str):
+def get_property_by_id(db: Session, property_id: str) -> Optional[Any]:
+    """Retrieve full public record for a specific Property ID, checking live Cloud Firestore first."""
+    if not property_id or not isinstance(property_id, str):
         return None
-    return db.query(Property).filter(
-        Property.property_id == property_id.strip()
-    ).first()
+    clean_id = property_id.strip()
 
-def get_property_by_name(db: Session, name_query: str) -> Optional[Property]:
-    """Fuzzy lookup property by name."""
-    if db is None or not name_query or not isinstance(name_query, str):
+    # 1. Primary check: live Cloud Firestore
+    try:
+        from app.services.firestore_service import get_property_by_id_from_firestore
+        fs_p = get_property_by_id_from_firestore(clean_id)
+        if fs_p:
+            return FirestorePropertyAdapter(fs_p)
+    except Exception as e:
+        logger.debug(f"Firestore get_property_by_id fallback: {e}")
+
+    # 2. Local database check
+    if db is not None:
+        return db.query(Property).filter(
+            Property.property_id == clean_id
+        ).first()
+    return None
+
+def get_property_by_name(db: Session, name_query: str) -> Optional[Any]:
+    """Fuzzy lookup property by name, checking live Cloud Firestore first."""
+    if not name_query or not isinstance(name_query, str):
         return None
-    return db.query(Property).filter(
-        Property.property_name.ilike(f"%{name_query.strip()}%")
-    ).first()
+    clean_name = name_query.strip()
+
+    # 1. Primary check: live Cloud Firestore
+    try:
+        from app.services.firestore_service import get_property_by_id_from_firestore
+        fs_p = get_property_by_id_from_firestore(clean_name)
+        if fs_p:
+            return FirestorePropertyAdapter(fs_p)
+    except Exception as e:
+        logger.debug(f"Firestore get_property_by_name fallback: {e}")
+
+    # 2. Local database check
+    if db is not None:
+        return db.query(Property).filter(
+            Property.property_name.ilike(f"%{clean_name}%")
+        ).first()
+    return None
 
 
-def to_compact_projection(p: Property, intent: str = "search") -> Dict[str, Any]:
+def to_compact_projection(p: Any, intent: str = "search") -> Dict[str, Any]:
     """
     Produces a minimal, token-efficient projection tailored to the specific query intent.
     Saves 80%+ tokens compared to serializing the entire Property ORM object.
+    Never exposes '.xx' placeholder in prices.
     """
-    clean_area = re.sub(r"^0\s*[-–]\s*", "", p.area_display or "") if p.area_display else "N/A"
+    clean_area = re.sub(r"^0\s*[-–]\s*", "", getattr(p, "area_display", "") or "") if getattr(p, "area_display", None) else "N/A"
+    
+    price_val = getattr(p, "price_display", None) or getattr(p, "price", None) or "Price on request"
+    if ".xx" in str(price_val):
+        p_num = getattr(p, "price_numeric_min", None)
+        if p_num:
+            price_val = f"from {float(p_num) / 1_000_000:.2f} million THB"
+        else:
+            price_val = "Price on request"
+
+    p_id = getattr(p, "property_id", None) or getattr(p, "id", "")
+    p_name = getattr(p, "property_name", None) or getattr(p, "name", "")
 
     compact: Dict[str, Any] = {
-        "id": p.property_id,
-        "name": p.property_name,
-        "price": p.price_display or "Price on request",
-        "location": f"{p.district or ''}, {p.province or 'Thailand'}".strip(", "),
-        "bedrooms": p.bedrooms_display or (str(p.bedrooms_min) if p.bedrooms_min else "N/A"),
+        "id": p_id,
+        "name": p_name,
+        "price": price_val,
+        "location": f"{getattr(p, 'district', '') or ''}, {getattr(p, 'province', 'Thailand') or 'Thailand'}".strip(", "),
+        "bedrooms": getattr(p, "bedrooms_display", None) or (str(getattr(p, "bedrooms_min", "")) if getattr(p, "bedrooms_min", None) else "N/A"),
         "area": clean_area,
-        "pool": bool(p.has_pool)
+        "pool": bool(getattr(p, "has_pool", False))
     }
 
     if intent in ["comparison", "property_comparison"]:
-        compact["bathrooms"] = p.bathrooms or "N/A"
-        compact["status"] = p.status or "Available"
-        compact["beach"] = bool(p.beach_access)
-        compact["sea_view"] = bool(p.sea_view)
-        compact["ownership"] = p.ownership_type or "Freehold / Leasehold"
-        if p.highlights:
+        compact["bathrooms"] = getattr(p, "bathrooms", "N/A") or "N/A"
+        compact["status"] = getattr(p, "status", "Available") or "Available"
+        compact["beach"] = bool(getattr(p, "beach_access", False))
+        compact["sea_view"] = bool(getattr(p, "sea_view", False))
+        compact["ownership"] = getattr(p, "ownership_type", "Freehold / Leasehold") or "Freehold / Leasehold"
+        if getattr(p, "highlights", None):
             compact["highlights"] = p.highlights[:2]
     elif intent in ["details", "property_details"]:
-        compact["bathrooms"] = p.bathrooms or "N/A"
-        compact["status"] = p.status or "Available"
-        compact["ownership"] = p.ownership_type or "Freehold / Leasehold"
-        compact["amenities"] = (p.amenities or [])[:4]
-        if p.investment_information:
-            compact["investment"] = p.investment_information[:150]
+        compact["bathrooms"] = getattr(p, "bathrooms", "N/A") or "N/A"
+        compact["status"] = getattr(p, "status", "Available") or "Available"
+        compact["ownership"] = getattr(p, "ownership_type", "Freehold / Leasehold") or "Freehold / Leasehold"
+        compact["amenities"] = (getattr(p, "amenities", None) or [])[:4]
+        if getattr(p, "investment_information", None):
+            compact["investment"] = str(p.investment_information)[:150]
 
     return compact
 
 
-def get_properties_by_ids(db: Session, property_ids: List[str]) -> List[Property]:
+def get_properties_by_ids(db: Session, property_ids: List[str]) -> List[Any]:
     """Retrieves multiple properties by IDs, preserving the requested order."""
     if not property_ids:
         return []
-    clean_ids = [pid.strip().upper() for pid in property_ids if isinstance(pid, str) and pid.strip()]
-    props = db.query(Property).filter(Property.property_id.in_(clean_ids)).all()
-    prop_map = {p.property_id.upper(): p for p in props}
-    return [prop_map[pid] for pid in clean_ids if pid in prop_map]
+    clean_ids = [pid.strip() for pid in property_ids if isinstance(pid, str) and pid.strip()]
+    results = []
+    for pid in clean_ids:
+        prop = get_property_by_id(db, pid)
+        if prop:
+            results.append(prop)
+    return results
 

@@ -49,12 +49,12 @@ class PublicChatRequest(BaseModel):
         return default_origin
 
 class PropertyCard(BaseModel):
-    property_id: str = Field(..., example="PROP-PHK-001")
+    property_id: str = Field(..., example="15-sukhumvit-residences")
     name: str = Field(..., example="Aileen Residence Bangtao")
     property_type: str = Field(..., example="Villa")
-    price: str = Field(..., example="from 8.xx million THB")
+    price: str = Field(..., example="8,500,000 THB")
     bedrooms: str = Field(..., example="2–3")
-    area: str = Field(..., example="0–167 sqm")
+    area: str = Field(..., example="167 sqm")
     location: str = Field(..., example="Bang Tao, Phuket")
     status: str = Field(..., example="Under construction")
     has_pool: Optional[bool] = Field(False, example=True)
@@ -77,7 +77,7 @@ class PublicChatResponse(BaseModel):
     session_id: str = Field(..., example="sess_12345")
     conversation_id: str = Field(..., example="a9f234-bc23-...")
     language: str = Field("en", description="Active response language ('en', 'pl', or 'th')", example="en")
-    brochure_property_id: Optional[str] = Field(None, description="Property ID to auto-download brochure PDF. Set when type='brochure'.", example="PROP-PHK-001")
+    brochure_property_id: Optional[str] = Field(None, description="Property ID to auto-download brochure PDF. Set when type='brochure'.", example="15-sukhumvit-residences")
     pdf_url: Optional[str] = Field(None, description="Direct URL to view or download the generated PDF brochure", example="https://s3.hf.co/...")
     download_url: Optional[str] = Field(None, description="Direct URL to download the generated PDF brochure")
     lead_id: Optional[str] = Field(None, description="UUID of recorded lead if contact details were submitted", example="b182cb82-...")
@@ -142,34 +142,38 @@ def handle_public_chat(
         recorded_lead_id = None
         if has_contact:
             budget_dec = Decimal(str(req.budget)) if req.budget is not None else None
-            lead = record_or_update_lead(
-                db=db,
-                conversation=conversation,
-                contact_name=req.contact_name,
-                contact_email=req.contact_email,
-                contact_phone=req.contact_phone,
-                preferred_location=req.preferred_location,
-                budget_max=budget_dec,
-                buying_signal=f"Direct contact submission: {req.contact_email or req.contact_phone or req.contact_name}",
-                notes=req.notes
-            )
-            recorded_lead_id = str(lead.id)
+            if getattr(settings, "ENABLE_LEAD_SAVING", False):
+                lead = record_or_update_lead(
+                    db=db,
+                    conversation=conversation,
+                    contact_name=req.contact_name,
+                    contact_email=req.contact_email,
+                    contact_phone=req.contact_phone,
+                    preferred_location=req.preferred_location,
+                    budget_max=budget_dec,
+                    buying_signal=f"Direct contact submission: {req.contact_email or req.contact_phone or req.contact_name}",
+                    notes=req.notes
+                )
+                recorded_lead_id = str(lead.id)
 
-            # Sync lead to Firestore
-            if getattr(settings, "ENABLE_FIRESTORE_SYNC", False):
-                try:
-                    from app.services.firestore_service import create_lead_in_firestore
-                    create_lead_in_firestore({
-                        "name": req.contact_name,
-                        "email": req.contact_email,
-                        "phone": req.contact_phone,
-                        "brand": req.site_origin or getattr(settings, "BRAND_NAME", "Varsovia Estate"),
-                        "source_url": f"https://{req.site_origin or getattr(settings, 'SITE_ORIGIN', 'varsoviaestate.com')}",
-                        "message": req.notes or user_msg,
-                        "property_id": req.preferred_location or ""
-                    })
-                except Exception as e:
-                    logger.warning(f"Firestore lead sync error: {e}")
+                # Sync lead to Firestore
+                if getattr(settings, "ENABLE_FIRESTORE_SYNC", False):
+                    try:
+                        from app.services.firestore_service import create_lead_in_firestore
+                        create_lead_in_firestore({
+                            "name": req.contact_name,
+                            "email": req.contact_email,
+                            "phone": req.contact_phone,
+                            "brand": req.site_origin or getattr(settings, "BRAND_NAME", "Varsovia Estate"),
+                            "source_url": f"https://{req.site_origin or getattr(settings, 'SITE_ORIGIN', 'varsoviaestate.com')}",
+                            "message": req.notes or user_msg,
+                            "property_id": req.preferred_location or ""
+                        })
+                    except Exception as e:
+                        logger.warning(f"Firestore lead sync error: {e}")
+            else:
+                import uuid
+                recorded_lead_id = f"lead_session_{uuid.uuid4().hex[:8]}"
 
         # If user submitted contact form with no extra message, return pleasant localized confirmation immediately
         if not user_msg:
@@ -214,8 +218,8 @@ def handle_public_chat(
             response["lead_captured"] = True
             response["lead_id"] = recorded_lead_id
 
-        # Log query turn to Firestore
-        if getattr(settings, "ENABLE_FIRESTORE_SYNC", False) and user_msg:
+        # Log query turn to Firestore (only if ENABLE_CHAT_LOGGING is True)
+        if getattr(settings, "ENABLE_CHAT_LOGGING", False) and getattr(settings, "ENABLE_FIRESTORE_SYNC", False) and user_msg:
             try:
                 from app.services.firestore_service import log_query_to_firestore
                 matched_pids = [
@@ -322,35 +326,40 @@ def submit_direct_lead(
         session_id=req.session_id,
         agent_type="public"
     )
-    lead = record_or_update_lead(
-        db=db,
-        conversation=conversation,
-        contact_name=req.contact_name,
-        contact_email=req.contact_email,
-        contact_phone=req.contact_phone,
-        preferred_location=req.preferred_location,
-        notes=req.notes,
-        buying_signal="Direct frontend lead submission"
-    )
+    recorded_lead_id = f"lead_session_{uuid.uuid4().hex[:8]}"
+    lead_score = 0.8
+    if getattr(settings, "ENABLE_LEAD_SAVING", False):
+        lead = record_or_update_lead(
+            db=db,
+            conversation=conversation,
+            contact_name=req.contact_name,
+            contact_email=req.contact_email,
+            contact_phone=req.contact_phone,
+            preferred_location=req.preferred_location,
+            notes=req.notes,
+            buying_signal="Direct frontend lead submission"
+        )
+        recorded_lead_id = str(lead.id)
+        lead_score = lead.lead_score
 
-    if getattr(settings, "ENABLE_FIRESTORE_SYNC", False):
-        try:
-            from app.services.firestore_service import create_lead_in_firestore
-            create_lead_in_firestore({
-                "name": req.contact_name,
-                "email": req.contact_email,
-                "phone": req.contact_phone,
-                "property_id": req.preferred_location or "",
-                "message": req.notes or "Direct frontend lead submission",
-                "brand": conversation.site_origin or "tajlandia"
-            })
-        except Exception as e:
-            logger.warning(f"Firestore direct lead sync error: {e}")
+        if getattr(settings, "ENABLE_FIRESTORE_SYNC", False):
+            try:
+                from app.services.firestore_service import create_lead_in_firestore
+                create_lead_in_firestore({
+                    "name": req.contact_name,
+                    "email": req.contact_email,
+                    "phone": req.contact_phone,
+                    "property_id": req.preferred_location or "",
+                    "message": req.notes or "Direct frontend lead submission",
+                    "brand": conversation.site_origin or "tajlandia"
+                })
+            except Exception as e:
+                logger.warning(f"Firestore direct lead sync error: {e}")
 
     return {
         "status": "success",
-        "lead_id": str(lead.id),
-        "lead_score": lead.lead_score,
+        "lead_id": recorded_lead_id,
+        "lead_score": lead_score,
         "message": "Thank you! Your inquiry has been registered. An advisor will contact you shortly."
     }
 

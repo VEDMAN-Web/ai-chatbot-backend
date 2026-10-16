@@ -71,12 +71,18 @@ class Settings(BaseSettings):
     
     # AI Configuration (Model is strictly configurable, not hardcoded)
     OPENAI_API_KEY: str = ""
-    OPENAI_MODEL: str = "gpt-5.5"
-    OPENAI_TEMPERATURE: float = 0.2
+    OPENAI_MODEL: str = "gpt-4o"
+    OPENAI_TEMPERATURE: float = 0.0
+    OPENAI_TIMEOUT: float = 180.0
     
     ANTHROPIC_API_KEY: str = ""
     ANTHROPIC_MODEL: str = "claude-opus-5-5"
-    ANTHROPIC_TEMPERATURE: float = 0.2
+    ANTHROPIC_TEMPERATURE: float = 0.0
+
+    # Persistence & Audit Flags (In-session memory stays ON, permanent persistence OFF until enabled)
+    ENABLE_LEAD_SAVING: bool = False
+    ENABLE_CHAT_LOGGING: bool = False
+    ENABLE_AUDIT_LOGGING: bool = False
 
     # Action Confirmation & Security
     ACTION_EXPIRATION_MINUTES: int = 15

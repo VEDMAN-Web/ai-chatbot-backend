@@ -136,13 +136,13 @@ PUBLIC_TOOLS = [
         "type": "function",
         "function": {
             "name": "get_property_by_id",
-            "description": "Retrieves the complete verified record and detailed specifications for a specific property or development by Property ID, document slug, or project name (e.g. '15 Sukhumvit Residences', 'Sea Heaven Phuket Naithon Phase 3.1', 'Sun Hills Layan Phuket', 'PROP-PHK-001'). Call this whenever the user asks for details, more information, or inquiries about a specific named property or development.",
+            "description": "Retrieves the complete verified record and detailed specifications for a specific property or development by Property ID, document slug, or project name (e.g. '15-sukhumvit-residences', '15 Sukhumvit Residences', 'Sea Heaven Phuket Naithon Phase 3.1', 'Sun Hills Layan Phuket'). Call this whenever the user asks for details, more information, or inquiries about a specific named property or development.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "property_id": {
                         "type": "string",
-                        "description": "Property ID, document slug, or project name (e.g. '15-sukhumvit-residences', '15 Sukhumvit Residences', 'Sea Heaven Phuket Naithon Phase 3.1', 'Sun Hills Layan Phuket', 'PROP-PHK-001')"
+                        "description": "Property ID, document slug, or project name (e.g. '15-sukhumvit-residences', '15 Sukhumvit Residences', 'Sea Heaven Phuket Naithon Phase 3.1', 'Sun Hills Layan Phuket')"
                     },
                     "property_name": {
                         "type": "string",
@@ -163,7 +163,7 @@ PUBLIC_TOOLS = [
                 "properties": {
                     "property_id": {
                         "type": "string",
-                        "description": "Unique Property ID (e.g. PROP-PHK-001)"
+                        "description": "Unique Property ID or document slug (e.g. '15-sukhumvit-residences')"
                     },
                     "property_name": {
                         "type": "string",
@@ -200,7 +200,7 @@ PUBLIC_TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "property_id": {"type": "string", "description": "Property ID (e.g. PROP-PHK-001)"},
+                    "property_id": {"type": "string", "description": "Property ID or slug (e.g. '15-sukhumvit-residences')"},
                     "customer_name": {"type": "string", "description": "Customer name"},
                     "customer_email": {"type": "string", "description": "Customer email"},
                     "customer_phone": {"type": "string", "description": "Customer phone or WhatsApp"},
@@ -220,7 +220,7 @@ PUBLIC_TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "property_id": {"type": "string", "description": "Property ID (e.g. PROP-PHK-001)"},
+                    "property_id": {"type": "string", "description": "Property ID or slug (e.g. '15-sukhumvit-residences')"},
                     "recipient_email": {"type": "string", "description": "Customer's destination email address"},
                     "customer_name": {"type": "string", "description": "Customer's name"}
                 },
@@ -236,7 +236,7 @@ PUBLIC_TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "property_id": {"type": "string", "description": "Property ID (e.g. PROP-PHK-001)"},
+                    "property_id": {"type": "string", "description": "Property ID or slug (e.g. '15-sukhumvit-residences')"},
                     "location_name": {"type": "string", "description": "District or area name (e.g. Bang Tao, Chaweng)"}
                 }
             }
@@ -289,11 +289,17 @@ def format_property_card(p: Property) -> Dict[str, Any]:
         nearby_places_from_db=getattr(p, "nearby_places", None)
     )
 
+    clean_price = p.price_display or "Price on request"
+    if ".xx" in str(clean_price) and getattr(p, "price_numeric_min", None):
+        clean_price = f"from {float(p.price_numeric_min) / 1_000_000:.2f} million THB"
+    elif ".xx" in str(clean_price):
+        clean_price = "Price on request"
+
     # Google Calendar 1-Click Link
     cal_url = google_manager.generate_google_calendar_url(
         title=f"Viewing: {p.property_name} ({p.property_id})",
         start_time="",
-        description=f"Property viewing appointment for {p.property_name} in {loc_display}. Ref: {p.property_id}. Price: {p.price_display or 'Price on request'}.",
+        description=f"Property viewing appointment for {p.property_name} in {loc_display}. Ref: {p.property_id}. Price: {clean_price}.",
         location=f"{p.property_name}, {loc_display}, Thailand"
     )
 
@@ -301,7 +307,7 @@ def format_property_card(p: Property) -> Dict[str, Any]:
         "property_id": p.property_id,
         "name": p.property_name,
         "property_type": p.property_type or "Residential",
-        "price": p.price_display or "Price on request",
+        "price": clean_price,
         "price_numeric_min": float(p.price_numeric_min) if p.price_numeric_min else None,
         "bedrooms": p.bedrooms_display or (str(p.bedrooms_min) if p.bedrooms_min else "N/A"),
         "area": re.sub(r"^0\s*[-–]\s*", "", p.area_display or "") if p.area_display else "N/A",
@@ -1157,12 +1163,13 @@ def is_off_topic_query(message: str) -> bool:
     if any(p in msg for p in coding_patterns):
         return True
 
-    # Creative / Chit-chat / Jokes
+    # Creative / Chit-chat / Jokes / Poems / Songs
     creative_patterns = [
         "tell me a joke", "tell a joke", "make me laugh", "write a poem", "write a song",
         "sing a song", "tell me a story", "write a story", "write an essay", "compose a poem",
         "opowiedz żart", "opowiedz zart", "opowiedz kawał", "opowiedz kawal", "napisz wiersz",
-        "napisz piosenkę", "napisz piosenke", "napisz opowiadanie", "napisz esej"
+        "napisz piosenkę", "napisz piosenke", "napisz opowiadanie", "napisz esej",
+        "wiersz", "poem", "poetry", "wierszyk", "poezj", "piosenk", "żart", "zart", "kawał", "kawal"
     ]
     if any(p in msg for p in creative_patterns):
         return True
@@ -1300,6 +1307,8 @@ def _safe_openai_create(client: Any, **kwargs) -> Any:
         if call_kwargs.get("tools") or call_kwargs.get("functions"):
             call_kwargs["reasoning_effort"] = "none"
 
+    call_kwargs.setdefault("timeout", getattr(settings, "OPENAI_TIMEOUT", 180.0))
+
     try:
         return client.chat.completions.create(**call_kwargs)
     except Exception as e:
@@ -1320,6 +1329,7 @@ def _safe_openai_create(client: Any, **kwargs) -> Any:
             # Fallback to gpt-4o for zero downtime
             fallback_kwargs = dict(kwargs)
             fallback_kwargs["model"] = "gpt-4o"
+            fallback_kwargs.setdefault("timeout", getattr(settings, "OPENAI_TIMEOUT", 180.0))
             fallback_kwargs.pop("reasoning_effort", None)
             if "max_completion_tokens" in fallback_kwargs:
                 fallback_kwargs["max_tokens"] = fallback_kwargs.pop("max_completion_tokens")
@@ -1360,7 +1370,7 @@ def classify_off_topic_dynamic(
     # 3. If OpenAI client is available, run dynamic evaluation
     if client and getattr(settings, "OPENAI_API_KEY", None):
         try:
-            recent_turns = history[-6:] if history else []
+            recent_turns = history[-50:] if history else []
             ctx_snippets = []
             for t in recent_turns:
                 ctx_snippets.append(f"{t.get('role', 'user').title()}: {t.get('content', '')[:300]}")
@@ -1433,7 +1443,7 @@ def rewrite_public_query(
     if is_greeting_or_chit_chat(current_message):
         return current_message
 
-    recent_turns = history[-6:] if history else []
+    recent_turns = history[-50:] if history else []
     msg_lower = current_message.lower().strip()
 
     if client and getattr(settings, "OPENAI_API_KEY", None):
@@ -1478,8 +1488,9 @@ class PublicAgentService:
         self.model = settings.OPENAI_MODEL
         self.temperature = settings.OPENAI_TEMPERATURE
         self.api_key = settings.OPENAI_API_KEY
+        self.timeout = getattr(settings, "OPENAI_TIMEOUT", 180.0)
         if self.api_key:
-            self.client = OpenAI(api_key=self.api_key)
+            self.client = OpenAI(api_key=self.api_key, timeout=self.timeout)
         else:
             self.client = None
 
@@ -2563,11 +2574,11 @@ class PublicAgentService:
         props = get_properties_by_ids(db, prop_ids)
         if len(props) < 2:
             if language == "th":
-                reply_text = "สำหรับการเปรียบเทียบ กรุณาระบุรหัสอสังหาริมทรัพย์อย่างน้อย 2 รายการ (เช่น 'เปรียบเทียบ PROP-PHK-001 กับ PROP-PHK-002') หรือค้นหารายการที่สนใจก่อนได้ครับ"
+                reply_text = "สำหรับการเปรียบเทียบ กรุณาระบุชื่ออสังหาริมทรัพย์อย่างน้อย 2 รายการ (เช่น 'เปรียบเทียบ 15 Sukhumvit Residences กับ Sea Heaven') หรือค้นหารายการที่สนใจก่อนได้ครับ"
             elif language == "pl":
-                reply_text = "Aby porównać nieruchomości, wskaż co najmniej dwie oferty (np. 'Porównaj PROP-PHK-001 i PROP-PHK-002') lub najpierw wyszukaj interesujące Cię wille!"
+                reply_text = "Aby porównać nieruchomości, wskaż co najmniej dwie oferty (np. 'Porównaj 15 Sukhumvit Residences i Sea Heaven') lub najpierw wyszukaj interesujące Cię wille!"
             else:
-                reply_text = "To compare properties, please specify at least two listings (e.g. 'Compare PROP-PHK-001 and PROP-PHK-002') or perform a search first!"
+                reply_text = "To compare properties, please specify at least two listings (e.g. 'Compare 15 Sukhumvit Residences and Sea Heaven') or perform a search first!"
             append_conversation_turn(db, conversation, user_message, reply_text)
             return {
                 "type": "text",
@@ -2772,9 +2783,9 @@ class PublicAgentService:
 
         # Multilingual clarification messages
         clarification_msgs = {
-            "en": "Which property would you like the brochure for? Please mention the property name or ID (e.g. PROP-PHK-001), or first search for properties and then request the brochure.",
-            "pl": "Dla której nieruchomości chcesz broszurę? Podaj nazwę lub ID nieruchomości (np. PROP-PHK-001) lub najpierw wyszukaj nieruchomości.",
-            "th": "คุณต้องการโบรชัวร์สำหรับอสังหาริมทรัพย์ใด? กรุณาระบุชื่อหรือรหัสอสังหาริมทรัพย์ (เช่น PROP-PHK-001) หรือค้นหาก่อนแล้วขอโบรชัวร์"
+            "en": "Which property would you like the brochure for? Please mention the property name, or first search for properties and then request the brochure.",
+            "pl": "Dla której nieruchomości chcesz broszurę? Podaj nazwę nieruchomości lub najpierw wyszukaj nieruchomości.",
+            "th": "คุณต้องการโบรชัวร์สำหรับอสังหาริมทรัพย์ใด? กรุณาระบุชื่ออสังหาริมทรัพย์ หรือค้นหาก่อนแล้วขอโบรชัวร์ครับ"
         }
 
         # Confirm messages
@@ -4028,9 +4039,9 @@ class PublicAgentService:
         """Calls OpenAI with structured tools and persists multi-turn context."""
         messages = [{"role": "system", "content": get_public_system_prompt(language, site_origin=conversation.site_origin)}]
 
-        # Inject conversation history bounded to last 2 turns (4 items) to prevent token explosion
+        # Inject full conversation history (up to last 100 turns for 50+ back-to-back questions)
         history = conversation.message_history or []
-        for h in history[-4:]:
+        for h in history[-100:]:
             messages.append({"role": h["role"], "content": h["content"]})
 
         messages.append({"role": "user", "content": user_message})
