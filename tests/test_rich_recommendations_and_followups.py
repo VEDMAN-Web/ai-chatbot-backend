@@ -63,29 +63,47 @@ def test_build_rich_property_recommendation_text():
         }
     ]
 
-    # Test rich text recommendation with sparse query
+    # Sparse "Show me villas"-style query: listings + clarifying questions
     rich_text = build_rich_property_recommendation_text(
         cards=sample_cards,
         language="en",
         is_alternative=False,
         is_sparse=True,
-        searched_location="Phuket"
+        searched_location=None,
+        searched_budget=None,
+        searched_bedrooms=None,
     )
 
-    # 1. Contains rich intro and details
+    # 1. Contains rich intro and details (no broken ** markdown)
     assert "Ocean Vista Luxury Villa" in rich_text
     assert "Azure Horizon Beachfront Condo" in rich_text
     assert "Choeng Thale" in rich_text
     assert "28,500,000" in rich_text
-    
-    # 2. Contains consultative follow-up questions (at most 2-3)
-    # Check that questions are present
-    assert "?" in rich_text
-    question_lines = [line for line in rich_text.split("\n") if "?" in line]
-    # Follow-up questions should not exceed 3
-    assert len(question_lines) <= 4  # allow max 3 bullet questions + potential prompt
+    assert "**from" not in rich_text
+    assert "narrow this down" in rich_text.lower() or "may i ask" in rich_text.lower()
 
-    # 3. Test alternative recommendation with encouraging tone
+    # 2. Exactly 2 consultative follow-up question bullets when sparse
+    followup_bullets = [
+        line for line in rich_text.split("\n")
+        if line.strip().startswith("•") and "?" in line
+        and "Ocean Vista" not in line and "Azure Horizon" not in line
+    ]
+    assert 2 <= len(followup_bullets) <= 3
+    assert "budget" in rich_text.lower() or "bedroom" in rich_text.lower()
+
+    # 3. Fully specified inquiry should not force clarifying questions
+    rich_full = build_rich_property_recommendation_text(
+        cards=sample_cards,
+        language="en",
+        is_sparse=False,
+        searched_location="Phuket",
+        searched_budget=30_000_000,
+        searched_bedrooms=3,
+    )
+    assert "floor plans" in rich_full.lower() or "brochure" in rich_full.lower()
+    assert "What target budget" not in rich_full
+
+    # 4. Alternative recommendation with encouraging tone
     rich_alt_text = build_rich_property_recommendation_text(
         cards=sample_cards,
         language="en",
@@ -95,3 +113,4 @@ def test_build_rich_property_recommendation_text():
         searched_bedrooms=8
     )
     assert any(w in rich_alt_text.lower() for w in ["delighted", "recommend", "handpicked", "exceptional", "pleasure"])
+    assert "?" in rich_alt_text
