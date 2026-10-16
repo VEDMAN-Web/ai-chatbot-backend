@@ -5,6 +5,7 @@ import logging
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
 from abc import ABC, abstractmethod
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 from app.db.models import Property, PropertySpec, Lead
 from app.core.config import settings
@@ -533,76 +534,30 @@ def generate_report(
             leads = query.order_by(Lead.lead_score.desc(), Lead.created_at.desc()).limit(10).all()
 
         leads_data = []
-        if not leads:
-            sample_leads = [
-                {
-                    "lead_id": "lead-001",
-                    "contact_name": "Alexander Smith",
-                    "contact_email": "alexander.smith@investor.eu",
-                    "contact_phone": "+48 501 234 567",
-                    "preferred_location": "Bang Tao, Phuket",
-                    "budget": "25,000,000 THB",
-                    "lead_score": 92.0,
-                    "status": "qualified",
-                    "notes": "Interested in 3-bedroom luxury pool villa. Cash buyer, planning site visit in Q4 2026.",
-                    "buying_signals": ["Explicit budget 25M THB", "Requested floor plan", "Direct WhatsApp contact provided"]
-                },
-                {
-                    "lead_id": "lead-002",
-                    "contact_name": "Elena Rostova",
-                    "contact_email": "elena.r@luxuryestate.ch",
-                    "contact_phone": "+41 79 123 4567",
-                    "preferred_location": "Bophut / Chaweng, Koh Samui",
-                    "budget": "40,000,000 THB",
-                    "lead_score": 96.0,
-                    "status": "new",
-                    "notes": "Looking for sea-view villa with rental management program. High net worth investor.",
-                    "buying_signals": ["Inquired about guaranteed rental return", "Requested contracts", "Ready to sign"]
-                },
-                {
-                    "lead_id": "lead-003",
-                    "contact_name": "Michael Chang",
-                    "contact_email": "mchang@venture-sg.com",
-                    "contact_phone": "+65 9123 4567",
-                    "preferred_location": "Layan, Phuket",
-                    "budget": "18,000,000 THB",
-                    "lead_score": 85.0,
-                    "status": "new",
-                    "notes": "Inquiring about foreign freehold ownership and company setup in Thailand.",
-                    "buying_signals": ["Asked about 30+30+30 lease vs Freehold", "High engagement"]
-                }
-            ]
-            if lead_ids:
-                l_ids_lower = [str(x).lower() for x in lead_ids]
-                leads_data = [l for l in sample_leads if any(x in l["contact_name"].lower() or x in l["lead_id"].lower() for x in l_ids_lower)]
-                if not leads_data:
-                    leads_data = sample_leads[:1]
-            else:
-                leads_data = sample_leads
-        else:
-            for l in leads:
-                notes_val = "Web chat inquiry"
-                if l.buying_signals and isinstance(l.buying_signals, list):
-                    for sig in l.buying_signals:
-                        if isinstance(sig, str) and sig.startswith("Note: "):
-                            notes_val = sig.replace("Note: ", "")
-                            break
-                    else:
-                        if len(l.buying_signals) > 0 and isinstance(l.buying_signals[0], str):
-                            notes_val = l.buying_signals[0]
+        # Never invent sample leads — empty DB must yield an empty report
+        for l in leads:
+            notes_val = "Web chat inquiry"
+            if l.buying_signals and isinstance(l.buying_signals, list):
+                for sig in l.buying_signals:
+                    if isinstance(sig, str) and sig.startswith("Note: "):
+                        notes_val = sig.replace("Note: ", "")
+                        break
+                else:
+                    if len(l.buying_signals) > 0 and isinstance(l.buying_signals[0], str):
+                        notes_val = l.buying_signals[0]
 
-                leads_data.append({
-                    "lead_id": str(l.id),
-                    "contact_name": l.contact_name or "Inquiring Visitor",
-                    "contact_email": l.contact_email or "Not provided",
-                    "contact_phone": l.contact_phone or "Not provided",
-                    "preferred_location": l.preferred_location or "Thailand",
-                    "budget": f"{float(l.budget_max):,} THB" if getattr(l, "budget_max", None) else "Flexible",
-                    "lead_score": getattr(l, "lead_score", 0.0) or 0.0,
-                    "status": getattr(l, "status", "new") or "new",
-                    "notes": notes_val,
-                    "buying_signals": getattr(l, "buying_signals", []) or []
-                })
+            leads_data.append({
+                "lead_id": str(l.id),
+                "contact_name": l.contact_name or "Inquiring Visitor",
+                "contact_email": l.contact_email or "Not provided",
+                "contact_phone": l.contact_phone or "Not provided",
+                "preferred_location": l.preferred_location or "Thailand",
+                "budget": f"{float(l.budget_max):,} THB" if getattr(l, "budget_max", None) else "Flexible",
+                "lead_score": getattr(l, "lead_score", 0.0) or 0.0,
+                "status": getattr(l, "status", "new") or "new",
+                "notes": notes_val,
+                "buying_signals": getattr(l, "buying_signals", []) or []
+            })
 
         filename = f"tajlandia_lead_report_{timestamp_str}.{fmt}"
         if fmt == "xlsx":
@@ -628,14 +583,21 @@ def generate_report(
 
     # Property Report Generation
     report_title = title or "Tajlandia AI Property Intelligence Inventory Report"
-    query = db.query(Property)
+    from app.services.property_search import build_property_query, PropertyFilterParams
+
+    # build_property_query expects a Session (not an existing Query)
+    params = PropertyFilterParams(websites=websites or None)
+    query = build_property_query(db, params)
     if property_ids:
-        clean_ids = [pid.strip().upper() for pid in property_ids]
-        query = query.filter(Property.property_id.in_(clean_ids))
-    if websites:
-        from app.services.property_search import build_property_query, PropertyFilterParams
-        params = PropertyFilterParams(websites=websites)
-        query = build_property_query(query, params)
+        clean_ids = [str(pid).strip() for pid in property_ids if pid]
+        # Match both exact IDs and case variants used in Firestore/SQL
+        upper_ids = [c.upper() for c in clean_ids]
+        query = query.filter(
+            or_(
+                Property.property_id.in_(clean_ids),
+                Property.property_id.in_(upper_ids),
+            )
+        )
     properties = query.all()
 
     properties_data = []
