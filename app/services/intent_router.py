@@ -1,6 +1,7 @@
 import re
 import json
 import logging
+from difflib import SequenceMatcher, get_close_matches
 from enum import Enum
 from typing import Dict, Any, List, Optional, Tuple
 from decimal import Decimal
@@ -24,15 +25,127 @@ class IntentType(str, Enum):
 SHOW_MORE_PATTERNS = [
     r"^(?:show|see|load|fetch|give\s+me)\s+more(?:\s+properties|\s+villas|\s+condos|\s+results)?$",
     r"^(?:next|more)\s*(?:page|results|options)?$",
-    r"^any\s+more(?:\s+options|\s+villas|\s+properties)?$",
+    r"^any\s+more(?:\s+options|\s+villas|\s+properties)?\??$",
     r"^more$",
+    # Alternatives / reject-current follow-ups (must beat details + off-topic)
+    r"\b(?:show\s+me\s+)?(?:any|some)\s+other(?:\s+(?:propert(?:y|ies)|villas?|condos?|options?|ones?|listings?))?\b",
+    r"\bshow\s+me\s+(?:any\s+)?(?:other|others|different)(?:\s+\w+){0,6}\b",
+    r"\b(?:different|other)\s+(?:ones?|options?|propert(?:y|ies)|villas?|condos?|listings?)\b",
+    r"\bsomething\s+(?:else|different)\b",
+    r"\binstead\s+of\s+(?:this|that|it|these|the\s+current)\b",
+    r"\bi\s+(?:don'?t|do\s+not)\s+like\s+(?:this|that|it)\b",
+    r"\bnot\s+(?:this|that)\s+(?:one|property|villa|condo)?\b",
+    r"^any\s+other\??$",
+    r"^others?\??$",
+    r"^something\s+else\??$",
     r"^(?:pokaż|pokaz|zobacz|daj\s+mi)?\s*(?:więcej|wiecej|kolejne)(?:\s+ofert|\s+willi|\s+apartamentów|\s+wyników)?$",
     r"^(?:następna|nastepna)\s*(?:strona|oferta)?$",
     r"^więcej$",
     r"^wiecej$",
+    r"\b(?:inne|innych|coś\s+innego|cos\s+innego|inne\s+oferty|inne\s+propozycje)\b",
+    r"\bnie\s+podoba\s+mi\s+się\s+(?:to|ta|ten)\b",
     r"^(?:ดูเพิ่มเติม|เพิ่มเติม|หน้าถัดไป|ข้อเสนอถัดไป|แสดงเพิ่ม|ขอเพิ่ม|ดูเพิ่ม)$",
-    r"^(?:ดู|ขอ)?\s*(?:เพิ่มเติม|เพิ่มอีก|รายการอื่น)$"
+    r"^(?:ดู|ขอ)?\s*(?:เพิ่มเติม|เพิ่มอีก|รายการอื่น)$",
+    r"\b(?:อย่างอื่น|รายการอื่น|ตัวเลือกอื่น|ไม่เอาอันนี้)\b",
 ]
+
+# Reject the currently focused property and ask for alternatives
+REJECT_ACTIVE_PATTERNS = [
+    r"\binstead\s+of\s+(?:this|that|it|these|the\s+current)\b",
+    r"\bi\s+(?:don'?t|do\s+not)\s+like\s+(?:this|that|it)\b",
+    r"\bnot\s+(?:this|that)\s+(?:one|property|villa|condo)?\b",
+    r"\bnie\s+podoba\s+mi\s+się\s+(?:to|ta|ten)\b",
+    r"\bไม่เอาอันนี้\b",
+]
+
+# Canonical Thailand destinations for exact + fuzzy location resolution
+LOCATION_ALIASES: List[Tuple[str, str]] = [
+    ("choeng thale", "Bang Tao"), ("cherngtalay", "Bang Tao"), ("เชิงทะเล", "Bang Tao"),
+    ("bang tao", "Bang Tao"), ("bangtao", "Bang Tao"), ("บางเทา", "Bang Tao"),
+    ("layan", "Layan"), ("ลายัน", "Layan"),
+    ("karon", "Karon"), ("กะรน", "Karon"),
+    ("rawai", "Rawai"), ("ราไวย์", "Rawai"),
+    ("kamala", "Kamala"), ("กมลา", "Kamala"),
+    ("surin", "Surin"), ("สุรินทร์", "Surin"),
+    ("patong", "Patong"), ("ป่าตอง", "Patong"),
+    ("kata", "Kata"), ("กะตะ", "Kata"),
+    ("nai harn", "Nai Harn"), ("ในหาน", "Nai Harn"),
+    ("phuket", "Phuket"), ("ภูเก็ต", "Phuket"),
+    ("maenam", "Maenam"), ("แม่น้ำ", "Maenam"),
+    ("bophut", "Bophut"), ("บ่อผุด", "Bophut"),
+    ("chaweng", "Chaweng"), ("เฉวง", "Chaweng"),
+    ("lamai", "Lamai"), ("ละไม", "Lamai"),
+    ("choeng mon", "Choeng Mon"), ("เชิงมน", "Choeng Mon"),
+    ("plai laem", "Plai Laem"), ("ปลายแหลม", "Plai Laem"),
+    ("koh samui", "Koh Samui"), ("samui", "Koh Samui"), ("เกาะสมุย", "Koh Samui"), ("สมุย", "Koh Samui"),
+    ("koh phangan", "Koh Phangan"), ("phangan", "Koh Phangan"), ("เกาะพะงัน", "Koh Phangan"), ("พะงัน", "Koh Phangan"),
+    ("pattaya", "Pattaya"), ("พัทยา", "Pattaya"),
+    ("bangkok", "Bangkok"), ("กรุงเทพ", "Bangkok"), ("กรุงเทพฯ", "Bangkok"),
+    ("hua hin", "Hua Hin"), ("หัวหิน", "Hua Hin"),
+    ("krabi", "Krabi"), ("กระบี่", "Krabi"),
+    ("chiang mai", "Chiang Mai"), ("เชียงใหม่", "Chiang Mai"),
+    ("phang nga", "Phang Nga"), ("พังงา", "Phang Nga"),
+]
+
+_FUZZY_LOCATION_STOPWORDS = frozenset({
+    "okay", "ok", "yes", "yeah", "please", "thanks", "thank", "the", "and", "for",
+    "with", "this", "that", "show", "me", "find", "want", "looking", "villa", "villas",
+    "condo", "property", "properties", "budget", "under", "more", "other", "any",
+    "something", "else", "instead", "like", "dont", "not", "in", "at", "on",
+    "near", "around", "about", "how", "what", "where", "who", "can", "could", "would",
+})
+
+
+def fuzzy_resolve_location(message: str, cutoff: float = 0.74) -> Optional[str]:
+    """
+    Resolve a Thailand city/area from exact substring or fuzzy token match.
+    Returns canonical location (e.g. 'Phuket') or None. Never invents non-catalog places.
+    """
+    msg = (message or "").lower().strip()
+    if not msg:
+        return None
+
+    for kw, canon in sorted(LOCATION_ALIASES, key=lambda kv: len(kv[0]), reverse=True):
+        if kw in msg:
+            return canon
+
+    latin_aliases = [(kw, canon) for kw, canon in LOCATION_ALIASES if re.search(r"[a-z]", kw)]
+    alias_keys = [kw for kw, _ in latin_aliases]
+    tokens = re.findall(r"[a-zA-Z]{3,}", msg)
+    bigrams = [f"{tokens[i]} {tokens[i + 1]}" for i in range(len(tokens) - 1)]
+
+    candidates: List[Tuple[float, str]] = []
+    for tok in tokens + bigrams:
+        if tok in _FUZZY_LOCATION_STOPWORDS:
+            continue
+        close = get_close_matches(tok, alias_keys, n=1, cutoff=cutoff)
+        if close:
+            score = SequenceMatcher(None, tok, close[0]).ratio()
+            candidates.append((score, close[0]))
+            continue
+        best_kw, best_r = None, 0.0
+        for kw in alias_keys:
+            if abs(len(kw) - len(tok)) > 3:
+                continue
+            r = SequenceMatcher(None, tok, kw).ratio()
+            if r > best_r:
+                best_r, best_kw = r, kw
+        if best_kw and best_r >= cutoff:
+            candidates.append((best_r, best_kw))
+
+    if not candidates:
+        return None
+    candidates.sort(key=lambda x: (-x[0], -len(x[1])))
+    best_kw = candidates[0][1]
+    for kw, canon in latin_aliases:
+        if kw == best_kw:
+            return canon
+    return None
+
+
+def message_rejects_active_property(message: str) -> bool:
+    msg = (message or "").lower().strip()
+    return any(re.search(p, msg) for p in REJECT_ACTIVE_PATTERNS)
 
 COMPARISON_PATTERNS = [
     r"(?:compare|comparison)\s+(?:the\s+)?(?:first|1st|1)\s+(?:and|with|to)\s+(?:the\s+)?(?:second|2nd|2)",
@@ -48,6 +161,8 @@ COMPARISON_PATTERNS = [
 
 DETAILS_PATTERNS = [
     r"(?:tell\s+me\s+more\s+about|details\s+for|specs\s+for|show\s+me|info\s+on)\s+(PROP-[A-Z0-9\-]+)",
+    # UI / quick-reply: "View details for isla-kata-sea-view-villa"
+    r"(?:view\s+)?details\s+for\s+([a-z0-9][a-z0-9\-_]{2,120})",
     # Ordinals (singular + plural): "first property", "first properties", "the first ones"
     r"(?:tell\s+me\s+more\s+about|tell\s+me\s+about|details\s+for|specs\s+for|more\s+(?:details|info)\s+(?:about|on)|info\s+on)\s+(?:the\s+)?(first|second|third|fourth|fifth|1st|2nd|3rd|4th|5th)\s+(?:ones?|propert(?:y|ies)|villas?|condos?|listings?)",
     r"^(?:the\s+)?(first|second|third|fourth|fifth|1st|2nd|3rd|4th|5th)\s+(?:ones?|propert(?:y|ies)|villas?|condos?|listings?)?\s*[\?\!\.]*$",
@@ -121,6 +236,74 @@ PDF_EXPORT_PATTERNS = [
 ]
 
 
+# Words that are filter vocabulary, not project names (EN / PL / TH)
+_FILTER_TYPE_TOKENS = {
+    "villa", "villas", "willa", "wille", "willi", "willę", "willy", "willą", "willem",
+    "condo", "condos", "condominium", "condominiums",
+    "apartment", "apartments", "apartament", "apartamenty", "apartamentów", "apartamentow",
+    "mieszkanie", "mieszkania", "mieszkań", "mieszkán",
+    "property", "properties", "nieruchomość", "nieruchomosc", "nieruchomości", "nieruchomosci",
+    "listing", "listings", "oferta", "oferty", "ofert",
+    "house", "houses", "dom", "domy",
+    "penthouse", "studio", "studios",
+    "วิลล่า", "คอนโด", "คอนโดมิเนียม", "อพาร์ทเมนท์", "บ้าน",
+}
+
+_SHOW_SEARCH_VERBS = re.compile(
+    r"\b(?:show\s+me|find|search|looking\s+for|list|pokaż|pokaz|zobacz|wyświetl|wyswietl|"
+    r"szukam|szukamy|chcę|chce|daj\s+mi|znajdź|znajdz|ค้นหา|แสดง|ขอดู|หา)\b",
+    re.IGNORECASE,
+)
+
+
+def message_looks_like_filter_search(message: str) -> bool:
+    """
+    True when the message is a location/type/budget/bedroom search (EN or PL),
+    not a bare property name like "Anava" or "Satoshi Residence".
+    Used to stop Polish "Pokaż wille w Phuket..." from being treated as a name lookup.
+    """
+    text = (message or "").strip()
+    if not text:
+        return False
+    filters = extract_search_filters_deterministic(text)
+    has_loc = bool(filters.get("location") or filters.get("foreign_location") or filters.get("is_broad_thailand"))
+    has_type = bool(filters.get("property_type") or filters.get("is_multiple_types"))
+    has_budget = filters.get("max_price") is not None or filters.get("min_price") is not None
+    has_beds = filters.get("bedrooms") is not None
+    has_amenity = bool(
+        filters.get("required_amenities")
+        or filters.get("has_pool")
+        or filters.get("beach_access")
+        or filters.get("sea_view")
+    )
+    has_show = bool(_SHOW_SEARCH_VERBS.search(text))
+
+    # Strong signals: location + (type|budget|beds|amenity)
+    if has_loc and (has_type or has_budget or has_beds or has_amenity):
+        return True
+    # Type + budget/beds without needing location
+    if has_type and (has_budget or has_beds):
+        return True
+    # "Pokaż/Show me" + any structured filter
+    if has_show and (has_loc or has_type or has_budget or has_beds or has_amenity):
+        return True
+    # Captured phrase is only filter vocabulary (e.g. "wille w Phuket")
+    tokens = [t for t in re.split(r"[^\wąćęłńóśźżĄĆĘŁŃÓŚŹŻ]+", text.lower()) if t]
+    content = [t for t in tokens if t not in {
+        "w", "we", "na", "do", "od", "z", "za", "po", "przy", "dla", "o", "i", "a", "the", "a", "an",
+        "in", "at", "for", "under", "below", "up", "to", "me", "my", "some", "any",
+        "mln", "m", "million", "milionów", "milionow", "miliony", "thb", "baht", "eur", "usd", "pln",
+        "pokaż", "pokaz", "zobacz", "show", "find", "search",
+    } and not t.isdigit()]
+    if content and all(t in _FILTER_TYPE_TOKENS or t in {
+        "phuket", "samui", "bangkok", "pattaya", "phangan", "thailand", "tajlandia",
+        "koh", "layan", "karon", "maenam", "ภูเก็ต", "สมุย",
+    } for t in content):
+        if has_loc or has_type:
+            return True
+    return False
+
+
 def detect_deterministic_intent(
     message: str,
     stored_state: Optional[Dict[str, Any]] = None
@@ -179,13 +362,15 @@ def detect_deterministic_intent(
         if re.search(pat, msg_low):
             return IntentType.PROPERTY_SEARCH, {"show_all": True}
 
-    # 1.1 Show More / Pagination
+    # 1.1 Show More / Pagination / "any other" alternatives
     for pat in SHOW_MORE_PATTERNS:
         if re.search(pat, msg_low):
             curr_offset = state.get("pagination_offset", 0)
             return IntentType.SHOW_MORE, {
                 "offset": curr_offset + state.get("limit", 4),
-                "limit": state.get("limit", 4)
+                "limit": state.get("limit", 4),
+                "reject_active": message_rejects_active_property(msg_low),
+                "reuse_active_filters": True,
             }
 
     # 1.2 PDF / Brochure request — detect and extract target property ID
@@ -269,7 +454,13 @@ def detect_deterministic_intent(
         "villas", "villa", "condo", "condominium", "properties", "property", "more",
         "options", "results", "listings", "first properties", "second properties",
         "third properties", "first ones", "second ones", "third ones",
+        # Polish type / listing vocabulary (never project names)
+        "willa", "wille", "willi", "willę", "willą", "willy",
+        "apartament", "apartamenty", "apartamentów", "apartamentow",
+        "mieszkanie", "mieszkania", "nieruchomości", "nieruchomosci",
+        "oferty", "ofert", "kondominium",
     }
+    _filter_search_message = message_looks_like_filter_search(msg_clean)
     _ORDINAL_WORD_TO_IDX = {
         "FIRST": 0, "1ST": 0, "1": 0, "อันแรก": 0,
         "SECOND": 1, "2ND": 1, "2": 1, "อันที่สอง": 1,
@@ -298,18 +489,38 @@ def detect_deterministic_intent(
                         "from_property_context": True,
                     }
             elif target_raw and target_raw.lower() not in _DETAIL_SKIP_NAMES and len(target_raw) >= 3:
-                # Named project follow-up — map to known session property_id when possible
+                # Polish/EN filter searches ("Pokaż wille w Phuket…") must not become name lookups
+                if _filter_search_message:
+                    break
+                # Named project / slug follow-up — keep explicit token; live lookup overrides active context
                 name_match = re.search(pat, msg_clean, flags=re.IGNORECASE)
                 named = (name_match.group(1).strip() if name_match else target_raw).strip(" .,?!")
+                named_l = named.lower()
+                # Skip if captured "name" is only type/location filter words
+                named_tokens = [t for t in re.split(r"[^\wąćęłńóśźż]+", named_l) if t and len(t) > 1]
+                if named_tokens and all(
+                    t in _FILTER_TYPE_TOKENS
+                    or t in _DETAIL_SKIP_NAMES
+                    or t in {"w", "do", "od", "na", "in", "under", "mln", "thb", "baht", "million"}
+                    or t.isdigit()
+                    for t in named_tokens
+                ):
+                    break
                 mapped_id = None
                 ref_map = (pctx or {}).get("reference_map") or {}
-                named_l = named.lower()
-                for ref, rid in sorted(ref_map.items(), key=lambda kv: len(str(kv[0])), reverse=True):
-                    ref_l = str(ref).lower()
-                    if len(ref_l) >= 3 and (named_l == ref_l or named_l in ref_l or ref_l in named_l):
+                slug_like = bool(re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)+", named_l))
+                # Prefer exact slug/id hit in session ids before fuzzy name map
+                for rid in (last_result_ids or []):
+                    if named_l == str(rid).lower() or named_l.replace(" ", "-") == str(rid).lower():
                         mapped_id = str(rid)
                         break
-                if not mapped_id:
+                if not mapped_id and not slug_like:
+                    for ref, rid in sorted(ref_map.items(), key=lambda kv: len(str(kv[0])), reverse=True):
+                        ref_l = str(ref).lower()
+                        if len(ref_l) >= 3 and (named_l == ref_l or named_l in ref_l or ref_l in named_l):
+                            mapped_id = str(rid)
+                            break
+                if not mapped_id and not slug_like:
                     for rid in (last_result_ids or []):
                         if named_l.replace(" ", "-") in str(rid).lower() or all(
                             t in str(rid).lower() for t in named_l.split() if len(t) >= 3
@@ -319,7 +530,9 @@ def detect_deterministic_intent(
                 return IntentType.PROPERTY_DETAILS, {
                     "property_name": named,
                     "property_id": mapped_id or named,
-                    "from_property_context": True,
+                    # Slug/exact name must not be overwritten by active property fallback
+                    "from_property_context": not slug_like and not bool(mapped_id),
+                    "explicit_property_token": named,
                 }
 
             if target_id:
@@ -526,14 +739,33 @@ def detect_deterministic_intent(
         "villa in", "condo in", "houses in", "apartments in", "buy a villa", "buy a condo",
         "cheapest", "lowest price", "most affordable", "najtańszy", "najtanszy",
         "anything in", "something in", "options in", "what about", "how about",
+        "okay in", "ok in", "maybe in", "perhaps in",
         "coś w", "cos w", "cokolwiek w", "oferty w",
+        # Polish show/find + type phrases (must beat DETAILS "pokaż <name>" capture)
+        "pokaż wille", "pokaz wille", "pokaż willę", "pokaz willę", "pokaż willi",
+        "pokaż apartament", "pokaz apartament", "pokaż mieszkani", "pokaz mieszkani",
+        "wille w", "willę w", "willi w", "apartamenty w", "mieszkania w",
+        "szukam will", "szukam apartament", "szukam mieszkani", "szukam nieruchom",
         "ค้นหา", "แสดง", "ขอดู", "หาวิลล่า", "หาคอนโด", "พูลวิลล่าใน", "คอนโดใน",
         "วิลล่าใน", "อสังหาริมทรัพย์ใน", "ถูกที่สุด", "ราคาถูกที่สุด", "มีอะไรใน"
     ]
+    if message_looks_like_filter_search(msg_clean):
+        return IntentType.PROPERTY_SEARCH, extract_search_filters_deterministic(message)
     extracted_test = extract_search_filters_deterministic(message)
+    location_followup = bool(extracted_test.get("location")) and (
+        re.search(r"\b(?:in|at|around|near|w|ใน)\b", msg_low)
+        or len(msg_low.split()) <= 6
+        or bool(extracted_test.get("location_fuzzy"))
+        or bool(state.get("active_filters") or state.get("location") or state.get("last_result_ids"))
+    )
     has_search_intent = any(k in msg_low for k in search_keywords) or (
-        ("location" in extracted_test) and ("property_type" in extracted_test or "bedrooms" in extracted_test or "max_price" in extracted_test)
-    ) or ("property_type" in extracted_test and any(k in msg_low for k in ["cheapest", "lowest", "affordable", "najtańszy", "najtanszy", "ถูกที่สุด", "ราคาต่ำสุด"])) or bool(extracted_test.get("foreign_location"))
+        ("location" in extracted_test) and (
+            "property_type" in extracted_test
+            or "bedrooms" in extracted_test
+            or "max_price" in extracted_test
+            or location_followup
+        )
+    ) or ("property_type" in extracted_test and any(k in msg_low for k in ["cheapest", "lowest", "affordable", "najtańszy", "najtanszy", "ถูกที่สุด", "ราคาต่ำสุด"])) or bool(extracted_test.get("foreign_location")) or bool(extracted_test.get("required_amenities"))
     if has_search_intent:
         return IntentType.PROPERTY_SEARCH, extracted_test
 
@@ -555,38 +787,16 @@ def extract_search_filters_deterministic(message: str) -> Dict[str, Any]:
         "thb": 1.0, "baht": 1.0, "บาท": 1.0
     }
 
-    # Location (English / Polish / Thai)
-    destinations = [
-        ("choeng thale", "Bang Tao"), ("cherngtalay", "Bang Tao"), ("เชิงทะเล", "Bang Tao"),
-        ("bang tao", "Bang Tao"), ("bangtao", "Bang Tao"), ("บางเทา", "Bang Tao"),
-        ("layan", "Layan"), ("ลายัน", "Layan"),
-        ("karon", "Karon"), ("กะรน", "Karon"),
-        ("rawai", "Rawai"), ("ราไวย์", "Rawai"),
-        ("kamala", "Kamala"), ("กมลา", "Kamala"),
-        ("surin", "Surin"), ("สุรินทร์", "Surin"),
-        ("patong", "Patong"), ("ป่าตอง", "Patong"),
-        ("kata", "Kata"), ("กะตะ", "Kata"),
-        ("nai harn", "Nai Harn"), ("ในหาน", "Nai Harn"),
-        ("phuket", "Phuket"), ("ภูเก็ต", "Phuket"),
-        ("maenam", "Maenam"), ("แม่น้ำ", "Maenam"),
-        ("bophut", "Bophut"), ("บ่อผุด", "Bophut"),
-        ("chaweng", "Chaweng"), ("เฉวง", "Chaweng"),
-        ("lamai", "Lamai"), ("ละไม", "Lamai"),
-        ("choeng mon", "Choeng Mon"), ("เชิงมน", "Choeng Mon"),
-        ("plai laem", "Plai Laem"), ("ปลายแหลม", "Plai Laem"),
-        ("samui", "Koh Samui"), ("koh samui", "Koh Samui"), ("เกาะสมุย", "Koh Samui"), ("สมุย", "Koh Samui"),
-        ("phangan", "Koh Phangan"), ("koh phangan", "Koh Phangan"), ("เกาะพะงัน", "Koh Phangan"), ("พะงัน", "Koh Phangan"),
-        ("pattaya", "Pattaya"), ("พัทยา", "Pattaya"),
-        ("bangkok", "Bangkok"), ("กรุงเทพ", "Bangkok"), ("กรุงเทพฯ", "Bangkok"),
-        ("hua hin", "Hua Hin"), ("หัวหิน", "Hua Hin"),
-        ("krabi", "Krabi"), ("กระบี่", "Krabi"),
-        ("chiang mai", "Chiang Mai"), ("เชียงใหม่", "Chiang Mai"),
-        ("phang nga", "Phang Nga"), ("พังงา", "Phang Nga")
-    ]
-    for kw, val in destinations:
+    # Location (English / Polish / Thai) — exact then fuzzy (puket → Phuket)
+    for kw, val in sorted(LOCATION_ALIASES, key=lambda kv: len(kv[0]), reverse=True):
         if kw in msg_low:
             filters["location"] = val
             break
+    if not filters.get("location"):
+        fuzzy_loc = fuzzy_resolve_location(message)
+        if fuzzy_loc:
+            filters["location"] = fuzzy_loc
+            filters["location_fuzzy"] = True
 
     if not filters.get("location"):
         foreign_destinations = [
@@ -625,8 +835,15 @@ def extract_search_filters_deterministic(message: str) -> Dict[str, Any]:
             filters["location"] = None
 
     # Property Type (English / Polish / Thai)
-    has_villa = any(k in msg_low for k in ["villa", "villas", "willa", "wille", "willi", "วิลล่า", "พูลวิลล่า", "บ้าน"])
-    has_condo = any(k in msg_low for k in ["condo", "condos", "condominium", "condominiums", "apartment", "apartments", "apartament", "apartamenty", "mieszkanie", "mieszkania", "คอนโด", "คอนโดมิเนียม", "อพาร์ทเมนท์", "อพาร์ตเมนต์"])
+    has_villa = any(k in msg_low for k in [
+        "villa", "villas", "willa", "wille", "willi", "willę", "willą", "willy",
+        "วิลล่า", "พูลวิลล่า", "บ้าน",
+    ])
+    has_condo = any(k in msg_low for k in [
+        "condo", "condos", "condominium", "condominiums", "apartment", "apartments",
+        "apartament", "apartamenty", "apartamentów", "apartamentow", "kondominium",
+        "mieszkanie", "mieszkania", "คอนโด", "คอนโดมิเนียม", "อพาร์ทเมนท์", "อพาร์ตเมนต์",
+    ])
     if has_villa and has_condo:
         filters["property_type"] = None
         filters["is_multiple_types"] = True
@@ -635,8 +852,24 @@ def extract_search_filters_deterministic(message: str) -> Dict[str, Any]:
     elif has_condo:
         filters["property_type"] = "Condominium"
 
-    # Bedrooms
-    bed_match = re.search(r"(\d+)\s*(?:bed|bedroom|br|sypialn|pokoj|ห้องนอน|ห้อง)", msg_low)
+    # Amenity requests (gym, pool, spa, parking, …) → canonical keys for search
+    try:
+        from app.services.amenity_service import extract_requested_amenities
+        req_am = extract_requested_amenities(message)
+        if req_am:
+            filters["required_amenities"] = req_am
+            if "pool" in req_am or "pool_private" in req_am:
+                filters["has_pool"] = True
+            if "beach_access" in req_am:
+                filters["beach_access"] = True
+    except Exception:
+        pass
+
+    # Bedrooms (allow hyphen: "50-bedroom", "3-bed", Polish "3 sypialnie")
+    bed_match = re.search(
+        r"(\d+)\s*[-–]?\s*(?:bedrooms?|beds?|br|sypialni[aeę]?|sypialn|pokoj(?:e|i)?|ห้องนอน|ห้อง)\b",
+        msg_low,
+    )
     if bed_match:
         filters["bedrooms"] = int(bed_match.group(1))
 

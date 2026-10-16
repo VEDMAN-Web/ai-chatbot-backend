@@ -30,7 +30,7 @@ from app.services.i18n_service import (
     resolve_language, get_compact_system_prompt, get_public_system_prompt,
     get_language_switch_confirmation, get_greeting_text, get_off_topic_text,
     get_zero_match_text, get_quick_replies, get_data_unavailable_fallback,
-    build_no_match_reply, build_name_not_found_reply, get_brochure_unavailable_text,
+    build_no_match_reply, build_name_not_found_reply, build_seen_all_reply, build_amenity_none_match_reply, get_brochure_unavailable_text,
     build_consultative_followup_questions, build_encouraging_alternative_intro,
     build_rich_property_recommendation_text
 )
@@ -321,7 +321,7 @@ def format_property_card(p: Property) -> Dict[str, Any]:
         location=f"{p.property_name}, {loc_display}, Thailand"
     )
 
-    return {
+    card = {
         "property_id": p.property_id,
         "name": p.property_name,
         "property_type": p.property_type or "Residential",
@@ -344,8 +344,16 @@ def format_property_card(p: Property) -> Dict[str, Any]:
         "beach_access": bool(p.beach_access),
         "images": img_urls,
         "detail_page_url": p.detail_page_url or settings.get_property_detail_url(p.property_id, country=p.province, city=p.district),
-        "highlights": list(p.highlights or [])[:3]
+        "highlights": list(p.highlights or [])[:3],
+        "amenities": list(getattr(p, "amenities", None) or []),
+        "description": getattr(p, "description", None) or "",
     }
+    try:
+        from app.services.amenity_service import enrich_card_amenity_flags
+        enrich_card_amenity_flags(card)
+    except Exception:
+        pass
+    return card
 
 
 def is_legal_inquiry(message: str) -> bool:
@@ -798,6 +806,135 @@ def get_session_seen_property_ids(conversation: Any) -> List[str]:
     return list(seen)
 
 
+_SLUG_LIKE_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)+$", re.IGNORECASE)
+_EXPLICIT_DETAIL_TOKEN_RE = re.compile(
+    r"(?:view\s+)?(?:details|specs|info)\s+(?:for|about|on)\s+(?:the\s+)?"
+    r"([a-z0-9][\w\-'&.]{2,120})",
+    re.IGNORECASE,
+)
+_ORDINAL_DETAIL_TOKENS = frozenset({
+    "first", "second", "third", "fourth", "fifth",
+    "1st", "2nd", "3rd", "4th", "5th", "1", "2", "3", "4", "5",
+    "pierwsza", "druga", "trzecia", "อันแรก", "อันที่สอง", "อันที่สาม",
+})
+
+
+def extract_explicit_property_token(
+    message: str,
+    args: Optional[Dict[str, Any]] = None,
+) -> Optional[str]:
+    """
+    Pull an explicit slug or property name from the user message / tool args.
+    Used so 'View details for <slug>' never falls back to the active property.
+    """
+    args = args or {}
+    if args.get("explicit_property_token"):
+        tok = str(args.get("explicit_property_token") or "").strip(" .,?!")
+        if tok and tok.lower() not in _ORDINAL_DETAIL_TOKENS:
+            return tok
+
+    msg = (message or "").strip()
+    m = _EXPLICIT_DETAIL_TOKEN_RE.search(msg)
+    if m:
+        tok = m.group(1).strip(" .,?!")
+        if tok and tok.lower() not in _ORDINAL_DETAIL_TOKENS:
+            return tok
+
+    for key in ("property_id", "property_name"):
+        val = str(args.get(key) or "").strip(" .,?!")
+        if not val or val.lower() in _ORDINAL_DETAIL_TOKENS:
+            continue
+        if val.upper().startswith("PROP-") or _SLUG_LIKE_RE.match(val):
+            return val
+        # Exact name passed as property_name when message also names it
+        if key == "property_name" and len(val) >= 3 and val.lower() in msg.lower():
+            return val
+    return None
+
+
+def lookup_property_by_slug_or_name(token: str) -> Optional[Dict[str, Any]]:
+    """
+    Resolve slug / exact name via Firestore id+slug fields and the name index.
+    Never invents a hit. Returns a normalized property card dict or None.
+    """
+    raw = (token or "").strip()
+    if not raw or len(raw) < 2:
+        return None
+    try:
+        from app.services.firestore_service import get_property_by_id_from_firestore
+        fs = get_property_by_id_from_firestore(raw)
+        if fs:
+            return fs
+    except Exception as e:
+        logger.warning(f"Firestore slug/name lookup failed for '{raw}': {e}")
+
+    try:
+        from app.services.property_name_index import (
+            ensure_name_index_from_firestore,
+            match_property_name,
+        )
+        from app.services.firestore_service import get_property_by_id_from_firestore
+
+        ensure_name_index_from_firestore()
+        for q in (raw, raw.replace("-", " "), raw.replace("_", " ")):
+            mr = match_property_name(q)
+            if mr.confident and mr.confident.doc_id:
+                fs = get_property_by_id_from_firestore(mr.confident.doc_id)
+                if fs:
+                    return fs
+    except Exception as e:
+        logger.warning(f"Name-index slug lookup failed for '{raw}': {e}")
+    return None
+
+
+def resolve_empty_search_after_seen_exclusion(
+    db: Session,
+    params: PropertyFilterParams,
+    seen_ids: List[str],
+    *,
+    language: str = "en",
+    site_origin: Optional[str] = None,
+    criteria_summary: Optional[str] = None,
+) -> Tuple[str, List[Dict[str, Any]], str]:
+    """
+    When a search with seen-ID exclusion returned no cards, distinguish:
+    - seen_all: matches exist but were all already shown
+    - no_match: nothing matches the filters at all
+    Returns (reply_text, cards, reason).
+    """
+    all_matching = search_properties_unified(
+        db, params, limit=100, exclude_property_ids=None
+    )
+    if not all_matching:
+        return (
+            build_no_match_reply(
+                language=language,
+                site_origin=site_origin,
+                criteria_summary=criteria_summary,
+            ),
+            [],
+            "no_match",
+        )
+    seen_set = {str(s).strip().lower() for s in (seen_ids or []) if s}
+    unseen = [
+        c for c in all_matching
+        if str(c.get("property_id") or "").strip().lower() not in seen_set
+    ]
+    if unseen:
+        return ("", unseen[:4], "unseen_remaining")
+    n = len(all_matching)
+    return (
+        build_seen_all_reply(
+            language=language,
+            site_origin=site_origin,
+            criteria_summary=criteria_summary,
+            total_matching=n,
+        ),
+        [],
+        "seen_all",
+    )
+
+
 def search_properties_unified(
     db: Session,
     params: PropertyFilterParams,
@@ -822,14 +959,23 @@ def search_properties_unified(
     if getattr(settings, "ENABLE_FIRESTORE_SYNC", True):
         try:
             from app.services.firestore_service import search_properties_firestore
+            req_am = list(getattr(params, "required_amenities", None) or [])
+            # Legacy pool/beach flags also implied by canonical amenity requests
+            has_pool_flag = params.has_pool
+            beach_flag = params.beach_access
+            if "pool" in req_am or "pool_private" in req_am:
+                has_pool_flag = True
+            if "beach_access" in req_am:
+                beach_flag = True
             fs_cards = search_properties_firestore(
                 location=params.location,
                 property_type=params.property_type,
                 min_price=float(params.min_price) if params.min_price else None,
                 max_price=float(params.max_price) if params.max_price else None,
                 bedrooms=int(params.bedrooms) if params.bedrooms and str(params.bedrooms).isdigit() else None,
-                has_pool=params.has_pool,
-                beach_access=params.beach_access,
+                has_pool=has_pool_flag,
+                beach_access=beach_flag,
+                required_amenities=req_am or None,
                 query=getattr(params, "query", None),
                 websites=getattr(params, "websites", None),
                 target="user",
@@ -1260,6 +1406,16 @@ def is_off_topic_query(message: str) -> bool:
     if any(p in msg for p in health_patterns):
         return True
 
+    # 5a. Fuzzy Thailand city (puket / phucket / pattya) is on-topic search context
+    try:
+        from app.services.intent_router import fuzzy_resolve_location, message_rejects_active_property
+        if fuzzy_resolve_location(msg):
+            return False
+        if message_rejects_active_property(msg):
+            return False
+    except Exception:
+        pass
+
     # 5. Check for ANY on-topic Thailand or real estate signals
     on_topic_keywords = [
         # Thailand locations
@@ -1335,10 +1491,13 @@ def is_off_topic_query(message: str) -> bool:
     re_followup_ok = [
         "tell me more", "more about", "more details", "the first", "the second", "the third",
         "this one", "that one", "this property", "that property", "this villa", "that villa",
-        "which one", "show me more", "any more", "how much", "what about the", "floor plan",
+        "which one", "show me more", "any more", "any other", "show me other", "show me others",
+        "different ones", "something else", "instead of this", "don't like this", "dont like this",
+        "how much", "what about the", "floor plan",
         "brochure", "viewing", "schedule", "cheaper", "more options", "compare",
         "pierwsz", "drug", "trzec", "więcej o", "wiecej o", "opowiedz", "szczegół",
         "ta oferta", "ta willa", "อันแรก", "อันที่สอง", "รายละเอียด", "เพิ่มเติม", "เปรียบเทียบ",
+        "อย่างอื่น", "รายการอื่น", "inne oferty", "coś innego",
     ]
     if any(f in msg for f in re_followup_ok):
         return False
@@ -1597,8 +1756,23 @@ class PublicAgentService:
         criteria_summary: Optional[str] = None,
     ) -> Tuple[str, List[Dict[str, Any]]]:
         """Drop unsafe replies; return honest no-match text and empty cards on failure."""
+        from app.services.reply_validator import sanitize_listing_line_text
+        from app.services.listing_presentation import apply_presentation_to_card
+
         cards = list(cards or [])
         tenant = _resolve_tenant_for_validation(site_origin)
+        # Presentation clean-up on cards (name/location/highlights/marketing)
+        cleaned_cards = []
+        for c in cards:
+            if isinstance(c, dict):
+                try:
+                    apply_presentation_to_card(c, language=language)
+                except Exception:
+                    pass
+                cleaned_cards.append(c)
+        cards = cleaned_cards
+        # Never repeat guaranteed-return / marketing claims as bot facts
+        reply_text = sanitize_listing_line_text(reply_text or "")
         # Drop null-price cards from budget searches before validation when possible
         filters = dict(applied_filters or {})
         if filters.get("max_price") is not None or filters.get("min_price") is not None:
@@ -1665,6 +1839,17 @@ class PublicAgentService:
         if tool_name == "search_properties":
             # 1. Direct query / project name check (e.g. '15 Sukhumvit Residences', 'Sea Heaven')
             query_term = args.get("query") or args.get("property_name") or args.get("project_name")
+            from app.services.intent_router import (
+                extract_search_filters_deterministic,
+                message_looks_like_filter_search,
+            )
+            # Polish/EN filter phrases must not be treated as project names
+            if query_term and message_looks_like_filter_search(str(query_term)):
+                derived = extract_search_filters_deterministic(str(query_term))
+                for k, v in derived.items():
+                    if k not in args or args.get(k) in (None, "", []):
+                        args[k] = v
+                query_term = None
             if query_term:
                 from app.services.firestore_service import get_property_by_id_from_firestore
                 fs_single = get_property_by_id_from_firestore(str(query_term))
@@ -1709,6 +1894,15 @@ class PublicAgentService:
             elif "max_price" in stored_prefs and stored_prefs["max_price"] is not None:
                 max_p = Decimal(str(stored_prefs["max_price"]))
 
+            tool_amenities = list(args.get("required_amenities") or [])
+            if not tool_amenities:
+                try:
+                    from app.services.amenity_service import extract_requested_amenities
+                    tool_amenities = extract_requested_amenities(
+                        str(args.get("query") or args.get("property_name") or "")
+                    )
+                except Exception:
+                    tool_amenities = []
             params = PropertyFilterParams(
                 location=loc,
                 province=args.get("province"),
@@ -1722,6 +1916,7 @@ class PublicAgentService:
                 max_area=Decimal(str(args["max_area"])) if args.get("max_area") else None,
                 has_pool=args.get("has_pool"),
                 beach_access=args.get("beach_access"),
+                required_amenities=tool_amenities or None,
                 query=query_term,
                 status=args.get("status"),
                 limit=6
@@ -1777,7 +1972,8 @@ class PublicAgentService:
                 ]
             }
             # Named search with zero confident matches: honest message + Did you mean (no invented facts)
-            if query_term and not matched_cards:
+            # But if the query also looks like filters and we somehow still have zero, skip name-not-found
+            if query_term and not matched_cards and not message_looks_like_filter_search(str(query_term)):
                 from app.services.property_name_index import (
                     get_last_name_search_suggestions,
                     get_last_name_search_candidates,
@@ -1828,7 +2024,7 @@ class PublicAgentService:
                         "location": fs_prop.get("location"),
                         "status": fs_prop.get("status"),
                         "description": fs_prop.get("description") or fs_prop.get("name"),
-                        "ownership": "Freehold / Leasehold",
+                        "ownership": (fs_prop.get("ownership") or fs_prop.get("ownership_type") or None),
                         "amenities": fs_prop.get("highlights", []),
                         "investment_info": f"Expected ROI: {fs_prop.get('expected_roi') or 'N/A'}",
                         "detail_page_url": fs_prop.get("detail_page_url")
@@ -2636,10 +2832,23 @@ class PublicAgentService:
         start_time: float,
         language: str = "en"
     ) -> Dict[str, Any]:
-        """Handles pagination and 'show more' requests deterministically, strictly excluding any properties already shown in this chat."""
+        """Handles pagination and 'show more' / 'any other' requests, excluding already-shown IDs."""
         stored_prefs = dict(conversation.preferences or {})
-        seen_ids = get_session_seen_property_ids(conversation)
+        seen_ids = list(get_session_seen_property_ids(conversation))
         cache_hit = False
+
+        # Reject current focused property → force-exclude it for alternatives
+        if args.get("reject_active"):
+            pctx_reject = load_property_context(conversation)
+            reject_ids = []
+            if pctx_reject.active_property_id:
+                reject_ids.append(str(pctx_reject.active_property_id))
+            for pid in (stored_prefs.get("selected_property_ids") or []):
+                if pid:
+                    reject_ids.append(str(pid))
+            for pid in reject_ids:
+                if pid not in seen_ids:
+                    seen_ids.append(pid)
 
         active_filters = dict(stored_prefs.get("active_filters", {}))
         loc = active_filters.get("location") or stored_prefs.get("location")
@@ -2647,6 +2856,18 @@ class PublicAgentService:
         bedrooms = active_filters.get("bedrooms") or stored_prefs.get("bedrooms_num")
         max_p = Decimal(str(active_filters["max_price"])) if active_filters.get("max_price") else (Decimal(str(stored_prefs["budget_max"])) if stored_prefs.get("budget_max") else None)
         has_pool = active_filters.get("has_pool", stored_prefs.get("has_pool"))
+
+        # Persist last search filters so follow-ups keep reusing them
+        stored_prefs["active_filters"] = {
+            "location": loc,
+            "property_type": p_type,
+            "bedrooms": bedrooms,
+            "max_price": float(max_p) if max_p is not None else None,
+            "has_pool": has_pool,
+        }
+        if loc:
+            stored_prefs["location"] = loc
+        conversation.preferences = stored_prefs
 
         params = PropertyFilterParams(
             location=loc,
@@ -2659,6 +2880,7 @@ class PublicAgentService:
         cards = search_properties_unified(db, params, limit=4, exclude_property_ids=seen_ids)
         relaxed_filter_label = None
         used_relaxed_alternatives = False
+        empty_reason = None
 
         # Exactly one relaxed filter when narrow sub-district yields nothing: broaden to Phuket
         if not cards and loc in ["Bang Tao", "Choeng Thale", "Layan", "Kamala", "Surin", "Rawai", "Karon", "Patong"]:
@@ -2717,26 +2939,51 @@ class PublicAgentService:
             stored_prefs["seen_property_ids"] = new_seen
             stored_prefs["last_result_ids"] = [c["property_id"] for c in cards]
         else:
-            cards = []
-            reply_text = build_no_match_reply(
+            # Distinguish true zero-match vs all matches already shown this session
+            reply_text, recovered, empty_reason = resolve_empty_search_after_seen_exclusion(
+                db,
+                params,
+                seen_ids,
                 language=language,
                 site_origin=conversation.site_origin,
                 criteria_summary=criteria_summary,
             )
+            if empty_reason == "unseen_remaining" and recovered:
+                cards = recovered
+                empty_reason = None
+                reply_text = build_rich_property_recommendation_text(
+                    cards=cards,
+                    language=language,
+                    is_alternative=False,
+                    is_sparse=(not loc) or (not max_p) or (not bedrooms),
+                    searched_location=loc,
+                    searched_bedrooms=bedrooms,
+                    searched_budget=float(max_p) if max_p else None,
+                    site_origin=conversation.site_origin,
+                )
+                reply_text = ensure_structured_response(
+                    reply_text, cards=cards, user_message=user_message, language=language
+                )
+                new_seen = list(set(seen_ids + [c["property_id"] for c in cards]))
+                stored_prefs["seen_property_ids"] = new_seen
+                stored_prefs["last_result_ids"] = [c["property_id"] for c in cards]
+            else:
+                cards = []
 
-        reply_text, cards = self._validate_or_fallback(
-            reply_text,
-            cards,
-            language=language,
-            site_origin=conversation.site_origin,
-            applied_filters={
-                "location": loc,
-                "property_type": p_type,
-                "bedrooms": bedrooms,
-                "max_price": float(max_p) if max_p is not None else None,
-            },
-            criteria_summary=criteria_summary,
-        )
+        if empty_reason != "seen_all":
+            reply_text, cards = self._validate_or_fallback(
+                reply_text,
+                cards,
+                language=language,
+                site_origin=conversation.site_origin,
+                applied_filters={
+                    "location": loc,
+                    "property_type": p_type,
+                    "bedrooms": bedrooms,
+                    "max_price": float(max_p) if max_p is not None else None,
+                },
+                criteria_summary=criteria_summary,
+            )
 
         append_conversation_turn(
             db=db,
@@ -2792,7 +3039,88 @@ class PublicAgentService:
         pid = args.get("property_id") or args.get("property_name")
         pname = args.get("property_name")
         ordinal_index = args.get("ordinal_index")
-        if ordinal_index is not None:
+        card = None
+        p_name = None
+        p_id = None
+        p_loc = None
+        p_price = None
+        p_beds = None
+        p_area = None
+        p_status = None
+        p_owner = None
+        p_high = []
+        p_desc = ""
+        explicit_resolved = False
+
+        # TASK 1: Explicit slug / name in the message always overrides active property
+        explicit_token = extract_explicit_property_token(user_message, args)
+        if explicit_token:
+            fs_card = lookup_property_by_slug_or_name(explicit_token)
+            if fs_card and isinstance(fs_card, dict):
+                card = fs_card
+                pid = fs_card.get("property_id") or explicit_token
+                pname = fs_card.get("name") or explicit_token
+                p_name = fs_card.get("name") or fs_card.get("property_name")
+                p_id = fs_card.get("property_id") or pid
+                p_loc = fs_card.get("location")
+                p_price = fs_card.get("price") or fs_card.get("price_display")
+                p_beds = fs_card.get("bedrooms") or fs_card.get("bedrooms_display")
+                p_area = fs_card.get("area") or fs_card.get("area_display")
+                p_status = fs_card.get("status") or "Available"
+                from app.services.listing_presentation import extract_ownership_from_property
+                p_owner = extract_ownership_from_property(fs_card)
+                p_high = fs_card.get("highlights") or []
+                p_desc = fs_card.get("description") or ""
+                explicit_resolved = True
+            else:
+                # If the "name" was actually a filter search (e.g. PL "wille w Phuket"), search instead
+                from app.services.intent_router import message_looks_like_filter_search
+                if message_looks_like_filter_search(user_message):
+                    return self._handle_property_search(
+                        db, conversation, user_message, start_time, language=language
+                    )
+                # Honest not-found — never answer with a different (active) property
+                label = explicit_token
+                reply_text = build_name_not_found_reply(
+                    language=language,
+                    site_origin=getattr(conversation, "site_origin", None),
+                    asked_name=label,
+                    suggestions=[],
+                )
+                pctx = update_rolling_summary(pctx, user_message, reply_text, None)
+                stored_prefs = save_property_context(conversation, pctx)
+                append_conversation_turn(
+                    db=db,
+                    conversation=conversation,
+                    user_message=user_message,
+                    assistant_message=reply_text,
+                    structured_data={"properties": [], "property_ids": []},
+                    new_preferences=stored_prefs,
+                )
+                token_tracker.log_turn(
+                    TurnTokenMetrics(
+                        request_id=f"req_{uuid.uuid4().hex[:8]}",
+                        session_id=conversation.session_id,
+                        conversation_id=str(conversation.id),
+                        intent="property_details",
+                        model="deterministic",
+                        latency_sec=round(time.time() - start_time, 3),
+                    ),
+                    db=db,
+                )
+                return {
+                    "type": "text",
+                    "text": reply_text,
+                    "properties": [],
+                    "quick_replies": self._generate_quick_replies(user_message, [], language=language),
+                    "lead_captured": False,
+                    "preferences": stored_prefs,
+                    "session_id": conversation.session_id,
+                    "conversation_id": str(conversation.id),
+                    "language": language,
+                }
+
+        if not explicit_resolved and ordinal_index is not None:
             batch = []
             for label in ("first property", "second property", "third property", "fourth property", "fifth property"):
                 if pctx.reference_map.get(label):
@@ -2806,8 +3134,14 @@ class PublicAgentService:
             if 0 <= idx < len(batch):
                 pid = batch[idx]
 
-        if not pid or args.get("from_property_context") or (
-            isinstance(pid, str) and not re.match(r"(?i)^prop-", str(pid)) and (" " in str(pid) or not re.search(r"\d", str(pid)))
+        if not explicit_resolved and (
+            not pid
+            or args.get("from_property_context")
+            or (
+                isinstance(pid, str)
+                and not re.match(r"(?i)^prop-", str(pid))
+                and (" " in str(pid) or not re.search(r"\d", str(pid)))
+            )
         ):
             resolved = resolve_property_reference(user_message, pctx, language=language)
             if resolved.ambiguous:
@@ -2831,27 +3165,29 @@ class PublicAgentService:
                 pid = pctx.active_property_id
 
         # Named follow-up like "tell me more about Fantasea Condo" — map shown card name → id
-        for candidate in [pname, pid, user_message]:
-            if not candidate:
-                continue
-            mapped = resolve_name_against_context(str(candidate), pctx, conversation)
-            if mapped:
-                pid = mapped
-                break
-            # Also try extracting quoted / trailing project name from the user message
-            m_name = re.search(
-                r"(?:about|regarding|for|on)\s+(.+?)\s*$",
-                str(candidate),
-                flags=re.IGNORECASE,
-            )
-            if m_name:
-                mapped = resolve_name_against_context(m_name.group(1).strip(" .,?!"), pctx, conversation)
+        # Skip when an explicit slug/name already resolved from live data
+        if not explicit_resolved:
+            for candidate in [pname, pid, user_message]:
+                if not candidate:
+                    continue
+                mapped = resolve_name_against_context(str(candidate), pctx, conversation)
                 if mapped:
                     pid = mapped
                     break
+                # Also try extracting quoted / trailing project name from the user message
+                m_name = re.search(
+                    r"(?:about|regarding|for|on)\s+(.+?)\s*$",
+                    str(candidate),
+                    flags=re.IGNORECASE,
+                )
+                if m_name:
+                    mapped = resolve_name_against_context(m_name.group(1).strip(" .,?!"), pctx, conversation)
+                    if mapped:
+                        pid = mapped
+                        break
 
         # Ordinal phrases that slipped through as names ("first properties")
-        if isinstance(pid, str) and re.search(
+        if not explicit_resolved and isinstance(pid, str) and re.search(
             r"^(?:the\s+)?(first|second|third|fourth|fifth|1st|2nd|3rd|4th|5th)\s+"
             r"(?:ones?|propert(?:y|ies)|villas?|condos?|listings?)$",
             pid.strip(),
@@ -2861,25 +3197,16 @@ class PublicAgentService:
             if ord_resolved.property_id:
                 pid = ord_resolved.property_id
 
-        pname = args.get("property_name") or pid
-        card = None
-        p_name = None
-        p_id = None
-        p_loc = None
-        p_price = None
-        p_beds = None
-        p_area = None
-        p_status = None
-        p_owner = None
-        p_high = []
-        p_desc = ""
+        if not explicit_resolved:
+            pname = args.get("property_name") or pid
 
         # Live authorized fetch only — never use prior assistant text as factual source
         lookup_keys = []
-        for candidate in [pid, pname, args.get("property_name")]:
-            s = str(candidate or "").strip()
-            if s and s not in lookup_keys:
-                lookup_keys.append(s)
+        if not explicit_resolved:
+            for candidate in [pid, pname, args.get("property_name")]:
+                s = str(candidate or "").strip()
+                if s and s not in lookup_keys:
+                    lookup_keys.append(s)
 
         for key in lookup_keys:
             try:
@@ -2896,7 +3223,8 @@ class PublicAgentService:
                 p_beds = live_card.get("bedrooms") or live_card.get("bedrooms_display")
                 p_area = live_card.get("area") or live_card.get("area_display")
                 p_status = live_card.get("status") or "Available"
-                p_owner = live_card.get("ownership") or live_card.get("ownership_type") or "Foreign Freehold / Leasehold available"
+                from app.services.listing_presentation import extract_ownership_from_property
+                p_owner = extract_ownership_from_property(live_card) if isinstance(live_card, dict) else None
                 p_high = live_card.get("highlights") or []
                 p_desc = live_card.get("description") or ""
                 pid = p_id
@@ -2910,7 +3238,12 @@ class PublicAgentService:
                 p_beds = getattr(_rec, "bedrooms_display", None) or "N/A"
                 p_area = getattr(_rec, "area_display", None) or "N/A"
                 p_status = getattr(_rec, "status", None) or "Available"
-                p_owner = getattr(_rec, "ownership_type", None) or "Foreign Freehold / Leasehold available"
+                p_owner = getattr(_rec, "ownership_type", None) or None
+                if p_owner and str(p_owner).strip().lower() in (
+                    "foreign freehold / leasehold available",
+                    "freehold / leasehold",
+                ):
+                    p_owner = None
                 p_high = getattr(_rec, "highlights", None) or []
                 p_desc = getattr(_rec, "description", None) or ""
                 pid = p_id
@@ -2938,7 +3271,8 @@ class PublicAgentService:
                     p_beds = fs_prop.get("bedrooms")
                     p_area = fs_prop.get("area")
                     p_status = fs_prop.get("status") or "Available"
-                    p_owner = "Foreign Freehold / Leasehold available"
+                    from app.services.listing_presentation import extract_ownership_from_property
+                    p_owner = extract_ownership_from_property(fs_prop)
                     p_high = fs_prop.get("highlights") or []
                     p_desc = fs_prop.get("description") or ""
                     pid = p_id or pid
@@ -2957,51 +3291,131 @@ class PublicAgentService:
                     p_beds = prop.bedrooms_display or "N/A"
                     p_area = prop.area_display or "N/A"
                     p_status = prop.status or "Available"
-                    p_owner = prop.ownership_type or "Foreign Freehold / Leasehold available"
+                    from app.services.listing_presentation import extract_ownership_from_property
+                    p_owner = extract_ownership_from_property(card) or (
+                        prop.ownership_type if prop.ownership_type and str(prop.ownership_type).strip().lower()
+                        not in ("foreign freehold / leasehold available", "freehold / leasehold") else None
+                    )
                     p_high = prop.highlights or []
                     p_desc = prop.description or ""
 
         if card:
             focus_q = (args.get("focus_question") or user_message or "").lower()
-            has_pool = bool(card.get("has_pool")) if isinstance(card, dict) else False
-            beach = bool(card.get("beach_access")) if isinstance(card, dict) else False
+            from app.services.amenity_service import (
+                collect_property_amenities,
+                enrich_card_amenity_flags,
+                extract_requested_amenities,
+                property_has_amenity,
+                AMENITY_LABELS_EN,
+            )
+            from app.services.listing_presentation import (
+                apply_presentation_to_card,
+                clean_highlights_for_display,
+                extract_ownership_from_property,
+                pool_display_label,
+                sanitize_marketing_claims,
+            )
+            if isinstance(card, dict):
+                enrich_card_amenity_flags(card)
+                apply_presentation_to_card(card, language=language)
+                p_name = card.get("name") or p_name
+                p_loc = card.get("location") or p_loc
+                p_desc = sanitize_marketing_claims(str(p_desc or card.get("description") or ""), mode="description")
+                p_high = clean_highlights_for_display(p_high or card.get("highlights") or [], prop=card, language=language)
+                p_owner = extract_ownership_from_property(card) or p_owner
+                if p_owner and str(p_owner).strip().lower() in (
+                    "foreign freehold / leasehold available",
+                    "freehold / leasehold",
+                ):
+                    p_owner = None
+            amenity_facts = collect_property_amenities(card if isinstance(card, dict) else {})
+            has_pool = bool(amenity_facts.get("pool") and amenity_facts["pool"].present) or bool(
+                amenity_facts.get("pool_private") and amenity_facts["pool_private"].present
+            )
+            beach = bool(amenity_facts.get("beach_access") and amenity_facts["beach_access"].present)
+            has_parking = bool(amenity_facts.get("parking") and amenity_facts["parking"].present)
+            pool_lab = pool_display_label(card if isinstance(card, dict) else {}, language=language)
 
-            # Focused amenity/price answers from verified fields only — never invent
-            if any(k in focus_q for k in ["pool", "swimming", "basen", "สระ"]):
+            def _amenity_yes_no(canon: str) -> bool:
+                return property_has_amenity(card if isinstance(card, dict) else {}, canon)
+
+            def _amenity_reply(canon: str, yes_en: str, no_en: str, yes_pl: str, no_pl: str, yes_th: str, no_th: str) -> str:
+                ok = _amenity_yes_no(canon)
                 if language == "th":
-                    reply_text = (
-                        f"**{p_name}**: {'มีสระว่ายน้ำส่วนตัวในข้อมูลที่ตรวจสอบแล้วครับ' if has_pool else 'ในฐานข้อมูลที่ตรวจสอบแล้วยังไม่มีข้อมูลว่ามีสระว่ายน้ำส่วนตัว'}\n\n"
-                        f"• **ราคา:** {p_price}\n• **ทำเล:** {p_loc}\n• **ห้องนอน:** {p_beds}"
-                    )
+                    body = yes_th if ok else no_th
                 elif language == "pl":
-                    reply_text = (
-                        f"**{p_name}**: {'Tak — według zweryfikowanych danych posiada prywatny basen.' if has_pool else 'W zweryfikowanej bazie nie ma potwierdzenia prywatnego basenu.'}\n\n"
+                    body = yes_pl if ok else no_pl
+                else:
+                    body = yes_en if ok else no_en
+                return (
+                    f"**{p_name}**: {body}\n\n"
+                    f"• **Price:** {p_price}\n• **Location:** {p_loc}\n• **Bedrooms:** {p_beds}"
+                    if language == "en"
+                    else (
+                        f"**{p_name}**: {body}\n\n"
                         f"• **Cena:** {p_price}\n• **Lokalizacja:** {p_loc}\n• **Sypialnie:** {p_beds}"
+                        if language == "pl"
+                        else (
+                            f"**{p_name}**: {body}\n\n"
+                            f"• **ราคา:** {p_price}\n• **ทำเล:** {p_loc}\n• **ห้องนอน:** {p_beds}"
+                        )
                     )
-                else:
-                    reply_text = (
-                        f"**{p_name}**: {'Yes — verified data confirms a private pool.' if has_pool else 'Verified data does not confirm a private pool for this listing.'}\n\n"
-                        f"• **Price:** {p_price}\n• **Location:** {p_loc}\n• **Bedrooms:** {p_beds}"
-                    )
-            elif any(k in focus_q for k in ["parking", "garage", "ที่จอด", "garaż", "garaz"]):
-                # Only confirm parking when the authorized record documents it — never invent
-                parking_val = None
-                if isinstance(card, dict):
-                    for k in ("has_parking", "parking", "parking_spaces", "amenities"):
-                        if k in card and card.get(k) not in (None, "", []):
-                            parking_val = card.get(k)
-                            break
-                if parking_val is True or (isinstance(parking_val, (int, float)) and parking_val > 0):
-                    reply_text = f"**{p_name}**: Verified data confirms parking ({parking_val})."
-                elif isinstance(parking_val, str) and parking_val.strip():
-                    reply_text = f"**{p_name}**: Verified parking info: {parking_val}."
-                elif isinstance(parking_val, list) and any("park" in str(x).lower() for x in parking_val):
-                    reply_text = f"**{p_name}**: Parking is listed among verified amenities."
-                else:
-                    reply_text = (
-                        f"**{p_name}**: Parking is not documented in the verified database.\n\n"
-                        f"• **Price:** {p_price}\n• **Location:** {p_loc}"
-                    )
+                )
+
+            # Focused amenity/price answers from unified amenity helper — never invent
+            asked_amenities = extract_requested_amenities(focus_q)
+            if any(k in focus_q for k in ["pool", "swimming", "basen", "สระ"]) or "pool" in asked_amenities or "pool_private" in asked_amenities:
+                reply_text = _amenity_reply(
+                    "pool_private" if "private" in focus_q or "pool_private" in asked_amenities else "pool",
+                    "Yes — verified data confirms a pool.",
+                    "A pool is not in our verified data for this listing.",
+                    "Tak — według zweryfikowanych danych posiada basen.",
+                    "Basen nie figuruje w zweryfikowanych danych dla tej oferty.",
+                    "มีสระว่ายน้ำในข้อมูลที่ตรวจสอบแล้วครับ",
+                    "ในฐานข้อมูลที่ตรวจสอบแล้วยังไม่มีข้อมูลว่ามีสระว่ายน้ำ",
+                )
+            elif any(k in focus_q for k in ["parking", "garage", "ที่จอด", "garaż", "garaz"]) or "parking" in asked_amenities:
+                reply_text = _amenity_reply(
+                    "parking",
+                    "Yes — verified data confirms parking.",
+                    "Parking is not in our verified data for this listing.",
+                    "Tak — według zweryfikowanych danych jest parking.",
+                    "Parking nie figuruje w zweryfikowanych danych dla tej oferty.",
+                    "มีที่จอดรถในข้อมูลที่ตรวจสอบแล้วครับ",
+                    "ในฐานข้อมูลที่ตรวจสอบแล้วยังไม่มีข้อมูลที่จอดรถ",
+                )
+            elif any(k in focus_q for k in ["beach", "ชายหาด", "plaża", "plaza"]) or "beach_access" in asked_amenities:
+                reply_text = _amenity_reply(
+                    "beach_access",
+                    "Yes — verified data confirms beach access.",
+                    "Beach access is not in our verified data for this listing.",
+                    "Tak — według zweryfikowanych danych jest dostęp do plaży.",
+                    "Dostęp do plaży nie figuruje w zweryfikowanych danych dla tej oferty.",
+                    "มีทางเข้าชายหาดในข้อมูลที่ตรวจสอบแล้วครับ",
+                    "ในฐานข้อมูลที่ตรวจสอบแล้วยังไม่มีข้อมูลทางเข้าชายหาด",
+                )
+            elif any(k in focus_q for k in ["gym", "fitness", "siłowni", "silowni", "ฟิตเนส", "ยิม"]) or "gym" in asked_amenities:
+                reply_text = _amenity_reply(
+                    "gym",
+                    "Yes — verified data confirms a gym / fitness area.",
+                    "A gym is not in our verified data for this listing.",
+                    "Tak — według zweryfikowanych danych jest siłownia.",
+                    "Siłownia nie figuruje w zweryfikowanych danych dla tej oferty.",
+                    "มีฟิตเนสในข้อมูลที่ตรวจสอบแล้วครับ",
+                    "ในฐานข้อมูลที่ตรวจสอบแล้วยังไม่มีข้อมูลฟิตเนส",
+                )
+            elif asked_amenities:
+                canon = asked_amenities[0]
+                label = AMENITY_LABELS_EN.get(canon, canon)
+                reply_text = _amenity_reply(
+                    canon,
+                    f"Yes — verified data confirms {label.lower()}.",
+                    f"{label} is not in our verified data for this listing.",
+                    f"Tak — według zweryfikowanych danych: {label}.",
+                    f"{label} nie figuruje w zweryfikowanych danych dla tej oferty.",
+                    f"มี{label}ในข้อมูลที่ตรวจสอบแล้วครับ",
+                    f"ในฐานข้อมูลที่ตรวจสอบแล้วยังไม่มีข้อมูลเกี่ยวกับ {label}",
+                )
             elif any(k in focus_q for k in ["price", "cost", "how much", "cena", "ราคา"]) and not any(
                 k in focus_q for k in ["bedroom", "ownership", "status", "sypialn", "własno", "wlasno", "กรรมสิทธิ์"]
             ):
@@ -3028,54 +3442,70 @@ class PublicAgentService:
                     "",
                     _field("Price", "Cena", "ราคา", p_price),
                     _field("Bedrooms", "Sypialnie", "ห้องนอน", p_beds),
-                    _field("Ownership", "Forma własności", "กรรมสิทธิ์", p_owner),
-                    _field("Status", "Status", "สถานะ", p_status),
                 ]
+                if p_owner:
+                    lines.append(_field("Ownership", "Forma własności", "กรรมสิทธิ์", p_owner))
+                lines.append(_field("Status", "Status", "สถานะ", p_status))
                 if "location" in focus_q or "ทำเล" in focus_q:
                     lines.append(_field("Location", "Lokalizacja", "ทำเล", p_loc))
                 reply_text = "\n".join(lines)
             elif language == "th":
-                reply_text = (
-                    f"ข้อมูลจำเพาะที่ผ่านการตรวจสอบสำหรับ **{p_name}** ({p_id}):\n\n"
-                    f"• **ทำเล:** {p_loc}\n"
-                    f"• **ราคา:** {p_price}\n"
-                    f"• **ห้องนอน / พื้นที่ใช้สอย:** {p_beds} | {p_area}\n"
-                    f"• **สถานะ:** {p_status}\n"
-                    f"• **สระว่ายน้ำ:** {'มี' if has_pool else 'ไม่ระบุในฐานข้อมูล'}\n"
-                    f"• **ใกล้ชายหาด:** {'มี' if beach else 'ไม่ระบุในฐานข้อมูล'}\n"
-                    f"• **รูปแบบกรรมสิทธิ์:** {p_owner}\n"
-                    f"• **จุดเด่น:** {', '.join(p_high) if p_high else 'Not documented in verified database'}\n\n"
-                    f"{p_desc}\n\n"
-                    f"คุณต้องการดูผังอาคาร (Floor Plan) เพิ่มเติม หรือต้องการให้นัดหมายเข้าชมโครงการไหมครับ?"
-                )
+                lines_th = [
+                    f"ข้อมูลจำเพาะที่ผ่านการตรวจสอบสำหรับ **{p_name}** ({p_id}):",
+                    "",
+                    f"• **ทำเล:** {p_loc}",
+                    f"• **ราคา:** {p_price}",
+                    f"• **ห้องนอน / พื้นที่ใช้สอย:** {p_beds} | {p_area}",
+                    f"• **สถานะ:** {p_status}",
+                ]
+                if pool_lab:
+                    lines_th.append(f"• **สระว่ายน้ำ:** {pool_lab}")
+                if beach:
+                    lines_th.append("• **ใกล้ชายหาด:** มี")
+                if p_owner:
+                    lines_th.append(f"• **รูปแบบกรรมสิทธิ์:** {p_owner}")
+                if p_high:
+                    lines_th.append(f"• **จุดเด่น:** {', '.join(p_high)}")
+                lines_th.extend(["", p_desc or "", "", "คุณต้องการดูผังอาคาร (Floor Plan) เพิ่มเติม หรือต้องการให้นัดหมายเข้าชมโครงการไหมครับ?"])
+                reply_text = "\n".join(lines_th)
             elif language == "pl":
-                reply_text = (
-                    f"Oto zweryfikowane parametry dla **{p_name}** ({p_id}):\n\n"
-                    f"• **Lokalizacja:** {p_loc}\n"
-                    f"• **Cena:** {p_price}\n"
-                    f"• **Sypialnie / Powierzchnia:** {p_beds} | {p_area}\n"
-                    f"• **Status:** {p_status}\n"
-                    f"• **Prywatny basen:** {'Tak' if has_pool else 'Brak w bazie'}\n"
-                    f"• **Dostęp do plaży:** {'Tak' if beach else 'Brak w bazie'}\n"
-                    f"• **Forma własności:** {p_owner}\n"
-                    f"• **Główne atuty:** {', '.join(p_high) if p_high else 'Brak w bazie'}\n\n"
-                    f"{p_desc}\n\n"
-                    f"Czy chcesz uzyskać więcej szczegółów na temat rzutów pięter lub umówić termin prezentacji z naszym doradcą?"
-                )
+                lines_pl = [
+                    f"Oto zweryfikowane parametry dla **{p_name}** ({p_id}):",
+                    "",
+                    f"• **Lokalizacja:** {p_loc}",
+                    f"• **Cena:** {p_price}",
+                    f"• **Sypialnie / Powierzchnia:** {p_beds} | {p_area}",
+                    f"• **Status:** {p_status}",
+                ]
+                if pool_lab:
+                    lines_pl.append(f"• **Basen:** {pool_lab}")
+                if beach:
+                    lines_pl.append("• **Dostęp do plaży:** Tak")
+                if p_owner:
+                    lines_pl.append(f"• **Forma własności:** {p_owner}")
+                if p_high:
+                    lines_pl.append(f"• **Główne atuty:** {', '.join(p_high)}")
+                lines_pl.extend(["", p_desc or "", "", "Czy chcesz uzyskać więcej szczegółów na temat rzutów pięter lub umówić termin prezentacji z naszym doradcą?"])
+                reply_text = "\n".join(lines_pl)
             else:
-                reply_text = (
-                    f"Here are the verified specifications for **{p_name}** ({p_id}):\n\n"
-                    f"• **Location:** {p_loc}\n"
-                    f"• **Price:** {p_price}\n"
-                    f"• **Bedrooms / Area:** {p_beds} | {p_area}\n"
-                    f"• **Status:** {p_status}\n"
-                    f"• **Private pool:** {'Yes' if has_pool else 'Not documented in verified database'}\n"
-                    f"• **Beach access:** {'Yes' if beach else 'Not documented in verified database'}\n"
-                    f"• **Ownership:** {p_owner}\n"
-                    f"• **Key Highlights:** {', '.join(p_high) if p_high else 'Not documented in verified database'}\n\n"
-                    f"{p_desc}\n\n"
-                    f"Would you like more details regarding floor plans or assistance scheduling a viewing tour?"
-                )
+                lines_en = [
+                    f"Here are the verified specifications for **{p_name}** ({p_id}):",
+                    "",
+                    f"• **Location:** {p_loc}",
+                    f"• **Price:** {p_price}",
+                    f"• **Bedrooms / Area:** {p_beds} | {p_area}",
+                    f"• **Status:** {p_status}",
+                ]
+                if pool_lab:
+                    lines_en.append(f"• **Pool:** {pool_lab}")
+                if beach:
+                    lines_en.append("• **Beach access:** Yes")
+                if p_owner:
+                    lines_en.append(f"• **Ownership:** {p_owner}")
+                if p_high:
+                    lines_en.append(f"• **Key Highlights:** {', '.join(p_high)}")
+                lines_en.extend(["", p_desc or "", "", "Would you like more details regarding floor plans or assistance scheduling a viewing tour?"])
+                reply_text = "\n".join(lines_en)
             cards = [card]
             record_or_update_lead(
                 db=db,
@@ -3273,7 +3703,7 @@ class PublicAgentService:
                     f"| **พื้นที่ใช้สอย** | {p1.area_display or 'ไม่ระบุ'} | {p2.area_display or 'ไม่ระบุ'} |\n"
                     f"| **สระว่ายน้ำส่วนตัว** | {'มี' if p1.has_pool else 'ไม่มี'} | {'มี' if p2.has_pool else 'ไม่มี'} |\n"
                     f"| **สถานะ** | {p1.status or 'พร้อมขาย'} | {p2.status or 'พร้อมขาย'} |\n"
-                    f"| **รูปแบบกรรมสิทธิ์** | {p1.ownership_type or 'Freehold / Leasehold'} | {p2.ownership_type or 'Freehold / Leasehold'} |\n\n"
+                    f"| **รูปแบบกรรมสิทธิ์** | {p1.ownership_type or 'ยืนยันกับที่ปรึกษา'} | {p2.ownership_type or 'ยืนยันกับที่ปรึกษา'} |\n\n"
                     f"ทั้งสองโครงการสร้างตามมาตรฐานคุณภาพในทำเลยอดนิยม "
                     f"คุณต้องการดูผังอาคารเพิ่มเติมหรือนัดหมายเข้าชมโครงการไหมครับ?"
                 )
@@ -3290,7 +3720,7 @@ class PublicAgentService:
                     f"| **Powierzchnia** | {p1.area_display or 'Brak danych'} | {p2.area_display or 'Brak danych'} |\n"
                     f"| **Prywatny basen** | {'Tak' if p1.has_pool else 'Nie'} | {'Tak' if p2.has_pool else 'Nie'} |\n"
                     f"| **Status** | {p1.status or 'Dostępne'} | {p2.status or 'Dostępne'} |\n"
-                    f"| **Forma własności** | {p1.ownership_type or 'Freehold / Leasehold'} | {p2.ownership_type or 'Freehold / Leasehold'} |\n\n"
+                    f"| **Forma własności** | {p1.ownership_type or 'Potwierdź z doradcą'} | {p2.ownership_type or 'Potwierdź z doradcą'} |\n\n"
                     f"Obie inwestycje reprezentują zweryfikowane standardy budowlane w prestiżowych lokalizacjach. "
                     f"Czy chciałbyś zapoznać się ze szczegółowymi rzutami architektonicznymi lub umówić prezentację?"
                 )
@@ -3307,7 +3737,7 @@ class PublicAgentService:
                     f"| **Built Area** | {p1.area_display or 'N/A'} | {p2.area_display or 'N/A'} |\n"
                     f"| **Private Pool** | {'Yes' if p1.has_pool else 'No'} | {'Yes' if p2.has_pool else 'No'} |\n"
                     f"| **Status** | {p1.status or 'Available'} | {p2.status or 'Available'} |\n"
-                    f"| **Ownership** | {p1.ownership_type or 'Freehold / Leasehold'} | {p2.ownership_type or 'Freehold / Leasehold'} |\n\n"
+                    f"| **Ownership** | {p1.ownership_type or 'Confirm with advisor'} | {p2.ownership_type or 'Confirm with advisor'} |\n\n"
                     f"Both developments offer verified construction quality in high-demand investment locations. "
                     f"Would you like to examine the architectural floor plans or schedule a viewing tour?"
                 )
@@ -3769,14 +4199,44 @@ class PublicAgentService:
                     site_origin=conversation.site_origin
                 )
         else:
-            # Exact refine criteria had no production match — never invent/guess alternatives
-            cards = []
-            stored_prefs["last_result_ids"] = []
-            reply_text = get_data_unavailable_fallback(
+            # Exact refine with exclusion empty — seen-all vs true no-match
+            criteria_bits = []
+            if loc:
+                criteria_bits.append(str(loc))
+            if p_type:
+                criteria_bits.append(str(p_type))
+            if bedrooms:
+                criteria_bits.append(f"{bedrooms} bed")
+            if max_p is not None:
+                criteria_bits.append(f"budget <= {max_p}")
+            criteria_summary = ", ".join(criteria_bits) if criteria_bits else None
+            reply_text, recovered, empty_reason = resolve_empty_search_after_seen_exclusion(
+                db,
+                params,
+                seen_ids,
                 language=language,
                 site_origin=getattr(conversation, "site_origin", None),
-                detail=user_message[:120] if user_message else None,
+                criteria_summary=criteria_summary,
             )
+            if empty_reason == "unseen_remaining" and recovered:
+                cards = recovered
+                stored_prefs["seen_property_ids"] = list(
+                    set(seen_ids + [c["property_id"] for c in cards])
+                )
+                stored_prefs["last_result_ids"] = [c["property_id"] for c in cards]
+                reply_text = build_rich_property_recommendation_text(
+                    cards=cards,
+                    language=language,
+                    is_alternative=False,
+                    is_sparse=(not loc) or (not max_p) or (not bedrooms),
+                    location=loc,
+                    budget=max_p,
+                    bedrooms=bedrooms,
+                    site_origin=conversation.site_origin,
+                )
+            else:
+                cards = []
+                stored_prefs["last_result_ids"] = []
 
         updated_prefs = extract_user_preferences(
             user_message=user_message,
@@ -3848,6 +4308,9 @@ class PublicAgentService:
         bedrooms = None
         max_p = None
         has_pool = None
+        beach_access = None
+        required_amenities: List[str] = []
+        amenity_none_match = False
         is_show_all = bool(extracted.get("show_all")) or any(k in user_message.lower() for k in ["show all", "all properties", "view all", "list all", "wszystkie nieruchomości", "wszystkie oferty"])
         foreign_loc = extracted.get("foreign_location")
         if is_show_all:
@@ -3888,13 +4351,21 @@ class PublicAgentService:
             bedrooms = extracted.get("bedrooms") or stored_prefs.get("bedrooms_num")
             max_p = Decimal(str(extracted["max_price"])) if extracted.get("max_price") else (Decimal(str(stored_prefs["budget_max"])) if stored_prefs.get("budget_max") else None)
             has_pool = extracted.get("has_pool", stored_prefs.get("has_pool"))
+            beach_access = extracted.get("beach_access", stored_prefs.get("beach_access"))
+            required_amenities = list(
+                extracted.get("required_amenities")
+                or (stored_prefs.get("active_filters") or {}).get("required_amenities")
+                or []
+            )
 
             search_filters = {
                 "location": loc,
                 "property_type": p_type,
                 "bedrooms": bedrooms,
                 "max_price": float(max_p) if max_p else None,
-                "has_pool": has_pool
+                "has_pool": has_pool,
+                "beach_access": beach_access,
+                "required_amenities": required_amenities or None,
             }
             stored_prefs["active_filters"] = search_filters
             seen_ids = get_session_seen_property_ids(conversation)
@@ -3904,6 +4375,8 @@ class PublicAgentService:
                 bedrooms=bedrooms,
                 max_price=max_p,
                 has_pool=has_pool,
+                beach_access=beach_access,
+                required_amenities=required_amenities or None,
                 offset=0,
                 limit=4
             )
@@ -3913,13 +4386,21 @@ class PublicAgentService:
 
             # Smart fresh criteria recovery: If merged search yielded 0 results because of stale constraints
             # from earlier turns, retry with ONLY the fresh criteria specified in this turn.
-            has_fresh_criteria = bool(extracted.get("location") or extracted.get("property_type") or extracted.get("bedrooms") or extracted.get("max_price") or extracted.get("has_pool"))
+            has_fresh_criteria = bool(
+                extracted.get("location")
+                or extracted.get("property_type")
+                or extracted.get("bedrooms")
+                or extracted.get("max_price")
+                or extracted.get("has_pool")
+                or extracted.get("required_amenities")
+            )
             if not cards and has_fresh_criteria:
                 fresh_loc = extracted.get("location")
                 fresh_type = extracted.get("property_type")
                 fresh_bed = extracted.get("bedrooms")
                 fresh_max_p = Decimal(str(extracted["max_price"])) if extracted.get("max_price") else None
                 fresh_pool = extracted.get("has_pool")
+                fresh_am = list(extracted.get("required_amenities") or [])
 
                 fresh_params = PropertyFilterParams(
                     location=fresh_loc,
@@ -3927,6 +4408,8 @@ class PublicAgentService:
                     bedrooms=fresh_bed,
                     max_price=fresh_max_p,
                     has_pool=fresh_pool,
+                    beach_access=extracted.get("beach_access"),
+                    required_amenities=fresh_am or None,
                     offset=0,
                     limit=4
                 )
@@ -3934,23 +4417,79 @@ class PublicAgentService:
                 if matched_fresh:
                     cards = matched_fresh
                     loc, p_type, bedrooms, max_p, has_pool = fresh_loc, fresh_type, fresh_bed, fresh_max_p, fresh_pool
+                    required_amenities = fresh_am
                     search_filters = {
                         "location": loc,
                         "property_type": p_type,
                         "bedrooms": bedrooms,
                         "max_price": float(max_p) if max_p else None,
-                        "has_pool": has_pool
+                        "has_pool": has_pool,
+                        "required_amenities": required_amenities or None,
                     }
                     stored_prefs["active_filters"] = search_filters
 
+            # Amenity none-match: honest message + labelled alternatives (never fake a gym match)
+            if not cards and required_amenities:
+                from app.services.amenity_service import (
+                    AMENITY_LABELS_EN,
+                    apply_amenity_labels,
+                    filter_cards_by_amenities,
+                )
+                # Same location without amenity filter
+                base_params = PropertyFilterParams(
+                    location=loc,
+                    property_type=p_type,
+                    bedrooms=bedrooms,
+                    max_price=max_p,
+                    offset=0,
+                    limit=6,
+                )
+                same_loc = search_properties_unified(db, base_params, limit=6, exclude_property_ids=None)
+                # Other locations that DO have the amenity
+                other_params = PropertyFilterParams(
+                    location=None,
+                    property_type=p_type,
+                    bedrooms=bedrooms,
+                    max_price=max_p,
+                    required_amenities=required_amenities,
+                    offset=0,
+                    limit=4,
+                )
+                other_match = search_properties_unified(db, other_params, limit=4, exclude_property_ids=None)
+                other_match = [
+                    c for c in other_match
+                    if loc and loc.lower() not in str(c.get("location") or "").lower()
+                ] if loc else other_match
+                alts: List[Dict[str, Any]] = []
+                if other_match:
+                    alts = apply_amenity_labels(other_match[:3], required_amenities, language=language)
+                elif same_loc:
+                    alts = apply_amenity_labels(same_loc[:3], required_amenities, language=language)
+                    # Force "not listed" labels for same-location non-matches
+                    for c in alts:
+                        c["amenity_match"] = False
+                amenity_none_match = True
+                amenity_lab = AMENITY_LABELS_EN.get(required_amenities[0], required_amenities[0])
+                reply_text = build_amenity_none_match_reply(
+                    language=language,
+                    site_origin=getattr(conversation, "site_origin", None),
+                    location=loc,
+                    amenity_label=amenity_lab,
+                    alternatives=alts,
+                )
+                cards = alts
+                search_relaxed_alts = alts
+                search_relaxed_filter = f"amenity:{required_amenities[0]}"
+
             # Zero results only: exactly one relaxed filter (sub-district -> Phuket), never pad silently
-            if not cards and loc in ["Bang Tao", "Choeng Thale", "Layan", "Kamala", "Surin", "Rawai", "Karon"]:
+            if not cards and not amenity_none_match and loc in ["Bang Tao", "Choeng Thale", "Layan", "Kamala", "Surin", "Rawai", "Karon"]:
                 broad_params = PropertyFilterParams(
                     location="Phuket",
                     property_type=p_type,
                     bedrooms=bedrooms,
                     max_price=max_p,
                     has_pool=has_pool,
+                    required_amenities=required_amenities or None,
                     offset=0,
                     limit=3
                 )
@@ -3964,10 +4503,36 @@ class PublicAgentService:
         prompt_tokens = 0
         comp_tokens = 0
         llm_calls = 0
-        reply_text = ""
+        reply_text = reply_text if amenity_none_match else ""
         is_sparse = (not loc) or (not max_p) or (not bedrooms)
 
-        if cards:
+        # Label matching amenity search results (Gym ✓) — never present non-matches as matches
+        if cards and required_amenities and not amenity_none_match:
+            from app.services.amenity_service import (
+                AMENITY_LABELS_EN,
+                apply_amenity_labels,
+                filter_cards_by_amenities,
+            )
+            matching, _non = filter_cards_by_amenities(cards, required_amenities)
+            if matching:
+                cards = apply_amenity_labels(matching, required_amenities, language=language)
+            else:
+                # Safety: never present non-matching cards as if they matched
+                labelled = apply_amenity_labels(cards[:3], required_amenities, language=language)
+                for c in labelled:
+                    c["amenity_match"] = False
+                amenity_lab = AMENITY_LABELS_EN.get(required_amenities[0], required_amenities[0])
+                reply_text = build_amenity_none_match_reply(
+                    language=language,
+                    site_origin=getattr(conversation, "site_origin", None),
+                    location=loc,
+                    amenity_label=amenity_lab,
+                    alternatives=labelled,
+                )
+                cards = labelled
+                amenity_none_match = True
+
+        if cards and not amenity_none_match:
             stored_prefs["seen_property_ids"] = list(set(seen_ids + [c["property_id"] for c in cards]))
             stored_prefs["last_result_ids"] = [c["property_id"] for c in cards]
             # Persistent property context: ordinals for follow-ups; single-result => active focus
@@ -4134,6 +4699,13 @@ class PublicAgentService:
                         bedrooms=bedrooms,
                         site_origin=conversation.site_origin
                     )
+        elif amenity_none_match:
+            # Honest amenity miss already composed; keep labelled alternatives only
+            stored_prefs["last_result_ids"] = [c["property_id"] for c in cards if c.get("property_id")]
+            if cards:
+                stored_prefs["seen_property_ids"] = list(
+                    set(seen_ids + [c["property_id"] for c in cards if c.get("property_id")])
+                )
         else:
             # No exact production match — never invent listings; honest no-match only
             stored_prefs["last_result_ids"] = []

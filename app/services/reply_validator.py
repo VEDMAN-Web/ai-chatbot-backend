@@ -8,7 +8,26 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-from app.services.approved_statements import APPROVED_STATEMENTS
+from app.services.approved_statements import APPROVED_STATEMENTS, DEVELOPER_MARKETING_CLAIM_LABEL
+
+_UNVERIFIED_MARKETING_PATTERNS = [
+    re.compile(p, re.IGNORECASE)
+    for p in (
+        r"zero\s+construction\s+risk",
+        r"immediate\s+rental\s+income(?:\s+from\s+day\s+one)?",
+        r"premium\s+weekly\s+rates?",
+        r"gwarantowane?\s+\d+(?:[.,]\d+)?\s*%",
+        r"guaranteed?\s+\d+(?:[.,]\d+)?\s*%\s*(?:roi|net|return)?",
+        r"guaranteed?\s+(?:rental\s+)?(?:income|yield|return)",
+        r"no\s+construction\s+risk",
+    )
+]
+
+
+def sanitize_listing_line_text(text: str) -> str:
+    """Strip / label investment promises so they are not repeated as bot facts."""
+    from app.services.listing_presentation import sanitize_marketing_claims
+    return sanitize_marketing_claims(text or "", mode="description")
 
 
 def _card_price_numeric(card: Dict[str, Any]) -> Optional[float]:
@@ -191,14 +210,25 @@ def validate_reply(
 
     allowed = _allowed_text_blob(cards, tool_results)
 
+    # b0. Unverified marketing / guaranteed-return claims must not be stated as facts
+    # (allowed only when explicitly labelled as developer marketing claim)
+    low_text = text.lower()
+    for pat in _UNVERIFIED_MARKETING_PATTERNS:
+        for m in pat.finditer(text):
+            window = text[max(0, m.start() - 40) : m.end() + 40].lower()
+            if DEVELOPER_MARKETING_CLAIM_LABEL.lower() in window:
+                continue
+            reasons.append(f"unverified_marketing_claim:{m.group(0)[:60]}")
+
     # b. Percentages / yields only if in retrieved data or APPROVED_STATEMENTS
     for m in re.finditer(r"(\d+(?:\.\d+)?)\s*%", text):
         token = m.group(0).lower().replace(" ", "")
         span_ctx = text[max(0, m.start() - 24): m.end() + 24].lower()
-        if any(k in span_ctx for k in ("yield", "roi", "return", "zwrot", "ผลตอบแทน")):
+        if any(k in span_ctx for k in ("yield", "roi", "return", "zwrot", "ผลตอบแทน", "gwarant")):
             approved_hit = any(token in str(s).lower().replace(" ", "") for s in (APPROVED_STATEMENTS or []))
             in_data = token in allowed.replace(" ", "")
-            if not approved_hit and not in_data:
+            labelled = DEVELOPER_MARKETING_CLAIM_LABEL.lower() in span_ctx
+            if not approved_hit and not in_data and not labelled:
                 reasons.append(f"unapproved_percentage:{m.group(0)}")
 
     # Currency / large money amounts mentioned must appear in allowed blob (digits)

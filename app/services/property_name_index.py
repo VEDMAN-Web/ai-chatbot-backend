@@ -13,6 +13,7 @@ import re
 import threading
 import time
 import unicodedata
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
@@ -22,6 +23,11 @@ logger = logging.getLogger(__name__)
 CACHE_TTL_SEC = 600  # ~10 minutes
 FUZZY_THRESHOLD = 0.86
 FUZZY_GAP = 0.06  # best must beat 2nd by this much for confident fuzzy
+
+# Per-request (contextvar) Did-you-mean meta — never share across concurrent visitors
+_cv_name_suggestions: ContextVar[Optional[Tuple[str, ...]]] = ContextVar("name_suggestions", default=None)
+_cv_name_candidates: ContextVar[Optional[Tuple[Tuple[str, str], ...]]] = ContextVar("name_candidates", default=None)
+_cv_name_query: ContextVar[Optional[str]] = ContextVar("name_query", default=None)
 
 GENERIC_TOKENS = frozenset({
     "villa", "villas", "condo", "condos", "condominium", "condominiums",
@@ -36,6 +42,16 @@ GENERIC_TOKENS = frozenset({
     "widokiem", "morze", "morskie",
 })
 
+# Conversational fillers (PL / EN) — ignored for distinctive token matching
+FILLER_TOKENS = frozenset({
+    "mi", "me", "my", "please", "pls", "a", "an", "the", "to", "for", "about",
+    "show", "tell", "find", "get", "see", "give", "want", "need", "looking",
+    "pokaz", "pokaż", "zobacz", "chce", "chcę", "prosze", "proszę", "o", "i",
+    "daj", "poprosze", "poproszę", "jakis", "jakiś", "jakie", "jaką", "ten", "ta",
+    "to", "tego", "tej", "those", "these", "that", "this", "some", "any",
+    "can", "could", "would", "you", "your", "more", "info", "details", "detail",
+})
+
 # Address / street fragments: do not demote a unique brand hit (e.g. Mirage Sukhumvit 27)
 LOCATIONISH_TOKENS = frozenset({
     "sukhumvit", "silom", "sathorn", "thonglor", "ekkamai", "ari", "onenimman",
@@ -45,23 +61,22 @@ LOCATIONISH_TOKENS = frozenset({
     "naithon", "nathon", "bophut", "maenam", "lamai", "choeng", "mon",
 })
 
-# Last name-search suggestions (for Did-you-mean without rewriting call chains)
-_LAST_NAME_SUGGESTIONS: List[str] = []
-_LAST_NAME_CANDIDATES: List[Dict[str, str]] = []
-_LAST_NAME_QUERY: Optional[str] = None
-
-
 def get_last_name_search_suggestions() -> List[str]:
-    return list(_LAST_NAME_SUGGESTIONS)
+    """Per-request Did-you-mean labels (contextvar; safe under concurrent chats)."""
+    tips = _cv_name_suggestions.get()
+    return list(tips) if tips else []
 
 
 def get_last_name_search_candidates() -> List[Dict[str, str]]:
-    """List of {property_id, name} from the last non-confident name search."""
-    return [dict(c) for c in _LAST_NAME_CANDIDATES]
+    """List of {property_id, name} from this request's non-confident name search."""
+    raw = _cv_name_candidates.get()
+    if not raw:
+        return []
+    return [{"property_id": pid, "name": name} for pid, name in raw]
 
 
 def get_last_name_search_query() -> Optional[str]:
-    return _LAST_NAME_QUERY
+    return _cv_name_query.get()
 
 
 def set_last_name_search_meta(
@@ -69,9 +84,9 @@ def set_last_name_search_meta(
     suggestions: Optional[Sequence[str]] = None,
     candidates: Optional[Sequence[Any]] = None,
 ) -> None:
-    global _LAST_NAME_SUGGESTIONS, _LAST_NAME_QUERY, _LAST_NAME_CANDIDATES
-    _LAST_NAME_QUERY = (query or "").strip() or None
-    cand_dicts: List[Dict[str, str]] = []
+    """Store Did-you-mean meta in the current context only (not process-global)."""
+    q = (query or "").strip() or None
+    cand_pairs: List[Tuple[str, str]] = []
     if candidates:
         for c in candidates:
             if isinstance(c, dict):
@@ -81,12 +96,14 @@ def set_last_name_search_meta(
                 pid = str(getattr(c, "doc_id", "") or "").strip()
                 name = str(getattr(c, "display_name", "") or "").strip()
             if pid and name:
-                cand_dicts.append({"property_id": pid, "name": name})
-    _LAST_NAME_CANDIDATES = cand_dicts
+                cand_pairs.append((pid, name))
     if suggestions is not None:
-        _LAST_NAME_SUGGESTIONS = [str(s).strip() for s in suggestions if str(s).strip()]
+        tips = tuple(str(s).strip() for s in suggestions if str(s).strip())
     else:
-        _LAST_NAME_SUGGESTIONS = [c["name"] for c in cand_dicts]
+        tips = tuple(name for _pid, name in cand_pairs)
+    _cv_name_query.set(q)
+    _cv_name_candidates.set(tuple(cand_pairs) if cand_pairs else ())
+    _cv_name_suggestions.set(tips)
 
 
 def normalize_property_name(text: Optional[str]) -> str:
@@ -111,9 +128,22 @@ def normalize_property_name(text: Optional[str]) -> str:
     return s
 
 
-def distinctive_tokens(text: Optional[str]) -> List[str]:
+def strip_filler_words(text: Optional[str]) -> str:
+    """Drop PL/EN conversational fillers before name matching (e.g. 'mi Anava')."""
     norm = normalize_property_name(text)
-    return [t for t in norm.split() if t and t not in GENERIC_TOKENS and len(t) >= 2]
+    if not norm:
+        return ""
+    kept = [t for t in norm.split() if t and t not in FILLER_TOKENS]
+    return " ".join(kept)
+
+
+def distinctive_tokens(text: Optional[str]) -> List[str]:
+    # Strip fillers first so "mi Anava" / "pokaż mi Anava" keep only "anava"
+    cleaned = strip_filler_words(text)
+    return [
+        t for t in cleaned.split()
+        if t and t not in GENERIC_TOKENS and t not in FILLER_TOKENS and len(t) >= 2
+    ]
 
 
 def _field_strings(data: Dict[str, Any], doc_id: str) -> List[str]:
@@ -164,6 +194,8 @@ class NameMatchResult:
     confident: Optional[NameIndexEntry] = None
     candidates: List[NameIndexEntry] = field(default_factory=list)
     reason: str = ""
+    query: Optional[str] = None
+    suggestions: List[str] = field(default_factory=list)
 
 
 class PropertyNameIndex:
@@ -252,31 +284,33 @@ class PropertyNameIndex:
         self.ensure_fresh()
         q_raw = (query or "").strip()
         if not q_raw:
-            return NameMatchResult(reason="empty")
+            return NameMatchResult(reason="empty", query=None)
 
+        # Exact match uses the full normalized query so "The Ville Condo Samui" still hits.
+        # Token / filler-stripped form handles "mi Anava" / "pokaż mi Anava".
         q_norm = normalize_property_name(q_raw)
+        q_norm_stripped = normalize_property_name(strip_filler_words(q_raw) or q_raw)
         q_tokens = distinctive_tokens(q_raw)
 
-        # Generic-only query: never confident
-        if not q_tokens:
-            set_last_name_search_meta(q_raw, [])
-            return NameMatchResult(reason="generic_only")
-
+        # Generic-only query: never confident (unless exact alias below)
         with self._lock:
             entries = list(self._entries)
 
-        # 1. Exact normalized alias match
-        exact = [e for e in entries if q_norm in e.aliases_norm]
+        # 1. Exact normalized alias match (full or filler-stripped)
+        exact = [
+            e for e in entries
+            if q_norm in e.aliases_norm or (q_norm_stripped and q_norm_stripped in e.aliases_norm)
+        ]
         if len(exact) == 1:
             set_last_name_search_meta(q_raw, [])
-            return NameMatchResult(confident=exact[0], reason="exact")
+            return NameMatchResult(confident=exact[0], reason="exact", query=q_raw, suggestions=[])
         if len(exact) > 1:
             q_slug = re.sub(r"[^a-z0-9]+", "-", q_norm).strip("-")
 
             def _exact_rank(e: NameIndexEntry) -> tuple:
                 disp_norm = normalize_property_name(e.display_name)
                 return (
-                    0 if disp_norm == q_norm else 1,
+                    0 if disp_norm == q_norm or disp_norm == q_norm_stripped else 1,
                     0 if normalize_property_name(e.doc_id) == q_norm or e.doc_id.lower() == q_slug else 1,
                     len(e.display_name),
                     e.doc_id,
@@ -288,7 +322,13 @@ class PropertyNameIndex:
                 confident=exact_sorted[0],
                 candidates=exact_sorted[:3],
                 reason="exact_multi",
+                query=q_raw,
+                suggestions=[],
             )
+
+        if not q_tokens:
+            set_last_name_search_meta(q_raw, [])
+            return NameMatchResult(reason="generic_only", query=q_raw, suggestions=[])
 
         scored: List[Tuple[float, str, NameIndexEntry]] = []
 
@@ -377,12 +417,16 @@ class PropertyNameIndex:
 
         if confident is None:
             set_last_name_search_meta(q_raw, candidates=candidates)
+            tips = [c.display_name for c in candidates]
         else:
             set_last_name_search_meta(q_raw, suggestions=[], candidates=[])
+            tips = []
         return NameMatchResult(
             confident=confident,
             candidates=candidates if confident is None else [],
             reason="token" if best_kind == "token" else "fuzzy",
+            query=q_raw,
+            suggestions=tips,
         )
 
 

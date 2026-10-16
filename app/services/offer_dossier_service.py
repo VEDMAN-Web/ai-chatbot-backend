@@ -669,7 +669,7 @@ def generate_offer_dossier_pdf(
         can.setFont(FONT_BOLD, 9.5)
         can.drawString(50, 296, p_obj.area_display or "120-250 m²")
         can.drawString(170, 296, (p_obj.status or "Gotowe")[:20])
-        can.drawString(300, 296, "Freehold / Leasehold")
+        can.drawString(300, 296, (getattr(p_obj, "ownership_type", None) or "Confirm with advisor")[:28])
         amenity_txt = "Prywatny Basen, Ogród" if p_obj.has_pool else "Siłownia, Recepcja"
         can.drawString(420, 296, amenity_txt)
 

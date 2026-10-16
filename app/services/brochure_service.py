@@ -93,7 +93,7 @@ def _firestore_card_to_brochure_prop(card: Dict[str, Any]) -> SimpleNamespace:
         status=card.get("status") or None,
         price_display=price_display if price_display else None,
         price_numeric_min=card.get("price_numeric_min"),
-        ownership_type=ownership if ownership else _NOT_DOC,
+        ownership_type=ownership if ownership else None,
         has_pool=bool(card.get("has_pool")) if card.get("has_pool") is not None else False,
         developer_name=card.get("developer_name") or card.get("developer") or _NOT_DOC,
         description=card.get("description") or "",
@@ -429,7 +429,7 @@ def _generate_reportlab_brochure_pdf(
         {
             "title": "BEZPIECZEŃSTWO PRAWNE" if lang == "pl" else "LEGAL VERIFICATION",
             "desc": "Pełna weryfikacja dewelopera, statusu gruntów i formy własności chroniącej zagranicznego nabywcę." if lang == "pl" else "Comprehensive developer due diligence, title deed audit, and protected ownership structures.",
-            "val": prop.ownership_type or "Freehold / Leasehold"
+            "val": prop.ownership_type or "Confirm with advisor"
         }
     ]
 
@@ -516,7 +516,7 @@ def _generate_reportlab_brochure_pdf(
         ("ŁAZIENKI", f"{prop.bathrooms or 3} Łazienki"),
         ("POWIERZCHNIA UŻYTKOWA", prop.area_display or f"{prop.area_sqm_min or 250} m²"),
         ("PRYWATNY BASEN", "Tak (System ze słoną wodą)" if prop.has_pool else "Dostępny w projekcie"),
-        ("FORMA WŁASNOŚCI", prop.ownership_type or "Foreign Freehold / Leasehold 90 lat"),
+        ("FORMA WŁASNOŚCI", prop.ownership_type or "Potwierdź z doradcą"),
         ("DEWELOPER", prop.developer_name or "Renomowany deweloper")
     ]
 
