@@ -1,4 +1,6 @@
+import logging
 import os
+import threading
 from fastapi import FastAPI, Depends, Query, HTTPException, status, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -14,6 +16,8 @@ from app.api.v1.chat import router as chat_router
 from app.api.v1.admin import router as admin_router
 from app.api.v1.auth import router as auth_router
 
+logger = logging.getLogger(__name__)
+
 app = FastAPI(
     title="Tajlandia AI Property Intelligence Platform API",
     description="Multi-tenant backend for Public Customer Chatbot & Internal Admin Agent.",
@@ -26,6 +30,21 @@ app = FastAPI(
 static_dir = os.path.join(os.path.dirname(__file__), "static")
 if os.path.exists(static_dir):
     app.mount("/static", StaticFiles(directory=static_dir), name="static")
+
+
+def _prewarm_caches_background() -> None:
+    """Load catalog + name index without blocking startup; never raise."""
+    try:
+        from app.services.firestore_service import prewarm_property_catalog
+        prewarm_property_catalog(target="user")
+    except Exception as e:
+        logger.warning("Startup catalog pre-warm failed (non-fatal): %s", e)
+    try:
+        from app.services.property_name_index import prewarm_property_name_index
+        prewarm_property_name_index(target="user")
+    except Exception as e:
+        logger.warning("Startup name-index pre-warm failed (non-fatal): %s", e)
+
 
 @app.on_event("startup")
 def startup_db_init():
@@ -55,6 +74,16 @@ def startup_db_init():
         print("FastAPI Startup: Verified all admin and user database tables and columns.")
     except Exception as e:
         print(f"FastAPI Startup DB Notice: {e}")
+
+    # Non-blocking cache pre-warm (Firestore may be unavailable in some envs)
+    try:
+        threading.Thread(
+            target=_prewarm_caches_background,
+            daemon=True,
+            name="prewarm-property-caches",
+        ).start()
+    except Exception as e:
+        logger.warning("Could not start cache pre-warm thread: %s", e)
 
 @app.get("/", include_in_schema=False)
 def serve_frontend():

@@ -16,10 +16,20 @@ logger = logging.getLogger(__name__)
 _admin_firestore_client = None
 _user_firestore_client = None
 
-# Short-lived in-memory catalog cache (lazy; concurrent-safe)
+# In-memory catalog cache with single-flight + stale-while-revalidate
 _CATALOG_LOCK = threading.RLock()
 _CATALOG_CACHE: Dict[str, Tuple[float, List[Dict[str, Any]]]] = {}
-_CATALOG_TTL_SEC = 120  # 2 minutes — balances freshness vs 925-doc reload cost
+_CATALOG_INFLIGHT: Dict[str, threading.Event] = {}
+_CATALOG_REFRESHING: set = set()
+# Legacy module constant (tests may read); runtime TTL comes from settings
+_CATALOG_TTL_SEC = 900
+
+
+def _catalog_ttl_sec() -> float:
+    try:
+        return float(getattr(settings, "CATALOG_CACHE_TTL_SEC", 900) or 900)
+    except Exception:
+        return 900.0
 
 
 class FirestoreDatabaseError(Exception):
@@ -385,9 +395,15 @@ def normalize_firestore_project(doc_id: str, data: Dict[str, Any]) -> Dict[str, 
 
 
 def clear_property_catalog_cache() -> None:
-    """Test/helper: drop the short-lived catalog cache."""
+    """Test/helper: drop the catalog cache (does not interrupt in-flight loads)."""
     with _CATALOG_LOCK:
         _CATALOG_CACHE.clear()
+
+
+def _slice_catalog(cached: List[Dict[str, Any]], limit: int) -> List[Dict[str, Any]]:
+    if limit and int(limit) > 0:
+        return list(cached[: int(limit)])
+    return list(cached)
 
 
 def _fetch_properties_from_firestore_uncached(
@@ -396,6 +412,7 @@ def _fetch_properties_from_firestore_uncached(
     active_only: bool = True,
     target: str = "user",
 ) -> List[Dict[str, Any]]:
+    t0 = time.monotonic()
     client = get_firestore_client(target=target)
     if not client:
         logger.warning("Firestore client not available.")
@@ -447,7 +464,44 @@ def _fetch_properties_from_firestore_uncached(
         ]
 
     results.sort(key=lambda p: str(p.get("property_id") or ""))
+    logger.info(
+        "timing.catalog_load duration_sec=%.3f count=%s target=%s city_id=%s",
+        time.monotonic() - t0,
+        len(results),
+        target,
+        city_id or "",
+    )
     return results
+
+
+def _store_catalog_cache(cache_key: str, results: List[Dict[str, Any]]) -> None:
+    with _CATALOG_LOCK:
+        _CATALOG_CACHE[cache_key] = (time.monotonic(), list(results))
+
+
+def _background_refresh_catalog(
+    cache_key: str,
+    limit: int,
+    city_id: Optional[str],
+    active_only: bool,
+    target: str,
+) -> None:
+    try:
+        results = _fetch_properties_from_firestore_uncached(
+            limit=limit, city_id=city_id, active_only=active_only, target=target
+        )
+        _store_catalog_cache(cache_key, results)
+        logger.info(
+            "Catalog cache refreshed in background key=%s count=%s",
+            cache_key,
+            len(results),
+        )
+    except Exception as e:
+        # Failed refresh must never wipe good cached data
+        logger.warning("Background catalog refresh failed (keeping stale): %s", e)
+    finally:
+        with _CATALOG_LOCK:
+            _CATALOG_REFRESHING.discard(cache_key)
 
 
 def fetch_properties_from_firestore(
@@ -458,27 +512,107 @@ def fetch_properties_from_firestore(
 ) -> List[Dict[str, Any]]:
     """
     Fetches real property projects from Firestore `projects` collection.
-    Uses a short-lived in-memory cache (lazy load) so concurrent searches do not
-    each re-stream all ~925 documents. Cache key ignores small `limit` when the
-    caller wants a large catalog slice (search path uses limit=5000).
+
+    Cache behaviour (full catalog fetches, limit >= 500):
+    - Fresh hit: return immediately.
+    - Expired hit (stale-while-revalidate): return stale immediately; one background refresh.
+    - Cold miss: single-flight — only one thread streams Firestore; others wait for that result.
+    - Failed refresh never clears a good cache entry.
     """
     # Cache full-ish catalog fetches; small one-off limits bypass cache
     use_cache = (not limit or int(limit) >= 500) and active_only
     cache_key = f"{target}|{city_id or ''}|{bool(active_only)}"
+    ttl = _catalog_ttl_sec()
+    # Large enough fetch for cache population (search path uses limit=5000)
+    load_limit = max(int(limit) if limit else 5000, 5000) if use_cache else int(limit or 150)
+
     if use_cache:
+        leader = False
+        wait_event: Optional[threading.Event] = None
         with _CATALOG_LOCK:
             hit = _CATALOG_CACHE.get(cache_key)
-            if hit and (time.monotonic() - hit[0]) < _CATALOG_TTL_SEC:
-                cached = hit[1]
-                return list(cached[: int(limit)]) if limit and int(limit) > 0 else list(cached)
+            now = time.monotonic()
+            if hit:
+                ts, cached = hit
+                age = now - ts
+                if age < ttl:
+                    return _slice_catalog(cached, limit)
+                # Stale: serve immediately, refresh in background (single-flight)
+                if cache_key not in _CATALOG_REFRESHING:
+                    _CATALOG_REFRESHING.add(cache_key)
+                    threading.Thread(
+                        target=_background_refresh_catalog,
+                        args=(cache_key, load_limit, city_id, active_only, target),
+                        daemon=True,
+                        name=f"catalog-swr-{cache_key[:24]}",
+                    ).start()
+                return _slice_catalog(cached, limit)
+
+            # Cold miss — single-flight
+            if cache_key in _CATALOG_INFLIGHT:
+                wait_event = _CATALOG_INFLIGHT[cache_key]
+            else:
+                wait_event = threading.Event()
+                _CATALOG_INFLIGHT[cache_key] = wait_event
+                leader = True
+
+        if not leader and wait_event is not None:
+            wait_event.wait(timeout=90.0)
+            with _CATALOG_LOCK:
+                hit = _CATALOG_CACHE.get(cache_key)
+                if hit:
+                    return _slice_catalog(hit[1], limit)
+            # Leader failed with nothing cached — fall through to own load
+            with _CATALOG_LOCK:
+                if cache_key not in _CATALOG_INFLIGHT:
+                    wait_event = threading.Event()
+                    _CATALOG_INFLIGHT[cache_key] = wait_event
+                    leader = True
+                else:
+                    wait_event = _CATALOG_INFLIGHT[cache_key]
+                    leader = False
+            if not leader:
+                wait_event.wait(timeout=90.0)
+                with _CATALOG_LOCK:
+                    hit = _CATALOG_CACHE.get(cache_key)
+                    if hit:
+                        return _slice_catalog(hit[1], limit)
+                raise FirestoreDatabaseError("Catalog load failed (single-flight waiter).")
+
+        try:
+            results = _fetch_properties_from_firestore_uncached(
+                limit=load_limit, city_id=city_id, active_only=active_only, target=target
+            )
+            _store_catalog_cache(cache_key, results)
+            logger.info(
+                "Successfully fetched %s properties from Firestore 'projects' (cold).",
+                len(results),
+            )
+            return _slice_catalog(results, limit)
+        except FirestoreDatabaseError:
+            with _CATALOG_LOCK:
+                hit = _CATALOG_CACHE.get(cache_key)
+                if hit:
+                    logger.warning("Catalog cold load failed; returning existing cache.")
+                    return _slice_catalog(hit[1], limit)
+            raise
+        except Exception as e:
+            logger.error(f"Error fetching properties from Firestore: {e}")
+            with _CATALOG_LOCK:
+                hit = _CATALOG_CACHE.get(cache_key)
+                if hit:
+                    return _slice_catalog(hit[1], limit)
+            raise FirestoreDatabaseError(f"Error communicating with Firestore: {e}")
+        finally:
+            with _CATALOG_LOCK:
+                ev = _CATALOG_INFLIGHT.pop(cache_key, None)
+                if ev is not None:
+                    ev.set()
 
     try:
         results = _fetch_properties_from_firestore_uncached(
             limit=limit, city_id=city_id, active_only=active_only, target=target
         )
-        if use_cache:
-            with _CATALOG_LOCK:
-                _CATALOG_CACHE[cache_key] = (time.monotonic(), list(results))
         logger.info(f"Successfully fetched {len(results)} properties from Firestore 'projects'.")
         return results
     except FirestoreDatabaseError:
@@ -486,6 +620,15 @@ def fetch_properties_from_firestore(
     except Exception as e:
         logger.error(f"Error fetching properties from Firestore: {e}")
         raise FirestoreDatabaseError(f"Error communicating with Firestore: {e}")
+
+
+def prewarm_property_catalog(target: str = "user") -> None:
+    """Best-effort catalog warm — safe to call from a startup background thread."""
+    try:
+        fetch_properties_from_firestore(limit=5000, active_only=True, target=target)
+        logger.info("Property catalog pre-warm complete (target=%s).", target)
+    except Exception as e:
+        logger.warning("Property catalog pre-warm skipped (Firestore unavailable?): %s", e)
 
 
 def score_property_relevance(
@@ -731,11 +874,14 @@ def search_properties_firestore(
         if mr.confident:
             direct_prop = get_property_by_id_from_firestore(mr.confident.doc_id, target=target)
             if direct_prop:
-                set_last_name_search_meta(q_clean, [])
+                set_last_name_search_meta(q_clean, suggestions=[], candidates=[])
                 return _enrich_and_return_one(direct_prop)
+        # Pass candidates (id + name) with suggestions so pending/"yes" confirmation works
+        _dym = list(mr.candidates or [])[:3]
         set_last_name_search_meta(
             q_clean,
-            [c.display_name for c in (mr.candidates or [])[:3]],
+            suggestions=[c.display_name for c in _dym],
+            candidates=_dym,
         )
         return []
 
@@ -761,12 +907,14 @@ def search_properties_firestore(
         if mr.confident:
             direct_prop = get_property_by_id_from_firestore(mr.confident.doc_id, target=target)
             if direct_prop:
-                set_last_name_search_meta(location or loc_clean, [])
+                set_last_name_search_meta(location or loc_clean, suggestions=[], candidates=[])
                 return _enrich_and_return_one(direct_prop)
         # Name-as-location with no confident match: do not treat as geography filter
+        _dym = list(mr.candidates or [])[:3]
         set_last_name_search_meta(
             location or loc_clean,
-            [c.display_name for c in (mr.candidates or [])[:3]],
+            suggestions=[c.display_name for c in _dym],
+            candidates=_dym,
         )
         return []
 
@@ -1294,6 +1442,30 @@ def _conversation_doc_id(session_id: str, agent_type: str = "public") -> str:
     return f"{at}__{clean_sid}"
 
 
+def update_conversation_site_origin_firestore(conversation, site_origin: str) -> None:
+    """Persist the current request's siteOrigin onto the conversation document (merge)."""
+    if conversation is None or not site_origin:
+        return
+    agent_type = getattr(conversation, "agent_type", "public") or "public"
+    client = get_firestore_client(target="admin" if agent_type == "admin" else "user")
+    if not client:
+        return
+    doc_id = getattr(conversation, "id", None) or _conversation_doc_id(
+        getattr(conversation, "session_id", "anonymous"),
+        agent_type,
+    )
+    now_iso = datetime.now(timezone.utc).isoformat()
+    try:
+        client.collection("conversations").document(str(doc_id)).set(
+            {"siteOrigin": site_origin, "updatedAt": now_iso},
+            merge=True,
+        )
+        conversation.site_origin = site_origin
+        conversation.updated_at = now_iso
+    except Exception as e:
+        logger.warning("Failed to update conversation siteOrigin in Firestore: %s", e)
+
+
 def get_or_create_conversation_firestore(
     session_id: str,
     site_origin: Optional[str] = None,
@@ -1302,6 +1474,9 @@ def get_or_create_conversation_firestore(
     """
     Retrieves or creates a conversation in Firestore `conversations`.
     Stores full messageHistory + preferences (property_context). No PostgreSQL.
+
+    Existing docs are rebound to the request site_origin so multi-site session
+    reuse cannot keep a stale brand / advisor email.
     """
     client = get_firestore_client(target="admin" if agent_type == "admin" else "user")
     clean_sid = session_id.strip() if session_id else "anonymous"
@@ -1329,6 +1504,13 @@ def get_or_create_conversation_firestore(
         doc = doc_ref.get()
         if doc.exists:
             data = doc.to_dict() or {}
+            if (data.get("siteOrigin") or "") != clean_origin:
+                data["siteOrigin"] = clean_origin
+                data["updatedAt"] = now_iso
+                try:
+                    doc_ref.set({"siteOrigin": clean_origin, "updatedAt": now_iso}, merge=True)
+                except Exception as e:
+                    logger.warning("Failed to rebind siteOrigin on existing conversation: %s", e)
             return FirestoreConversation(doc.id, data)
 
         # Backward compatible: legacy docs keyed only by session_id (public)
@@ -1338,6 +1520,8 @@ def get_or_create_conversation_firestore(
                 data = legacy.to_dict() or {}
                 data["agentType"] = agent_type
                 data["sessionId"] = clean_sid
+                data["siteOrigin"] = clean_origin
+                data["updatedAt"] = now_iso
                 # Migrate to agent-scoped id
                 doc_ref.set(data, merge=True)
                 return FirestoreConversation(doc_id, data)

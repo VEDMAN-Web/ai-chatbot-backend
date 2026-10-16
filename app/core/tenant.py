@@ -10,10 +10,13 @@ Resolves tenant based on:
 2. Environment configuration (DEFAULT_TENANT / SITE_ORIGIN / BOT_NAME)
 3. Default fallback (tajlandia.com)
 """
+import logging
 import os
 from dataclasses import dataclass
 from typing import Optional, Dict, Any
 from app.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class TenantProfile:
@@ -259,6 +262,13 @@ def resolve_tenant(site_origin: Optional[str] = None) -> TenantProfile:
         for domain, profile in TENANT_REGISTRY.items():
             if domain == raw or raw.endswith(domain) or domain in raw:
                 return _apply_custom_bot_name(profile)
+
+        # Unknown host (e.g. "default", preview vercel.app) — keep default brand, log for ops.
+        logger.warning(
+            "Unknown site_origin=%r — using default tenant brand. "
+            "Check client site_origin / embed settings.",
+            site_origin or raw,
+        )
 
     # Return dynamic default tenant loaded purely from .env
     return get_default_tenant_profile()

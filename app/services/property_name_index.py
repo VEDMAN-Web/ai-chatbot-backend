@@ -20,9 +20,17 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
 
-CACHE_TTL_SEC = 600  # ~10 minutes
+CACHE_TTL_SEC = 600  # legacy default; runtime uses settings.NAME_INDEX_TTL_SEC when available
 FUZZY_THRESHOLD = 0.86
 FUZZY_GAP = 0.06  # best must beat 2nd by this much for confident fuzzy
+
+
+def _name_index_ttl_sec() -> float:
+    try:
+        from app.core.config import settings
+        return float(getattr(settings, "NAME_INDEX_TTL_SEC", CACHE_TTL_SEC) or CACHE_TTL_SEC)
+    except Exception:
+        return float(CACHE_TTL_SEC)
 
 # Per-request (contextvar) Did-you-mean meta — never share across concurrent visitors
 _cv_name_suggestions: ContextVar[Optional[Tuple[str, ...]]] = ContextVar("name_suggestions", default=None)
@@ -84,7 +92,13 @@ def set_last_name_search_meta(
     suggestions: Optional[Sequence[str]] = None,
     candidates: Optional[Sequence[Any]] = None,
 ) -> None:
-    """Store Did-you-mean meta in the current context only (not process-global)."""
+    """
+    Store Did-you-mean meta in the current context only (not process-global).
+
+    Always pass candidates (objects/dicts with id + name) when available.
+    If only display-name suggestions are provided, recover ids from the name index
+    so pending confirmation ("yes") still works.
+    """
     q = (query or "").strip() or None
     cand_pairs: List[Tuple[str, str]] = []
     if candidates:
@@ -101,6 +115,29 @@ def set_last_name_search_meta(
         tips = tuple(str(s).strip() for s in suggestions if str(s).strip())
     else:
         tips = tuple(name for _pid, name in cand_pairs)
+
+    # Recover property ids when callers only passed suggestion labels
+    if tips and not cand_pairs:
+        try:
+            idx = get_property_name_index()
+            entries = list(getattr(idx, "_entries", []) or [])
+            for tip in tips:
+                tip_n = normalize_property_name(tip)
+                if not tip_n:
+                    continue
+                hit = next(
+                    (
+                        e for e in entries
+                        if normalize_property_name(e.display_name) == tip_n
+                        or tip_n in (e.aliases_norm or [])
+                    ),
+                    None,
+                )
+                if hit and hit.doc_id and hit.display_name:
+                    cand_pairs.append((hit.doc_id, hit.display_name))
+        except Exception:
+            pass
+
     _cv_name_query.set(q)
     _cv_name_candidates.set(tuple(cand_pairs) if cand_pairs else ())
     _cv_name_suggestions.set(tips)
@@ -205,6 +242,8 @@ class PropertyNameIndex:
         self._by_id: Dict[str, NameIndexEntry] = {}
         self._loaded_at: float = 0.0
         self._loader: Optional[Callable[[], List[Dict[str, Any]]]] = None
+        self._refreshing = False
+        self._inflight_event: Optional[threading.Event] = None
 
     def configure_loader(self, loader: Callable[[], List[Dict[str, Any]]]) -> None:
         self._loader = loader
@@ -217,6 +256,7 @@ class PropertyNameIndex:
 
     def load_from_rows(self, rows: Sequence[Dict[str, Any]]) -> None:
         """Load from raw project dicts (or CSV-shaped rows with doc_id)."""
+        t0 = time.monotonic()
         entries: List[NameIndexEntry] = []
         by_id: Dict[str, NameIndexEntry] = {}
         for row in rows:
@@ -264,21 +304,88 @@ class PropertyNameIndex:
             self._entries = entries
             self._by_id = by_id
             self._loaded_at = time.time()
-        logger.info("PropertyNameIndex loaded %s entries", len(entries))
+        logger.info(
+            "PropertyNameIndex loaded %s entries (timing.name_index_load duration_sec=%.3f)",
+            len(entries),
+            time.monotonic() - t0,
+        )
 
-    def ensure_fresh(self, force: bool = False) -> None:
-        with self._lock:
-            age = time.time() - self._loaded_at
-            if not force and self._entries and age < CACHE_TTL_SEC:
-                return
-            loader = self._loader
-        if loader is None:
-            return
+    def _run_loader(self, loader: Callable[[], List[Dict[str, Any]]]) -> None:
         try:
             rows = loader()
             self.load_from_rows(rows or [])
         except Exception as e:
-            logger.warning("PropertyNameIndex refresh failed: %s", e)
+            # Failed refresh must never wipe good cached data
+            logger.warning("PropertyNameIndex refresh failed (keeping stale): %s", e)
+
+    def _background_refresh(self, loader: Callable[[], List[Dict[str, Any]]]) -> None:
+        try:
+            self._run_loader(loader)
+        finally:
+            with self._lock:
+                self._refreshing = False
+
+    def ensure_fresh(self, force: bool = False) -> None:
+        """
+        Keep the name index warm with single-flight + stale-while-revalidate.
+        - Fresh: no-op.
+        - Expired with data: return immediately; one background refresh.
+        - Cold / force: only one thread loads; others wait for that result.
+        """
+        ttl = _name_index_ttl_sec()
+        leader = False
+        wait_event: Optional[threading.Event] = None
+        bg_loader: Optional[Callable[[], List[Dict[str, Any]]]] = None
+
+        with self._lock:
+            age = time.time() - self._loaded_at
+            has_data = bool(self._entries)
+            if not force and has_data and age < ttl:
+                return
+
+            loader = self._loader
+            if loader is None:
+                return
+
+            # Stale-while-revalidate: serve existing entries, refresh in background
+            if not force and has_data:
+                if not self._refreshing:
+                    self._refreshing = True
+                    bg_loader = loader
+                # else already refreshing — callers keep using stale
+            else:
+                # Cold miss or forced reload — single-flight
+                if self._refreshing and self._inflight_event is not None:
+                    wait_event = self._inflight_event
+                else:
+                    self._refreshing = True
+                    self._inflight_event = threading.Event()
+                    wait_event = self._inflight_event
+                    leader = True
+
+        if bg_loader is not None:
+            threading.Thread(
+                target=self._background_refresh,
+                args=(bg_loader,),
+                daemon=True,
+                name="name-index-swr",
+            ).start()
+            return
+
+        if not leader and wait_event is not None:
+            wait_event.wait(timeout=90.0)
+            return
+
+        if leader:
+            try:
+                self._run_loader(loader)
+            finally:
+                with self._lock:
+                    self._refreshing = False
+                    ev = self._inflight_event
+                    self._inflight_event = None
+                    if ev is not None:
+                        ev.set()
 
     def match(self, query: str) -> NameMatchResult:
         self.ensure_fresh()
@@ -449,6 +556,7 @@ def default_firestore_name_loader(target: str = "user") -> List[Dict[str, Any]]:
     """
     from app.services.firestore_service import get_firestore_client
 
+    t0 = time.monotonic()
     client = get_firestore_client(target=target)
     if not client:
         return []
@@ -467,6 +575,12 @@ def default_firestore_name_loader(target: str = "user") -> List[Dict[str, Any]]:
         data["doc_id"] = doc.id
         data["id"] = doc.id
         rows.append(data)
+    logger.info(
+        "timing.name_index_stream duration_sec=%.3f count=%s target=%s",
+        time.monotonic() - t0,
+        len(rows),
+        target,
+    )
     return rows
 
 
@@ -475,3 +589,12 @@ def ensure_name_index_from_firestore(target: str = "user", force: bool = False) 
     if idx._loader is None:  # noqa: SLF001 — intentional configure-once
         idx.configure_loader(lambda: default_firestore_name_loader(target=target))
     idx.ensure_fresh(force=force)
+
+
+def prewarm_property_name_index(target: str = "user") -> None:
+    """Best-effort name-index warm — safe for startup background thread."""
+    try:
+        ensure_name_index_from_firestore(target=target, force=True)
+        logger.info("Property name index pre-warm complete (target=%s).", target)
+    except Exception as e:
+        logger.warning("Property name index pre-warm skipped: %s", e)
