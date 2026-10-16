@@ -92,6 +92,47 @@ class ResolveResult:
     used_active_context: bool = False
 
 
+def recover_active_from_history(conversation: Any, ctx: PropertyContext) -> PropertyContext:
+    """
+    If active_property_id is missing, recover from the most recent assistant turn
+    that showed property cards / IDs. Prevents lost follow-ups after location/maps turns.
+    """
+    if ctx.active_property_id:
+        return ctx
+    history = list(getattr(conversation, "message_history", None) or [])
+    for turn in reversed(history[-30:]):
+        if not isinstance(turn, dict) or turn.get("role") != "assistant":
+            continue
+        pids: List[str] = []
+        sd = turn.get("structured_data") or {}
+        if isinstance(sd, dict):
+            for pid in sd.get("property_ids") or []:
+                if pid:
+                    pids.append(str(pid).strip())
+            for p in sd.get("properties") or []:
+                if isinstance(p, dict) and p.get("property_id"):
+                    pids.append(str(p["property_id"]).strip())
+        for p in turn.get("properties") or []:
+            if isinstance(p, dict) and p.get("property_id"):
+                pids.append(str(p["property_id"]).strip())
+            elif isinstance(p, str) and p.strip():
+                pids.append(p.strip())
+        # Dedupe preserve order
+        seen = set()
+        ordered = []
+        for pid in pids:
+            if pid and pid not in seen:
+                seen.add(pid)
+                ordered.append(pid)
+        if len(ordered) == 1:
+            return set_active_property(ctx, ordered[0])
+        if len(ordered) > 1:
+            ctx = touch_discussed(ctx, ordered, refresh_ordinals=True)
+            # Prefer the first card of the latest listing batch as soft active for "it"
+            return set_active_property(ctx, ordered[0])
+    return ctx
+
+
 def load_property_context(conversation: Any) -> PropertyContext:
     prefs = getattr(conversation, "preferences", None) or {}
     raw = prefs.get(CONTEXT_KEY) if isinstance(prefs, dict) else None
@@ -104,7 +145,10 @@ def load_property_context(conversation: Any) -> PropertyContext:
         last = prefs.get("last_result_ids") or []
         if selected:
             ctx.active_property_id = str(selected[0])
+        elif last and len(last) == 1:
+            ctx.active_property_id = str(last[0])
         elif last:
+            # Multiple in last batch — keep ordinals; soft-active = first for pronoun follow-ups
             ctx.active_property_id = str(last[0])
     if not ctx.recently_discussed_ids:
         merged = []
@@ -115,7 +159,11 @@ def load_property_context(conversation: Any) -> PropertyContext:
                     merged.append(s)
         ctx.recently_discussed_ids = merged[:20]
     if not ctx.reference_map and ctx.recently_discussed_ids:
-        ctx.reference_map = _build_ordinal_map(ctx.recently_discussed_ids)
+        # Prefer last_result_ids order for ordinals when available
+        batch = list(prefs.get("last_result_ids") or []) or list(ctx.recently_discussed_ids)
+        ctx.reference_map.update(_build_ordinal_map([str(x) for x in batch if x]))
+    # Last resort: recover from chat history cards
+    ctx = recover_active_from_history(conversation, ctx)
     return ctx
 
 

@@ -302,7 +302,9 @@ def detect_deterministic_intent(
         "that one", "give me that", "show that", "tell me about it", "อันนั้น", "ขออันนี้", "ดูอันนั้น",
         "this property", "that property", "this villa", "that villa", "its price", "its amenities",
         "its location", "does it", "is it ", "has it", "what about it", "does it also",
-    ]):
+        "and does it", "and has it", "where is it", "where is this", "located",
+        "have pool", "has pool", "have a pool", "has a parking", "have parking",
+    ]) or (active_id and re.search(r"\b(pool|parking|price|bedroom|location|beach|amenit)", msg_low)):
         focus = active_id or (last_result_ids[0] if last_result_ids else None)
         if focus:
             return IntentType.PROPERTY_DETAILS, {
