@@ -121,6 +121,42 @@ def validate_reply(
     location = filters.get("location")
     property_type = filters.get("property_type")
     bedrooms = filters.get("bedrooms")
+    asked_name = (
+        filters.get("query")
+        or filters.get("property_name")
+        or filters.get("asked_property_name")
+        or filters.get("name_query")
+    )
+
+    # Named-property search: returned cards must include that property (by name / id).
+    # Otherwise random real listings for a name query would incorrectly pass.
+    if asked_name and str(asked_name).strip():
+        from app.services.property_name_index import (
+            distinctive_tokens,
+            normalize_property_name,
+        )
+
+        asked_norm = normalize_property_name(str(asked_name))
+        asked_tokens = distinctive_tokens(str(asked_name))
+        if asked_tokens:
+            def _card_matches_asked(c: Dict[str, Any]) -> bool:
+                blob = normalize_property_name(
+                    " ".join(
+                        str(c.get(k) or "")
+                        for k in ("name", "property_name", "property_id", "id", "slug")
+                    )
+                )
+                if asked_norm and asked_norm == blob:
+                    return True
+                if asked_norm and asked_norm in blob:
+                    return True
+                card_tokens = set(distinctive_tokens(blob))
+                return bool(asked_tokens) and all(t in card_tokens for t in asked_tokens)
+
+            if cards and not any(_card_matches_asked(c) for c in cards):
+                reasons.append(f"named_property_missing:{str(asked_name).strip()[:80]}")
+            # If there are cards but none match, also fail even when empty? empty is ok for not-found
+            # (honest zero-card reply). Only fail when wrong cards are present.
 
     try:
         max_p = float(max_price) if max_price is not None else None
@@ -186,32 +222,46 @@ def validate_reply(
             if not ok_round:
                 reasons.append(f"price_not_in_data:{chunk[:40]}")
 
-    # Property names from cards that appear partially invented: if reply names a card-like
-    # Title Case phrase of 2+ tokens, require it match a known card name (or be a known filter word)
+    # Property-name check: Title Case phrases that look like project names.
+    # Generic descriptive words never count; only flag when a distinctive leftover
+    # remains and that leftover is not present in cards / tool_results.
     known_names = [
         str(c.get("name") or c.get("property_name") or "").strip().lower()
         for c in cards
         if c.get("name") or c.get("property_name")
     ]
-    skip_name_bits = {
-        "thailand", "phuket", "samui", "bangkok", "pattaya", "koh", "villa", "condo",
-        "verified", "listings", "criteria", "private", "pool", "beach", "access",
+    _GENERIC_NAME_TOKENS = {
+        "luxury", "pool", "villas", "villa", "condo", "condos", "condominium",
+        "apartment", "apartments", "beachfront", "sea", "view", "seaview",
+        "sea-view", "hillside", "modern", "private", "premium", "new",
+        "off-plan", "offplan", "freehold", "leasehold", "phuket", "samui",
+        "bangkok", "pattaya", "thailand", "bang", "tao", "layan", "kamala",
+        "karon", "rawai", "surin", "naithon", "cherngtalay", "real", "estate",
+        "property", "properties", "koh", "verified", "listings", "listing",
+        "criteria", "beach", "access", "residences", "residence",
     }
-    for m in re.finditer(r"\b([A-Z][a-zA-Z0-9]+(?:\s+[A-Z][a-zA-Z0-9]+){1,6})\b", text):
+    _PROJECTISH = ("villa", "villas", "condo", "condos", "residence", "residences", "estate")
+
+    def _distinctive_tokens(phrase_low: str) -> List[str]:
+        # Drop multi-word generics first
+        cleaned = phrase_low.replace("real estate", " ").replace("sea view", " ").replace("sea-view", " ")
+        return [t for t in re.split(r"[^a-z0-9]+", cleaned) if t and t not in _GENERIC_NAME_TOKENS]
+
+    for m in re.finditer(r"\b([A-Z][a-zA-Z0-9]+(?:\s+[A-Z][a-zA-Z0-9\-]+){1,6})\b", text):
         name = m.group(1).strip()
         low = name.lower()
-        if all(tok in skip_name_bits for tok in low.split()):
-            continue
+        distinctive = _distinctive_tokens(low)
+        if not distinctive:
+            continue  # purely generic (e.g. "Luxury Pool Villas", "Phuket Villas")
         if any(low == kn or low in kn or kn in low for kn in known_names):
             continue
-        if not known_names:
-            # No cards: invented named projects are not allowed
-            if any(k in low for k in ("villa", "condo", "residence", "residences", "estate")):
-                reasons.append(f"invented_property_name:{name}")
-        else:
-            # Has cards but mentions an unknown project-like name
-            if any(k in low for k in ("villa", "condo", "residence", "residences", "estate")):
-                reasons.append(f"unknown_property_name:{name}")
+        # Distinctive leftover must appear in allowed blob (card names / tool results)
+        dist_blob = " ".join(distinctive)
+        if dist_blob in allowed or all(tok in allowed for tok in distinctive):
+            continue
+        if any(k in low for k in _PROJECTISH):
+            tag = "invented_property_name" if not known_names else "unknown_property_name"
+            reasons.append(f"{tag}:{name}")
 
     # c. Advisor email must be the current tenant's (if any email is shown)
     emails = re.findall(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", text)

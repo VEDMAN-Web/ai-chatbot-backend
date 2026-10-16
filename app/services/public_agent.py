@@ -30,7 +30,7 @@ from app.services.i18n_service import (
     resolve_language, get_compact_system_prompt, get_public_system_prompt,
     get_language_switch_confirmation, get_greeting_text, get_off_topic_text,
     get_zero_match_text, get_quick_replies, get_data_unavailable_fallback,
-    build_no_match_reply,
+    build_no_match_reply, build_name_not_found_reply, get_brochure_unavailable_text,
     build_consultative_followup_questions, build_encouraging_alternative_intro,
     build_rich_property_recommendation_text
 )
@@ -1622,11 +1622,29 @@ class PublicAgentService:
         if ok:
             return reply_text, cards
         logger.warning("reply_validation_failed reasons=%s", reasons)
-        fallback = build_no_match_reply(
-            language=language,
-            site_origin=site_origin,
-            criteria_summary=criteria_summary,
+        asked = (
+            filters.get("query")
+            or filters.get("property_name")
+            or filters.get("asked_property_name")
+            or criteria_summary
         )
+        name_miss = any(str(r).startswith("named_property_missing:") for r in reasons)
+        if name_miss or (asked and any(str(r).startswith("named_property_missing") for r in reasons)):
+            from app.services.property_name_index import get_last_name_search_suggestions
+            fallback = build_name_not_found_reply(
+                language=language,
+                site_origin=site_origin,
+                asked_name=str(asked) if asked else None,
+                suggestions=get_last_name_search_suggestions(),
+            )
+            # Pending candidates are stored by the caller when conversation is available
+            # (execute_tool / _sync_pending_name_candidates_from_last_search).
+        else:
+            fallback = build_no_match_reply(
+                language=language,
+                site_origin=site_origin,
+                criteria_summary=criteria_summary,
+            )
         if not fallback:
             fallback = (
                 f"I could not verify that information. Our advisor can help: {tenant.advisor_email}"
@@ -1758,6 +1776,32 @@ class PublicAgentService:
                     for c in matched_cards
                 ]
             }
+            # Named search with zero confident matches: honest message + Did you mean (no invented facts)
+            if query_term and not matched_cards:
+                from app.services.property_name_index import (
+                    get_last_name_search_suggestions,
+                    get_last_name_search_candidates,
+                    get_last_name_search_query,
+                )
+                from app.services.name_confirmation import store_pending_name_candidates
+                tips = get_last_name_search_suggestions()
+                cands = get_last_name_search_candidates()
+                lang_pref = (conversation.preferences or {}).get("language") or "en"
+                tool_summary["name_suggestions"] = tips
+                tool_summary["name_candidates"] = cands
+                tool_summary["message"] = build_name_not_found_reply(
+                    language=str(lang_pref),
+                    site_origin=getattr(conversation, "site_origin", None),
+                    asked_name=str(query_term),
+                    suggestions=tips,
+                )
+                tool_summary["properties"] = []
+                if cands:
+                    conversation.preferences = store_pending_name_candidates(
+                        conversation.preferences,
+                        query=str(query_term) or get_last_name_search_query(),
+                        candidates=cands,
+                    )
             return tool_summary, matched_cards, False
 
         elif tool_name == "get_property_by_id":
@@ -2133,6 +2177,17 @@ class PublicAgentService:
                 "language": active_lang
             }
 
+        # 0b. Did-you-mean confirmation follow-up (before greeting so "ok"/"sure" resolve)
+        pending_handled = self._maybe_resolve_pending_name_candidates(
+            db=db,
+            conversation=conversation,
+            user_message=user_message,
+            start_time=start_time,
+            language=active_lang,
+        )
+        if pending_handled is not None:
+            return pending_handled
+
         # 1. Greeting and pleasantry handling (Fast path - never triggers search or off-topic)
         if is_greeting_or_chit_chat(user_message):
             res = self._handle_greeting(db, conversation, user_message, language=active_lang)
@@ -2313,6 +2368,108 @@ class PublicAgentService:
             return self._call_openai(db, conversation, effective_message, raw_user_message=user_message, start_time=start_time, language=active_lang)
         else:
             return self._run_deterministic_retrieval(db, conversation, effective_message, raw_user_message=user_message, start_time=start_time, language=active_lang)
+
+    def _sync_pending_name_candidates_from_last_search(
+        self,
+        conversation: Conversation,
+        asked_name: Optional[str] = None,
+    ) -> None:
+        """Persist Did-you-mean candidates into conversation.preferences when present."""
+        from app.services.property_name_index import (
+            get_last_name_search_candidates,
+            get_last_name_search_query,
+        )
+        from app.services.name_confirmation import store_pending_name_candidates
+
+        cands = get_last_name_search_candidates()
+        if not cands:
+            return
+        conversation.preferences = store_pending_name_candidates(
+            conversation.preferences,
+            query=asked_name or get_last_name_search_query(),
+            candidates=cands,
+        )
+
+    def _clear_pending_name_candidates(self, conversation: Conversation) -> None:
+        from app.services.name_confirmation import clear_pending_name_candidates
+        conversation.preferences = clear_pending_name_candidates(conversation.preferences)
+
+    def _maybe_resolve_pending_name_candidates(
+        self,
+        db: Session,
+        conversation: Conversation,
+        user_message: str,
+        start_time: float,
+        language: str = "en",
+    ) -> Optional[Dict[str, Any]]:
+        """
+        If preferences hold pending_name_candidates from a Did-you-mean turn,
+        resolve yes/ordinal/name, ask which, or clear and continue.
+        Returns a response dict when handled; None to continue normal routing.
+        """
+        from app.services.name_confirmation import (
+            try_resolve_pending_name,
+            clear_pending_name_candidates,
+            PREF_CANDIDATES,
+        )
+
+        prefs = conversation.preferences or {}
+        if not prefs.get(PREF_CANDIDATES):
+            return None
+
+        outcome = try_resolve_pending_name(user_message, prefs, language=language)
+        if outcome.kind == "none":
+            return None
+
+        if outcome.kind == "clear_continue":
+            conversation.preferences = clear_pending_name_candidates(prefs)
+            return None
+
+        if outcome.kind == "ask_which":
+            ask_text = outcome.ask_text or "Which one did you mean?"
+            append_conversation_turn(
+                db=db,
+                conversation=conversation,
+                user_message=user_message,
+                assistant_message=ask_text,
+                new_preferences=dict(conversation.preferences or {}),
+            )
+            token_tracker.log_turn(
+                TurnTokenMetrics(
+                    request_id=f"req_{uuid.uuid4().hex[:8]}",
+                    session_id=conversation.session_id,
+                    conversation_id=str(conversation.id),
+                    intent="pending_name_clarify",
+                    model="deterministic",
+                    latency_sec=round(time.time() - start_time, 3),
+                ),
+                db=db,
+            )
+            return {
+                "type": "text",
+                "text": ask_text,
+                "properties": [],
+                "quick_replies": self._generate_quick_replies(user_message, [], language=language),
+                "lead_captured": False,
+                "preferences": conversation.preferences or {},
+                "session_id": conversation.session_id,
+                "conversation_id": str(conversation.id),
+                "language": language,
+            }
+
+        if outcome.kind == "resolved" and outcome.property_id:
+            conversation.preferences = clear_pending_name_candidates(prefs)
+            return self._handle_property_details(
+                db=db,
+                conversation=conversation,
+                args={"property_id": outcome.property_id},
+                user_message=user_message,
+                start_time=start_time,
+                language=language,
+            )
+
+        conversation.preferences = clear_pending_name_candidates(prefs)
+        return None
 
     def _handle_lead_capture(
         self,
@@ -3331,25 +3488,99 @@ class PublicAgentService:
                 "brochure_property_id": None
             }
 
-        # Property found — fetch property details and record high-intent lead for staff follow-up
+        # Property found — resolve display name (PG or Firestore), then generate brochure
         from app.core.tenant import resolve_tenant
         tenant = resolve_tenant(conversation.site_origin)
 
-        prop = db.query(Property).filter(Property.property_id == prop_id.upper()).first()
+        prop = None
+        try:
+            if db is not None:
+                prop = db.query(Property).filter(Property.property_id == prop_id.upper()).first()
+        except Exception:
+            prop = None
         p_name = prop.property_name if prop else prop_id
         pref_loc = f"{prop.district}, {prop.province}" if prop and prop.district else (prop.province if prop else None)
+        pref_type = prop.property_type if prop else None
+        if not prop and getattr(settings, "ENABLE_FIRESTORE_SYNC", True):
+            try:
+                from app.services.firestore_service import get_property_by_id_from_firestore
+                fs_card = get_property_by_id_from_firestore(str(prop_id).strip())
+                if fs_card:
+                    p_name = fs_card.get("name") or p_name
+                    pref_loc = fs_card.get("location") or pref_loc
+                    pref_type = fs_card.get("property_type") or pref_type
+            except Exception:
+                pass
 
-        # 1. Record lead linked to conversation in PostgreSQL for staff follow-up
+        # Generate 8-page luxury presentation brochure and upload to S3 / storage
+        from app.services.brochure_service import generate_and_upload_brochure
+        lead_name = stored_prefs.get("contact_name") or stored_prefs.get("name")
+        pdf_url = None
+        brochure_ok = False
+        try:
+            brochure_res = generate_and_upload_brochure(
+                db=db,
+                property_id=prop_id,
+                site_origin=conversation.site_origin,
+                language=language,
+                client_name=lead_name
+            )
+            pdf_url = brochure_res.get("file_url") or brochure_res.get("download_url")
+            brochure_ok = bool(pdf_url)
+        except Exception as be:
+            logger.error(f"Failed to generate and upload brochure for {prop_id}: {be}", exc_info=True)
+            brochure_ok = False
+            pdf_url = None
+
+        if not brochure_ok:
+            # Honest failure: no fake download link; do not mark brochure as delivered
+            reply_text = get_brochure_unavailable_text(
+                language=language,
+                site_origin=conversation.site_origin,
+                property_label=p_name,
+            )
+            try:
+                record_or_update_lead(
+                    db=db,
+                    conversation=conversation,
+                    preferred_location=pref_loc,
+                    preferred_type=pref_type,
+                    buying_signal=f"Brochure request failed for {prop_id} ({p_name})",
+                    notes=f"Client asked for brochure for {prop_id} on {tenant.brand_name} but generation failed",
+                )
+            except Exception as le:
+                logger.warning(f"Could not record failed-brochure lead: {le}")
+            append_conversation_turn(
+                db=db, conversation=conversation, user_message=user_message, assistant_message=reply_text
+            )
+            return {
+                "type": "text",
+                "text": reply_text,
+                "properties": [],
+                "quick_replies": [
+                    f"View details for {prop_id}",
+                    "Show villas in Phuket",
+                    "Contact advisor",
+                ],
+                "lead_captured": True,
+                "preferences": stored_prefs,
+                "session_id": conversation.session_id,
+                "conversation_id": str(conversation.id),
+                "language": language,
+                "brochure_property_id": None,
+                "pdf_url": None,
+                "download_url": None,
+            }
+
+        # Success: record lead + mark brochure as delivered
         record_or_update_lead(
             db=db,
             conversation=conversation,
             preferred_location=pref_loc,
-            preferred_type=prop.property_type if prop else None,
+            preferred_type=pref_type,
             buying_signal=f"Requested brochure for {prop_id} ({p_name})",
-            notes=f"Client requested verified property brochure for {prop_id} on {tenant.brand_name} ({tenant.domain})"
+            notes=f"Client requested verified property brochure for {prop_id} on {tenant.brand_name} ({tenant.domain})",
         )
-
-        # 2. Persist requested brochure ID in conversation preferences
         requested = list(stored_prefs.get("brochures_requested") or [])
         if prop_id not in requested:
             requested.append(prop_id)
@@ -3364,26 +3595,10 @@ class PublicAgentService:
                 except Exception:
                     pass
 
-        # Generate 8-page luxury presentation brochure and upload to S3 / storage
-        from app.services.brochure_service import generate_and_upload_brochure
-        lead_name = stored_prefs.get("contact_name") or stored_prefs.get("name")
-        try:
-            brochure_res = generate_and_upload_brochure(
-                db=db,
-                property_id=prop_id,
-                site_origin=conversation.site_origin,
-                language=language,
-                client_name=lead_name
-            )
-            pdf_url = brochure_res.get("file_url") or brochure_res.get("download_url")
-        except Exception as be:
-            logger.error(f"Failed to generate and upload brochure for {prop_id}: {be}", exc_info=True)
-            pdf_url = f"/api/v1/chat/brochure/{prop_id}?site_origin={conversation.site_origin}&session_id={conversation.session_id}"
-
         confirm_msgs = {
-            "en": f"📄 Official brochure for {p_name} - [Download PDF]({pdf_url})",
-            "pl": f"📄 Oficjalna broszura dla {p_name} - [Pobierz PDF]({pdf_url})",
-            "th": f"📄 โบรชัวร์สำหรับ {p_name} - [ดาวน์โหลด PDF]({pdf_url})"
+            "en": f"Official brochure for {p_name} - [Download PDF]({pdf_url})",
+            "pl": f"Oficjalna broszura dla {p_name} - [Pobierz PDF]({pdf_url})",
+            "th": f"โบรชัวร์สำหรับ {p_name} - [ดาวน์โหลด PDF]({pdf_url})",
         }
 
         reply_text = confirm_msgs.get(language, confirm_msgs["en"])
@@ -3994,6 +4209,12 @@ class PublicAgentService:
             applied_filters=search_filters if isinstance(search_filters, dict) else {},
             criteria_summary=", ".join(criteria_bits) if criteria_bits else None,
         )
+        if cards:
+            self._clear_pending_name_candidates(conversation)
+        elif "Did you mean" in (reply_text or "") or "Czy chodziło" in (reply_text or "") or "คุณหมายถึง" in (reply_text or ""):
+            self._sync_pending_name_candidates_from_last_search(conversation)
+            updated_prefs = dict(updated_prefs or {})
+            updated_prefs.update(conversation.preferences or {})
 
         append_conversation_turn(
             db=db,
@@ -4348,13 +4569,22 @@ class PublicAgentService:
                             )
                         })
                     else:
-                        # No production match — honest fallback only; never invent or inject random listings
+                        # Prefer honest Did-you-mean from search_properties when present
                         all_cards = []
-                        final_text = get_data_unavailable_fallback(
-                            language=language,
-                            site_origin=getattr(conversation, "site_origin", None),
-                            detail=(raw_user_message or user_message or "")[:120] or None,
-                        )
+                        name_msg = None
+                        for tr in logged_tool_results:
+                            res = (tr or {}).get("result") or {}
+                            if isinstance(res, dict) and res.get("name_suggestions") is not None:
+                                name_msg = res.get("message")
+                                break
+                        if name_msg:
+                            final_text = name_msg
+                        else:
+                            final_text = get_data_unavailable_fallback(
+                                language=language,
+                                site_origin=getattr(conversation, "site_origin", None),
+                                detail=(raw_user_message or user_message or "")[:120] or None,
+                            )
                         messages_for_second = None
                 if messages_for_second is not None:
                     second_resp = _safe_openai_create(
@@ -4439,6 +4669,19 @@ class PublicAgentService:
             )
             if not all_cards:
                 resp_type = "text"
+            if all_cards:
+                self._clear_pending_name_candidates(conversation)
+            else:
+                asked = (
+                    (search_args or {}).get("query")
+                    or (search_args or {}).get("property_name")
+                    or (raw_user_message or user_message)
+                )
+                self._sync_pending_name_candidates_from_last_search(
+                    conversation, asked_name=str(asked) if asked else None
+                )
+                updated_prefs = dict(updated_prefs or {})
+                updated_prefs.update(conversation.preferences or {})
 
             append_conversation_turn(
                 db=db,

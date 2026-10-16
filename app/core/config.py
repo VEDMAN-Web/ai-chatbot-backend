@@ -83,6 +83,13 @@ class Settings(BaseSettings):
     # In-session memory: support 100+ consecutive property follow-ups
     SESSION_MEMORY_TURNS: int = 100
     SESSION_MEMORY_MESSAGES: int = 220  # 110 user+assistant turns buffered in memory
+    # Cap real visitor chat messages per session (0 or less = unlimited)
+    MAX_USER_MESSAGES_PER_SESSION: int = 50
+
+    # Brochure PDF engine: "reportlab" (legacy) or "html" (Jinja2 + WeasyPrint)
+    BROCHURE_ENGINE: str = "reportlab"
+    # If HTML engine fails, fall back to ReportLab when true
+    BROCHURE_FALLBACK_TO_REPORTLAB: bool = True
 
     # Persistent property context (reference memory separate from live facts)
     PROPERTY_CONTEXT_RECENT_MESSAGES: int = 20

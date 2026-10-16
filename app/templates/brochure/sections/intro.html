@@ -1,0 +1,56 @@
+<section class="page intro-page" data-section="intro">
+  <span class="section-marker">SECTION:intro</span>
+  <div class="intro-media">
+    {% if prepared.hero_image or data.hero_image or (data.images and data.images[0]) %}
+    <img class="img-cover" src="{{ prepared.hero_image or data.hero_image or data.images[0] }}" alt=""/>
+    {% else %}
+    <div class="intro-placeholder"></div>
+    {% endif %}
+    {% if data.name %}
+    <div class="intro-overlay">
+      <h2 class="intro-headline">{{ data.name }}</h2>
+    </div>
+    {% endif %}
+  </div>
+  <div class="intro-copy">
+    {% if data.location_text %}
+    <p class="label-caps">{{ data.location_text }}</p>
+    {% endif %}
+    <hr class="thin-rule" style="margin-left:0;"/>
+    <p class="body-text">{{ prepared.description or data.description }}</p>
+  </div>
+</section>
+<style>
+  .intro-page {
+    display: grid;
+    grid-template-columns: 42% 58%;
+  }
+  .intro-media {
+    position: relative;
+    background: var(--ink);
+    overflow: hidden;
+  }
+  .intro-placeholder {
+    width: 100%;
+    height: 100%;
+    background: linear-gradient(160deg, var(--sage), var(--ink));
+  }
+  .intro-overlay {
+    position: absolute;
+    left: 8mm;
+    right: 8mm;
+    bottom: 12mm;
+  }
+  .intro-headline {
+    color: #fff;
+    font-size: 22pt;
+    line-height: 1.2;
+  }
+  .intro-copy {
+    padding: 22mm 18mm;
+    background: var(--paper);
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+  }
+</style>

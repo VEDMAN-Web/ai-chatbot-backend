@@ -1,0 +1,84 @@
+<section class="page cover-page" data-section="cover">
+  <span class="section-marker">SECTION:cover</span>
+  <div class="cover-inner">
+    <p class="label-caps cover-the">{{ labels.the }}</p>
+    <h1 class="cover-title">{{ data.name or data.property_id }}</h1>
+    {% if data.location_text %}
+    <hr class="thin-rule"/>
+    <p class="cover-location">{{ data.location_text }}</p>
+    {% endif %}
+    <div class="cover-brand">
+      {% if logo_data_uri %}
+      <img class="cover-logo" src="{{ logo_data_uri }}" alt=""/>
+      {% endif %}
+      {% if data.tenant and data.tenant.brand_name %}
+      <p class="cover-brand-name">{{ data.tenant.brand_name }}</p>
+      {% endif %}
+    </div>
+    {% if data.contact %}
+    <p class="cover-footer">
+      {% if data.contact.email %}{{ data.contact.email }}{% endif %}
+      {% if data.contact.email and data.contact.website_url %} | {% endif %}
+      {% if data.contact.website_url %}{{ data.contact.website_url }}{% endif %}
+    </p>
+    {% endif %}
+  </div>
+</section>
+<style>
+  .cover-page {
+    background: var(--sage);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .cover-inner {
+    text-align: center;
+    padding: 28mm 24mm;
+    width: 100%;
+  }
+  .cover-the {
+    margin-bottom: 10mm;
+    color: var(--ink);
+  }
+  .cover-title {
+    font-size: 36pt;
+    line-height: 1.15;
+    text-transform: uppercase;
+    max-width: 220mm;
+    margin: 0 auto;
+    word-wrap: break-word;
+  }
+  .cover-location {
+    font-family: var(--serif);
+    font-size: 12pt;
+    color: var(--ink);
+    letter-spacing: 0.06em;
+  }
+  .cover-brand {
+    margin-top: 28mm;
+  }
+  .cover-logo {
+    max-height: 18mm;
+    max-width: 42mm;
+    object-fit: contain;
+    margin: 0 auto 4mm;
+    display: block;
+  }
+  .cover-brand-name {
+    font-family: var(--sans);
+    font-size: 9pt;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--ink);
+  }
+  .cover-footer {
+    position: absolute;
+    bottom: 10mm;
+    left: 0;
+    right: 0;
+    text-align: center;
+    font-size: 7.5pt;
+    color: var(--muted);
+    letter-spacing: 0.04em;
+  }
+</style>

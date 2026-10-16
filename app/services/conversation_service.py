@@ -160,6 +160,73 @@ def append_conversation_turn(
     return conversation
 
 
+def get_session_message_count(conversation) -> int:
+    """
+    Read preferences['session_message_count'] (survives message_history trim).
+    Defaults to 0 when missing or invalid.
+    """
+    prefs = getattr(conversation, "preferences", None) or {}
+    raw = prefs.get("session_message_count", 0)
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return 0
+
+
+def increment_session_message_count(conversation) -> int:
+    """
+    Increment preferences['session_message_count'] in memory.
+    Caller must persist (e.g. persist_conversation_preferences) after a successful turn.
+    """
+    prefs = dict(getattr(conversation, "preferences", None) or {})
+    new_count = get_session_message_count(conversation) + 1
+    prefs["session_message_count"] = new_count
+    conversation.preferences = prefs
+    return new_count
+
+
+def persist_conversation_preferences(conversation) -> None:
+    """
+    Persist preferences (including session_message_count) without appending a chat turn.
+    Updates the in-process cache and merges into Firestore when sync is enabled.
+    Does not write to PostgreSQL.
+    """
+    if conversation is None:
+        return
+
+    c_agent_type = getattr(conversation, "agent_type", "public")
+    clean_session_id = getattr(conversation, "session_id", "anonymous")
+    session_key = f"{c_agent_type}:{clean_session_id}"
+    _IN_SESSION_CONVERSATIONS[session_key] = conversation
+
+    if not _firestore_sync_enabled(c_agent_type):
+        return
+
+    try:
+        from app.services.firestore_service import (
+            get_firestore_client,
+            _conversation_doc_id,
+        )
+
+        client = get_firestore_client(
+            target="admin" if c_agent_type == "admin" else "user"
+        )
+        if not client or not clean_session_id:
+            return
+        doc_id = _conversation_doc_id(clean_session_id, c_agent_type)
+        now_iso = datetime.now(timezone.utc).isoformat()
+        client.collection("conversations").document(doc_id).set(
+            {
+                "preferences": getattr(conversation, "preferences", None) or {},
+                "updatedAt": now_iso,
+            },
+            merge=True,
+        )
+        conversation.updated_at = now_iso
+    except Exception as e:
+        logger.error(f"persist_conversation_preferences failed: {e}")
+
+
 def clear_in_session_conversation(session_id: str, agent_type: str = "public") -> None:
     """Drop process-local cache (Firestore remains source of truth)."""
     key = f"{agent_type}:{(session_id or '').strip()}"

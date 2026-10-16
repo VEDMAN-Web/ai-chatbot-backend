@@ -56,6 +56,125 @@ def get_data_unavailable_fallback(
     )
 
 
+def get_brochure_unavailable_text(
+    language: str = "en",
+    site_origin: Optional[str] = None,
+    property_label: Optional[str] = None,
+) -> str:
+    """
+    Honest reply when brochure PDF generation or upload fails.
+    No em-dashes. Uses tenant advisor email only.
+    """
+    tenant = resolve_tenant(site_origin)
+    advisor = getattr(tenant, "advisor_email", None) or ""
+    lang = normalize_language(language) or "en"
+    label = (property_label or "").strip()
+    about = f" for {label}" if label else ""
+    about_pl = f" dla {label}" if label else ""
+    about_th = f" สำหรับ {label}" if label else ""
+
+    if lang == "th":
+        return (
+            f"ขออภัยครับ ขณะนี้ยังไม่สามารถสร้างโบรชัวร์ PDF{about_th} ได้\n\n"
+            f"ทีมที่ปรึกษา ({advisor}) สามารถส่งเอกสารยืนยันให้คุณได้โดยตรง "
+            "หรือลองขออีกครั้งในอีกสักครู่ครับ"
+        )
+    if lang == "pl":
+        return (
+            f"Przepraszam. Nie udało się teraz wygenerować broszury PDF{about_pl}.\n\n"
+            f"Nasz zespół doradców ({advisor}) może przesłać oficjalne materiały bezpośrednio. "
+            "Możesz też spróbować ponownie za chwilę."
+        )
+    return (
+        f"I'm sorry. The brochure PDF{about} cannot be generated right now.\n\n"
+        f"Our advisory team ({advisor}) can send the official materials directly. "
+        "You can also try again in a moment."
+    )
+
+
+def build_session_limit_reply(
+    language: str = "en",
+    site_origin: Optional[str] = None,
+) -> str:
+    """
+    Reply when the visitor has reached MAX_USER_MESSAGES_PER_SESSION in this chat.
+    No em-dashes. Uses tenant advisor email from config only.
+    """
+    tenant = resolve_tenant(site_origin)
+    advisor = getattr(tenant, "advisor_email", None) or ""
+    lang = normalize_language(language) or "en"
+
+    if lang == "th":
+        return (
+            "แชทนี้ถึงจำนวนข้อความสูงสุดแล้ว กรุณาเริ่มแชทใหม่เพื่อสนทนาต่อ\n\n"
+            f"หากต้องการความช่วยเหลือเพิ่มเติม ติดต่อทีมที่ปรึกษาได้ที่ {advisor}"
+        )
+    if lang == "pl":
+        return (
+            "Ta rozmowa osiągnęła limit wiadomości. Aby kontynuować, rozpocznij nowy czat.\n\n"
+            f"Jeśli potrzebujesz pomocy, napisz do naszego zespołu doradców ({advisor})."
+        )
+    return (
+        "This chat has reached its message limit. Please start a new chat to continue.\n\n"
+        f"Our advisory team ({advisor}) is happy to help if you need further assistance."
+    )
+
+
+def build_name_not_found_reply(
+    language: str = "en",
+    site_origin: Optional[str] = None,
+    asked_name: Optional[str] = None,
+    suggestions: Optional[List[str]] = None,
+) -> str:
+    """
+    Honest reply when a named-property search has no confident match.
+    May list up to 3 close names (Did you mean). Never invents price/beds/ownership.
+    No em-dashes.
+    """
+    tenant = resolve_tenant(site_origin)
+    advisor = getattr(tenant, "advisor_email", None) or ""
+    lang = normalize_language(language) or "en"
+    asked = (asked_name or "").strip()
+    tips = [str(s).strip() for s in (suggestions or []) if str(s).strip()][:3]
+    tip_block = "\n".join(f"• {t}" for t in tips)
+
+    if lang == "th":
+        head = (
+            f"ไม่พบโครงการชื่อ \"{asked}\" ในฐานข้อมูลที่ตรวจสอบแล้วครับ"
+            if asked
+            else "ไม่พบโครงการตามชื่อที่ระบุในฐานข้อมูลที่ตรวจสอบแล้วครับ"
+        )
+        mid = f"\n\nคุณหมายถึงรายการเหล่านี้หรือไม่:\n{tip_block}" if tip_block else ""
+        return (
+            f"{head}{mid}\n\n"
+            f"ทีมที่ปรึกษา ({advisor}) สามารถช่วยตรวจสอบชื่อโครงการให้ได้ "
+            "หรือแจ้งทำเล / งบประมาณ เพื่อค้นหาจากรายการที่มีอยู่จริงครับ"
+        )
+    if lang == "pl":
+        head = (
+            f"Nie znaleziono nieruchomości \"{asked}\" w zweryfikowanej bazie."
+            if asked
+            else "Nie znaleziono nieruchomości o podanej nazwie w zweryfikowanej bazie."
+        )
+        mid = f"\n\nCzy chodziło Ci o:\n{tip_block}" if tip_block else ""
+        return (
+            f"{head}{mid}\n\n"
+            f"Nasz zespół doradców ({advisor}) może pomóc potwierdzić nazwę projektu "
+            "albo wyszukać oferty po lokalizacji i budżecie."
+        )
+    head = (
+        f"\"{asked}\" is not in our verified database."
+        if asked
+        else "That property name is not in our verified database."
+    )
+    mid = f"\n\nDid you mean:\n{tip_block}" if tip_block else ""
+    return (
+        f"{head}{mid}\n\n"
+        f"Our advisory team ({advisor}) can help confirm the project name, "
+        "or you can search by location and budget among verified listings."
+    )
+
+
 def build_no_match_reply(
     language: str = "en",
     site_origin: Optional[str] = None,

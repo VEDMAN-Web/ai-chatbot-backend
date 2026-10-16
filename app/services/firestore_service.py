@@ -378,6 +378,10 @@ def fetch_properties_from_firestore(
     Fetches real property projects from Firestore `projects` collection.
     Supports cityId filtering and active_only flag.
     Routes to user or admin Firestore client based on target.
+
+    Results are ordered by document ID for stable, deterministic ordering.
+    When limit is large (or None-like <=0), pages through the collection so
+    every listing is reachable (not only the first 250 by ID).
     """
     client = get_firestore_client(target=target)
     if not client:
@@ -401,15 +405,37 @@ def fetch_properties_from_firestore(
             except Exception:
                 query = query.where("cityId", "==", str(city_id).lower())
 
-        query = query.limit(limit)
-        docs = list(query.stream())
+        page_size = 500
+        max_total = int(limit) if limit and int(limit) > 0 else 10_000
+        results: List[Dict[str, Any]] = []
+        last_doc = None
 
-        results = []
-        for doc in docs:
-            data = doc.to_dict() or {}
-            normalized = normalize_firestore_project(doc.id, data)
-            results.append(normalized)
+        try:
+            while len(results) < max_total:
+                batch_q = query.order_by("__name__").limit(min(page_size, max_total - len(results)))
+                if last_doc is not None:
+                    batch_q = batch_q.start_after(last_doc)
+                docs = list(batch_q.stream())
+                if not docs:
+                    break
+                for doc in docs:
+                    data = doc.to_dict() or {}
+                    results.append(normalize_firestore_project(doc.id, data))
+                    if len(results) >= max_total:
+                        break
+                last_doc = docs[-1]
+                if len(docs) < page_size:
+                    break
+        except Exception as page_err:
+            # Fallback when composite index for order_by + filters is missing
+            logger.warning(f"Paged Firestore fetch fallback: {page_err}")
+            docs = list(query.limit(max_total).stream())
+            results = [
+                normalize_firestore_project(doc.id, doc.to_dict() or {})
+                for doc in docs
+            ]
 
+        results.sort(key=lambda p: str(p.get("property_id") or ""))
         logger.info(f"Successfully fetched {len(results)} properties from Firestore 'projects'.")
         return results
 
@@ -504,61 +530,22 @@ def get_property_by_id_from_firestore(property_id: str, target: str = "user") ->
                 except Exception:
                     pass
 
-        # 5. Fuzzy match in relevant city if city recognized
-        city_id = None
-        for c in ["phuket", "samui", "pattaya", "bangkok", "phangan", "hua-hin"]:
-            if c in slug_cand:
-                city_id = c
-                break
-
-        def _name_blob(data: Dict[str, Any], doc_id: str) -> str:
-            parts = [str(doc_id)]
-            for key in ("name", "title", "seoTitle", "projectName", "slug"):
-                val = data.get(key)
-                if isinstance(val, dict):
-                    parts.extend(str(v) for v in val.values() if v)
-                elif val:
-                    parts.append(str(val))
-            return " ".join(parts).lower()
-
-        query_l = raw_query.lower().strip()
-        slug_tokens = [t for t in slug_cand.split("-") if len(t) >= 3]
-
-        if city_id and slug_cand not in city_country_keywords and len(slug_cand) > len(city_id):
+        # 5. Cached full-catalog name matcher (all listings, not first-400 window)
+        # Exact / token / fuzzy with confidence gate. Never invents a hit.
+        if slug_cand not in city_country_keywords and len(raw_query) >= 2:
             try:
-                from google.cloud.firestore_v1.base_query import FieldFilter
-                city_docs = list(col.where(filter=FieldFilter("cityId", "==", city_id)).limit(150).stream())
-                for d in city_docs:
-                    data = d.to_dict() or {}
-                    blob = _name_blob(data, d.id)
-                    if slug_cand in blob.replace(" ", "-") or query_l in blob:
-                        return normalize_firestore_project(d.id, data)
-                    if slug_tokens and all(t in blob for t in slug_tokens):
-                        return normalize_firestore_project(d.id, data)
-            except Exception:
-                pass
-
-        # 6. Global fuzzy name match (e.g. "Mono Champaca" without city in the query)
-        # Scans a bounded window so "tell me more about <shown card name>" works.
-        if slug_cand not in city_country_keywords and len(query_l) >= 4:
-            try:
-                scanned = 0
-                best = None
-                for d in col.limit(400).stream():
-                    scanned += 1
-                    data = d.to_dict() or {}
-                    blob = _name_blob(data, d.id)
-                    blob_slug = re.sub(r"[^a-z0-9]+", "-", blob).strip("-")
-                    if query_l == blob or slug_cand == str(d.id).lower():
-                        return normalize_firestore_project(d.id, data)
-                    if query_l in blob or slug_cand in blob_slug:
-                        return normalize_firestore_project(d.id, data)
-                    if slug_tokens and all(t in blob for t in slug_tokens):
-                        best = best or (d.id, data)
-                if best:
-                    return normalize_firestore_project(best[0], best[1])
+                from app.services.property_name_index import (
+                    ensure_name_index_from_firestore,
+                    match_property_name,
+                )
+                ensure_name_index_from_firestore(target=target)
+                mr = match_property_name(raw_query)
+                if mr.confident and mr.confident.doc_id:
+                    hit = col.document(mr.confident.doc_id).get()
+                    if hit.exists:
+                        return normalize_firestore_project(hit.id, hit.to_dict() or {})
             except Exception as fuzzy_err:
-                logger.debug(f"Firestore global fuzzy name lookup failed: {fuzzy_err}")
+                logger.debug(f"Firestore cached name lookup failed: {fuzzy_err}")
 
         return None
     except Exception as e:
@@ -596,31 +583,54 @@ def search_properties_firestore(
     pt_clean = (property_type or "").lower().strip()
     q_clean = (query or "").strip()
 
-    # 1. Direct search by query / project name (e.g. "15 Sukhumvit Residences", "Sea Heaven Phuket Naithon Phase 3.1")
+    from app.services.property_name_index import (
+        ensure_name_index_from_firestore,
+        match_property_name,
+        set_last_name_search_meta,
+        distinctive_tokens,
+    )
+
+    def _enrich_and_return_one(direct_prop: Dict[str, Any]) -> List[Dict[str, Any]]:
+        maps_url = build_google_maps_url(
+            latitude=direct_prop.get("latitude"),
+            longitude=direct_prop.get("longitude"),
+            property_name=direct_prop.get("name"),
+            location_str=direct_prop.get("location") or direct_prop.get("address")
+        )
+        embed_info = build_google_maps_embed_url(
+            latitude=direct_prop.get("latitude"),
+            longitude=direct_prop.get("longitude"),
+            location_str=direct_prop.get("location") or direct_prop.get("address"),
+            property_name=direct_prop.get("name")
+        )
+        direct_prop["maps_url"] = maps_url
+        direct_prop["maps_embed_url"] = embed_info.get("embed_url")
+        direct_prop["nearby_landmarks"] = get_property_proximity_landmarks(
+            latitude=direct_prop.get("latitude"),
+            longitude=direct_prop.get("longitude"),
+            district=direct_prop.get("district"),
+            province=direct_prop.get("province")
+        )
+        return [direct_prop]
+
+    # 1. Direct search by query / project name — confident match only.
+    # On miss: zero cards + Did-you-mean candidates. Never unfiltered fallback / shuffle.
     if q_clean:
-        direct_prop = get_property_by_id_from_firestore(q_clean, target=target)
-        if direct_prop:
-            maps_url = build_google_maps_url(
-                latitude=direct_prop.get("latitude"),
-                longitude=direct_prop.get("longitude"),
-                property_name=direct_prop.get("name"),
-                location_str=direct_prop.get("location") or direct_prop.get("address")
-            )
-            embed_info = build_google_maps_embed_url(
-                latitude=direct_prop.get("latitude"),
-                longitude=direct_prop.get("longitude"),
-                location_str=direct_prop.get("location") or direct_prop.get("address"),
-                property_name=direct_prop.get("name")
-            )
-            direct_prop["maps_url"] = maps_url
-            direct_prop["maps_embed_url"] = embed_info.get("embed_url")
-            direct_prop["nearby_landmarks"] = get_property_proximity_landmarks(
-                latitude=direct_prop.get("latitude"),
-                longitude=direct_prop.get("longitude"),
-                district=direct_prop.get("district"),
-                province=direct_prop.get("province")
-            )
-            return [direct_prop]
+        try:
+            ensure_name_index_from_firestore(target=target)
+        except Exception:
+            pass
+        mr = match_property_name(q_clean)
+        if mr.confident:
+            direct_prop = get_property_by_id_from_firestore(mr.confident.doc_id, target=target)
+            if direct_prop:
+                set_last_name_search_meta(q_clean, [])
+                return _enrich_and_return_one(direct_prop)
+        set_last_name_search_meta(
+            q_clean,
+            [c.display_name for c in (mr.candidates or [])[:3]],
+        )
+        return []
 
     # Known regions must never trigger direct single-property resolution
     known_regions = [
@@ -628,31 +638,30 @@ def search_properties_firestore(
         "hua hin", "hua-hin", "krabi", "chiang mai", "thailand", "tajlandia"
     ]
 
-    # If location looks like a specific project name rather than a region, attempt direct resolution
-    if loc_clean and loc_clean not in known_regions and len(loc_clean) >= 3:
-        direct_prop = get_property_by_id_from_firestore(location, target=target)
-        if direct_prop:
-            maps_url = build_google_maps_url(
-                latitude=direct_prop.get("latitude"),
-                longitude=direct_prop.get("longitude"),
-                property_name=direct_prop.get("name"),
-                location_str=direct_prop.get("location") or direct_prop.get("address")
-            )
-            embed_info = build_google_maps_embed_url(
-                latitude=direct_prop.get("latitude"),
-                longitude=direct_prop.get("longitude"),
-                location_str=direct_prop.get("location") or direct_prop.get("address"),
-                property_name=direct_prop.get("name")
-            )
-            direct_prop["maps_url"] = maps_url
-            direct_prop["maps_embed_url"] = embed_info.get("embed_url")
-            direct_prop["nearby_landmarks"] = get_property_proximity_landmarks(
-                latitude=direct_prop.get("latitude"),
-                longitude=direct_prop.get("longitude"),
-                district=direct_prop.get("district"),
-                province=direct_prop.get("province")
-            )
-            matched.append(direct_prop)
+    # If location looks like a specific project name rather than a region, same matcher as query
+    name_like_location = (
+        bool(loc_clean)
+        and loc_clean not in known_regions
+        and len(loc_clean) >= 3
+        and bool(distinctive_tokens(location or loc_clean))
+    )
+    if name_like_location:
+        try:
+            ensure_name_index_from_firestore(target=target)
+        except Exception:
+            pass
+        mr = match_property_name(location or loc_clean)
+        if mr.confident:
+            direct_prop = get_property_by_id_from_firestore(mr.confident.doc_id, target=target)
+            if direct_prop:
+                set_last_name_search_meta(location or loc_clean, [])
+                return _enrich_and_return_one(direct_prop)
+        # Name-as-location with no confident match: do not treat as geography filter
+        set_last_name_search_meta(
+            location or loc_clean,
+            [c.display_name for c in (mr.candidates or [])[:3]],
+        )
+        return []
 
     # Determine city hint for targeted Firestore query
     city_hint = None
@@ -661,7 +670,8 @@ def search_properties_firestore(
             city_hint = c
             break
 
-    all_props = fetch_properties_from_firestore(limit=250, city_id=city_hint, active_only=True, target=target)
+    # Paginated fetch (deterministic order). High cap so all ~925 listings are reachable.
+    all_props = fetch_properties_from_firestore(limit=5000, city_id=city_hint, active_only=True, target=target)
     if not all_props and not matched:
         return []
 
@@ -732,14 +742,10 @@ def search_properties_firestore(
 
         candidates.append(p)
 
-    # Preserve any direct match (e.g. from specific project query) at position 0
+    # Preserve any direct match at position 0; keep remaining in deterministic doc-id order
     direct_ids = {m.get("property_id") for m in matched if m.get("property_id")}
     remaining = [c for c in candidates if c.get("property_id") not in direct_ids]
-
-    # Dynamic rotation: Shuffle remaining candidate matches so broad discovery queries
-    # showcase a fresh, varied selection of verified properties instead of always the same 4
-    import random
-    random.shuffle(remaining)
+    remaining.sort(key=lambda p: str(p.get("property_id") or ""))
 
     for p in remaining:
         # Add Google Maps URL & Embed

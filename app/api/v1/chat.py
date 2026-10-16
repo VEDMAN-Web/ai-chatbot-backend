@@ -9,7 +9,13 @@ import io
 from typing import Optional, List, Dict, Any
 from app.core.config import settings
 from app.db.session import get_user_db as get_db
-from app.services.conversation_service import get_or_create_conversation, append_conversation_turn
+from app.services.conversation_service import (
+    get_or_create_conversation,
+    append_conversation_turn,
+    get_session_message_count,
+    increment_session_message_count,
+    persist_conversation_preferences,
+)
 from app.services.public_agent import public_agent, format_property_card
 from app.services.lead_service import record_or_update_lead
 from app.db.models import Property
@@ -64,7 +70,11 @@ class PropertyCard(BaseModel):
     highlights: List[str] = Field(default_factory=list, example=["54 exclusive pool villas", "Completion Q4 2027"])
 
 class PublicChatResponse(BaseModel):
-    type: str = Field(..., example="property_cards", description="Response type: 'property_cards', 'text', or 'brochure'")
+    type: str = Field(
+        ...,
+        example="property_cards",
+        description="Response type: 'property_cards', 'text', 'brochure', or 'session_limit'",
+    )
     text: str = Field(..., description="Grounded natural language response")
     properties: List[PropertyCard] = Field(default_factory=list, description="Array of matching property cards")
     quick_replies: List[str] = Field(default_factory=list, description="Suggested follow-up actions for user")
@@ -77,6 +87,18 @@ class PublicChatResponse(BaseModel):
     pdf_url: Optional[str] = Field(None, description="Direct URL to view or download the generated PDF brochure", example="https://s3.hf.co/...")
     download_url: Optional[str] = Field(None, description="Direct URL to download the generated PDF brochure")
     lead_id: Optional[str] = Field(None, description="UUID of recorded lead if contact details were submitted", example="b182cb82-...")
+    session_limit_reached: Optional[bool] = Field(
+        False,
+        description="True when this chat has reached MAX_USER_MESSAGES_PER_SESSION and further messages are blocked",
+    )
+    message_limit: Optional[int] = Field(
+        None,
+        description="Configured max user messages per session when the limit is enabled",
+    )
+    session_limit_warning: Optional[bool] = Field(
+        False,
+        description="True when 5 or fewer user messages remain before the session limit",
+    )
 
 class ChatHistoryResponse(BaseModel):
     session_id: str
@@ -172,6 +194,7 @@ def handle_public_chat(
                 recorded_lead_id = f"lead_session_{uuid.uuid4().hex[:8]}"
 
         # If user submitted contact form with no extra message, return pleasant localized confirmation immediately
+        # Contact-only submissions do not count toward the session message limit.
         if not user_msg:
             from app.core.tenant import resolve_tenant
             tenant = resolve_tenant(req.site_origin)
@@ -200,8 +223,37 @@ def handle_public_chat(
                 "conversation_id": str(conversation.id),
                 "language": lang,
                 "brochure_property_id": None,
-                "lead_id": recorded_lead_id
+                "lead_id": recorded_lead_id,
+                "session_limit_reached": False,
+                "message_limit": None,
+                "session_limit_warning": False,
             }
+
+        # Per-session visitor message limit (independent of trimmed message_history)
+        max_msgs = int(getattr(settings, "MAX_USER_MESSAGES_PER_SESSION", 50) or 0)
+        if max_msgs > 0:
+            current_count = get_session_message_count(conversation)
+            if current_count >= max_msgs:
+                from app.services.i18n_service import build_session_limit_reply
+                lang = req.language if req.language in ["en", "pl", "th"] else "en"
+                return {
+                    "type": "session_limit",
+                    "text": build_session_limit_reply(
+                        language=lang,
+                        site_origin=req.site_origin,
+                    ),
+                    "properties": [],
+                    "quick_replies": [],
+                    "lead_captured": False,
+                    "preferences": conversation.preferences or {},
+                    "session_id": conversation.session_id,
+                    "conversation_id": str(conversation.id),
+                    "language": lang,
+                    "brochure_property_id": None,
+                    "session_limit_reached": True,
+                    "message_limit": max_msgs,
+                    "session_limit_warning": False,
+                }
 
         # Otherwise, process message through chatbot agent
         response = public_agent.run_conversation(
@@ -213,6 +265,21 @@ def handle_public_chat(
         if has_contact:
             response["lead_captured"] = True
             response["lead_id"] = recorded_lead_id
+
+        # Count only successfully processed visitor chat messages
+        new_count = increment_session_message_count(conversation)
+        persist_conversation_preferences(conversation)
+        prefs = dict(response.get("preferences") or conversation.preferences or {})
+        prefs["session_message_count"] = new_count
+        response["preferences"] = prefs
+        response["session_limit_reached"] = False
+        if max_msgs > 0:
+            response["message_limit"] = max_msgs
+            remaining = max_msgs - new_count
+            response["session_limit_warning"] = remaining <= 5
+        else:
+            response["message_limit"] = None
+            response["session_limit_warning"] = False
 
         # Log query turn to Firestore (only if ENABLE_CHAT_LOGGING is True)
         if getattr(settings, "ENABLE_CHAT_LOGGING", False) and getattr(settings, "ENABLE_FIRESTORE_SYNC", False) and user_msg:

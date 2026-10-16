@@ -1,0 +1,69 @@
+<section class="page facilities-page" data-section="facilities">
+  <span class="section-marker">SECTION:facilities</span>
+  <p class="label-caps fac-label">{{ labels.facilities_label }}</p>
+  {% set imgs = prepared.facility_images or [] %}
+  {% if imgs %}
+  <div class="fac-images">
+    {% if imgs|length >= 1 %}
+    <figure class="fac-hero">
+      <img class="img-cover" src="{{ imgs[0] }}" alt=""/>
+    </figure>
+    {% endif %}
+    <div class="fac-row">
+      {% if imgs|length >= 2 %}
+      <figure><img class="img-cover" src="{{ imgs[1] }}" alt=""/></figure>
+      {% endif %}
+      {% if imgs|length >= 3 %}
+      <figure><img class="img-cover" src="{{ imgs[2] }}" alt=""/></figure>
+      {% endif %}
+    </div>
+  </div>
+  {% endif %}
+  <ul class="fac-list">
+    {% for item in prepared.facilities or page.facilities or data.facilities %}
+    <li>{{ item }}</li>
+    {% endfor %}
+  </ul>
+</section>
+<style>
+  .facilities-page {
+    padding: 14mm 18mm 16mm;
+    background: var(--paper);
+  }
+  .fac-label {
+    text-align: center;
+    font-style: italic;
+    letter-spacing: 0.12em;
+    text-transform: none;
+    margin-bottom: 8mm;
+    color: var(--muted);
+  }
+  .fac-images { margin-bottom: 8mm; }
+  .fac-hero {
+    width: 100%;
+    height: 78mm;
+    overflow: hidden;
+    margin-bottom: 4mm;
+  }
+  .fac-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 4mm;
+  }
+  .fac-row figure {
+    height: 42mm;
+    overflow: hidden;
+  }
+  .fac-list {
+    list-style: none;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 3mm 10mm;
+    columns: 2;
+  }
+  .fac-list li {
+    font-size: 10pt;
+    padding: 2mm 0;
+    border-bottom: 1px solid rgba(0,0,0,0.08);
+  }
+</style>
