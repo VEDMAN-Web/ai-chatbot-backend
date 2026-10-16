@@ -1,0 +1,59 @@
+<section class="page units-page" data-section="unit_types">
+  <span class="section-marker">SECTION:unit_types</span>
+  <h2 class="units-title">{{ labels.unit_types_title }}</h2>
+  <div class="units-grid">
+    {% for unit in prepared.unit_types or data.unit_types %}
+    <article class="unit-card">
+      {% if unit.layout_image %}
+      <div class="unit-img"><img class="img-cover" src="{{ unit.layout_image }}" alt=""/></div>
+      {% else %}
+      <div class="unit-img unit-img-empty"></div>
+      {% endif %}
+      <p class="unit-meta">
+        {% if unit.size_text %}<strong>{{ unit.size_text }}</strong>{% endif %}
+        {% if unit.name %}<span>{{ unit.name }}</span>{% endif %}
+        {% if unit.beds is not none %}<span>{{ unit.beds }} {{ labels.beds }}</span>{% endif %}
+      </p>
+    </article>
+    {% endfor %}
+  </div>
+</section>
+<style>
+  .units-page { padding: 14mm 16mm; background: var(--paper); }
+  .units-title {
+    text-align: center;
+    font-size: 20pt;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    margin-bottom: 8mm;
+  }
+  .units-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    grid-template-rows: repeat(2, 1fr);
+    gap: 6mm;
+    height: 155mm;
+  }
+  .unit-card { display: flex; flex-direction: column; min-height: 0; }
+  .unit-img {
+    flex: 1;
+    background: #f0ebe3;
+    overflow: hidden;
+    border: 1px solid rgba(0,0,0,0.06);
+  }
+  .unit-img-empty {
+    background: repeating-linear-gradient(
+      45deg, #f0ebe3, #f0ebe3 8px, #e7e0d6 8px, #e7e0d6 16px
+    );
+  }
+  .unit-meta {
+    margin-top: 2mm;
+    font-size: 8pt;
+    text-align: center;
+    color: var(--muted);
+    display: flex;
+    flex-direction: column;
+    gap: 1mm;
+  }
+  .unit-meta strong { color: var(--ink); font-size: 9pt; }
+</style>

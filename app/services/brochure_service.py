@@ -15,7 +15,8 @@ import io
 import re
 import logging
 from datetime import datetime, timezone
-from typing import Optional, List, Dict, Any
+from types import SimpleNamespace
+from typing import Optional, List, Dict, Any, Union
 
 from reportlab.pdfgen import canvas
 from reportlab.lib import colors
@@ -39,6 +40,155 @@ from app.services.offer_dossier_service import (
 
 logger = logging.getLogger(__name__)
 
+_NOT_DOC = "Not documented in verified database"
+
+
+def _firestore_card_to_brochure_prop(card: Dict[str, Any]) -> SimpleNamespace:
+    """
+    Map a normalize_firestore_project dict into attribute-style object
+    expected by the brochure renderer. Missing fields stay None / honest labels.
+    Never invents prices, beds, or ownership.
+    """
+    images_raw = card.get("images") or []
+    image_objs = []
+    for item in images_raw:
+        if isinstance(item, str) and item.strip():
+            image_objs.append(SimpleNamespace(image_url=item.strip()))
+        elif isinstance(item, dict):
+            url = item.get("image_url") or item.get("url") or item.get("src")
+            if url:
+                image_objs.append(SimpleNamespace(image_url=str(url).strip()))
+        elif hasattr(item, "image_url") and getattr(item, "image_url", None):
+            image_objs.append(item)
+
+    price_display = card.get("price") or card.get("price_display")
+    beds = card.get("bedrooms") or card.get("bedrooms_display")
+    area = card.get("area") or card.get("area_display")
+    ownership = card.get("ownership") or card.get("ownership_type") or card.get("ownership_structure")
+
+    bedrooms_min = None
+    if beds is not None:
+        try:
+            nums = re.findall(r"\d+", str(beds))
+            if nums:
+                bedrooms_min = int(nums[0])
+        except (TypeError, ValueError):
+            bedrooms_min = None
+
+    area_sqm_min = None
+    if area is not None:
+        try:
+            nums = re.findall(r"\d+(?:\.\d+)?", str(area).replace(",", ""))
+            if nums:
+                area_sqm_min = float(nums[0])
+        except (TypeError, ValueError):
+            area_sqm_min = None
+
+    return SimpleNamespace(
+        property_id=str(card.get("property_id") or "").strip() or None,
+        property_name=str(card.get("name") or card.get("property_name") or "").strip() or None,
+        district=card.get("district") or None,
+        province=card.get("province") or None,
+        property_type=card.get("property_type") or None,
+        status=card.get("status") or None,
+        price_display=price_display if price_display else None,
+        price_numeric_min=card.get("price_numeric_min"),
+        ownership_type=ownership if ownership else _NOT_DOC,
+        has_pool=bool(card.get("has_pool")) if card.get("has_pool") is not None else False,
+        developer_name=card.get("developer_name") or card.get("developer") or _NOT_DOC,
+        description=card.get("description") or "",
+        bedrooms_min=bedrooms_min,
+        bedrooms_display=str(beds) if beds not in (None, "") else _NOT_DOC,
+        bathrooms=card.get("bathrooms") if card.get("bathrooms") not in (None, "") else _NOT_DOC,
+        area_sqm_min=area_sqm_min,
+        area_display=str(area) if area not in (None, "", "N/A") else _NOT_DOC,
+        images=image_objs,
+    )
+
+
+def _load_property_for_brochure(db: Session, property_id: str) -> Any:
+    """
+    Load property for brochure: PostgreSQL first, then Firestore (read-only).
+    Raises ValueError if missing from both.
+    """
+    prop = None
+    if db is not None:
+        try:
+            prop = db.query(Property).filter(Property.property_id == property_id.upper()).first()
+            if not prop:
+                prop = db.query(Property).filter(Property.property_id.ilike(property_id.strip())).first()
+        except Exception as e:
+            logger.warning(f"PostgreSQL brochure lookup failed for '{property_id}': {e}")
+            prop = None
+
+    if prop:
+        return prop
+
+    try:
+        from app.services.firestore_service import get_property_by_id_from_firestore
+        fs_card = get_property_by_id_from_firestore(str(property_id).strip())
+    except Exception as e:
+        logger.warning(f"Firestore brochure lookup failed for '{property_id}': {e}")
+        fs_card = None
+
+    if fs_card and isinstance(fs_card, dict):
+        return _firestore_card_to_brochure_prop(fs_card)
+
+    raise ValueError(f"Property with ID '{property_id}' not found.")
+
+
+def _generate_html_brochure_pdf(
+    db: Session,
+    property_id: str,
+    site_origin: Optional[str] = None,
+    language: str = "en",
+    client_name: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Deterministic Jinja2 + WeasyPrint brochure. No LLM.
+    Returns the same dict shape as the ReportLab path.
+    """
+    from app.services.brochure_data import load_brochure_data
+    from app.services.brochure_renderer import render_brochure_pdf
+
+    tenant = resolve_tenant(site_origin)
+    lang = language if language in ["en", "pl", "th"] else "en"
+    data = load_brochure_data(
+        db=db,
+        property_id=property_id,
+        site_origin=site_origin,
+        language=lang,
+    )
+    pdf_bytes = render_brochure_pdf(data, use_cache=True)
+
+    safe_brand = re.sub(r"[^A-Za-z0-9_\-]+", "_", tenant.brand_name or "Brand")
+    safe_name = re.sub(r"[^A-Za-z0-9_\-]+", "_", str(data.property_id or property_id))
+    out_filename = f"{safe_brand}_Property_{safe_name}_brochure.pdf"
+
+    saved_url = default_storage_provider.save_file(
+        filename=out_filename,
+        content=pdf_bytes,
+        content_type="application/pdf",
+    )
+    logger.info(
+        "Generated HTML brochure: %s (%s bytes) stored at %s",
+        out_filename,
+        len(pdf_bytes),
+        saved_url,
+    )
+    return {
+        "success": True,
+        "filename": out_filename,
+        "file_url": saved_url,
+        "download_url": saved_url,
+        "property_id": data.property_id or property_id,
+        "property_name": data.name or property_id,
+        "pages": None,
+        "pdf_bytes": pdf_bytes,
+        "file_size_bytes": len(pdf_bytes),
+        "engine": "html",
+    }
+
 
 def generate_single_property_brochure_pdf(
     db: Session,
@@ -49,46 +199,101 @@ def generate_single_property_brochure_pdf(
     template_variant: int = 2
 ) -> Dict[str, Any]:
     """
-    Builds an 8-page luxury property brochure PDF dedicated to a single property,
-    modeled precisely after Varsovia_Estate_Dariusz_Tajlandia 2.pdf.
+    Builds a property brochure PDF.
+    Engine selected by settings.BROCHURE_ENGINE ("reportlab" default, or "html").
+    On HTML failure, falls back to ReportLab when BROCHURE_FALLBACK_TO_REPORTLAB is true.
+    """
+    from app.core.config import settings as _settings
+
+    engine = str(getattr(_settings, "BROCHURE_ENGINE", "reportlab") or "reportlab").strip().lower()
+    if engine == "html":
+        try:
+            return _generate_html_brochure_pdf(
+                db=db,
+                property_id=property_id,
+                site_origin=site_origin,
+                language=language,
+                client_name=client_name,
+            )
+        except Exception as html_err:
+            logger.error(
+                "HTML brochure engine failed for %s: %s",
+                property_id,
+                html_err,
+                exc_info=True,
+            )
+            if not bool(getattr(_settings, "BROCHURE_FALLBACK_TO_REPORTLAB", True)):
+                raise
+            logger.warning("Falling back to ReportLab brochure engine for %s", property_id)
+
+    return _generate_reportlab_brochure_pdf(
+        db=db,
+        property_id=property_id,
+        site_origin=site_origin,
+        language=language,
+        client_name=client_name,
+        template_variant=template_variant,
+    )
+
+
+def _generate_reportlab_brochure_pdf(
+    db: Session,
+    property_id: str,
+    site_origin: Optional[str] = None,
+    language: str = "en",
+    client_name: Optional[str] = None,
+    template_variant: int = 2
+) -> Dict[str, Any]:
+    """
+    Legacy ReportLab 8-page luxury property brochure.
     """
     tenant = resolve_tenant(site_origin)
     brand = tenant.brand_name
     lang = language if language in ["en", "pl", "th"] else "en"
 
-    # 1. Fetch Property
-    prop = db.query(Property).filter(Property.property_id == property_id.upper()).first()
-    if not prop:
-        # Fallback to case-insensitive search or name search
-        prop = db.query(Property).filter(Property.property_id.ilike(property_id.strip())).first()
-    if not prop:
-        raise ValueError(f"Property with ID '{property_id}' not found.")
+    # 1. Fetch Property (PostgreSQL, then Firestore)
+    prop = _load_property_for_brochure(db, property_id)
 
     # 2. Select Theme (default to Variant 2 - Modern Slate / Tajlandia AI / Varsovia)
     theme = TEMPLATE_THEMES.get(template_variant, TEMPLATE_THEMES[2])
     logo_path = resolve_logo_path(brand)
 
     # 3. Format Strings & Display Data
-    p_name = prop.property_name or "Luxury Property"
+    p_name = prop.property_name or prop.property_id or "Property"
     client_display = (client_name or ("Szanowny Kliencie" if lang == "pl" else "Valued Client")).strip()
     date_display = datetime.now().strftime("%d.%m.%Y")
     country_display = "TAJLANDIA." if lang == "pl" else "THAILAND."
     company_name = tenant.brand_name.upper()
 
-    location_str = f"{prop.district or 'Phuket'}, {prop.province or 'Thailand'}"
-    if prop.district and prop.province:
-        loc_tag = f"{prop.district.upper()} • {prop.province.upper()}"
+    district = getattr(prop, "district", None)
+    province = getattr(prop, "province", None)
+    if district and province:
+        location_str = f"{district}, {province}"
+        loc_tag = f"{str(district).upper()} • {str(province).upper()}"
+    elif district or province:
+        location_str = str(district or province)
+        loc_tag = location_str.upper()
     else:
-        loc_tag = "PHUKET • THAILAND"
+        location_str = "Thailand"
+        loc_tag = "THAILAND"
 
-    price_str = prop.price_display or (f"from {prop.price_numeric_min:,.0f} THB" if prop.price_numeric_min else "Price on Inquiry")
+    if prop.price_display:
+        price_str = prop.price_display
+    elif prop.price_numeric_min:
+        price_str = f"from {prop.price_numeric_min:,.0f} THB"
+    else:
+        price_str = "Price on request"
 
-    # Images: gather all available images
+    # Images: gather all available (safe when images is empty / None)
     prop_images = [fetch_property_image_reader(prop)]
-    if prop.images and len(prop.images) > 1:
-        for extra_img in prop.images[1:]:
+    extra_imgs = list(getattr(prop, "images", None) or [])
+    if len(extra_imgs) > 1:
+        for extra_img in extra_imgs[1:]:
             try:
-                reader = ImageReader(extra_img.image_url)
+                img_url = getattr(extra_img, "image_url", None) or (str(extra_img) if isinstance(extra_img, str) else None)
+                if not img_url:
+                    continue
+                reader = ImageReader(img_url)
                 prop_images.append(reader)
             except Exception:
                 pass
@@ -684,7 +889,8 @@ def generate_single_property_brochure_pdf(
         "property_name": p_name,
         "pages": 8,
         "pdf_bytes": pdf_bytes,
-        "file_size_bytes": len(pdf_bytes)
+        "file_size_bytes": len(pdf_bytes),
+        "engine": "reportlab",
     }
 
 

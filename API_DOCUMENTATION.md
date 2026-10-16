@@ -196,6 +196,39 @@ When the user submits a modal form, viewing request, or callback request, send t
 
 ---
 
+#### Success Response 4 — Session Message Limit Reached (`200 OK`):
+When the visitor has already sent `MAX_USER_MESSAGES_PER_SESSION` chat messages in this `session_id` (default **50**; set to `0` to disable), further chat messages are blocked. The LLM is not called. Contact-form-only submissions (no `message` text) are not counted and are not blocked.
+
+```json
+{
+  "type": "session_limit",
+  "text": "This chat has reached its message limit. Please start a new chat to continue.\n\nOur advisory team (advisor@tajlandia.com) is happy to help if you need further assistance.",
+  "properties": [],
+  "quick_replies": [],
+  "lead_captured": false,
+  "lead_id": null,
+  "preferences": {
+    "session_message_count": 50
+  },
+  "session_id": "client_sess_101",
+  "conversation_id": "940adccc-4baf-42e7-adcf-8ccb58af809c",
+  "language": "en",
+  "brochure_property_id": null,
+  "session_limit_reached": true,
+  "message_limit": 50,
+  "session_limit_warning": false
+}
+```
+
+* `type` is `"session_limit"`.
+* `session_limit_reached` is `true`.
+* `message_limit` is the configured cap.
+* `quick_replies` is empty (frontend should show its own "Start new chat" control).
+* `text` is localized (`en` / `pl` / `th`) and includes the tenant advisor email for `site_origin`.
+* Normal chat replies may also include `session_limit_warning: true` when 5 or fewer messages remain before the limit.
+
+---
+
 #### Where It Fails:
 1. **Empty Message & No Contact Information (`400 Bad Request`):**
    * **Why:** Both `message` and all contact fields (`contact_name`, `contact_email`, `contact_phone`) were empty or missing.

@@ -1,0 +1,67 @@
+<section class="page contact-page" data-section="contact">
+  <span class="section-marker">SECTION:contact</span>
+  <div class="contact-inner">
+    {% if logo_data_uri %}
+    <img class="contact-logo" src="{{ logo_data_uri }}" alt=""/>
+    {% endif %}
+    {% if data.tenant and data.tenant.brand_name %}
+    <h2 class="contact-brand">{{ data.tenant.brand_name }}</h2>
+    {% endif %}
+    {% if data.name %}
+    <p class="contact-property">{{ data.name }}</p>
+    {% endif %}
+    <hr class="thin-rule"/>
+    <div class="contact-details body-text">
+      {% if data.contact and data.contact.email %}
+      <p>{{ data.contact.email }}</p>
+      {% endif %}
+      {% if data.contact and data.contact.phone %}
+      <p>{{ data.contact.phone }}</p>
+      {% endif %}
+      {% if data.contact and data.contact.website_url %}
+      <p>{{ data.contact.website_url }}</p>
+      {% elif data.tenant and data.tenant.website_url %}
+      <p>{{ data.tenant.website_url }}</p>
+      {% endif %}
+    </div>
+    <p class="contact-note label-caps">{{ labels.contact_note }}</p>
+  </div>
+</section>
+<style>
+  .contact-page {
+    background: var(--sage);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .contact-inner {
+    text-align: center;
+    padding: 20mm;
+  }
+  .contact-logo {
+    max-height: 22mm;
+    max-width: 50mm;
+    object-fit: contain;
+    margin: 0 auto 6mm;
+    display: block;
+  }
+  .contact-brand {
+    font-size: 22pt;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    margin-bottom: 3mm;
+  }
+  .contact-property {
+    font-family: var(--serif);
+    font-size: 12pt;
+    color: var(--ink);
+  }
+  .contact-details {
+    margin: 8mm 0;
+  }
+  .contact-details p { margin: 2mm 0; }
+  .contact-note {
+    margin-top: 14mm;
+    color: var(--muted);
+  }
+</style>
