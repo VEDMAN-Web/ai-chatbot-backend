@@ -865,13 +865,29 @@ def build_rich_property_recommendation_text(
     for idx, c in enumerate(cards[:3], 1):
         name = c.get("name", "Featured Property")
         loc = c.get("location", "Thailand")
-        price = c.get("price", "Price on request")
+        price = str(c.get("price") or "Price on request").strip()
+        # Avoid "Starting from from 17.80M THB"
+        if price.lower().startswith("from "):
+            price_display = price
+        elif price.lower() == "price on request":
+            price_display = price
+        else:
+            price_display = price
         beds = c.get("bedrooms")
-        beds_str = f"{beds} bedrooms" if beds and str(beds) != "N/A" else ""
-        if language == "pl" and beds_str:
-            beds_str = f"{beds} sypialnie"
-        elif language == "th" and beds_str:
-            beds_str = f"{beds} ห้องนอน"
+        beds_raw = str(beds).strip() if beds and str(beds) != "N/A" else ""
+        # Avoid "1-4 Beds bedrooms"
+        if beds_raw:
+            low_b = beds_raw.lower()
+            if any(x in low_b for x in ["bed", "sypial", "ห้องนอน"]):
+                beds_str = beds_raw
+            elif language == "pl":
+                beds_str = f"{beds_raw} sypialnie"
+            elif language == "th":
+                beds_str = f"{beds_raw} ห้องนอน"
+            else:
+                beds_str = f"{beds_raw} bedrooms"
+        else:
+            beds_str = ""
 
         features = []
         if c.get("has_pool"):
@@ -885,15 +901,19 @@ def build_rich_property_recommendation_text(
 
         if language == "pl":
             property_descriptions.append(
-                f"• **{name}** ({loc}): Cena od **{price}**{feat_str} – doskonały wybór gwarantujący najwyższy standard i bezpieczeństwo transakcji."
+                f"• **{name}** ({loc}): Cena **{price_display}**{feat_str} – doskonały wybór gwarantujący najwyższy standard i bezpieczeństwo transakcji."
             )
         elif language == "th":
             property_descriptions.append(
-                f"• **{name}** ({loc}): เริ่มต้น **{price}**{feat_str} – โครงการคุณภาพสูงพร้อมสิทธิ์การถือครองที่โปร่งใสและปลอดภัย"
+                f"• **{name}** ({loc}): **{price_display}**{feat_str} – โครงการคุณภาพสูงพร้อมสิทธิ์การถือครองที่โปร่งใสและปลอดภัย"
             )
         else:
+            if price_display.lower().startswith("from ") or price_display.lower() == "price on request":
+                price_line = f"**{price_display}**"
+            else:
+                price_line = f"Starting from **{price_display}**"
             property_descriptions.append(
-                f"• **{name}** ({loc}): Starting from **{price}**{feat_str} – an outstanding selection offering premium finishes and strong lifestyle value."
+                f"• **{name}** ({loc}): {price_line}{feat_str} – an outstanding selection offering premium finishes and strong lifestyle value."
             )
 
     body = "\n".join(property_descriptions) if property_descriptions else ""

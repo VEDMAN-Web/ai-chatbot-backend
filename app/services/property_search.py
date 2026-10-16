@@ -415,13 +415,15 @@ def to_compact_projection(p: Any, intent: str = "search") -> Dict[str, Any]:
 
 
 def get_properties_by_ids(db: Session, property_ids: List[str]) -> List[Any]:
-    """Retrieves multiple properties by IDs, preserving the requested order."""
+    """Retrieves multiple properties by IDs or names, preserving the requested order."""
     if not property_ids:
         return []
     clean_ids = [pid.strip() for pid in property_ids if isinstance(pid, str) and pid.strip()]
     results = []
     for pid in clean_ids:
         prop = get_property_by_id(db, pid)
+        if not prop:
+            prop = get_property_by_name(db, pid)
         if prop:
             results.append(prop)
     return results
