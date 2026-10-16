@@ -175,6 +175,112 @@ def build_name_not_found_reply(
     )
 
 
+def build_seen_all_reply(
+    language: str = "en",
+    site_origin: Optional[str] = None,
+    criteria_summary: Optional[str] = None,
+    total_matching: int = 0,
+) -> str:
+    """
+    Honest reply when matching listings exist but were all already shown in this session.
+    Never claims "no match".
+    """
+    tenant = resolve_tenant(site_origin)
+    advisor = getattr(tenant, "advisor_email", None) or ""
+    lang = normalize_language(language) or "en"
+    n = max(int(total_matching or 0), 1)
+    criteria = (criteria_summary or "").strip()
+
+    if lang == "th":
+        head = (
+            f"คุณดูรายการที่ผ่านการตรวจสอบครบทั้ง {n} รายการที่ตรงกับเงื่อนไขแล้วครับ"
+            f"{(' (' + criteria + ')') if criteria else ''}"
+        )
+        return (
+            f"{head}\n\n"
+            "ขั้นตอนถัดไปที่แนะนำ:\n"
+            "• ผ่อนงบประมาณ\n"
+            "• ลองเมือง / เกาะอื่น\n"
+            "• เปลี่ยนประเภทอสังหาฯ (เช่น วิลล่า ↔ คอนโด)\n\n"
+            f"ทีมที่ปรึกษา ({advisor}) ยินดีช่วยปรับเงื่อนไขให้ตรงขึ้นได้ครับ"
+        )
+    if lang == "pl":
+        head = (
+            f"Widziałeś już wszystkie {n} zweryfikowane oferty spełniające kryteria"
+            f"{(': ' + criteria) if criteria else ''}."
+        )
+        return (
+            f"{head}\n\n"
+            "Konkretne następne kroki:\n"
+            "• poluzuj budżet\n"
+            "• wybierz inne miasto / wyspę\n"
+            "• zmień typ nieruchomości (np. willa ↔ apartament)\n\n"
+            f"Nasz zespół doradców ({advisor}) pomoże doprecyzować wyszukiwanie."
+        )
+    if criteria:
+        head = f"You have already seen all {n} verified listings matching {criteria}."
+    else:
+        head = f"You have already seen all {n} verified listings matching your criteria."
+    return (
+        f"{head}\n\n"
+        "Concrete next steps:\n"
+        "• Relax the budget\n"
+        "• Try another city or island\n"
+        "• Switch property type (e.g. villa <-> condo)\n\n"
+        f"Our advisory team ({advisor}) can help refine the search further."
+    )
+
+
+def build_amenity_none_match_reply(
+    language: str = "en",
+    site_origin: Optional[str] = None,
+    location: Optional[str] = None,
+    amenity_label: str = "gym",
+    alternatives: Optional[List[Dict[str, Any]]] = None,
+) -> str:
+    """
+    Honest reply when no listing in the requested location has the amenity.
+    Alternatives (if any) must already be labelled (e.g. 'Gym not listed').
+    """
+    tenant = resolve_tenant(site_origin)
+    advisor = getattr(tenant, "advisor_email", None) or ""
+    lang = normalize_language(language) or "en"
+    loc = (location or "").strip() or ("your selected area" if lang == "en" else ("wybranej lokalizacji" if lang == "pl" else "พื้นที่ที่เลือก"))
+    amenity = (amenity_label or "amenity").strip()
+    alts = [c for c in (alternatives or []) if isinstance(c, dict)][:3]
+
+    def _alt_line(c: Dict[str, Any]) -> str:
+        name = str(c.get("name") or c.get("property_name") or "").strip()
+        place = str(c.get("location") or "").strip()
+        labels = c.get("amenity_labels") or []
+        lab = labels[0] if labels else f"{amenity} not listed"
+        bits = [b for b in [name, place, lab] if b]
+        return "• " + " | ".join(bits)
+
+    alt_block = "\n".join(line for line in (_alt_line(c) for c in alts) if line)
+
+    if lang == "th":
+        head = f"ไม่พบรายการที่ผ่านการตรวจสอบใน {loc} ที่มี{amenity}ในข้อมูลครับ"
+        mid = f"\n\nตัวเลือกใกล้เคียง (ระบุชัดว่าไม่มี{amenity}ในรายการ):\n{alt_block}" if alt_block else ""
+        return (
+            f"{head}{mid}\n\n"
+            f"ทีมที่ปรึกษา ({advisor}) สามารถช่วยค้นหาโครงการที่มีสิ่งอำนวยความสะดวกนี้ได้ครับ"
+        )
+    if lang == "pl":
+        head = f"Żadna zweryfikowana oferta w lokalizacji {loc} nie wymienia: {amenity}."
+        mid = f"\n\nNajbliższe alternatywy (oznaczone jako brak {amenity}):\n{alt_block}" if alt_block else ""
+        return (
+            f"{head}{mid}\n\n"
+            f"Nasz zespół doradców ({advisor}) pomoże znaleźć oferty z tym udogodnieniem."
+        )
+    head = f"None of the verified listings in {loc} list a {amenity.lower()}."
+    mid = f"\n\nClosest alternatives (clearly labelled):\n{alt_block}" if alt_block else ""
+    return (
+        f"{head}{mid}\n\n"
+        f"Our advisory team ({advisor}) can help find listings that document this amenity."
+    )
+
+
 def build_no_match_reply(
     language: str = "en",
     site_origin: Optional[str] = None,
@@ -207,8 +313,8 @@ def build_no_match_reply(
             head = f"ไม่พบรายการที่ผ่านการตรวจสอบซึ่งตรงกับเงื่อนไข: {criteria}"
         if alt_block and relaxed_filter:
             mid = (
-                f"\n\nได้ผ่อนเงื่อนไขเพียงข้อเดียว ({relaxed_filter}) "
-                f"และพบตัวเลือกใกล้เคียงดังนี้:\n{alt_block}"
+                f"\n\nรายการนี้ไม่ตรงตามเงื่อนไขของคุณ แต่เป็นตัวเลือกที่ใกล้เคียงที่สุด "
+                f"(ผ่อนเงื่อนไข: {relaxed_filter}):\n{alt_block}"
             )
         else:
             mid = ""
@@ -223,8 +329,8 @@ def build_no_match_reply(
             head = f"Nie znaleziono zweryfikowanej oferty spełniającej kryteria: {criteria}."
         if alt_block and relaxed_filter:
             mid = (
-                f"\n\nPo poluzowaniu dokładnie jednego filtra ({relaxed_filter}) "
-                f"najbliższe dostępne oferty to:\n{alt_block}"
+                f"\n\nTo nie spełnia Twoich kryteriów, ale jest to najbliższa opcja "
+                f"(poluzowano: {relaxed_filter}):\n{alt_block}"
             )
         else:
             mid = ""
@@ -239,8 +345,8 @@ def build_no_match_reply(
         head = f"No verified listing matches your criteria: {criteria}."
     if alt_block and relaxed_filter:
         mid = (
-            f"\n\nAfter relaxing exactly one filter ({relaxed_filter}), "
-            f"the closest verified options are:\n{alt_block}"
+            f"\n\nThis does not match your criteria, but it is the closest option "
+            f"(relaxed: {relaxed_filter}):\n{alt_block}"
         )
     else:
         mid = ""

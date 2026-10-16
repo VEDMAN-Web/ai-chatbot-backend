@@ -1,7 +1,9 @@
 import os
 import json
 import logging
-from typing import Dict, Any, List, Optional
+import threading
+import time
+from typing import Dict, Any, List, Optional, Tuple
 from datetime import datetime, timezone
 import base64
 import re
@@ -13,6 +15,11 @@ logger = logging.getLogger(__name__)
 # Singleton Firestore clients
 _admin_firestore_client = None
 _user_firestore_client = None
+
+# Short-lived in-memory catalog cache (lazy; concurrent-safe)
+_CATALOG_LOCK = threading.RLock()
+_CATALOG_CACHE: Dict[str, Tuple[float, List[Dict[str, Any]]]] = {}
+_CATALOG_TTL_SEC = 120  # 2 minutes — balances freshness vs 925-doc reload cost
 
 
 class FirestoreDatabaseError(Exception):
@@ -165,12 +172,14 @@ def normalize_firestore_project(doc_id: str, data: Dict[str, Any]) -> Dict[str, 
     Normalizes a Firestore `projects` document into the standard Tajlandia property card format.
     Handles multilingual name fields, coordinates, pricing, and images.
     """
-    # Name/Title handling (can be dict like {'pl': '...', 'en': '...'} or string)
-    raw_name = data.get("name") or data.get("title") or data.get("projectName") or ""
-    if isinstance(raw_name, dict):
-        name_str = raw_name.get("pl") or raw_name.get("en") or next((str(v) for v in raw_name.values() if v), doc_id)
-    else:
-        name_str = str(raw_name) if raw_name else doc_id
+    # Name/Title: prefer English for default public cards; cleaned fallback (no long PL marketing)
+    from app.services.listing_presentation import (
+        apply_presentation_to_card,
+        resolve_display_name,
+        sanitize_marketing_claims,
+        shorten_location,
+    )
+    name_str = resolve_display_name(data, doc_id=doc_id, language="en")
 
     # Pricing
     price_min = data.get("priceFrom")
@@ -232,8 +241,15 @@ def normalize_firestore_project(doc_id: str, data: Dict[str, Any]) -> Dict[str, 
     else:
         country_id = str(country_raw) if country_raw else "Thailand"
 
-    loc_parts = [str(p).strip() for p in [city_id, address, country_id] if p and str(p).strip()]
-    location_str = ", ".join(loc_parts) if loc_parts else "Thailand"
+    location_str = shorten_location(
+        district=city_id,
+        city=city_id,
+        province=country_id,
+        location=", ".join(
+            str(p).strip() for p in [city_id, address, country_id] if p and str(p).strip()
+        ),
+        address=address,
+    )
 
     # Images
     images = list(data.get("images") or [])
@@ -261,20 +277,6 @@ def normalize_firestore_project(doc_id: str, data: Dict[str, Any]) -> Dict[str, 
 
     amenities = list(data.get("amenities") or [])
     tags = list(data.get("tags") or [])
-    all_features = [str(a).lower() for a in (amenities + tags)]
-    combined_desc = (
-        str(name_str) + " " +
-        str(data.get("propertyType") or "") + " " +
-        str(data.get("description") or "") + " " +
-        str(data.get("shortDescription") or "") + " " +
-        " ".join(all_features)
-    ).lower()
-
-    pool_terms = ["pool", "basen", "basseyn", "swimming", "infinity", "jacuzzi", "water-park", "waterpark"]
-    has_pool = any(term in combined_desc for term in pool_terms)
-
-    beach_terms = ["beach", "plaz", "morz", "beachfront", "sea-view", "sea view", "ocean-view", "ocean view"]
-    beach_access = any(term in combined_desc for term in beach_terms)
 
     # Sanitize raw_firestore_data to ensure JSON serializability (Firestore DatetimeWithNanoseconds -> ISO string)
     def _make_json_safe(obj: Any) -> Any:
@@ -328,6 +330,7 @@ def normalize_firestore_project(doc_id: str, data: Dict[str, Any]) -> Dict[str, 
 
     if not desc_str:
         desc_str = f"Exclusive development '{name_str}' in {location_str}. Featuring {bedrooms_str}, {area_str}, with pricing starting from {price_display}."
+    desc_str = sanitize_marketing_claims(desc_str, mode="description")
 
     # Websites & Domains Scope
     raw_websites = data.get("websites") or data.get("domains") or data.get("allowed_websites")
@@ -338,7 +341,7 @@ def normalize_firestore_project(doc_id: str, data: Dict[str, Any]) -> Dict[str, 
         site_orig = data.get("siteOrigin") or "varsoviaestate.com"
         websites_list = [site_orig]
 
-    return {
+    card = {
         "property_id": doc_id,
         "name": name_str,
         "property_type": data.get("propertyType") or "Villa / Condo",
@@ -355,17 +358,96 @@ def normalize_firestore_project(doc_id: str, data: Dict[str, Any]) -> Dict[str, 
         "latitude": lat,
         "longitude": lng,
         "status": data.get("completionStatus") or ("Available" if data.get("isActive", True) else "Sold Out"),
-        "has_pool": has_pool,
-        "beach_access": beach_access,
+        "has_pool": False,
+        "beach_access": False,
         "images": images,
         "detail_page_url": settings.get_property_detail_url(slug_target, country=country_id, city=city_id),
-        "highlights": (data.get("highlights") or amenities)[:3],
+        "highlights": (data.get("highlights") or amenities or tags)[:5],
+        "amenities": amenities,
+        "tags": tags,
         "expected_roi": data.get("expectedROI") or data.get("rentalYield"),
         "description": desc_str,
         "websites": websites_list,
         "is_public": data.get("isActive", True),
-        "raw_firestore_data": safe_raw_data
+        "raw_firestore_data": safe_raw_data,
     }
+    # Unified amenity facts + presentation clean-up (name/location/highlights/ownership)
+    try:
+        from app.services.amenity_service import enrich_card_amenity_flags
+        enrich_card_amenity_flags(card)
+    except Exception:
+        pass
+    try:
+        apply_presentation_to_card(card, language="en", raw_data=data)
+    except Exception:
+        pass
+    return card
+
+
+def clear_property_catalog_cache() -> None:
+    """Test/helper: drop the short-lived catalog cache."""
+    with _CATALOG_LOCK:
+        _CATALOG_CACHE.clear()
+
+
+def _fetch_properties_from_firestore_uncached(
+    limit: int = 150,
+    city_id: Optional[str] = None,
+    active_only: bool = True,
+    target: str = "user",
+) -> List[Dict[str, Any]]:
+    client = get_firestore_client(target=target)
+    if not client:
+        logger.warning("Firestore client not available.")
+        raise FirestoreDatabaseError("Firestore client is not initialized or unavailable.")
+
+    col = client.collection("projects")
+    query = col
+    if active_only:
+        try:
+            from google.cloud.firestore_v1.base_query import FieldFilter
+            query = query.where(filter=FieldFilter("isActive", "==", True))
+        except Exception:
+            query = query.where("isActive", "==", True)
+
+    if city_id:
+        try:
+            from google.cloud.firestore_v1.base_query import FieldFilter
+            query = query.where(filter=FieldFilter("cityId", "==", str(city_id).lower()))
+        except Exception:
+            query = query.where("cityId", "==", str(city_id).lower())
+
+    page_size = 500
+    max_total = int(limit) if limit and int(limit) > 0 else 10_000
+    results: List[Dict[str, Any]] = []
+    last_doc = None
+
+    try:
+        while len(results) < max_total:
+            batch_q = query.order_by("__name__").limit(min(page_size, max_total - len(results)))
+            if last_doc is not None:
+                batch_q = batch_q.start_after(last_doc)
+            docs = list(batch_q.stream())
+            if not docs:
+                break
+            for doc in docs:
+                data = doc.to_dict() or {}
+                results.append(normalize_firestore_project(doc.id, data))
+                if len(results) >= max_total:
+                    break
+            last_doc = docs[-1]
+            if len(docs) < page_size:
+                break
+    except Exception as page_err:
+        logger.warning(f"Paged Firestore fetch fallback: {page_err}")
+        docs = list(query.limit(max_total).stream())
+        results = [
+            normalize_firestore_project(doc.id, doc.to_dict() or {})
+            for doc in docs
+        ]
+
+    results.sort(key=lambda p: str(p.get("property_id") or ""))
+    return results
 
 
 def fetch_properties_from_firestore(
@@ -376,72 +458,96 @@ def fetch_properties_from_firestore(
 ) -> List[Dict[str, Any]]:
     """
     Fetches real property projects from Firestore `projects` collection.
-    Supports cityId filtering and active_only flag.
-    Routes to user or admin Firestore client based on target.
-
-    Results are ordered by document ID for stable, deterministic ordering.
-    When limit is large (or None-like <=0), pages through the collection so
-    every listing is reachable (not only the first 250 by ID).
+    Uses a short-lived in-memory cache (lazy load) so concurrent searches do not
+    each re-stream all ~925 documents. Cache key ignores small `limit` when the
+    caller wants a large catalog slice (search path uses limit=5000).
     """
-    client = get_firestore_client(target=target)
-    if not client:
-        logger.warning("Firestore client not available.")
-        raise FirestoreDatabaseError("Firestore client is not initialized or unavailable.")
+    # Cache full-ish catalog fetches; small one-off limits bypass cache
+    use_cache = (not limit or int(limit) >= 500) and active_only
+    cache_key = f"{target}|{city_id or ''}|{bool(active_only)}"
+    if use_cache:
+        with _CATALOG_LOCK:
+            hit = _CATALOG_CACHE.get(cache_key)
+            if hit and (time.monotonic() - hit[0]) < _CATALOG_TTL_SEC:
+                cached = hit[1]
+                return list(cached[: int(limit)]) if limit and int(limit) > 0 else list(cached)
 
     try:
-        col = client.collection("projects")
-        query = col
-        if active_only:
-            try:
-                from google.cloud.firestore_v1.base_query import FieldFilter
-                query = query.where(filter=FieldFilter("isActive", "==", True))
-            except Exception:
-                query = query.where("isActive", "==", True)
-
-        if city_id:
-            try:
-                from google.cloud.firestore_v1.base_query import FieldFilter
-                query = query.where(filter=FieldFilter("cityId", "==", str(city_id).lower()))
-            except Exception:
-                query = query.where("cityId", "==", str(city_id).lower())
-
-        page_size = 500
-        max_total = int(limit) if limit and int(limit) > 0 else 10_000
-        results: List[Dict[str, Any]] = []
-        last_doc = None
-
-        try:
-            while len(results) < max_total:
-                batch_q = query.order_by("__name__").limit(min(page_size, max_total - len(results)))
-                if last_doc is not None:
-                    batch_q = batch_q.start_after(last_doc)
-                docs = list(batch_q.stream())
-                if not docs:
-                    break
-                for doc in docs:
-                    data = doc.to_dict() or {}
-                    results.append(normalize_firestore_project(doc.id, data))
-                    if len(results) >= max_total:
-                        break
-                last_doc = docs[-1]
-                if len(docs) < page_size:
-                    break
-        except Exception as page_err:
-            # Fallback when composite index for order_by + filters is missing
-            logger.warning(f"Paged Firestore fetch fallback: {page_err}")
-            docs = list(query.limit(max_total).stream())
-            results = [
-                normalize_firestore_project(doc.id, doc.to_dict() or {})
-                for doc in docs
-            ]
-
-        results.sort(key=lambda p: str(p.get("property_id") or ""))
+        results = _fetch_properties_from_firestore_uncached(
+            limit=limit, city_id=city_id, active_only=active_only, target=target
+        )
+        if use_cache:
+            with _CATALOG_LOCK:
+                _CATALOG_CACHE[cache_key] = (time.monotonic(), list(results))
         logger.info(f"Successfully fetched {len(results)} properties from Firestore 'projects'.")
         return results
-
+    except FirestoreDatabaseError:
+        raise
     except Exception as e:
         logger.error(f"Error fetching properties from Firestore: {e}")
         raise FirestoreDatabaseError(f"Error communicating with Firestore: {e}")
+
+
+def score_property_relevance(
+    prop: Dict[str, Any],
+    *,
+    location: Optional[str] = None,
+    property_type: Optional[str] = None,
+    bedrooms: Optional[int] = None,
+    max_price: Optional[float] = None,
+    min_price: Optional[float] = None,
+    has_pool: Optional[bool] = None,
+    required_amenities: Optional[List[str]] = None,
+) -> float:
+    """Higher = better match for search ranking (not alphabetical)."""
+    score = 0.0
+    loc = (location or "").strip().lower()
+    if loc:
+        blob = " ".join(
+            str(prop.get(k) or "").lower()
+            for k in ("location", "district", "address", "name", "province")
+        )
+        if loc in blob:
+            score += 40.0
+        elif any(tok in blob for tok in loc.split() if len(tok) >= 3):
+            score += 20.0
+    pt = (property_type or "").strip().lower()
+    if pt:
+        ptype = str(prop.get("property_type") or "").lower()
+        pname = str(prop.get("name") or "").lower()
+        if pt in ptype or pt in pname or ("villa" in pt and "villa" in ptype):
+            score += 25.0
+        elif "condo" in pt and ("condo" in ptype or "apart" in ptype):
+            score += 25.0
+    if bedrooms is not None and bedrooms > 0:
+        b_nums = [int(n) for n in re.findall(r"\d+", str(prop.get("bedrooms") or ""))]
+        if b_nums and min(b_nums) <= bedrooms <= max(b_nums):
+            score += 15.0
+            # Prefer tighter bedroom ranges
+            span = max(b_nums) - min(b_nums)
+            score += max(0.0, 5.0 - span)
+    p_min = prop.get("price_numeric_min")
+    try:
+        p_min_f = float(p_min) if p_min is not None else None
+    except (TypeError, ValueError):
+        p_min_f = None
+    if max_price is not None and p_min_f is not None and p_min_f <= float(max_price):
+        score += 20.0
+        # Prefer listings closer to (but under) budget
+        ratio = p_min_f / float(max_price) if float(max_price) > 0 else 0.0
+        score += 10.0 * min(ratio, 1.0)
+    if min_price is not None and p_min_f is not None and p_min_f >= float(min_price):
+        score += 5.0
+    if has_pool is True and prop.get("has_pool"):
+        score += 8.0
+    if required_amenities:
+        try:
+            from app.services.amenity_service import property_has_amenity
+            hits = sum(1 for a in required_amenities if property_has_amenity(prop, a))
+            score += 6.0 * hits
+        except Exception:
+            pass
+    return score
 
 
 def get_firestore_properties_count(target: str = "user") -> int:
@@ -561,6 +667,7 @@ def search_properties_firestore(
     bedrooms: Optional[int] = None,
     has_pool: Optional[bool] = None,
     beach_access: Optional[bool] = None,
+    required_amenities: Optional[List[str]] = None,
     query: Optional[str] = None,
     websites: Optional[List[str]] = None,
     target: str = "user",
@@ -717,35 +824,64 @@ def search_properties_firestore(
             elif is_condo_query and "condo" not in p_type and "apart" not in p_type:
                 continue
 
-        # Bedroom filter
+        # Bedroom filter — exclude listings with unknown beds when a count was requested
         if bedrooms is not None and bedrooms > 0:
             b_str = str(p.get("bedrooms") or "")
             import re
             b_nums = [int(n) for n in re.findall(r"\d+", b_str)]
-            if b_nums:
-                min_b, max_b = min(b_nums), max(b_nums)
-                if not (min_b <= bedrooms <= max_b):
-                    continue
+            if not b_nums:
+                continue
+            min_b, max_b = min(b_nums), max(b_nums)
+            if not (min_b <= bedrooms <= max_b):
+                continue
 
-        # Price filters
+        # Price filters — exclude unknown / "price on request" on budget searches
         p_min = p.get("price_numeric_min")
+        price_blob = str(p.get("price") or p.get("price_display") or "").strip().lower()
+        is_por = (
+            p_min is None
+            or (not price_blob)
+            or ("request" in price_blob)
+            or price_blob in ("n/a", "na", "-", "tba")
+        )
+        if min_price is not None or max_price is not None:
+            if is_por:
+                continue
         if min_price is not None and p_min is not None and p_min < min_price:
             continue
         if max_price is not None and p_min is not None and p_min > max_price:
             continue
 
-        # Amenities filter
+        # Amenities filter (legacy flags + canonical amenity keys)
         if has_pool is True and not p.get("has_pool"):
             continue
         if beach_access is True and not p.get("beach_access"):
             continue
+        if required_amenities:
+            from app.services.amenity_service import property_has_amenity
+            if not all(property_has_amenity(p, a) for a in required_amenities):
+                continue
 
         candidates.append(p)
 
-    # Preserve any direct match at position 0; keep remaining in deterministic doc-id order
+    # Preserve any direct match at position 0; rank remaining by relevance (not A–Z)
     direct_ids = {m.get("property_id") for m in matched if m.get("property_id")}
     remaining = [c for c in candidates if c.get("property_id") not in direct_ids]
-    remaining.sort(key=lambda p: str(p.get("property_id") or ""))
+    remaining.sort(
+        key=lambda p: (
+            -score_property_relevance(
+                p,
+                location=location,
+                property_type=property_type,
+                bedrooms=bedrooms,
+                max_price=max_price,
+                min_price=min_price,
+                has_pool=has_pool,
+                required_amenities=list(required_amenities) if required_amenities else None,
+            ),
+            str(p.get("property_id") or ""),
+        )
+    )
 
     for p in remaining:
         # Add Google Maps URL & Embed

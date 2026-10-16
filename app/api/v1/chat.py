@@ -42,17 +42,46 @@ class PublicChatRequest(BaseModel):
 
     @field_validator("site_origin", mode="before")
     def validate_origin(cls, v):
+        """
+        Keep the real site origin so resolve_tenant() can brand replies correctly.
+        Accepts tajlandia.com / tajlandia.pl, thai.estate, varsoviaestate.com, localhost.
+        Never collapse tajlandia → varsoviaestate.com.
+        """
         default_origin = getattr(settings, "SITE_ORIGIN", "varsoviaestate.com") or "varsoviaestate.com"
+        default_host = (
+            str(default_origin)
+            .strip()
+            .lower()
+            .replace("https://", "")
+            .replace("http://", "")
+            .split("/")[0]
+            .split(":")[0]
+        )
         if not v or not isinstance(v, str):
-            return default_origin
-        v_clean = v.strip().lower().replace("https://", "").replace("http://", "").split("/")[0]
-        if "tajlandia" in v_clean or default_origin in v_clean:
-            return default_origin
-        allowed = [default_origin, "thai.estate", "localhost", "127.0.0.1"]
-        for domain in allowed:
-            if domain in v_clean:
-                return v_clean
-        return default_origin
+            return default_host
+        host = (
+            v.strip()
+            .lower()
+            .replace("https://", "")
+            .replace("http://", "")
+            .split("/")[0]
+            .split(":")[0]
+        )
+        if host.startswith("www."):
+            host = host[4:]
+
+        if host in ("localhost", "127.0.0.1"):
+            return host
+        if "tajlandia" in host:
+            return "tajlandia.pl" if host.endswith(".pl") else "tajlandia.com"
+        if "thai.estate" in host or host == "thai.estate":
+            return "thai.estate"
+        if "varsovia" in host:
+            return "varsoviaestate.com"
+        if host == default_host or default_host in host:
+            return default_host
+        # Unknown hosts fall back to default (do not invent a brand)
+        return default_host
 
 class PropertyCard(BaseModel):
     property_id: str = Field(..., example="15-sukhumvit-residences")
@@ -182,12 +211,14 @@ def handle_public_chat(
                 if getattr(settings, "ENABLE_FIRESTORE_SYNC", False):
                     try:
                         from app.services.firestore_service import create_lead_in_firestore
+                        from app.core.tenant import resolve_tenant
+                        _tenant = resolve_tenant(req.site_origin)
                         create_lead_in_firestore({
                             "name": req.contact_name,
                             "email": req.contact_email,
                             "phone": req.contact_phone,
-                            "brand": req.site_origin or getattr(settings, "BRAND_NAME", "Varsovia Estate"),
-                            "source_url": f"https://{req.site_origin or getattr(settings, 'SITE_ORIGIN', 'varsoviaestate.com')}",
+                            "brand": _tenant.brand_name,
+                            "source_url": _tenant.website_url,
                             "message": req.notes or user_msg,
                             "property_id": req.preferred_location or ""
                         })

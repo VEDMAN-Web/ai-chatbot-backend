@@ -22,6 +22,9 @@ class PropertyFilterParams(BaseModel):
     has_pool: Optional[bool] = None
     beach_access: Optional[bool] = None
     sea_view: Optional[bool] = None
+    required_amenities: Optional[List[str]] = Field(
+        None, description="Canonical amenity keys that must be present (gym, pool, parking, …)"
+    )
     query: Optional[str] = Field(None, max_length=200)
     status: Optional[str] = Field(None, max_length=50)
     is_public: Optional[bool] = True
@@ -277,7 +280,8 @@ class FirestorePropertyAdapter:
         self.beach_access = bool(data.get("beach_access"))
         self.sea_view = bool(data.get("sea_view"))
         self.description = data.get("description") or ""
-        self.ownership_type = data.get("ownership_type") or "Foreign Freehold / Leasehold available"
+        # Ownership only when present in property data — never invent a generic freehold/leasehold line
+        self.ownership_type = data.get("ownership_type") or data.get("ownership") or None
         self.highlights = list(data.get("highlights") or [])
         self.amenities = list(data.get("amenities") or [])
         self.investment_information = data.get("investment_information") or data.get("expected_roi") or ""
@@ -400,13 +404,25 @@ def to_compact_projection(p: Any, intent: str = "search") -> Dict[str, Any]:
         compact["status"] = getattr(p, "status", "Available") or "Available"
         compact["beach"] = bool(getattr(p, "beach_access", False))
         compact["sea_view"] = bool(getattr(p, "sea_view", False))
-        compact["ownership"] = getattr(p, "ownership_type", "Freehold / Leasehold") or "Freehold / Leasehold"
+        _own = getattr(p, "ownership_type", None) or getattr(p, "ownership", None)
+        if _own and str(_own).strip().lower() not in (
+            "freehold / leasehold",
+            "foreign freehold / leasehold available",
+            "foreign freehold / leasehold 90 lat",
+        ):
+            compact["ownership"] = str(_own).strip()
         if getattr(p, "highlights", None):
             compact["highlights"] = p.highlights[:2]
     elif intent in ["details", "property_details"]:
         compact["bathrooms"] = getattr(p, "bathrooms", "N/A") or "N/A"
         compact["status"] = getattr(p, "status", "Available") or "Available"
-        compact["ownership"] = getattr(p, "ownership_type", "Freehold / Leasehold") or "Freehold / Leasehold"
+        _own = getattr(p, "ownership_type", None) or getattr(p, "ownership", None)
+        if _own and str(_own).strip().lower() not in (
+            "freehold / leasehold",
+            "foreign freehold / leasehold available",
+            "foreign freehold / leasehold 90 lat",
+        ):
+            compact["ownership"] = str(_own).strip()
         compact["amenities"] = (getattr(p, "amenities", None) or [])[:4]
         if getattr(p, "investment_information", None):
             compact["investment"] = str(p.investment_information)[:150]

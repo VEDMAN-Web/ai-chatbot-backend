@@ -265,17 +265,8 @@ def resolve_tenant(site_origin: Optional[str] = None) -> TenantProfile:
 
 
 def _apply_custom_bot_name(profile: TenantProfile) -> TenantProfile:
-    """Allows BOT_NAME env override if explicitly set."""
-    custom_bot = getattr(settings, "BOT_NAME", "") or os.getenv("BOT_NAME", "")
-    if custom_bot and custom_bot.strip():
-        return TenantProfile(
-            site_origin=profile.site_origin,
-            brand_name=profile.brand_name,
-            bot_name=custom_bot.strip(),
-            brand_title=profile.brand_title,
-            brand_subtitle=profile.brand_subtitle,
-            domain=profile.domain,
-            advisor_email=profile.advisor_email,
-            website_url=profile.website_url
-        )
+    """
+    Registry tenant profiles keep their own brand/bot/email.
+    A global BOT_NAME (often Varsovia) must NOT overwrite tajlandia/thai tenants.
+    """
     return profile

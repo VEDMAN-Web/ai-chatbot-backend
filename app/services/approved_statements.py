@@ -10,3 +10,7 @@ from typing import List
 
 # Empty by default. Each string must be an exact approved phrase.
 APPROVED_STATEMENTS: List[str] = []
+
+# Label used when developer marketing / guaranteed-return text is shown
+# without endorsing it as a bot fact.
+DEVELOPER_MARKETING_CLAIM_LABEL = "developer marketing claim"
