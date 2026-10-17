@@ -2645,10 +2645,17 @@ class PublicAgentService:
         save_property_context(conversation, pctx)
 
         # 2b. Questions about the listings currently on screen ("which is cheapest?", "który jest tańszy?")
-        from app.services.shown_set import answer_shown_set_question, last_shown_cards
-        _shown_reply = answer_shown_set_question(
-            user_message, last_shown_cards(conversation.message_history or []), active_lang
-        )
+        from app.services.shown_set import answer_shown_set_question, shown_cards, _REF_RE as _SHOWN_REF
+        _shown_reply = None
+        if active_lang in ("en", "pl") and _SHOWN_REF.search(user_message or ""):
+            def _enrich_shown(_pid: str):
+                from app.services.firestore_service import get_property_by_id_from_firestore
+                return get_property_by_id_from_firestore(_pid)
+            _shown_reply = answer_shown_set_question(
+                user_message,
+                shown_cards(conversation.message_history or [], pctx.reference_map or {}, _enrich_shown),
+                active_lang,
+            )
         if _shown_reply:
             append_conversation_turn(
                 db=db,
@@ -2677,6 +2684,38 @@ class PublicAgentService:
 
         # Resolve follow-up references via persistent context when intent is weak/general
         resolved = resolve_property_reference(user_message, pctx, language=active_lang)
+
+        # 3b. Viewing / visit request without contact details -> hand over to the advisor (no invented slots)
+        from app.services.viewing_handoff import build_viewing_reply, is_viewing_request, name_for_id
+        if intent != IntentType.LEAD_CAPTURE and is_viewing_request(user_message):
+            from app.core.tenant import resolve_tenant as _rt_view
+            _ten = _rt_view(getattr(conversation, "site_origin", None))
+            _pid = None
+            for _cand in (pctx.recently_discussed_ids or []):
+                if str(_cand) and str(_cand) in user_message:
+                    _pid = str(_cand)
+                    break
+            _pid = _pid or resolved.property_id or pctx.active_property_id
+            _name = name_for_id(conversation.message_history or [], _pid)
+            _view_reply = build_viewing_reply(active_lang, _name, list(_ten.contacts or []), _ten.advisor_email)
+            append_conversation_turn(
+                db=db,
+                conversation=conversation,
+                user_message=user_message,
+                assistant_message=_view_reply,
+                new_preferences=save_property_context(conversation, pctx),
+            )
+            return {
+                "type": "text",
+                "text": _view_reply,
+                "properties": [],
+                "quick_replies": self._generate_quick_replies(user_message, [], language=active_lang),
+                "lead_captured": False,
+                "preferences": conversation.preferences or {},
+                "session_id": conversation.session_id,
+                "conversation_id": str(conversation.id),
+                "language": active_lang,
+            }
         if resolved.ambiguous:
             clarify = resolved.clarification or (
                 "Which property are you referring to? Please name it or say 'the first/second property'."
