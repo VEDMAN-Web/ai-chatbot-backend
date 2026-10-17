@@ -22,7 +22,7 @@ from app.services.maps_service import (
 )
 from app.services.google_services import google_manager
 from app.services.intent_router import (
-    IntentType, detect_deterministic_intent, extract_search_filters_deterministic
+    IntentType, detect_deterministic_intent, extract_search_filters_deterministic, detect_price_sort
 )
 from app.services.cache_service import search_cache
 from app.services.token_tracker import token_tracker, TurnTokenMetrics
@@ -1004,7 +1004,8 @@ def search_properties_unified(
                 websites=getattr(params, "websites", None),
                 target="user",
                 limit=lim + len(exclude_set),
-                exclude_property_ids=list(exclude_set)
+                exclude_property_ids=list(exclude_set),
+                sort_by_price=getattr(params, "sort_by_price", None),
             )
             if fs_cards:
                 for c in fs_cards:
@@ -4736,6 +4737,7 @@ class PublicAgentService:
                 has_pool=has_pool,
                 beach_access=beach_access,
                 required_amenities=required_amenities or None,
+                sort_by_price=detect_price_sort(user_message),
                 offset=0,
                 limit=4
             )
@@ -4769,6 +4771,7 @@ class PublicAgentService:
                     has_pool=fresh_pool,
                     beach_access=extracted.get("beach_access"),
                     required_amenities=fresh_am or None,
+                    sort_by_price=detect_price_sort(user_message),
                     offset=0,
                     limit=4
                 )

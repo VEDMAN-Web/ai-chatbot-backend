@@ -26,6 +26,7 @@ class PropertyFilterParams(BaseModel):
         None, description="Canonical amenity keys that must be present (gym, pool, parking, …)"
     )
     query: Optional[str] = Field(None, max_length=200)
+    sort_by_price: Optional[str] = Field(None, description="'asc' for cheapest first, 'desc' for most expensive first")
     status: Optional[str] = Field(None, max_length=50)
     is_public: Optional[bool] = True
     limit: int = 10
