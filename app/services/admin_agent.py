@@ -317,7 +317,7 @@ MANDATORY STRUCTURED PRESENTATION FORMAT (BULLET POINTS ONLY - NO RAW TABLES):
     - 💰 **Price:** **[Price in THB]** (~€[EUR] / ~[PLN] PLN)
     - 🛏️ **Bedrooms:** [Bedrooms] | 📐 **Built Area:** [Area sqm]
     - 🏊 **Amenities & Highlights:** [Private Pool, Sea View, etc.]
-    - 📜 **Ownership / Legal:** [Foreign Freehold Condominium / 30-Year Registered Leasehold Villa]
+    - 📜 **Ownership / Legal:** [only if the listing data states it; otherwise write: confirm ownership structure with an advisor. NEVER assume freehold or leasehold]
   * NEVER output markdown tables.
   * NEVER output plain unstructured line dumps.
   * ONLY include legal or foreign ownership explanations when explicitly requested; never append unsolicited legal advice.

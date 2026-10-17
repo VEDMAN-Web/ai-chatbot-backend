@@ -542,7 +542,7 @@ def resolve_language(
 
 # --- Prompts & Templates ---
 
-def get_compact_system_prompt(language: str = "en", site_origin: Optional[str] = None) -> str:
+def _get_compact_system_prompt_base(language: str = "en", site_origin: Optional[str] = None) -> str:
     tenant = resolve_tenant(site_origin)
     if language == "th":
         return f"""คุณเป็นที่ปรึกษาด้านอสังหาริมทรัพย์มืออาชีพสำหรับ {tenant.brand_name} ({tenant.domain}) ในประเทศไทย
@@ -576,7 +576,7 @@ TON I ZASADY:
     - 💰 **Cena wyjściowa:** **[Cena w THB]** (~€[EUR] / ~[PLN] PLN)
     - 🛏️ **Sypialnie:** [Liczba sypialni] | 📐 **Typ:** [Typ]
     - 🏊 **Udogodnienia:** [Basen itp.]
-    - 📜 **Forma własności:** [Foreign Freehold w kondominium / Rejestrowany Leasehold na willę]
+    - 📜 **Forma własności:** [tylko jeśli dane oferty to podają; w przeciwnym razie napisz: formę własności potwierdzi doradca. NIGDY nie zakładaj freehold ani leasehold]
   * NIGDY nie używaj tabel markdown (| ... |).
   * Informacje prawne i zasady zakupu dla cudzoziemców podawaj WYŁĄCZNIE wtedy, gdy użytkownik wyraźnie o nie zapyta (NIE dodawaj nieproszonych porad prawnych przy standardowym wyszukiwaniu ofert).
   * Zakończ listą kolejnych kroków (broszura, prezentacja, doradca)."""
@@ -597,7 +597,7 @@ TON & CORE RULES (Main Scope §5.6):
     - 💰 **Starting Price:** **[Price in THB]** (~€[EUR] / ~[PLN] PLN)
     - 🛏️ **Bedrooms:** [Bedrooms] | 📐 **Built Area:** [Area sqm]
     - 🏊 **Amenities & Highlights:** [Pool, Sea View, etc.]
-    - 📜 **Ownership:** [Foreign Freehold Condominium / 30-Year Registered Leasehold Villa]
+    - 📜 **Ownership:** [only if the listing data states it; otherwise write: confirm ownership structure with your advisor. NEVER assume freehold or leasehold]
   * NEVER use markdown headers (###) or dash bullets (-). Use numbered titles like **1. Property Name** and professional bullet points with • only.
   * NEVER output markdown tables (`| Property | Location | ... |`).
   * NEVER output messy unbulleted plain lines (e.g. "Price: ... Location: ... Bedrooms: ...").
@@ -606,7 +606,7 @@ TON & CORE RULES (Main Scope §5.6):
   * For follow-ups using "it", "this property", "its pool/price/location": keep discussing the SAME active property from conversation context. Never ask which property if one is already in focus."""
 
 
-def get_public_system_prompt(language: str = "en", site_origin: Optional[str] = None) -> str:
+def _get_public_system_prompt_base(language: str = "en", site_origin: Optional[str] = None) -> str:
     tenant = resolve_tenant(site_origin)
     if language == "th":
         return f"""คุณคือที่ปรึกษาด้านอสังหาริมทรัพย์มืออาชีพสำหรับ {tenant.brand_name} ({tenant.domain}) ในประเทศไทย
@@ -666,7 +666,7 @@ ZASADY I TON ROZMOWY:
      - 💰 **Cena wyjściowa:** **[Cena w THB]** (~€[EUR] / ~[PLN] PLN)
      - 🛏️ **Sypialnie:** [Liczba sypialni] | 📐 **Powierzchnia:** [Metraż]
      - 🏊 **Udogodnienia:** [Basen, Widok na morze itp.]
-     - 📜 **Forma własności:** [Foreign Freehold w kondominium / Rejestrowany Leasehold na willę]
+     - 📜 **Forma własności:** [tylko jeśli dane oferty to podają; w przeciwnym razie napisz: formę własności potwierdzi doradca. NIGDY nie zakładaj freehold ani leasehold]
    - NIGDY nie stosuj tabel markdown (| ... |).
    - NIGDY nie wypisuj surowego tekstu bez punktorów (np. "Price: ... Location: ...").
    - Kwestie prawne i zasady zakupu podawaj WYŁĄCZNIE wtedy, gdy użytkownik wyraźnie o nie zapyta. NIGDY nie dołączaj nieproszonych pouczeń prawnych przy standardowym wyszukiwaniu nieruchomości.
@@ -710,7 +710,7 @@ CORE INSTRUCTIONS & TONE:
      • 💰 **Starting Price:** **[Price in THB]** (~€[EUR] / ~[PLN] PLN)
      • 🛏️ **Bedrooms:** [Bedrooms] | 📐 **Built Area:** [Area sqm]
      • 🏊 **Amenities & Highlights:** [Private Pool, Sea View, etc.]
-     • 📜 **Ownership Structure:** [Foreign Freehold Condominium / 30-Year Registered Leasehold Villa]
+     • 📜 **Ownership Structure:** [only if the listing data states it; otherwise write: confirm ownership structure with your advisor. NEVER assume freehold or leasehold]
    - NEVER output markdown tables (`| Property | Location | ... |`).
    - ONLY provide foreign ownership or legal explanations when the user specifically asks about them.
    - Conclude with:
@@ -720,6 +720,36 @@ CORE INSTRUCTIONS & TONE:
      • Speak with a senior property advisor
 10. PROPERTY FOLLOW-UPS: If the user asks about "it", "this villa", "its pool", "its price", or "where is it", answer for the active property already discussed. Do NOT ask which property when context is clear.
 """
+
+
+
+def market_scope_note(language: str = "en", site_origin: Optional[str] = None) -> str:
+    """Which markets this site may discuss. Appended to the system prompts so the model matches the search scope."""
+    from app.core.tenant import allowed_countries_for_site
+    if allowed_countries_for_site(site_origin or ""):
+        if language == "pl":
+            return ("\n\nZAKRES RYNKU: Ta strona obsługuje wyłącznie oferty w Tajlandii. Jeśli klient pyta o Kambodżę, "
+                    "Malediwy lub inny kraj, uprzejmie wyjaśnij, że specjalizujemy się w Tajlandii, i zaproponuj oferty z Tajlandii.")
+        return ("\n\nMARKET SCOPE: This site covers Thailand listings only. If the visitor asks about Cambodia, the Maldives "
+                "or any other country, politely say we specialise in Thailand and offer Thailand listings instead.")
+    if language == "pl":
+        return ("\n\nZAKRES RYNKU: Ta strona prezentuje zweryfikowane oferty w Tajlandii, Kambodży (np. Phnom Penh, Sihanoukville) "
+                "oraz na Malediwach. Zasady prawne o własności (art. 86) dotyczą Tajlandii: dla Kambodży i Malediwów nie podawaj "
+                "zasad własności ani prawa, tylko skieruj do doradcy. Pytania o inne kraje poza tą listą kieruj grzecznie do ofert, które mamy. "
+                "Nigdy nie zakładaj formy własności oferty: podawaj ją tylko, gdy jest w danych oferty, w przeciwnym razie odeślij do doradcy.")
+    return ("\n\nMARKET SCOPE: This site presents verified listings in Thailand, Cambodia (e.g. Phnom Penh, Sihanoukville) and the "
+            "Maldives. The Section 86 ownership rules above describe Thailand only: for Cambodia or the Maldives do not state "
+            "ownership or legal rules, refer the visitor to an advisor. For countries outside this list, politely say we do not "
+            "cover them and offer what we do list. Never assume a listing's ownership structure: state it only when the listing data "
+            "says so, otherwise refer to an advisor.")
+
+
+def get_compact_system_prompt(language: str = "en", site_origin: Optional[str] = None) -> str:
+    return _get_compact_system_prompt_base(language, site_origin) + market_scope_note(language, site_origin)
+
+
+def get_public_system_prompt(language: str = "en", site_origin: Optional[str] = None) -> str:
+    return _get_public_system_prompt_base(language, site_origin) + market_scope_note(language, site_origin)
 
 
 def get_admin_system_prompt(language: str = "en") -> str:
@@ -874,7 +904,7 @@ MANDATORY STRUCTURED PRESENTATION FORMAT (BULLET POINTS ONLY - NO RAW TABLES):
     - 💰 **Price:** **[Price in THB]** (~€[EUR] / ~[PLN] PLN)
     - 🛏️ **Bedrooms:** [Bedrooms] | 📐 **Built Area:** [Area sqm]
     - 🏊 **Amenities & Highlights:** [Private Pool, Sea View, etc.]
-    - 📜 **Ownership / Legal:** [Foreign Freehold Condominium / 30-Year Registered Leasehold Villa]
+    - 📜 **Ownership / Legal:** [only if the listing data states it; otherwise write: confirm ownership structure with your advisor. NEVER assume freehold or leasehold]
   * NEVER output markdown tables.
   * NEVER output plain unstructured line dumps."""
 

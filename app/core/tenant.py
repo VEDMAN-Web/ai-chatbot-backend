@@ -12,8 +12,9 @@ Resolves tenant based on:
 """
 import logging
 import os
+from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -280,3 +281,44 @@ def _apply_custom_bot_name(profile: TenantProfile) -> TenantProfile:
     A global BOT_NAME (often Varsovia) must NOT overwrite tajlandia/thai tenants.
     """
     return profile
+
+
+# ---------------------------------------------------------------------------
+# Market scope per site.
+# varsoviaestate.com sells every market in the catalogue (Thailand, Cambodia, Maldives).
+# tajlandia.com and thai.estate are Thailand-only sites, so they must never show other countries.
+# The site of the current public chat request is held in a ContextVar so every search path
+# (many call sites) is scoped without changing each signature. Admin code never sets it, so the
+# admin side stays unrestricted.
+# ---------------------------------------------------------------------------
+_REQUEST_SITE: ContextVar[Optional[str]] = ContextVar("request_site_origin", default=None)
+_THAILAND_ONLY_SITES = frozenset({"tajlandia.com", "thai.estate"})
+
+
+def set_request_site(site_origin: Optional[str]):
+    """Mark the current public chat request with its site. Returns a token for reset_request_site."""
+    return _REQUEST_SITE.set(str(site_origin or ""))
+
+
+def reset_request_site(token) -> None:
+    try:
+        _REQUEST_SITE.reset(token)
+    except Exception:
+        pass
+
+
+def allowed_countries_for_site(site_origin: Optional[str] = None) -> Optional[List[str]]:
+    """
+    Countries (lowercase, as stored in listing `province`) a site may show.
+    None means no restriction (varsoviaestate.com, admin, or outside a public chat request).
+    """
+    raw = site_origin if site_origin is not None else _REQUEST_SITE.get()
+    if raw is None:
+        return None
+    try:
+        domain = resolve_tenant(raw).site_origin
+    except Exception:
+        return None
+    if domain in _THAILAND_ONLY_SITES:
+        return ["thailand"]
+    return None
