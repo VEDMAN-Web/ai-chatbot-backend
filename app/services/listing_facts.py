@@ -93,7 +93,7 @@ def _fx_thb(currency: str) -> Optional[float]:
 def _not_in_data(name: str, what_en: str, what_pl: str, advisor: str, lang: str, card: Optional[Dict[str, Any]] = None) -> str:
     """Diplomatic 'we do not have that confirmed': says what we DO know, never guesses, offers the next step."""
     price = str((card or {}).get("price") or "").strip()
-    loc = str((card or {}).get("location") or "").strip()
+    loc = humanize_location((card or {}).get("location"))
     known_en = " and ".join(x for x in (f"prices start {price}" if price.lower().startswith("from") else (f"the price is {price}" if price else ""),
                                        f"it is located in {loc}" if loc else "") if x)
     known_pl = " oraz ".join(x for x in (f"cena {price}" if price else "", f"lokalizacja: {loc}" if loc else "") if x)
@@ -369,5 +369,6 @@ def humanize_status(status: Any, language: str = "en") -> str:
 
 
 def humanize_location(loc: Any) -> str:
-    s = str(loc or "").strip()
-    return s.title() if s and s == s.lower() else s
+    """'samui, Koh Samui' -> 'Samui, Koh Samui': capitalise only the parts stored in all lower case."""
+    parts = [p.strip() for p in str(loc or "").split(",")]
+    return ", ".join(p.title() if p and p == p.lower() else p for p in parts if p)
