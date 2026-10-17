@@ -443,6 +443,33 @@ def _name_lookup_after_search_verb(msg_clean: str) -> Optional[Tuple[IntentType,
     return None
 
 
+def _looks_like_phone(text: str) -> bool:
+    t = text.strip()
+    digits = re.sub(r"\D", "", t)
+    if not 7 <= len(digits) <= 15:
+        return False
+    if re.fullmatch(r"\d{4}[-/.]\d{1,2}[-/.]\d{1,2}(?:\s+\d{1,2}[:.]\d{2})?", t):
+        return False  # an ISO date (+ time)
+    if re.fullmatch(r"\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}", t):
+        return False  # a dd-mm-yyyy date
+    return True
+
+
+def _lead_target_ref(msg_clean: str) -> Optional[str]:
+    """The listing a viewing / email request is about: a listing id in the message, else a confidently named listing."""
+    m = _PROPERTY_ID_RE.search(msg_clean)
+    if m:
+        return m.group(0)
+    try:
+        from app.services.property_name_index import get_property_name_index
+        mention = get_property_name_index().find_mention(msg_clean)
+        if mention.confident:
+            return mention.confident.display_name
+    except Exception:
+        pass
+    return None
+
+
 def detect_deterministic_intent(
     message: str,
     stored_state: Optional[Dict[str, Any]] = None
@@ -490,6 +517,8 @@ def detect_deterministic_intent(
         "นัดชม", "เข้าชม", "จองคิวชม"
     ]
     has_viewing_intent = any(k in msg_low for k in viewing_keywords)
+    if phone_match and not _looks_like_phone(phone_match.group(0)):
+        phone_match = None  # "2026-11-02", "10:00", a price: not a phone number
     if email_match or phone_match or (has_viewing_intent and any(k in msg_low for k in ["name", "email", "phone", "contact", "telefon", "mail"])):
         name_match = re.search(r"(?:my name is|i am|nazywam się|imię:|name:)\s+([A-Z][a-zA-Z\'-]+(?:\s+[A-Z][a-zA-Z\'-]+)+)", message, re.I)
         search_f = extract_search_filters_deterministic(message)
@@ -500,7 +529,9 @@ def detect_deterministic_intent(
             "location": search_f.get("location"),
             "property_type": search_f.get("property_type", "Villa"),
             "budget": search_f.get("max_price"),
-            "is_viewing": has_viewing_intent
+            "is_viewing": has_viewing_intent,
+            "wants_specs": bool(re.search(r"\b(?:e-?mail|send)\b.*\b(?:brochure|specs?|specifications|floor\s*plans?|details)\b", msg_low)),
+            "target_ref": _lead_target_ref(msg_clean),
         }
 
     # 1. Show All Properties (Reset all filters)

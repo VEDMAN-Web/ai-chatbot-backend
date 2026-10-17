@@ -2908,6 +2908,8 @@ class PublicAgentService:
         budget = args.get("budget")
         budget_dec = Decimal(str(budget)) if budget else None
         is_viewing = args.get("is_viewing", False)
+        wants_specs = bool(args.get("wants_specs"))
+        target_label = self._resolve_lead_target_label(args.get("target_ref"))
 
         lead = record_or_update_lead(
             db=db,
@@ -2917,9 +2919,20 @@ class PublicAgentService:
             contact_phone=c_phone,
             preferred_location=pref_loc,
             budget_max=budget_dec,
-            buying_signal=f"{'Private viewing request' if is_viewing else 'Contact details submitted'}: {c_email or c_phone or c_name}",
+            buying_signal=f"{'Private viewing request' if is_viewing else 'Contact details submitted'}: {c_email or c_phone or c_name}"
+            + (f" [{target_label}]" if target_label else ""),
             notes=f"Client requested viewing/contact: {user_message}"
         )
+
+        if target_label or not pref_loc:
+            # The request is about one named listing (or about nothing searchable): confirm exactly that. Never
+            # invent a location ("Phuket") and never pad the confirmation with unrelated listings.
+            return self._lead_confirmation_for_target(
+                db, conversation, lead, user_message, start_time, language,
+                tenant=tenant, name=c_name, email=c_email, phone=c_phone, target_label=target_label,
+                is_viewing=is_viewing, wants_specs=wants_specs, budget_dec=budget_dec,
+                requested_slot=self._requested_slot(user_message),
+            )
 
         # Search for luxury properties matching location & budget to present alongside confirmation
         params = PropertyFilterParams(
@@ -3040,6 +3053,105 @@ class PublicAgentService:
             "session_id": conversation.session_id,
             "conversation_id": str(conversation.id),
             "language": language
+        }
+
+    @staticmethod
+    def _requested_slot(message: str) -> Optional[str]:
+        m = re.search(r"\b(\d{4}-\d{2}-\d{2})\b(?:\s+(?:at\s+)?(\d{1,2}:\d{2}))?", message)
+        if not m:
+            return None
+        return f"{m.group(1)} {m.group(2)}".strip() if m.group(2) else m.group(1)
+
+    @staticmethod
+    def _resolve_lead_target_label(ref: Optional[str]) -> Optional[str]:
+        """Display name of the listing a viewing / email request is about (id or name); None when unknown."""
+        if not ref:
+            return None
+        try:
+            from app.services.property_name_index import get_property_name_index
+            idx = get_property_name_index()
+            entry = idx.get_entry(ref) if idx.has_data() else None
+            if entry:
+                return entry.display_name
+        except Exception:
+            pass
+        if re.fullmatch(r"(?i)prop-[a-z0-9\-]+|[A-Za-z0-9]{18,24}", ref.strip()):
+            try:
+                from app.services.firestore_service import get_property_by_id_from_firestore
+                card = get_property_by_id_from_firestore(ref.strip())
+                if card and card.get("name"):
+                    return str(card["name"])
+            except Exception:
+                pass
+            return None  # an id we cannot name: do not print an opaque id to the visitor
+        return ref.strip()
+
+    def _lead_confirmation_for_target(
+        self, db, conversation, lead, user_message, start_time, language, *, tenant, name, email, phone,
+        target_label, is_viewing, wants_specs, budget_dec, requested_slot,
+    ) -> Dict[str, Any]:
+        contact = phone or email
+        who = f", {name}" if name else ""
+        if language == "pl":
+            subject = f"**{target_label}**" if target_label else "wskazaną nieruchomość"
+            what = "wysyłkę specyfikacji" if wants_specs else ("prywatną prezentację" if is_viewing else "kontakt")
+            slot = f" Preferowany termin: {requested_slot}." if requested_slot else ""
+            text = (f"Dziękujemy{who}! Zarejestrowaliśmy Twoją prośbę o {what} dla: {subject}.{slot} "
+                    f"Doradca {tenant.brand_name} ({tenant.advisor_email}) skontaktuje się z Tobą"
+                    f"{' pod adresem **' + contact + '**' if contact else ''}.")
+        elif language == "th":
+            subject = f"**{target_label}**" if target_label else "โครงการที่ระบุ"
+            slot = f" วัน-เวลาที่ต้องการ: {requested_slot}" if requested_slot else ""
+            text = (f"ขอบคุณครับ{who}! ระบบบันทึกคำขอของคุณสำหรับ {subject} แล้ว{slot} "
+                    f"ที่ปรึกษาของ {tenant.brand_name} ({tenant.advisor_email}) จะติดต่อกลับ"
+                    f"{' ทาง **' + contact + '**' if contact else ''}")
+        else:
+            subject = f"**{target_label}**" if target_label else "the property you asked about"
+            what = ("the verified specifications" if wants_specs
+                    else ("a private viewing" if is_viewing else "contact"))
+            slot = f" Preferred time: {requested_slot}." if requested_slot else ""
+            text = (f"Thank you{who}! We have registered your request for {what} of {subject}.{slot} "
+                    f"An advisor from {tenant.brand_name} ({tenant.advisor_email}) will contact you"
+                    f"{' via **' + contact + '**' if contact else ''} to follow up.")
+
+        stored_prefs = dict(conversation.preferences or {})
+        if budget_dec:
+            stored_prefs["budget_max"] = float(budget_dec)
+        conversation.preferences = stored_prefs
+        if hasattr(conversation, "__table__"):
+            try:
+                db.commit()
+            except Exception:
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+        append_conversation_turn(
+            db=db, conversation=conversation, user_message=user_message, assistant_message=text,
+            structured_data={"properties": [], "lead_id": str(lead.id)},
+        )
+        token_tracker.log_turn(
+            TurnTokenMetrics(
+                request_id=f"req_{uuid.uuid4().hex[:8]}",
+                session_id=conversation.session_id,
+                conversation_id=str(conversation.id),
+                intent="lead_capture",
+                model="deterministic",
+                latency_sec=round(time.time() - start_time, 3),
+            ),
+            db=db,
+        )
+        return {
+            "type": "text",
+            "text": text,
+            "properties": [],
+            "quick_replies": self._generate_quick_replies(user_message, [], language=language),
+            "lead_captured": True,
+            "lead_id": str(lead.id),
+            "preferences": stored_prefs,
+            "session_id": conversation.session_id,
+            "conversation_id": str(conversation.id),
+            "language": language,
         }
 
     def _handle_show_more(
