@@ -2645,10 +2645,17 @@ class PublicAgentService:
         save_property_context(conversation, pctx)
 
         # 2b. Questions about the listings currently on screen ("which is cheapest?", "który jest tańszy?")
-        from app.services.shown_set import answer_shown_set_question, last_shown_cards
-        _shown_reply = answer_shown_set_question(
-            user_message, last_shown_cards(conversation.message_history or []), active_lang
-        )
+        from app.services.shown_set import answer_shown_set_question, shown_cards, _REF_RE as _SHOWN_REF
+        _shown_reply = None
+        if active_lang in ("en", "pl") and _SHOWN_REF.search(user_message or ""):
+            def _enrich_shown(_pid: str):
+                from app.services.firestore_service import get_property_by_id_from_firestore
+                return get_property_by_id_from_firestore(_pid)
+            _shown_reply = answer_shown_set_question(
+                user_message,
+                shown_cards(conversation.message_history or [], pctx.reference_map or {}, _enrich_shown),
+                active_lang,
+            )
         if _shown_reply:
             append_conversation_turn(
                 db=db,

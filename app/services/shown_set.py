@@ -106,8 +106,13 @@ def answer_shown_set_question(message: str, cards: List[Dict[str, Any]], languag
 
     from app.services.amenity_service import property_has_amenity
 
+    def _known(c: Dict[str, Any]) -> bool:
+        return bool(c.get("_enriched")) or any(k in c for k in ("has_pool", "amenities", "highlights", "raw_firestore_data"))
+
     for rx, canon, en_what, pl_what in ((_POOL, "pool", "a pool", "basen"), (_BEACH, "beach_access", "beach access", "dostęp do plaży")):
         if rx.search(msg):
+            if not all(_known(c) for c in cards):
+                return None  # we only hold slim cards: never claim absence, let the normal flow answer
             yes = [c["name"] for c in cards if property_has_amenity(c, canon)]
             no = [c["name"] for c in cards if c["name"] not in yes]
             if len(yes) == len(cards):
@@ -121,3 +126,35 @@ def answer_shown_set_question(message: str, cards: List[Dict[str, Any]], languag
                       f"{pl_what.capitalize()} potwierdzono dla: {', '.join('**'+n+'**' for n in yes)}. "
                       f"Brak potwierdzenia w danych dla: {', '.join(no)}.")
     return None
+
+
+_ORD_LABELS = ("first property", "second property", "third property", "fourth property", "fifth property")
+
+
+def shown_cards(history: List[Dict[str, Any]], reference_map: Dict[str, str], enrich=None) -> List[Dict[str, Any]]:
+    """The listings of the latest search batch as full cards.
+
+    Ids come from the persistent ordinal map (stable across detail turns), else from history cards; each card is
+    enriched with the full listing record so price / amenity answers come from real data, not trimmed history.
+    """
+    hist_cards = last_shown_cards(history)
+    slim = {str(c.get("property_id") or c.get("id")): c for c in hist_cards}
+    ids = [str(reference_map[l]) for l in _ORD_LABELS if (reference_map or {}).get(l)]
+    if len(ids) < 2:
+        ids = list(slim.keys())
+    if len(ids) < 2:
+        return []
+    out: List[Dict[str, Any]] = []
+    for pid in ids[:5]:
+        base: Dict[str, Any] = dict(slim.get(pid) or {"property_id": pid})
+        full = None
+        if enrich:
+            try:
+                full = enrich(pid)
+            except Exception:
+                full = None
+        if full:
+            base = {**base, **full, "_enriched": True}
+        if base.get("name"):
+            out.append(base)
+    return out if len(out) >= 2 else []

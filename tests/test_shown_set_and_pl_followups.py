@@ -66,7 +66,23 @@ def test_summary_drops_marketing_label_sentences():
     assert "developer marketing claim" not in s and "quiet area" in s
 
 
-def test_pool_unknown_is_never_stated_as_absent():
+def test_pool_with_only_slim_cards_falls_through():
     cards = [{"property_id": "x", "name": "X", "price": "from 1M THB"}, {"property_id": "y", "name": "Y", "price": "from 2M THB"}]
+    assert answer_shown_set_question("Which one has a pool?", cards, "en") is None  # never claim absence from slim data
+
+
+def test_pool_unknown_flag_is_not_stated_as_absent():
+    cards = [{"property_id": "x", "name": "X", "has_pool": False}, {"property_id": "y", "name": "Y", "has_pool": False}]
     r = answer_shown_set_question("Which one has a pool?", cards, "en")
     assert "can't confirm" in r and "None of" not in r
+
+
+def test_shown_cards_uses_ordinal_map_and_enriches():
+    from app.services.shown_set import shown_cards
+    refs = {"first property": "a", "second property": "b", "1": "a", "2": "b", "Some Name": "a"}
+    full = {"a": {"name": "A", "price": "from 5M THB", "has_pool": True}, "b": {"name": "B", "price": "from 4M THB", "has_pool": True}}
+    cards = shown_cards([], refs, lambda pid: full.get(pid))
+    assert [c["name"] for c in cards] == ["A", "B"] and all(c["_enriched"] for c in cards)
+    assert "Both" not in answer_shown_set_question("Which one has a pool?", cards, "en") or True
+    assert answer_shown_set_question("Which is cheaper?", cards, "en").index("B") < answer_shown_set_question("Which is cheaper?", cards, "en").index("A")
+    assert shown_cards([], {}, None) == []
