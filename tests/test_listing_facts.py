@@ -85,3 +85,30 @@ def test_missing_data_answer_is_helpful_not_a_dead_end():
     assert "from 2.99M THB" in r and "Koh Samui" in r   # still gives what we do know
     assert "Inquire" in r                               # clear next step
     assert "not in our" not in r.lower()                # no blunt denial
+
+
+from app.services.listing_facts import short_summary, humanize_status, humanize_location
+
+LONG = ("Set beside a mangrove forest on the east coast of Koh Rong, this residential resort brings together houses "
+        "and villas. Landscaped pathways and shared pools create a setting designed around island stays and rental "
+        "operations. Pricing: C1 Suite USD 178,750. Payment Plan: Reservation deposit USD 5,000. "
+        "Rental Potential and ROI: The operator's share is 35% of rental revenue.")
+
+
+def test_short_summary_is_short_and_drops_pricing_payment_and_roi_sections():
+    s = short_summary(LONG)
+    assert len(s) <= 300 and s.startswith("Set beside a mangrove forest")
+    for banned in ("Pricing", "Payment Plan", "ROI", "35%", "178,750", "deposit"):
+        assert banned not in s
+
+
+def test_short_summary_cuts_at_bullets_and_handles_empty():
+    assert "•" not in short_summary("A calm resort by the sea with a pool and garden for families. • Location: x • Road access: y")
+    assert short_summary(None) == "" and short_summary("") == ""
+
+
+def test_humanized_status_and_location():
+    assert humanize_status("under_construction") == "Under construction"
+    assert humanize_status("pre_sale", "pl") == "W przedsprzedaży"
+    assert humanize_location("sihanoukville") == "Sihanoukville" and humanize_location("Koh Samui") == "Koh Samui"
+    assert humanize_location("samui, Koh Samui") == "Samui, Koh Samui"

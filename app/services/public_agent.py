@@ -1829,6 +1829,9 @@ def rewrite_public_query(
     return current_message
 
 
+from app.services.listing_facts import short_summary, humanize_status, humanize_location  # noqa: E402
+
+
 def _listing_fact_reply(focus_q: str, card: Any, language: str, conversation: Any, p_owner: Any) -> Optional[str]:
     """Grounded one-topic answer for a follow-up about the listing in focus (see listing_facts); None = not handled."""
     try:
@@ -3827,16 +3830,16 @@ class PublicAgentService:
                     lines_th.append(f"• **รูปแบบกรรมสิทธิ์:** {p_owner}")
                 if p_high:
                     lines_th.append(f"• **จุดเด่น:** {', '.join(p_high)}")
-                lines_th.extend(["", p_desc or "", "", "คุณต้องการดูผังอาคาร (Floor Plan) เพิ่มเติม หรือต้องการให้นัดหมายเข้าชมโครงการไหมครับ?"])
+                lines_th.extend(["", short_summary(p_desc), "", "คุณต้องการดูผังอาคาร (Floor Plan) เพิ่มเติม หรือต้องการให้นัดหมายเข้าชมโครงการไหมครับ?"])
                 reply_text = "\n".join(lines_th)
             elif language == "pl":
                 lines_pl = [
-                    f"Oto zweryfikowane parametry dla **{p_name}** ({p_id}):",
+                    f"Oto krótkie podsumowanie **{p_name}**:",
                     "",
-                    f"• **Lokalizacja:** {p_loc}",
+                    f"• **Lokalizacja:** {humanize_location(p_loc)}",
                     f"• **Cena:** {p_price}",
                     f"• **Sypialnie / Powierzchnia:** {p_beds} | {p_area}",
-                    f"• **Status:** {p_status}",
+                    f"• **Status:** {humanize_status(p_status, 'pl')}",
                 ]
                 if pool_lab:
                     lines_pl.append(f"• **Basen:** {pool_lab}")
@@ -3846,16 +3849,16 @@ class PublicAgentService:
                     lines_pl.append(f"• **Forma własności:** {p_owner}")
                 if p_high:
                     lines_pl.append(f"• **Główne atuty:** {', '.join(p_high)}")
-                lines_pl.extend(["", p_desc or "", "", "Czy chcesz uzyskać więcej szczegółów na temat rzutów pięter lub umówić termin prezentacji z naszym doradcą?"])
+                lines_pl.extend(["", short_summary(p_desc), "", "Czy przesłać broszurę, umówić prezentację lub odpowiedzieć na pytania o tę ofertę (termin ukończenia, metraże, warunki płatności)?"])
                 reply_text = "\n".join(lines_pl)
             else:
                 lines_en = [
-                    f"Here are the verified specifications for **{p_name}** ({p_id}):",
+                    f"Here's a quick look at **{p_name}**:",
                     "",
-                    f"• **Location:** {p_loc}",
+                    f"• **Location:** {humanize_location(p_loc)}",
                     f"• **Price:** {p_price}",
                     f"• **Bedrooms / Area:** {p_beds} | {p_area}",
-                    f"• **Status:** {p_status}",
+                    f"• **Status:** {humanize_status(p_status, 'en')}",
                 ]
                 if pool_lab:
                     lines_en.append(f"• **Pool:** {pool_lab}")
@@ -3865,7 +3868,7 @@ class PublicAgentService:
                     lines_en.append(f"• **Ownership:** {p_owner}")
                 if p_high:
                     lines_en.append(f"• **Key Highlights:** {', '.join(p_high)}")
-                lines_en.extend(["", p_desc or "", "", "Would you like more details regarding floor plans or assistance scheduling a viewing tour?"])
+                lines_en.extend(["", short_summary(p_desc), "", "Would you like the brochure, a viewing, or to ask me anything about this property (completion date, unit sizes, payment terms)?"])
                 reply_text = "\n".join(lines_en)
             cards = [card]
             record_or_update_lead(
