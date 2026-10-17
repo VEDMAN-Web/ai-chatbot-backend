@@ -1215,6 +1215,20 @@ def _extract_search_filters_deterministic_impl(message: str) -> Dict[str, Any]:
         filters["sea_view"] = True
 
     return filters
+_SORT_ASC_RE = re.compile(r"\b(?:cheapest|lowest[- ]priced?|lowest price|most affordable|least expensive|najta[nń]sz\w*|najmniej drog\w*)\b|ถูกที่สุด|ราคาต่ำสุด", re.I)
+_SORT_DESC_RE = re.compile(r"\b(?:most expensive|priciest|highest[- ]priced?|highest price|najdro[zż]sz\w*)\b|แพงที่สุด|ราคาสูงสุด", re.I)
+
+
+def detect_price_sort(message: str) -> Optional[str]:
+    """'asc' for 'cheapest / most affordable', 'desc' for 'most expensive'. Otherwise None (relevance order)."""
+    msg = message or ""
+    if _SORT_ASC_RE.search(msg) and not _SORT_DESC_RE.search(msg):
+        return "asc"
+    if _SORT_DESC_RE.search(msg) and not _SORT_ASC_RE.search(msg):
+        return "desc"
+    return None
+
+
 def _is_thousand_unit(unit: str) -> bool:
     """'100 tys. THB' / '500 thousand' mean thousands; without this a small number was read as millions."""
     return (unit or "").lower().rstrip(".") in ("tys", "tysięcy", "tysiecy", "thousand")

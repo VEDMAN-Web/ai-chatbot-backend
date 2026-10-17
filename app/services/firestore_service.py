@@ -881,7 +881,8 @@ def search_properties_firestore(
     websites: Optional[List[str]] = None,
     target: str = "user",
     limit: int = 6,
-    exclude_property_ids: Optional[List[str]] = None
+    exclude_property_ids: Optional[List[str]] = None,
+    sort_by_price: Optional[str] = None
 ) -> List[Dict[str, Any]]:
     """
     Searches properties in Firestore projects collection using structured criteria.
@@ -1117,6 +1118,13 @@ def search_properties_firestore(
             str(p.get("property_id") or ""),
         )
     )
+
+    if sort_by_price in ("asc", "desc"):
+        # "Cheapest" / "most expensive" must be true across ALL matches, not across the first few by relevance.
+        # Listings with no usable price are left out of a price ranking rather than shown as "cheapest".
+        priced = [c for c in remaining if (c.get("price_thb_min") or 0) > 0]
+        priced.sort(key=lambda c: (c["price_thb_min"], str(c.get("property_id") or "")), reverse=(sort_by_price == "desc"))
+        remaining = priced
 
     for p in remaining:
         # Add Google Maps URL & Embed
