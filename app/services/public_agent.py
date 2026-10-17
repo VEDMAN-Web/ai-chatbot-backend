@@ -1829,6 +1829,20 @@ def rewrite_public_query(
     return current_message
 
 
+def _listing_fact_reply(focus_q: str, card: Any, language: str, conversation: Any, p_owner: Any) -> Optional[str]:
+    """Grounded one-topic answer for a follow-up about the listing in focus (see listing_facts); None = not handled."""
+    try:
+        if not isinstance(card, dict):
+            return None
+        from app.core.tenant import resolve_tenant
+        from app.services.listing_facts import answer_listing_fact
+        advisor = resolve_tenant(getattr(conversation, "site_origin", None)).advisor_email
+        return answer_listing_fact(focus_q, card, language=language, advisor_email=advisor, ownership=(str(p_owner) if p_owner else None))
+    except Exception as exc:  # never let the helper break the chat: fall back to the existing answer
+        logger.warning("listing fact answer failed: %s", exc)
+        return None
+
+
 class PublicAgentService:
     def __init__(self):
         self.model = settings.OPENAI_MODEL
@@ -3761,6 +3775,8 @@ class PublicAgentService:
                     f"มี{label}ในข้อมูลที่ตรวจสอบแล้วครับ",
                     f"ในฐานข้อมูลที่ตรวจสอบแล้วยังไม่มีข้อมูลเกี่ยวกับ {label}",
                 )
+            elif (_fact_reply := _listing_fact_reply(focus_q, card, language, conversation, p_owner)) is not None:
+                reply_text = _fact_reply
             elif any(k in focus_q for k in ["price", "cost", "how much", "cena", "ราคา"]) and not any(
                 k in focus_q for k in ["bedroom", "ownership", "status", "sypialn", "własno", "wlasno", "กรรมสิทธิ์"]
             ):
