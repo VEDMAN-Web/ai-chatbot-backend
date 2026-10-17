@@ -1331,7 +1331,7 @@ def clean_response_text(text: Optional[str]) -> str:
     return s.strip()
 
 
-def is_off_topic_query(message: str) -> bool:
+def is_off_topic_query(message: str, lenient: bool = False) -> bool:
     """
     Intelligently identifies queries that are off-topic or random questions unrelated to
     Thailand luxury real estate (e.g. general trivia, coding, math, science, cars, electronics,
@@ -1485,6 +1485,11 @@ def is_off_topic_query(message: str) -> bool:
     has_contact = bool(re.search(r"[\w\.-]+@[\w\.-]+\.\w+", msg) or re.search(r"\+?\d{9,15}", msg))
 
     if has_real_estate_context or has_contact:
+        return False
+
+    # Mid-conversation about a listing ("Is there a gym?", "What is the payment plan?") carries no
+    # property words of its own. Only the explicit trivia / injection lists above may block it then.
+    if lenient:
         return False
 
     # 6. No Thailand / RE context → treat Q&A / trivia / general knowledge as off-topic
@@ -2682,7 +2687,11 @@ class PublicAgentService:
             IntentType.GREETING,
         }
         # Property follow-ups with active context are never off-topic
-        if is_property_followup_message(user_message, pctx) and (pctx.active_property_id or resolved.property_id):
+        if (
+            is_property_followup_message(user_message, pctx)
+            and (pctx.active_property_id or resolved.property_id)
+            and not is_off_topic_query(user_message, lenient=True)
+        ):
             is_off_topic = False
         elif intent == IntentType.OFF_TOPIC:
             is_off_topic = True
@@ -3944,6 +3953,21 @@ class PublicAgentService:
         prop_ids = args.get("property_ids", [])
         if not prop_ids:
             prop_ids = stored_prefs.get("last_result_ids", [])[:2]
+        else:
+            # "Compare it with Hidden Lotus": 'it' is the listing being discussed, never a listing literally named "It".
+            _pronouns = {"it", "this", "that", "this one", "that one", "this property", "that property",
+                         "this villa", "that villa", "this condo", "that condo", "this listing", "the same",
+                         "ten", "ta", "to", "ta oferta", "ta willa", "ten projekt"}
+            _pc = load_property_context(conversation)
+            _active = _pc.active_property_reference or _pc.active_property_id
+            _resolved_ids = []
+            for _x in prop_ids:
+                if isinstance(_x, str) and _x.strip().lower() in _pronouns:
+                    if _active and _active not in _resolved_ids:
+                        _resolved_ids.append(_active)
+                elif _x not in _resolved_ids:
+                    _resolved_ids.append(_x)
+            prop_ids = _resolved_ids
 
         props = get_properties_by_ids(db, prop_ids)
         if len(props) < 2:

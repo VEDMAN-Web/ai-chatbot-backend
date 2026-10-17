@@ -44,6 +44,11 @@ _FACT_HINTS = re.compile(
     r"(?:price|cost|how much|amenit|pool|parking|bedroom|bathroom|location|address|"
     r"area|size|sqm|status|available|ownership|freehold|leasehold|beach|sea view|"
     r"floor plan|brochure|yield|roi|developer|furniture|cena|basen|sypialn|"
+    r"gym|fitness|units?\b|studios?|payment|instal+ment|deposit|security|balcon|garden|wi-?fi|pets?\b|"
+    r"mall|supermarket|restaurant|airport|distance|how far|fees?\b|discount|complet|finish|built|handover|"
+    r"furnish|maintenance|taxes|visa|euro|\beur\b|zloty|z[lł]ot|\bpln\b|\busd\b|dollar|cheaper|expensive|"
+    r"how many|lift|elevator|storey|floors?\b|\bview|good (?:investment|deal)|recommend|guarantee|"
+    r"owns?\b|title|lease|mortgage|financ|per sq|one-bedroom|two-bedroom|1-bed|2-bed|"
     r"ราคา|สระ|ที่จอด|ทำเล|ห้องนอน|มี\s)",
     re.IGNORECASE,
 )
