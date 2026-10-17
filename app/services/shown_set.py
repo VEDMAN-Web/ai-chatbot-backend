@@ -5,7 +5,7 @@ No LLM: the answer is computed from the cards the visitor was just shown, so it 
 EN + PL only; other languages fall through to the normal flow.
 """
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from app.core.config import settings
 
@@ -70,8 +70,28 @@ def _t(language: str, en: str, pl: str) -> str:
     return pl if language == "pl" else en
 
 
+def contextual_quick_replies(language: str, name: Optional[str] = None, advisor_first: bool = False) -> List[str]:
+    """Follow-up chips after a shown-set / viewing answer (EN/PL; other languages get the English set).
+
+    The texts route into existing handlers: 'Tell me more about <name>' -> property details, 'Show me other options'
+    -> show-more, and the advisor chip is the exact text the generic chips already use ('Connect me with an advisor').
+    """
+    pl = language == "pl"
+    name = (name or "").replace("*", "").strip()[:60]
+    more = ([f"Powiedz więcej o {name}" if pl else f"Tell me more about {name}"] if name else [])
+    other = "Pokaż inne oferty" if pl else "Show me other options"
+    advisor = "Połącz mnie z doradcą" if pl else "Connect me with an advisor"
+    return ([advisor] + more + [other]) if advisor_first else (more + [other, advisor])
+
+
 def answer_shown_set_question(message: str, cards: List[Dict[str, Any]], language: str = "en") -> Optional[str]:
     """Reply text, or None when the message is not a question about the shown set."""
+    res = answer_shown_set(message, cards, language)
+    return res[0] if res else None
+
+
+def answer_shown_set(message: str, cards: List[Dict[str, Any]], language: str = "en") -> Optional[Tuple[str, Optional[str]]]:
+    """(reply text, name of the listing the answer points to or None), or None when not a shown-set question."""
     if language not in ("en", "pl") or len(cards) < 2:
         return None
     msg = (message or "").strip()
@@ -102,7 +122,7 @@ def answer_shown_set_question(message: str, cards: List[Dict[str, Any]], languag
             txt += _t(language, " (Listings without a published price are not included in this comparison.)",
                       " (Oferty bez opublikowanej ceny nie są uwzględnione w porównaniu.)")
         return txt + _t(language, "\n\nPrices are starting prices per project; units differ in size.",
-                        "\n\nCeny są cenami startowymi projektu; jednostki różnią się metrażem.")
+                        "\n\nCeny są cenami startowymi projektu; jednostki różnią się metrażem."), a["name"]
 
     from app.services.amenity_service import property_has_amenity
 
@@ -116,15 +136,15 @@ def answer_shown_set_question(message: str, cards: List[Dict[str, Any]], languag
             yes = [c["name"] for c in cards if property_has_amenity(c, canon)]
             no = [c["name"] for c in cards if c["name"] not in yes]
             if len(yes) == len(cards):
-                return _t(language, f"All of the listings above have {en_what}.", f"Wszystkie pokazane oferty mają {pl_what}.")
+                return _t(language, f"All of the listings above have {en_what}.", f"Wszystkie pokazane oferty mają {pl_what}."), cards[0]["name"]
             if not yes:
                 return _t(language, f"I can't confirm {en_what} for any of the listings above in our data.",
-                          f"Nie mogę potwierdzić: {pl_what} - w naszych danych brak tej informacji dla pokazanych ofert.")
+                          f"Nie mogę potwierdzić: {pl_what} - w naszych danych brak tej informacji dla pokazanych ofert."), None
             return _t(language,
                       f"{en_what.capitalize()} is confirmed for: {', '.join('**'+n+'**' for n in yes)}. "
                       f"Not confirmed in our data for: {', '.join(no)}.",
                       f"{pl_what.capitalize()} potwierdzono dla: {', '.join('**'+n+'**' for n in yes)}. "
-                      f"Brak potwierdzenia w danych dla: {', '.join(no)}.")
+                      f"Brak potwierdzenia w danych dla: {', '.join(no)}."), yes[0]
     return None
 
 

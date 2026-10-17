@@ -251,7 +251,7 @@ def build_amenity_none_match_reply(
 
     def _alt_line(c: Dict[str, Any]) -> str:
         name = str(c.get("name") or c.get("property_name") or "").strip()
-        place = str(c.get("location") or "").strip()
+        place = _display_loc(str(c.get("location") or "").strip())
         labels = c.get("amenity_labels") or []
         lab = labels[0] if labels else f"{amenity} not listed"
         bits = [b for b in [name, place, lab] if b]
@@ -300,7 +300,7 @@ def build_no_match_reply(
 
     def _alt_line(c: Dict[str, Any]) -> str:
         name = str(c.get("name") or c.get("property_name") or "").strip()
-        loc = str(c.get("location") or "").strip()
+        loc = _display_loc(str(c.get("location") or "").strip())
         price = str(c.get("price") or c.get("price_display") or "").strip()
         bits = [b for b in [name, loc, price] if b]
         return "• " + " | ".join(bits) if bits else ""
@@ -355,6 +355,12 @@ def build_no_match_reply(
         f"Our advisory team ({advisor}) can help further. "
         "You can also share a location, budget, or property type to search among verified listings only."
     )
+
+
+def _display_loc(value: str) -> str:
+    from app.services.listing_presentation import display_location
+    return display_location(value)
+
 
 LANGUAGE_ALIASES = {
     "pl": "pl",
@@ -1199,7 +1205,7 @@ def build_rich_property_recommendation_text(
         name = str(c.get("name") or c.get("property_name") or "").replace("*", "").strip()
         if not name:
             continue
-        loc = str(c.get("location") or "").replace("*", "").strip()
+        loc = _display_loc(str(c.get("location") or "").replace("*", "").strip())
         price_raw = c.get("price") if c.get("price") is not None else c.get("price_display")
         price = str(price_raw).strip().replace("*", "") if price_raw not in (None, "") else ""
         # Never "Starting from from" or "Starting from Price on request"

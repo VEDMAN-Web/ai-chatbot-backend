@@ -68,6 +68,38 @@ def slug_to_title(slug: str) -> str:
     s = re.sub(r"\s+", " ", s).strip()
     return " ".join(w.capitalize() for w in s.split() if w)
 
+# Location slugs / lower-case names -> display form. Display only: stored ids, slugs and filter keys are never changed.
+_LOCATION_DISPLAY = {
+    "samui": "Koh Samui", "koh samui": "Koh Samui", "ko samui": "Koh Samui",
+    "phangan": "Koh Phangan", "koh phangan": "Koh Phangan", "ko phangan": "Koh Phangan",
+    "phnom penh": "Phnom Penh", "siem reap": "Siem Reap", "sihanoukville": "Sihanoukville",
+    "hua hin": "Hua Hin", "koh rong": "Koh Rong", "koh chang": "Koh Chang", "koh tao": "Koh Tao",
+}
+_THAI_SCRIPT = re.compile(r"[\u0E00-\u0E7F]")
+_EMPTY_PARTS = {"none", "null", "nan", "undefined"}
+
+
+def display_location(loc: Any) -> str:
+    """Display form of a location name or slug, part by part (comma separated).
+
+    'phuket' -> 'Phuket', 'samui' -> 'Koh Samui', 'hua-hin' -> 'Hua Hin', 'phnom penh' -> 'Phnom Penh'.
+    A part that already has a capital letter, or any Thai-script text, is left untouched; None/null parts are
+    dropped and repeated neighbours ('samui, Koh Samui') collapse. Never use the result as a filter key or id.
+    """
+    if loc is None:
+        return ""
+    out: List[str] = []
+    for raw in str(loc).split(","):
+        part = raw.strip()
+        if not part or part.lower() in _EMPTY_PARTS:
+            continue
+        if not _THAI_SCRIPT.search(part) and part == part.lower():
+            spaced = re.sub(r"\s+", " ", re.sub(r"[-_]+", " ", part)).strip()
+            part = _LOCATION_DISPLAY.get(spaced) or " ".join(w[:1].upper() + w[1:] for w in spaced.split(" "))
+        if not out or out[-1].lower() != part.lower():
+            out.append(part)
+    return ", ".join(out)
+
 
 def _looks_like_long_polish_marketing(text: str) -> bool:
     t = (text or "").strip()
@@ -131,7 +163,7 @@ def resolve_display_name(
     return sanitize_marketing_claims(pick, mode="title")
 
 
-def shorten_location(
+def _shorten_location_raw(
     *,
     district: Optional[str] = None,
     city: Optional[str] = None,
@@ -191,6 +223,20 @@ def shorten_location(
         if short:
             return ", ".join(short)
     return loc or (str(province).strip() if province else "Thailand")
+
+
+def shorten_location(
+    *,
+    district: Optional[str] = None,
+    city: Optional[str] = None,
+    province: Optional[str] = None,
+    location: Optional[str] = None,
+    address: Optional[str] = None,
+) -> str:
+    """Short place label for display ('Bang Por, Koh Samui'), with lower-case slugs capitalised."""
+    return display_location(_shorten_location_raw(
+        district=district, city=city, province=province, location=location, address=address,
+    ))
 
 
 def extract_ownership_from_property(prop: Optional[Dict[str, Any]]) -> Optional[str]:
