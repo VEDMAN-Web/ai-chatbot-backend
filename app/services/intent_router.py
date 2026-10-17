@@ -358,6 +358,24 @@ def message_looks_like_filter_search(message: str) -> bool:
     return False
 
 
+_PROPERTY_ID_RE = re.compile(r"\bprop-[a-z0-9\-]+\b|\b(?=[A-Za-z0-9]*\d)(?=[A-Za-z0-9]*[A-Za-z])[A-Za-z0-9]{18,24}\b", re.IGNORECASE)
+
+_CARD_ACTION_RE = re.compile(
+    r"\b(?:brochure|pdf|e-?mail|e-?mailed|tour|viewing|inquir\w*|enquir\w*|callback|call\s+me|contact\s+me|schedule)\b"
+    r"|broszur|umów|umow|spotkani|นัดชม|โบรชัวร์",
+    re.IGNORECASE,
+)
+
+
+def _is_card_action_message(msg_clean: str) -> bool:
+    """PDF / email / tour / inquiry requests (from the card buttons or typed) are routed by their own rules."""
+    if re.search(r"[\w\.-]+@[\w\.-]+\.\w+", msg_clean):
+        return True
+    if any(re.search(pat, msg_clean.lower()) for pat in PDF_EXPORT_PATTERNS):
+        return True
+    return bool(_CARD_ACTION_RE.search(msg_clean))
+
+
 def _mention_intent(msg_clean: str) -> Optional[Tuple[IntentType, Dict[str, Any]]]:
     """
     A listing name anywhere in the message (typos allowed) decides the intent: the visitor is asking about THAT
@@ -438,8 +456,9 @@ def detect_deterministic_intent(
     state = stored_state or {}
     last_result_ids = list(state.get("last_result_ids") or [])
 
-    # A listing named anywhere in the message (typos allowed) decides the intent before any pattern guessing.
-    if len(msg_clean) >= 4:
+    # A listing named anywhere in the message (typos allowed) decides the intent before any pattern guessing --
+    # except card actions (PDF / email / tour / inquiry), which carry the name only to say WHICH listing.
+    if len(msg_clean) >= 4 and not _is_card_action_message(msg_clean):
         _by_mention = _mention_intent(msg_clean)
         if _by_mention:
             return _by_mention
@@ -899,6 +918,8 @@ def detect_deterministic_intent(
         return IntentType.PROPERTY_SEARCH, extract_search_filters_deterministic(message)
     if looks_like_project_name(msg_clean):
         return None, {}  # a project name that contains a place word: resolve by name, not by location
+    if _PROPERTY_ID_RE.search(msg_clean):
+        return None, {}  # a message carrying a listing id ("I am interested in <id> ...") is about THAT listing, not a place
     extracted_test = extract_search_filters_deterministic(message)
     location_followup = bool(extracted_test.get("location")) and (
         re.search(r"\b(?:in|at|around|near|w|ใน)\b", msg_low)

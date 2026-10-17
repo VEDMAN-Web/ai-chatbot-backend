@@ -905,32 +905,45 @@ function requestReport(propId) {
 function generatePdfForProperty(propId) {
   if (!propId) return;
 
-  // Show loading state on the button
-  const btn = event && event.target ? event.target : null;
+  // Download the brochure directly (no chat message): the button shows progress while the PDF is built (~10 s).
+  const btn = event && event.currentTarget ? event.currentTarget : (event && event.target ? event.target : null);
   const originalText = btn ? btn.innerHTML : '';
   if (btn) {
-    btn.innerHTML = '⏳ Loading...';
+    btn.innerHTML = '⏳ Preparing PDF...';
     btn.disabled = true;
   }
-
-  // Request the official brochure link through the chatbot
-  const prop = propertyCache[propId];
-  const pName = prop ? (prop.name || prop.property_name || propId) : propId;
-  const chatInput = document.getElementById('chatInput');
-  if (chatInput) {
-    chatInput.value = `Download brochure for ${pName}`;
-    handleSendMessage();
-  } else {
-    const url = `/api/v1/chat/brochure/${encodeURIComponent(propId)}?site_origin=${encodeURIComponent(activeTenantOrigin)}&session_id=${encodeURIComponent(currentSessionId)}`;
-    window.open(url, '_blank');
-  }
-
-  if (btn) {
-    setTimeout(() => {
+  const restore = () => {
+    if (btn) {
       btn.innerHTML = originalText;
       btn.disabled = false;
-    }, 1500);
-  }
+    }
+  };
+
+  const prop = propertyCache[propId];
+  const pName = prop ? (prop.name || prop.property_name || propId) : propId;
+  const url = `/api/v1/chat/brochure/${encodeURIComponent(propId)}?site_origin=${encodeURIComponent(activeTenantOrigin)}&session_id=${encodeURIComponent(currentSessionId)}`;
+
+  fetch(url)
+    .then((resp) => {
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      return resp.blob();
+    })
+    .then((blob) => {
+      const objectUrl = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = objectUrl;
+      a.download = `${String(pName).replace(/[^A-Za-z0-9]+/g, '_')}_Brochure.pdf`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(objectUrl), 10000);
+      restore();
+    })
+    .catch(() => {
+      // Fall back to opening the link in a new tab so the visitor still gets the file.
+      window.open(url, '_blank');
+      restore();
+    });
 }
 
 
