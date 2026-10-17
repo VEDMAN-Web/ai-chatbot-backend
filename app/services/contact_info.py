@@ -55,6 +55,37 @@ FORM_COPY: Dict[str, Dict[str, str]] = {
     },
 }
 
+# Copy for the chat widget shell itself (button, bubble, greeting, chips) so every front end uses one source.
+WIDGET_COPY: Dict[str, Dict[str, Any]] = {
+    "en": {
+        "cta_label": "Talk to an advisor",
+        "cta_action": "open_inquiry_form",
+        "bubble_label": "Ask Tina",
+        "placeholder": "Ask about properties, locations or prices...",
+        "send_label": "Send",
+        "greeting": "Hi, I'm Tina, your property assistant. Tell me what you're looking for, or ask about any listing.",
+        "suggestions": ["Villas in Phuket", "Condos under 5M THB", "Can foreigners buy freehold?", "Talk to an advisor"],
+    },
+    "pl": {
+        "cta_label": "Porozmawiaj z doradcą",
+        "cta_action": "open_inquiry_form",
+        "bubble_label": "Zapytaj Tinę",
+        "placeholder": "Zapytaj o nieruchomości, lokalizacje lub ceny...",
+        "send_label": "Wyślij",
+        "greeting": "Cześć, jestem Tina, Twoja asystentka ds. nieruchomości. Napisz, czego szukasz, lub zapytaj o dowolną ofertę.",
+        "suggestions": ["Wille na Phuket", "Apartamenty do 5 mln THB", "Czy cudzoziemiec może kupić na własność?", "Porozmawiaj z doradcą"],
+    },
+    "th": {
+        "cta_label": "คุยกับที่ปรึกษา",
+        "cta_action": "open_inquiry_form",
+        "bubble_label": "ถามทีน่า",
+        "placeholder": "สอบถามเรื่องอสังหาริมทรัพย์ ทำเล หรือราคา...",
+        "send_label": "ส่ง",
+        "greeting": "สวัสดีค่ะ ฉันทีน่า ผู้ช่วยด้านอสังหาริมทรัพย์ของคุณ บอกได้เลยว่ากำลังมองหาอะไร หรือสอบถามโครงการที่สนใจ",
+        "suggestions": ["วิลล่าในภูเก็ต", "คอนโดไม่เกิน 5 ล้านบาท", "ต่างชาติซื้อฟรีโฮลด์ได้ไหม", "คุยกับที่ปรึกษา"],
+    },
+}
+
 
 def _digits(phone: str) -> str:
     return re.sub(r"\D", "", phone or "")
@@ -81,4 +112,5 @@ def build_contact_info(tenant: TenantProfile, language: str = "en") -> Dict[str,
         "language": lang,
         "contacts": contacts,
         "inquiry_form": FORM_COPY[lang],
+        "widget": WIDGET_COPY[lang],
     }
