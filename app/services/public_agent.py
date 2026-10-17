@@ -3,6 +3,7 @@ import uuid
 import re
 import json
 import logging
+from datetime import datetime
 from decimal import Decimal
 from typing import Dict, Any, List, Optional, Tuple
 from sqlalchemy.orm import Session
@@ -28,6 +29,7 @@ from app.services.token_tracker import token_tracker, TurnTokenMetrics
 from app.services.i18n_service import (
     resolve_language, get_compact_system_prompt, get_public_system_prompt,
     get_language_switch_confirmation, get_greeting_text, get_off_topic_text,
+    get_thailand_only_foreign_reply,
     get_zero_match_text, get_quick_replies, get_data_unavailable_fallback,
     build_no_match_reply, build_name_not_found_reply, build_seen_all_reply, build_amenity_none_match_reply, get_brochure_unavailable_text,
     build_consultative_followup_questions, build_encouraging_alternative_intro,
@@ -352,13 +354,34 @@ def format_property_card(p: Property) -> Dict[str, Any]:
         "beach_access": bool(p.beach_access),
         "images": img_urls,
         "detail_page_url": p.detail_page_url or settings.get_property_detail_url(p.property_id, country=p.province, city=p.district),
-        "highlights": list(p.highlights or [])[:3],
+        "highlights": list(p.highlights or [])[:8],
         "amenities": list(getattr(p, "amenities", None) or []),
         "description": getattr(p, "description", None) or "",
     }
+    # Completion / handover date from ORM or metadata
+    _meta = getattr(p, "raw_metadata", None)
+    completion_raw = (
+        getattr(p, "completion_date", None)
+        or getattr(p, "completion", None)
+        or (_meta.get("completionDate") if isinstance(_meta, dict) else None)
+        or (_meta.get("completion_date") if isinstance(_meta, dict) else None)
+    )
+    if completion_raw:
+        card["completion_date"] = str(completion_raw)
+        stale = format_stale_completion_note(str(completion_raw), language="en")
+        if stale:
+            card["completion_note"] = stale
+            card["status_note"] = stale
     try:
         from app.services.amenity_service import enrich_card_amenity_flags
+        from app.services.listing_presentation import apply_presentation_to_card, clean_highlights_for_display
         enrich_card_amenity_flags(card)
+        apply_presentation_to_card(card, language="en")
+        # Single amenity helper path + chip dedupe
+        card["highlights"] = clean_highlights_for_display(
+            card.get("highlights") or [], prop=card, language="en", max_items=5
+        )
+        card["amenity_chips"] = list(card["highlights"])
     except Exception:
         pass
     return card
@@ -1362,6 +1385,73 @@ def redact_sensitive_output(text: str) -> str:
     return out
 
 
+def format_stale_completion_note(
+    completion_raw: Optional[str],
+    *,
+    language: str = "en",
+    now: Optional[datetime] = None,
+) -> Optional[str]:
+    """
+    If a planned completion date (e.g. 'Q4 2025') is in the past, return an honest note.
+    """
+    from datetime import datetime as _dt, timezone as _tz
+
+    raw = (completion_raw or "").strip()
+    if not raw:
+        return None
+    ref = now or _dt.now(_tz.utc)
+    end: Optional[_dt] = None
+    qm = re.search(r"\bQ([1-4])\s*[/\-]?\s*(20\d{2})\b", raw, re.I)
+    if qm:
+        q, year = int(qm.group(1)), int(qm.group(2))
+        month = q * 3
+        # End of quarter
+        day = 28 if month == 2 else 30 if month in (4, 6, 9, 11) else 31
+        try:
+            end = _dt(year, month, min(day, 28 if month == 2 else day), tzinfo=_tz.utc)
+        except ValueError:
+            end = _dt(year, month, 28, tzinfo=_tz.utc)
+    else:
+        ym = re.search(r"\b(20\d{2})\b", raw)
+        if ym and re.search(r"(?:complet|ready|handover|planned|q[1-4])", raw, re.I):
+            try:
+                end = _dt(int(ym.group(1)), 12, 31, tzinfo=_tz.utc)
+            except ValueError:
+                end = None
+    if end is None or end >= ref:
+        return None
+    if language == "th":
+        return (
+            f"วันที่แล้วเสร็จที่ระบุ ({raw}) ผ่านมาแล้ว — "
+            "โปรดยืนยันสถานะล่าสุดกับทีมที่ปรึกษา"
+        )
+    if language == "pl":
+        return (
+            f"Podana data ukończenia ({raw}) już minęła — "
+            "potwierdź aktualny status z zespołem doradców"
+        )
+    return (
+        f"The stated completion date ({raw}) has passed — "
+        "please confirm the current status with our advisory team"
+    )
+
+
+def _bedroom_configs_from_description(description: Optional[str]) -> Optional[str]:
+    """Pull bedroom configuration phrases from verified description text."""
+    if not description:
+        return None
+    m = re.search(
+        r"(\d+\s*[–\-]\s*\d+\s*bedrooms?|\d+\s*,\s*\d+(?:\s*,\s*\d+)*\s*(?:and\s+)?\d*\s*bedroom\s+configurations?|"
+        r"(?:available|offered|units?)\s+in\s+\d+[^\n.]{0,40}bedroom)",
+        description,
+        re.I,
+    )
+    if m:
+        return m.group(0).strip(" .,")
+    m2 = re.search(r"\b(\d+\s*[–\-to]+\s*\d+)\s*bedrooms?\b", description, re.I)
+    return m2.group(0).strip() if m2 else None
+
+
 def extract_contact_email_from_message(message: str) -> Optional[str]:
     if looks_like_prompt_injection(message):
         return None
@@ -1394,7 +1484,8 @@ def is_greeting_or_chit_chat(message: str) -> bool:
         "co tam", "co słychać", "co slychac", "thank you very much", "many thanks", "hello there",
         "good day", "morning", "evening", "nice to meet you",
         "สวัสดี", "สวัสดีครับ", "สวัสดีค่ะ", "ดีครับ", "ดีค่ะ", "หวัดดี", "ขอบคุณ", "ขอบคุณครับ",
-        "ขอบคุณค่ะ", "แต๊งกิ้ว", "คุณคือใคร", "ทำอะไรได้บ้าง", "ช่วยอะไรได้บ้าง", "ช่วยด้วย", "ช่วยหน่อย"
+        "ขอบคุณค่ะ", "แต๊งกิ้ว", "คุณคือใคร", "ทำอะไรได้บ้าง", "ช่วยอะไรได้บ้าง", "ช่วยด้วย", "ช่วยหน่อย",
+        "สบายดีไหม", "เป็นไงบ้าง", "อย่างไรบ้าง",
     }
     if clean in standalone_greetings:
         return True
@@ -3649,6 +3740,7 @@ class PublicAgentService:
                 return property_has_amenity(card if isinstance(card, dict) else {}, canon)
 
             def _amenity_reply(canon: str, yes_en: str, no_en: str, yes_pl: str, no_pl: str, yes_th: str, no_th: str) -> str:
+                """Short fact answer only — never dump the full spec block."""
                 ok = _amenity_yes_no(canon)
                 if language == "th":
                     body = yes_th if ok else no_th
@@ -3656,20 +3748,7 @@ class PublicAgentService:
                     body = yes_pl if ok else no_pl
                 else:
                     body = yes_en if ok else no_en
-                return (
-                    f"**{p_name}**: {body}\n\n"
-                    f"• **Price:** {p_price}\n• **Location:** {p_loc}\n• **Bedrooms:** {p_beds}"
-                    if language == "en"
-                    else (
-                        f"**{p_name}**: {body}\n\n"
-                        f"• **Cena:** {p_price}\n• **Lokalizacja:** {p_loc}\n• **Sypialnie:** {p_beds}"
-                        if language == "pl"
-                        else (
-                            f"**{p_name}**: {body}\n\n"
-                            f"• **ราคา:** {p_price}\n• **ทำเล:** {p_loc}\n• **ห้องนอน:** {p_beds}"
-                        )
-                    )
-                )
+                return f"**{p_name}**: {body}"
 
             def _display_fact(val: Any, *, missing_en: str = "not listed in our verified data") -> str:
                 if val is None:
@@ -3693,7 +3772,14 @@ class PublicAgentService:
             reply_text = ""
             asked_amenities = extract_requested_amenities(focus_q)
 
-            # Direct single-fact answers for the active property
+            # Direct single-fact answers for the active property (short; no full spec dump)
+            desc_txt = ""
+            if isinstance(card, dict):
+                desc_txt = str(card.get("description") or p_desc or "")
+            else:
+                desc_txt = str(p_desc or "")
+            cfg_phrase = _bedroom_configs_from_description(desc_txt)
+
             if any(k in focus_q for k in [
                 "how many bedroom", "bedrooms in this", "bedrooms in it", "bedroom in this",
                 "ile sypialn", "กี่ห้องนอน", "how many beds",
@@ -3701,26 +3787,54 @@ class PublicAgentService:
                 "bedroom" in focus_q
                 and any(k in focus_q for k in ["how many", "how much", "number of", "ile", "กี่"])
             ):
-                if language == "th":
-                    reply_text = f"**{p_name}**: ห้องนอน — {p_beds_out}"
-                elif language == "pl":
-                    reply_text = f"**{p_name}**: sypialnie — {p_beds_out}"
+                if p_beds_out != "not listed in our verified data":
+                    if language == "th":
+                        reply_text = f"**{p_name}** มี **{p_beds_out}** ห้องนอนครับ"
+                    elif language == "pl":
+                        reply_text = f"**{p_name}** ma **{p_beds_out}** sypialni."
+                    else:
+                        reply_text = f"**{p_name}** has **{p_beds_out}** bedrooms."
+                elif cfg_phrase:
+                    if language == "th":
+                        reply_text = (
+                            f"**{p_name}**: จำนวนห้องนอนไม่ได้ระบุเป็นตัวเลขเดียวในฐานข้อมูลที่ตรวจสอบแล้ว "
+                            f"— ตามคำอธิบายโครงการมีรูปแบบ {cfg_phrase}"
+                        )
+                    elif language == "pl":
+                        reply_text = (
+                            f"**{p_name}**: liczba sypialni nie jest podana jako jedna wartość w zweryfikowanych danych "
+                            f"— w opisie projektu: {cfg_phrase}."
+                        )
+                    else:
+                        reply_text = (
+                            f"**{p_name}**: bedrooms are not listed as a single count in our verified data. "
+                            f"The description mentions {cfg_phrase}."
+                        )
                 else:
-                    reply_text = (
-                        f"**{p_name}** has **{p_beds_out}** bedrooms."
-                        if p_beds_out != "not listed in our verified data"
-                        else f"**{p_name}**: bedrooms are not listed in our verified data."
-                    )
+                    if language == "th":
+                        reply_text = f"**{p_name}**: ห้องนอนไม่ระบุในฐานข้อมูลที่ตรวจสอบแล้ว"
+                    elif language == "pl":
+                        reply_text = f"**{p_name}**: liczba sypialni nie figuruje w zweryfikowanych danych."
+                    else:
+                        reply_text = f"**{p_name}**: bedrooms are not listed in our verified data."
             elif any(k in focus_q for k in [
                 "where is it", "where is this", "located", "location of", "where is the",
                 "gdzie jest", "ทำเล", "อยู่ที่ไหน",
             ]) and not any(k in focus_q for k in ["pool", "bedroom", "price", "parking"]):
+                map_url = ""
+                if isinstance(card, dict):
+                    map_url = str(card.get("maps_url") or "")
+                    lat, lng = card.get("latitude"), card.get("longitude")
+                    if not map_url and lat is not None and lng is not None:
+                        map_url = f"https://www.google.com/maps?q={lat},{lng}"
                 if language == "th":
-                    reply_text = f"**{p_name}** ตั้งอยู่ที่: **{p_loc_out}**"
+                    reply_text = f"**{p_name}** ตั้งอยู่ที่ **{p_loc_out}**"
                 elif language == "pl":
-                    reply_text = f"**{p_name}** znajduje się w: **{p_loc_out}**"
+                    reply_text = f"**{p_name}** znajduje się w **{p_loc_out}**."
                 else:
                     reply_text = f"**{p_name}** is located in **{p_loc_out}**."
+                if map_url:
+                    reply_text += f" [Map]({map_url})"
             # Focused amenity/price answers from unified amenity helper — never invent
             elif any(k in focus_q for k in ["pool", "swimming", "basen", "สระ"]) or "pool" in asked_amenities or "pool_private" in asked_amenities:
                 reply_text = _amenity_reply(
@@ -3862,6 +3976,13 @@ class PublicAgentService:
                     lines_en.append(f"• **Ownership:** {p_owner}")
                 if p_high:
                     lines_en.append(f"• **Key Highlights:** {', '.join(p_high)}")
+                _comp = None
+                if isinstance(card, dict):
+                    _comp = card.get("completion_note") or format_stale_completion_note(
+                        card.get("completion_date") or card.get("completion"), language=language
+                    )
+                if _comp:
+                    lines_en.append(f"• **Completion:** {_comp}")
                 lines_en.extend(["", p_desc or "", "", "Would you like more details regarding floor plans or assistance scheduling a viewing tour?"])
                 reply_text = "\n".join(lines_en)
             cards = [card]
@@ -4906,156 +5027,60 @@ class PublicAgentService:
                 only_id = stored_prefs["last_result_ids"][0]
                 _pctx = set_active_property(_pctx, only_id, reference=names.get(only_id))
             stored_prefs.update(save_property_context(conversation, _pctx))
-            if self.client:
-                try:
-                    projections = []
-                    for c in cards:
-                        p_min = c.get("price_numeric_min")
-                        approx_eur = f"~€{round(p_min / 38):,}" if p_min else None
-                        approx_pln = f"~{round(p_min / 8.5):,} PLN" if p_min else None
-                        projections.append({
-                            "id": c["property_id"],
-                            "name": c["name"],
-                            "price": c["price"],
-                            "approx_eur": approx_eur,
-                            "approx_pln": approx_pln,
-                            "location": c["location"],
-                            "type": c["property_type"],
-                            "bedrooms": c["bedrooms"],
-                            "pool": c["has_pool"]
-                        })
 
-                    hist_snippets = []
-                    for h in (conversation.message_history or [])[-2:]:
-                        hist_snippets.append(f"{h['role'].title()}: {h['content']}")
-                    hist_ctx = "\n".join(hist_snippets)
-
-                    system_prompt = get_compact_system_prompt(language, site_origin=conversation.site_origin)
-                    if language == "th":
-                        prompt_content = (
-                            (f"บริบทการสนทนา:\n{hist_ctx}\n\n" if hist_ctx else "") +
-                            f"คำขอของผู้ใช้: \"{user_message}\"\n\n"
-                            f"รายการอสังหาริมทรัพย์ที่ตรงเงื่อนไขในไทย:\n"
-                            f"{json.dumps(projections, ensure_ascii=False)}\n\n"
-                            f"ทำหน้าที่เป็นที่ปรึกษาอสังหาริมทรัพย์มืออาชีพ Tajlandia นำเสนอรายการแบบมืออาชีพ "
-                            f"ใช้ **1. [ชื่อโครงการ]** และจุด • เท่านั้น (ห้าม ### และห้าม '-') "
-                            f"หัวข้อย่อย: 📍 ทำเล, 💰 ราคา, 🛏️ ห้องนอน, 🏊 สิ่งอำนวยความสะดวก, 📜 กรรมสิทธิ์ "
-                            f"ห้ามตาราง Markdown ปิดท้ายด้วย **ขั้นตอนถัดไป**"
-                        )
-                    elif language == "pl":
-                        prompt_content = (
-                            (f"Kontekst rozmowy:\n{hist_ctx}\n\n" if hist_ctx else "") +
-                            f"Zapytanie użytkownika: \"{user_message}\"\n\n"
-                            f"Dopasowane zweryfikowane nieruchomości w Tajlandii:\n"
-                            f"{json.dumps(projections)}\n\n"
-                            f"Kontekst walutowy: 1 EUR ≈ 38 THB, 1 PLN ≈ 8.5 THB, 1 USD ≈ 35 THB (np. 8.5M THB to ok. 1.0M PLN / 224,000 EUR). "
-                            f"Wszystkie powyższe nieruchomości MIESZCZĄ SIĘ w budżecie klienta. Nigdy nie twierdz, że oferta przekracza budżet. "
-                            f"Działaj jako profesjonalny doradca ds. nieruchomości Tajlandia. Zaprezentuj oferty z punktorami • (NIGDY ### ani '-'):\n"
-                            f"**1. [Nazwa nieruchomości]**\n"
-                            f"• 📍 **Lokalizacja:** [Lokalizacja]\n"
-                            f"• 💰 **Cena wyjściowa:** **[Cena w THB]** (~€[EUR] / ~[PLN] PLN)\n"
-                            f"• 🛏️ **Sypialnie:** [Sypialnie] | 📐 **Typ:** [Typ]\n"
-                            f"• 🏊 **Udogodnienia:** [Basen itp.]\n"
-                            f"• 📜 **Forma własności:** [Foreign Freehold w condo / Leasehold na willę]\n"
-                            f"NIGDY nie generuj tabel markdown. Zakończ sekcją **Kolejne kroki** z punktorami •."
-                        )
-                    else:
-                        prompt_content = (
-                            (f"Recent Context:\n{hist_ctx}\n\n" if hist_ctx else "") +
-                            f"User Request: \"{user_message}\"\n\n"
-                            f"Matching Verified Properties in Thailand:\n"
-                            f"{json.dumps(projections)}\n\n"
-                            f"Currency conversion context: 1 EUR ≈ 38 THB, 1 PLN ≈ 8.5 THB, 1 USD ≈ 35 THB. "
-                            f"(For example, 8.5M THB is only ~€224,000 / ~1.0M PLN, which is well below a 1 million EUR or 4.5M PLN budget; 19.5M THB is ~€513,000). "
-                            f"ALL properties in the list above are strictly WITHIN the user's budget. Never state that a returned property exceeds budget. "
-                            f"Act as a professional real estate advisor for Tajlandia. Present ALL verified properties in clean numbered blocks with • bullets only (NEVER use ### headers or dash '-' bullets):\n"
-                            f"**1. [Property Name]**\n"
-                            f"• 📍 **Location:** [Location]\n"
-                            f"• 💰 **Starting Price:** **[Price in THB]** (~€[EUR] / ~[PLN] PLN)\n"
-                            f"• 🛏️ **Bedrooms:** [Bedrooms] | 📐 **Type:** [Type]\n"
-                            f"• 🏊 **Amenities & Highlights:** [Pool, Sea View, etc.]\n"
-                            f"• 📜 **Ownership Structure:** [Foreign Freehold Condominium / 30-Year Registered Leasehold Villa]\n"
-                            f"NEVER output markdown tables. Conclude with **Recommended next steps** using • bullets."
-                        )
-
-                    if is_sparse:
-                        if language == "th":
-                            prompt_content += (
-                                "\n\nคำแนะนำเพิ่มเติม: ผู้ใช้ยังไม่ได้ระบุรายละเอียดครบถ้วน (เช่น ทำเล งบประมาณ หรือจำนวนห้องนอน) "
-                                "ให้สอบถามคำถามเพิ่มเติม 2 ข้ออย่างชาญฉลาดในตอนท้าย เพื่อทำความเข้าใจความต้องการ "
-                                "(งบประมาณ / จำนวนห้องนอน / ทำเล เช่น ภูเก็ต เกาะสมุย กรุงเทพฯ) — ห้ามข้ามขั้นตอนนี้"
-                            )
-                        elif language == "pl":
-                            prompt_content += (
-                                "\n\nWAŻNE: Użytkownik nie podał jeszcze kluczowych szczegółów (np. preferowanej lokalizacji, budżetu lub liczby sypialni). "
-                                "Na końcu prezentacji ofert ZAWSZE zadaj dokładnie 2 konkretne pytania doprecyzowujące "
-                                "(budżet, liczba sypialni lub lokalizacja: Phuket / Koh Samui / Bangkok). Nie pomijaj tego kroku."
-                            )
-                        else:
-                            prompt_content += (
-                                "\n\nCRITICAL FOLLOW-UP INSTRUCTION: The user provided limited details "
-                                "(missing location, budget, and/or bedrooms). After the listings, ALWAYS ask exactly "
-                                "2 short consultative questions (budget range, bedrooms, or preferred island/city). "
-                                "Do not end only with brochure/viewing CTAs — questions first."
-                            )
-
-                    resp = _safe_openai_create(
-                        self.client,
-                        model=self.model,
-                        messages=[
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": prompt_content}
-                        ],
-                        temperature=0.0,
-                        max_tokens=800
+            # Text list must mirror cards (same count + order) — deterministic from card payload
+            if is_show_all:
+                intro = (
+                    "Here are all verified properties currently available in our Thailand portfolio:"
+                    if language == "en"
+                    else (
+                        "Oto wszystkie zweryfikowane nieruchomości dostępne w naszym portfolio w Tajlandii:"
+                        if language == "pl"
+                        else "นี่คืออสังหาริมทรัพย์ที่ผ่านการตรวจสอบทั้งหมดในพอร์ตโฟลิโอของเราในประเทศไทย:"
                     )
-                    reply_text = resp.choices[0].message.content or ""
-                    llm_calls = 1
-                    if resp.usage:
-                        prompt_tokens = resp.usage.prompt_tokens
-                        comp_tokens = resp.usage.completion_tokens
-                    # If sparse and LLM skipped clarifying questions, append them deterministically
-                    if reply_text and is_sparse:
-                        q_lines = [ln for ln in reply_text.splitlines() if "?" in ln]
-                        if len(q_lines) < 2:
-                            followups = build_consultative_followup_questions(
-                                language=language,
-                                location=loc,
-                                budget=max_p,
-                                bedrooms=bedrooms,
-                            )[:2]
-                            if followups:
-                                if language == "pl":
-                                    q_hdr = "Aby dopasować oferty precyzyjniej, powiedz proszę:"
-                                elif language == "th":
-                                    q_hdr = "เพื่อคัดกรองให้ตรงกับคุณมากขึ้น ขออนุญาตถามเพิ่มเติม:"
-                                else:
-                                    q_hdr = "To narrow this down to the best fit, may I ask:"
-                                reply_text = (
-                                    reply_text.rstrip()
-                                    + "\n\n"
-                                    + q_hdr
-                                    + "\n"
-                                    + "\n".join(f"• {q}" for q in followups)
-                                )
-                except Exception as e:
-                    logger.error(f"Error in search LLM synthesis: {e}")
-                    reply_text = ""
-
-            if not reply_text:
-                if is_show_all:
-                    intro = "Here are all verified properties currently available in our Thailand portfolio:" if language == "en" else ("Oto wszystkie zweryfikowane nieruchomości dostępne w naszym portfolio w Tajlandii:" if language == "pl" else "นี่คืออสังหาริมทรัพย์ที่ผ่านการตรวจสอบทั้งหมดในพอร์ตโฟลิโอของเราในประเทศไทย:")
-                    reply_text = intro
-                else:
-                    reply_text = build_rich_property_recommendation_text(
-                        cards=cards,
-                        language=language,
-                        is_alternative=False,
-                        is_sparse=is_sparse,
-                        location=loc,
-                        budget=max_p,
-                        bedrooms=bedrooms,
-                        site_origin=conversation.site_origin
+                )
+                body = build_rich_property_recommendation_text(
+                    cards=cards,
+                    language=language,
+                    is_alternative=False,
+                    is_sparse=is_sparse,
+                    location=loc,
+                    budget=max_p,
+                    bedrooms=bedrooms,
+                    site_origin=conversation.site_origin,
+                )
+                reply_text = f"{intro}\n\n{body}" if body else intro
+            else:
+                reply_text = build_rich_property_recommendation_text(
+                    cards=cards,
+                    language=language,
+                    is_alternative=False,
+                    is_sparse=is_sparse,
+                    location=loc,
+                    budget=max_p,
+                    bedrooms=bedrooms,
+                    site_origin=conversation.site_origin,
+                )
+            if is_sparse:
+                followups = build_consultative_followup_questions(
+                    language=language,
+                    location=loc,
+                    budget=max_p,
+                    bedrooms=bedrooms,
+                )[:2]
+                if followups:
+                    if language == "pl":
+                        q_hdr = "Aby dopasować oferty precyzyjniej, powiedz proszę:"
+                    elif language == "th":
+                        q_hdr = "เพื่อคัดกรองให้ตรงกับคุณมากขึ้น ขออนุญาตถามเพิ่มเติม:"
+                    else:
+                        q_hdr = "To narrow this down to the best fit, may I ask:"
+                    reply_text = (
+                        (reply_text or "").rstrip()
+                        + "\n\n"
+                        + q_hdr
+                        + "\n"
+                        + "\n".join(f"• {q}" for q in followups)
                     )
         elif amenity_none_match:
             # Honest amenity miss already composed; keep labelled alternatives only
@@ -5069,8 +5094,10 @@ class PublicAgentService:
             stored_prefs["last_result_ids"] = []
             if foreign_loc:
                 cards = []
-                reply_text = get_off_topic_text(
-                    language, site_origin=conversation.site_origin, user_message=user_message
+                reply_text = get_thailand_only_foreign_reply(
+                    language,
+                    site_origin=conversation.site_origin,
+                    foreign_place=str(foreign_loc),
                 )
             elif search_relaxed_alts and search_relaxed_filter:
                 cards = list(search_relaxed_alts)

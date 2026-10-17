@@ -995,11 +995,66 @@ def get_language_switch_confirmation(language: str, is_admin: bool = False) -> s
         return "We will now continue in English. 🇬🇧 Are you looking for a pool villa in Phuket or a condominium in Koh Samui?"
 
 
+def get_thailand_only_foreign_reply(
+    language: str,
+    site_origin: Optional[str] = None,
+    foreign_place: Optional[str] = None,
+) -> str:
+    """Thailand-only coverage reply for foreign location asks — no yield/ROI numbers."""
+    tenant = resolve_tenant(site_origin)
+    place = (foreign_place or "").strip()
+    place_bit_en = f" ({place})" if place else ""
+    place_bit_pl = f" ({place})" if place else ""
+    place_bit_th = f" ({place})" if place else ""
+    if language == "th":
+        return (
+            f"{tenant.brand_name} ครอบคลุมเฉพาะอสังหาริมทรัพย์ในประเทศไทยเท่านั้น"
+            f"{place_bit_th} และไม่เป็นตัวแทนโครงการนอกประเทศไทย\n\n"
+            f"ทีมที่ปรึกษา ({tenant.advisor_email}) พร้อมช่วยเหลือ "
+            "แจ้งทำเล / งบประมาณ / ประเภทอสังหาฯ ในไทย เพื่อค้นหาจากรายการที่ผ่านการตรวจสอบแล้วครับ"
+        )
+    if language == "pl":
+        return (
+            f"{tenant.brand_name} ({tenant.domain}) obsługuje wyłącznie zweryfikowane oferty w Tajlandii"
+            f"{place_bit_pl} i nie reprezentuje nieruchomości poza Tajlandią.\n\n"
+            f"Nasz zespół doradców ({tenant.advisor_email}) chętnie pomoże. "
+            "Podaj lokalizację, budżet lub typ w Tajlandii — wyszukam tylko wśród zweryfikowanych ofert."
+        )
+    return (
+        f"{tenant.brand_name} only covers verified real estate in Thailand"
+        f"{place_bit_en}. We do not represent properties outside Thailand.\n\n"
+        f"Our advisory team ({tenant.advisor_email}) can help. "
+        "Share a Thailand location, budget, or property type and I will search only among verified listings."
+    )
+
+
 def get_greeting_text(language: str, user_message: str, site_origin: Optional[str] = None) -> str:
     tenant = resolve_tenant(site_origin)
     u_low = user_message.lower()
     is_thanks = any(w in u_low for w in ["thank", "thx", "dzięk", "dziek", "ok", "okay", "super", "świetnie", "swietnie", "cool", "great", "ขอบคุณ", "แต๊ง"])
     is_who = any(w in u_low for w in ["who are you", "kim jesteś", "kim jestes", "what can you do", "co potrafisz", "help", "pomoc", "คุณคือใคร", "ทำอะไรได้บ้าง", "ช่วยอะไรได้บ้าง"])
+    is_how_are_you = any(
+        w in u_low
+        for w in (
+            "how are you",
+            "how're you",
+            "how's it going",
+            "how are things",
+            "jak się masz",
+            "jak sie masz",
+            "co słychać",
+            "co slychac",
+            "สบายดีไหม",
+            "เป็นไงบ้าง",
+            "อย่างไรบ้าง",
+        )
+    )
+    if is_how_are_you and not is_who:
+        if language == "th":
+            return "สบายดีครับ ขอบคุณที่ถาม — พร้อมช่วยค้นหาอสังหาริมทรัพย์ในไทยให้คุณครับ อยากเริ่มจากทำเลหรืองบประมาณไหมครับ?"
+        if language == "pl":
+            return "Dziękuję, wszystko w porządku. W czym mogę dziś pomóc przy nieruchomościach w Tajlandii?"
+        return "I'm doing well, thank you. How can I help with Thailand property today?"
 
     if language == "th":
         if is_thanks:
@@ -1090,26 +1145,8 @@ def get_off_topic_text(language: str, site_origin: Optional[str] = None, user_me
     is_foreign_property_inquiry = (not is_pure_trivia) and has_foreign and has_buy
 
     if is_foreign_property_inquiry:
-        if language == "th":
-            return (
-                f"{tenant.brand_name} ครอบคลุมเฉพาะอสังหาริมทรัพย์ในประเทศไทยเท่านั้น "
-                f"(ภูเก็ต เกาะสมุย กรุงเทพฯ และพื้นที่ใกล้เคียง) และไม่เป็นตัวแทนโครงการนอกประเทศไทย\n\n"
-                f"หากต้องการความช่วยเหลือเพิ่มเติม ติดต่อทีมที่ปรึกษาได้ที่ {tenant.advisor_email}\n"
-                "หรือแจ้งทำเล / งบประมาณ / ประเภทอสังหาฯ ในไทย เพื่อค้นหาจากรายการที่ผ่านการตรวจสอบแล้วครับ"
-            )
-        elif language == "pl":
-            return (
-                f"{tenant.brand_name} ({tenant.domain}) obsługuje wyłącznie zweryfikowane oferty w Tajlandii "
-                f"(Phuket, Koh Samui, Bangkok i okolice) i nie reprezentuje nieruchomości poza Tajlandią.\n\n"
-                f"Nasz zespół doradców ({tenant.advisor_email}) chętnie pomoże. "
-                "Podaj lokalizację, budżet lub typ nieruchomości w Tajlandii, a wyszukam wyłącznie wśród dostępnych, zweryfikowanych ofert."
-            )
-        return (
-            f"{tenant.brand_name} only covers verified real estate in Thailand "
-            f"(Phuket, Koh Samui, Bangkok and nearby areas). We do not represent properties outside Thailand.\n\n"
-            f"Our advisory team ({tenant.advisor_email}) can help. "
-            "Share a Thailand location, budget, or property type and I will search only among verified listings."
-        )
+        place = next((fl for fl in foreign_locs if fl in u_low), None)
+        return get_thailand_only_foreign_reply(language, site_origin=site_origin, foreign_place=place)
 
     # General off-topic / trivia / politics — refuse the question itself, redirect smoothly
     if language == "th":

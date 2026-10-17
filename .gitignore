@@ -38,6 +38,7 @@ tests/*
 !tests/test_*.py
 !tests/fixtures/
 !tests/fixtures/**
+!tests/fixtures/**/*.csv
 *.cover
 
 # 3. Python & Virtual Environments
@@ -78,6 +79,8 @@ frontend_example.html
 
 # 5. Generated Documents & File Storage
 data/reports/
+data/brochure_samples/
+data/brochure_samples/**
 data/*.db
 data/**/*.db
 *.db
@@ -88,6 +91,7 @@ data/drive_docs/private/
 *.xlsx
 *.docx
 *.csv
+!tests/fixtures/**/*.csv
 !data/tajlandia-com-2026-09-22.xlsx
 tajlandia_railway_dump.sql
 tajlandia_railway_dump.dump
