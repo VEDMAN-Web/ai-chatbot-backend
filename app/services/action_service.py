@@ -11,6 +11,9 @@ from app.core.auth import AuthenticatedStaff
 from app.services.audit_service import record_audit_log
 from app.services.google_services import google_manager
 
+# Re-exported so tests can patch `app.services.action_service.record_crud_operation_snapshot`
+from app.services.admin_batch_service import record_crud_operation_snapshot  # noqa: E402
+
 logger = logging.getLogger(__name__)
 
 # Lifecycle States
@@ -242,21 +245,38 @@ def confirm_and_execute_action(
     result_data: Dict[str, Any] = {}
     try:
         if action.tool_name in ["create_or_update_listing", "ingest_property_from_drive"]:
-            result_data = _execute_update_listing(db, action.action_payload)
+            result_data = _execute_update_listing(
+                db, action.action_payload, authenticated_staff=authenticated_staff
+            )
         elif action.tool_name == "send_email":
             result_data = _execute_send_email(
                 action.action_payload,
                 staff_user_email=authenticated_staff.email if authenticated_staff else None,
                 db=db
             )
+            result_data["undoable"] = False
         elif action.tool_name == "create_calendar_event":
             result_data = _execute_create_calendar_event(
                 action.action_payload,
                 staff_user_email=authenticated_staff.email if authenticated_staff else None,
                 db=db
             )
+            result_data["undoable"] = False
+        elif action.tool_name == "execute_batch_property_action":
+            result_data = _execute_batch_property_action(
+                db, action.action_payload, authenticated_staff
+            )
         else:
             raise ValueError(f"Unsupported tool action: {action.tool_name}")
+
+        # Persist operation_id on the pending action so Data history / Activity logs can link undo
+        operation_id = None
+        if isinstance(result_data, dict):
+            operation_id = result_data.get("operation_id")
+            if operation_id:
+                merged_payload = dict(action.action_payload or {})
+                merged_payload["operation_id"] = operation_id
+                action.action_payload = merged_payload
 
         # 6. Mark executed
         action.status = ACTION_STATUS_EXECUTED
@@ -264,12 +284,34 @@ def confirm_and_execute_action(
         action.execution_result = result_data
         db.commit()
 
-        # 7. Record immutable audit log
+        # 7. Record immutable audit log (include recipient/subject or event details for non-undoable)
+        audit_payload = dict(action.action_payload or {})
+        if action.tool_name == "send_email":
+            audit_payload = {
+                **audit_payload,
+                "to": (action.action_payload or {}).get("to"),
+                "subject": (action.action_payload or {}).get("subject"),
+                "undoable": False,
+                "operation_id": operation_id,
+            }
+        elif action.tool_name == "create_calendar_event":
+            audit_payload = {
+                **audit_payload,
+                "title": (action.action_payload or {}).get("title"),
+                "start_time": (action.action_payload or {}).get("start_time"),
+                "attendees": (action.action_payload or {}).get("attendees"),
+                "undoable": False,
+                "operation_id": operation_id,
+            }
+        elif operation_id:
+            audit_payload["operation_id"] = operation_id
+
         audit = record_audit_log(
             db=db,
             staff_user_id=authenticated_staff.email,
             tool_name=action.tool_name,
-            proposed_payload=action.action_payload,
+            proposed_payload=audit_payload,
+            tool_arguments={"operation_id": operation_id} if operation_id else None,
             confirmed_by_staff=True,
             execution_result=str(result_data),
             status="SUCCESS",
@@ -282,6 +324,7 @@ def confirm_and_execute_action(
             "pending_action_id": str(action.id),
             "tool_name": action.tool_name,
             "execution_result": result_data,
+            "operation_id": operation_id,
             "audit_log_id": str(audit.id),
             "confirmed_by": authenticated_staff.email
         }
@@ -347,10 +390,76 @@ def reject_pending_action(
     }
 
 
-def _execute_update_listing(db: Session, payload: Dict[str, Any]) -> Dict[str, Any]:
+def _execute_batch_property_action(
+    db: Session,
+    payload: Dict[str, Any],
+    authenticated_staff: AuthenticatedStaff,
+) -> Dict[str, Any]:
+    """
+    Applies a previously proposed batch property action. Only invoked after explicit
+    staff confirmation (pending action id + confirming user).
+    """
+    from app.services.admin_batch_service import execute_batch_property_operation
+
+    op_type = (payload.get("operation_type") or payload.get("action_type") or "update").lower()
+    records = payload.get("records") or []
+    if not records and payload.get("items"):
+        records = []
+        for it in payload["items"]:
+            row = {
+                "property_id": it.get("property_id"),
+                "name": it.get("name") or it.get("property_id"),
+            }
+            fields = (it.get("change") or {}).get("fields") or payload.get("update_fields") or {}
+            row.update(fields)
+            records.append(row)
+    if not records:
+        raise ValueError("Batch pending action has no listed records/items to apply.")
+
+    return execute_batch_property_operation(
+        action_type=op_type,
+        records=records,
+        staff_user=authenticated_staff,
+        source_filename=payload.get("source_filename") or "pending_action_confirm",
+        db_session=db,
+        confirmed_by_staff=True,
+    )
+
+
+def _serialize_property_snapshot(prop: Any) -> Dict[str, Any]:
+    """Capture a plain dict of listing fields for the 6-day undo snapshot."""
+    if prop is None:
+        return {}
+    keys = (
+        "property_id", "property_name", "project_name", "property_type", "status",
+        "country", "province", "district", "subdistrict", "area", "address",
+        "price_display", "price_numeric_min", "price_numeric_max", "currency", "price_note",
+        "bedrooms_display", "bedrooms_min", "bedrooms_max", "bathrooms",
+        "area_display", "area_sqm_min", "area_sqm_max", "usable_area_sqm", "land_area_sqm",
+        "description", "has_pool", "beach_access", "sea_view",
+        "features", "facilities", "amenities", "highlights", "developer_name", "ownership_type",
+        "websites", "is_public",
+    )
+    out: Dict[str, Any] = {}
+    for k in keys:
+        if hasattr(prop, k):
+            out[k] = getattr(prop, k, None)
+    # Also keep common aliases used by Firestore restore
+    if out.get("property_name"):
+        out.setdefault("name", out["property_name"])
+        out.setdefault("title", out["property_name"])
+    return out
+
+
+def _execute_update_listing(
+    db: Session,
+    payload: Dict[str, Any],
+    authenticated_staff: Optional[AuthenticatedStaff] = None,
+) -> Dict[str, Any]:
     """
     Safely creates or updates property listings in PostgreSQL via parameterized ORM.
     Handles mode == 'create' (or missing property) and mode == 'update'.
+    Saves a 6-day undo snapshot BEFORE writing when staff_user is provided (chat confirm path).
     """
     property_id = payload.get("property_id")
     fields = payload.get("fields_to_update", {}) or payload.get("fields", {})
@@ -379,6 +488,25 @@ def _execute_update_listing(db: Session, payload: Dict[str, Any]) -> Dict[str, A
 
     updated_fields = {}
     is_created = False
+    operation_id: Optional[str] = None
+
+    # Snapshot BEFORE mutation (6-day undo window) — chat confirm path only
+    previous_state = _serialize_property_snapshot(prop) if prop else None
+    snapshot_action = "create" if not prop else ("delete" if mode == "delete" else "update")
+    if authenticated_staff is not None:
+        try:
+            operation_id = record_crud_operation_snapshot(
+                action_type=snapshot_action,
+                property_id=property_id,
+                previous_state=previous_state,
+                staff_user=authenticated_staff,
+                source="chat_confirm",
+                created_id=property_id if snapshot_action == "create" else None,
+                db_session=db,
+                confirmed_by_staff=True,
+            )
+        except Exception as snap_exc:
+            logger.warning(f"Failed to save CRUD undo snapshot before listing write: {snap_exc}")
 
     from app.core.tenant import normalize_website_list, get_current_env_domain
 
@@ -476,7 +604,10 @@ def _execute_update_listing(db: Session, payload: Dict[str, Any]) -> Dict[str, A
         "updated_fields": updated_fields,
         "images_count": len(input_images),
         "images": input_images,
-        "current_status": prop.status
+        "current_status": prop.status,
+        "operation_id": operation_id,
+        "undoable": bool(operation_id),
+        "undo_window_days": 6 if operation_id else None,
     }
 
 
@@ -502,14 +633,18 @@ def _execute_send_email(
         staff_user_email=staff_user_email,
         db=db
     )
+    delivered = bool(res.get("success")) and not bool(res.get("is_mock"))
     return {
-        "delivered": res.get("success", True),
+        "delivered": delivered,
+        "success": bool(res.get("success")) and delivered,
+        "completed": delivered,
         "message_id": res.get("message_id"),
         "to": to_email,
         "subject": subject,
         "dispatched_at": res.get("timestamp", datetime.now(timezone.utc).isoformat()),
-        "provider": res.get("provider", "simulation"),
-        "is_mock": res.get("is_mock", True)
+        "provider": res.get("provider", "disconnected"),
+        "is_mock": bool(res.get("is_mock", True)),
+        "error": res.get("error"),
     }
 
 
@@ -539,14 +674,18 @@ def _execute_create_calendar_event(
         staff_user_email=staff_user_email,
         db=db
     )
+    created = bool(res.get("success")) and not bool(res.get("is_mock"))
     return {
-        "created": res.get("success", True),
+        "created": created,
+        "success": created,
+        "completed": created,
         "event_id": res.get("event_id"),
         "title": title,
         "start_time": start_time,
         "end_time": end_time or start_time,
         "attendees": attendees,
-        "status": "confirmed",
+        "status": "confirmed" if created else "incomplete",
         "google_calendar_url": res.get("google_calendar_url"),
-        "is_mock": res.get("is_mock", True)
+        "is_mock": bool(res.get("is_mock", True)),
+        "error": res.get("error"),
     }

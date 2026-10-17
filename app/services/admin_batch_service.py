@@ -196,12 +196,16 @@ def execute_batch_property_operation(
     records: List[Dict[str, Any]],
     staff_user: AuthenticatedStaff,
     source_filename: str = "batch_file",
-    db_session: Optional[Any] = None
+    db_session: Optional[Any] = None,
+    confirmed_by_staff: bool = False,
 ) -> Dict[str, Any]:
     """
-    Instantly executes bulk property mutations (delete, update, or create) in Firestore
+    Executes bulk property mutations (delete, update, or create) in Firestore
     (and PostgreSQL if synced), while saving a complete pre-modification snapshot
-    retained for exactly 6 days to support instant undo.
+    retained for exactly 6 days to support undo.
+
+    confirmed_by_staff must be True only when invoked after an explicit pending-action
+    confirmation (pending action id + confirming user). Chat proposals must not call this.
     """
     action_clean = action_type.lower().strip()
     if action_clean not in ["delete", "remove", "update", "create", "write"]:
@@ -361,8 +365,9 @@ def execute_batch_property_operation(
                 tool_name=f"batch_property_{action_clean}",
                 tool_arguments={"filename": source_filename, "count": len(affected_ids)},
                 proposed_payload={"operation_id": operation_id, "expires_at": expires_at.isoformat()},
-                confirmed_by_staff=True,
-                execution_result=f"Instantly executed {action_clean} on {len(affected_ids)} properties from {source_filename}."
+                confirmed_by_staff=bool(confirmed_by_staff),
+                status="SUCCESS",
+                execution_result=f"Executed {action_clean} on {len(affected_ids)} properties from {source_filename}."
             )
         except Exception:
             pass
@@ -389,11 +394,13 @@ def record_crud_operation_snapshot(
     staff_user: AuthenticatedStaff,
     source: str = "admin_crud",
     created_id: Optional[str] = None,
-    db_session: Optional[Any] = None
+    db_session: Optional[Any] = None,
+    confirmed_by_staff: bool = False,
 ) -> Optional[str]:
     """
     Saves a 6-day pre-modification snapshot for individual admin CRUD operations
     (create, update, delete) to support 1-click Undo / Rollback via the 6-day window.
+    confirmed_by_staff=True only after explicit pending-action confirmation.
     """
     action_clean = action_type.lower().strip()
     if action_clean == "remove":
@@ -451,8 +458,8 @@ def record_crud_operation_snapshot(
                 tool_name=f"admin_crud_{action_clean}",
                 tool_arguments={"property_id": property_id, "source": source},
                 proposed_payload={"operation_id": operation_id, "expires_at": expires_at.isoformat()},
-                confirmed_by_staff=True,
-                execution_result=f"Instantly executed {action_clean} on property {property_id}."
+                confirmed_by_staff=bool(confirmed_by_staff),
+                execution_result=f"Executed {action_clean} on property {property_id}."
             )
         except Exception:
             pass
@@ -593,17 +600,31 @@ def undo_batch_property_operation(
         "reverted_by": staff_user.email or staff_user.staff_user_id
     })
 
-    # Log to audit trail
+    # Log to audit trail — action UNDO with actor + original operation_id
     if db_session:
         try:
+            actor = staff_user.email or staff_user.user_id
             record_audit_log(
                 db=db_session,
-                staff_user_id=staff_user.user_id,
-                tool_name="undo_batch_property_operation",
-                tool_arguments={"operation_id": operation_id},
-                proposed_payload={"status": "REVERTED", "restored_count": restored_count},
-                confirmed_by_staff=True,
-                execution_result=f"Successfully reverted operation {operation_id}. Restored {restored_count} properties."
+                staff_user_id=actor,
+                tool_name="UNDO",
+                tool_arguments={
+                    "operation_id": operation_id,
+                    "actor": actor,
+                    "original_operation_id": operation_id,
+                },
+                proposed_payload={
+                    "status": "REVERTED",
+                    "restored_count": restored_count,
+                    "original_operation_id": operation_id,
+                    "action": "UNDO",
+                },
+                confirmed_by_staff=False,
+                status="SUCCESS",
+                execution_result=(
+                    f"UNDO of operation {operation_id} by {actor}. "
+                    f"Restored {restored_count} properties."
+                ),
             )
         except Exception:
             pass

@@ -198,18 +198,22 @@ class GoogleWorkspaceManager:
             except Exception as exc:
                 logger.warning(f"[SMTP ERROR] Failed to send email via SMTP: {exc}. Falling back to simulation.")
 
-        # Option 3: Simulated fallback for development / offline testing
-        message_id = f"gmail_{secrets.token_hex(8)}"
-        logger.info(f"[DEV GMAIL] Simulated email sent to {to} (subject: {subject})")
+        # Option 3: No live Workspace/SMTP — must NOT be reported as a successful send
+        logger.warning(
+            f"[GMAIL DISCONNECTED] Cannot send email to {to}: Google Workspace not connected "
+            f"and SMTP not configured. Returning incomplete (is_mock=True, success=False)."
+        )
         return {
-            "success": True,
-            "message_id": message_id,
+            "success": False,
+            "message_id": None,
             "to": to,
             "subject": subject,
             "body_preview": body[:120] + "..." if len(body) > 120 else body,
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "provider": "simulation",
-            "is_mock": True
+            "provider": "disconnected",
+            "is_mock": True,
+            "error": "Google Workspace is not connected; email did not complete.",
+            "completed": False,
         }
 
     # 2. Universal 1-Click Google Calendar Link Generator
@@ -302,12 +306,14 @@ class GoogleWorkspaceManager:
             except Exception as exc:
                 logger.warning(f"[CALENDAR API NOTICE] Failed to create event via Google Calendar API ({exc}). Falling back to simulation.")
 
-        # Simulated fallback for development / offline testing
-        event_id = f"cal_{secrets.token_hex(8)}"
-        logger.info(f"[DEV CALENDAR] Simulated event created: {title} at {start_time}")
+        # No live Calendar credentials — do not report as created
+        logger.warning(
+            f"[CALENDAR DISCONNECTED] Cannot create event '{title}': Workspace not connected. "
+            f"Returning incomplete (is_mock=True, success=False)."
+        )
         return {
-            "success": True,
-            "event_id": event_id,
+            "success": False,
+            "event_id": None,
             "title": title,
             "start_time": start_time,
             "end_time": end_time or start_time,
@@ -316,7 +322,9 @@ class GoogleWorkspaceManager:
             "google_calendar_url": cal_url,
             "description": description or f"Viewing for {related_property or 'Property'}",
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "is_mock": True
+            "is_mock": True,
+            "error": "Google Workspace is not connected; calendar event did not complete.",
+            "completed": False,
         }
 
 
