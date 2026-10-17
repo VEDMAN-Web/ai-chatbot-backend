@@ -753,6 +753,37 @@ def get_property_by_id_from_firestore(property_id: str, target: str = "user") ->
     try:
         col = client.collection("projects")
 
+        # 0. In-memory name index first (user catalogue). It knows every listing's id, slug and names,
+        # so a name that is not in it does not exist: answer at once instead of making ~14 sequential
+        # Firestore round trips (id, slug and name queries) that took 30 s for unknown names.
+        if target == "user":
+            try:
+                from app.services.property_name_index import (
+                    ensure_name_index_from_firestore,
+                    get_property_name_index,
+                    match_property_name,
+                )
+                ensure_name_index_from_firestore(target=target)
+                _idx = get_property_name_index()
+                if _idx.has_data():
+                    _slug = re.sub(r'[^a-zA-Z0-9]+', '-', raw_query.lower()).strip('-')
+                    _hit_id = None
+                    if _idx.get_entry(raw_query):
+                        _hit_id = raw_query
+                    elif _slug and _idx.get_entry(_slug):
+                        _hit_id = _slug
+                    else:
+                        _mr = match_property_name(raw_query)
+                        if _mr.confident and _mr.confident.doc_id:
+                            _hit_id = _mr.confident.doc_id
+                    if _hit_id:
+                        _d = col.document(_hit_id).get()
+                        if _d.exists:
+                            return normalize_firestore_project(_d.id, _d.to_dict() or {})
+                    return None
+            except Exception as _idx_err:
+                logger.debug(f"Name index shortcut skipped: {_idx_err}")
+
         # 1. Exact document ID lookup
         doc = col.document(raw_query).get()
         if doc.exists:
