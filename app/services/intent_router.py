@@ -1165,12 +1165,14 @@ def _extract_search_filters_deterministic_impl(message: str) -> Dict[str, Any]:
 
     # B. Suffix currency (e.g. 4.5 million PLN, 1 million EUR, 30,000,000 THB)
     if "max_price" not in filters:
-        sfx_m = re.search(r"([0-9][0-9,.]*)\s*(k|m|million|mln|milionów|ล้าน)?\s*(pln|eur|usd|thb|baht|บาท|zł|zl|dollars|euro|zlote|złotych)", msg_low)
+        sfx_m = re.search(r"([0-9][0-9,.]*)\s*(tys\.?|tysi[eę]cy|tysiecy|thousand|k|m|million|mln|milionów|ล้าน)?\s*(pln|eur|usd|thb|baht|บาท|zł|zl|dollars|euro|zlote|złotych)", msg_low)
         if sfx_m:
             val = float(sfx_m.group(1).replace(",", ""))
             unit = (sfx_m.group(2) or "").lower()
             curr = (sfx_m.group(3) or "").lower()
-            if unit in ["m", "million", "mln", "milionów", "ล้าน"] or (val < 500 and curr in ["pln", "eur", "usd", "thb"]):
+            if _is_thousand_unit(unit):
+                val *= 1_000
+            elif unit in ["m", "million", "mln", "milionów", "ล้าน"] or (val < 500 and curr in ["pln", "eur", "usd", "thb"]):
                 val *= 1_000_000
             elif unit == "k":
                 val *= 1_000
@@ -1179,22 +1181,26 @@ def _extract_search_filters_deterministic_impl(message: str) -> Dict[str, Any]:
 
     # C. Keyword-based budget without explicit currency (defaults to THB)
     if "max_price" not in filters:
-        p_match = re.search(r"(?:under|below|max|budget|up to|poniżej|ponizej|do|maksymalnie|budżet|budzet|ไม่เกิน|ต่ำกว่า|งบ|สูงสุด|ไม่เกินงบ)\s*(?:is|\s*[:=]|\s+around|\s+about)?\s*([0-9][0-9,.]*)\s*(m|million|mln|milionów|ล้าน|ล้านบาท|k)?\s*(?:thb|baht|บาท)?", msg_low)
+        p_match = re.search(r"(?:under|below|max|budget|up to|poniżej|ponizej|do|maksymalnie|budżet|budzet|ไม่เกิน|ต่ำกว่า|งบ|สูงสุด|ไม่เกินงบ)\s*(?:is|\s*[:=]|\s+around|\s+about)?\s*([0-9][0-9,.]*)\s*(tys\.?|tysi[eę]cy|tysiecy|thousand|m|million|mln|milionów|ล้าน|ล้านบาท|k)?\s*(?:thb|baht|บาท)?", msg_low)
         if p_match and "bed" not in p_match.group(0) and "ห้อง" not in p_match.group(0):
             val = float(p_match.group(1).replace(",", ""))
             unit = (p_match.group(2) or "").lower()
-            if unit in ["m", "million", "mln", "milionów", "ล้าน", "ล้านบาท"] or val < 500:
+            if _is_thousand_unit(unit):
+                val *= 1_000
+            elif unit in ["m", "million", "mln", "milionów", "ล้าน", "ล้านบาท"] or val < 500:
                 val *= 1_000_000
             elif unit == "k":
                 val *= 1_000
             filters["max_price"] = val
 
     # Min Price
-    min_match = re.search(r"(?:from|above|minimum|min|od|powyżej|powyzej|ตั้งแต่|มากกว่า|เริ่มต้น)\s*(?:is|\s*[:=])?\s*([0-9][0-9,.]*)\s*(m|million|mln|milionów|ล้าน|ล้านบาท|k)?\s*(?:thb|baht|บาท)?", msg_low)
+    min_match = re.search(r"(?:from|above|minimum|min|od|powyżej|powyzej|ตั้งแต่|มากกว่า|เริ่มต้น)\s*(?:is|\s*[:=])?\s*([0-9][0-9,.]*)\s*(tys\.?|tysi[eę]cy|tysiecy|thousand|m|million|mln|milionów|ล้าน|ล้านบาท|k)?\s*(?:thb|baht|บาท)?", msg_low)
     if min_match and "bed" not in min_match.group(0) and "ห้อง" not in min_match.group(0):
         val = float(min_match.group(1).replace(",", ""))
         unit = (min_match.group(2) or "").lower()
-        if unit in ["m", "million", "mln", "milionów", "ล้าน", "ล้านบาท"] or val < 500:
+        if _is_thousand_unit(unit):
+            val *= 1_000
+        elif unit in ["m", "million", "mln", "milionów", "ล้าน", "ล้านบาท"] or val < 500:
             val *= 1_000_000
         elif unit == "k":
             val *= 1_000
@@ -1209,6 +1215,11 @@ def _extract_search_filters_deterministic_impl(message: str) -> Dict[str, Any]:
         filters["sea_view"] = True
 
     return filters
+def _is_thousand_unit(unit: str) -> bool:
+    """'100 tys. THB' / '500 thousand' mean thousands; without this a small number was read as millions."""
+    return (unit or "").lower().rstrip(".") in ("tys", "tysięcy", "tysiecy", "thousand")
+
+
 def extract_search_filters_deterministic(message: str, *args: Any, **kwargs: Any) -> Dict[str, Any]:
     """Never raises: a malformed number in the text must not break the chat (falls back to no filters)."""
     try:

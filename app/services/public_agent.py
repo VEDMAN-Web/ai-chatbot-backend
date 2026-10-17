@@ -3405,8 +3405,12 @@ class PublicAgentService:
                 explicit_resolved = True
             else:
                 # If the "name" was actually a filter search (e.g. PL "wille w Phuket"), search instead
-                from app.services.intent_router import message_looks_like_filter_search
-                if message_looks_like_filter_search(user_message):
+                from app.services.intent_router import message_looks_like_filter_search, extract_search_filters_deterministic
+                # A property-type word alone ("Show me Atlantis Bay Villas") is a name, not a filter search:
+                # a real filter search also names a place, budget, bedrooms or an amenity.
+                _filters = {k: v for k, v in (extract_search_filters_deterministic(user_message) or {}).items()
+                            if v not in (None, "", [], {}) and k != "property_type"}
+                if message_looks_like_filter_search(user_message) and _filters:
                     return self._handle_property_search(
                         db, conversation, user_message, start_time, language=language
                     )
