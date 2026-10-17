@@ -148,3 +148,13 @@ def test_yield_and_roi_percentages_from_marketing_text_are_removed():
         assert "%" not in m(t), t
     assert "35,744 THB/sqm" in m("Competitive entry at 35,744 THB/sqm")
     assert "5% interest" in m("Loan at 5% interest, 30% deposit")
+
+
+def test_unknown_place_is_not_silently_replaced_by_another_search(monkeypatch):
+    import app.services.intent_router as ir
+    monkeypatch.setattr(fs, "fetch_properties_from_firestore", lambda **k: _cards())
+    monkeypatch.setitem(ir._PLACE_BLOB, "text", None)
+    assert ir.extract_search_filters_deterministic("Show me a villa in Antarctica").get("foreign_location") == "Antarctica"
+    for ok in ["Show me villas in Phuket", "Show me condos in Phnom Penh", "Show me villas in Thailand"]:
+        assert not ir.extract_search_filters_deterministic(ok).get("foreign_location"), ok
+    ir._PLACE_BLOB.update({"at": 0.0, "text": None})

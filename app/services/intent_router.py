@@ -828,6 +828,61 @@ def detect_deterministic_intent(
     return None, {}
 
 
+_PLACE_BLOB: Dict[str, Any] = {"at": 0.0, "text": None}
+_NOT_A_PLACE = frozenset({
+    "thailand", "thai", "asia", "the", "english", "polish", "any", "all", "my", "our", "this", "that", "it",
+    "budget", "total", "general", "particular", "stock", "case", "time", "order", "fact", "addition", "short",
+})
+
+
+def _catalog_place_text() -> Optional[str]:
+    """Lower-cased text of every place/name/address in the catalogue (15 min cache). None if unavailable."""
+    import time as _t
+    now = _t.time()
+    if _PLACE_BLOB["text"] is not None and now - _PLACE_BLOB["at"] < 900:
+        return _PLACE_BLOB["text"]
+    try:
+        from app.services.firestore_service import fetch_properties_from_firestore
+        props = fetch_properties_from_firestore(limit=5000, active_only=True, target="user") or []
+        if not props:
+            return _PLACE_BLOB["text"]
+        parts = []
+        for p in props:
+            for k in ("location", "address", "district", "province", "name", "city", "area"):
+                v = p.get(k)
+                if v:
+                    parts.append(str(v).lower().replace("-", " "))
+        _PLACE_BLOB.update({"at": now, "text": " | ".join(parts)})
+    except Exception:
+        return _PLACE_BLOB["text"]
+    return _PLACE_BLOB["text"]
+
+
+def _unknown_place_in_message(message: str) -> Optional[str]:
+    """
+    "...villa in Antarctica": a capitalised place after in/near/at that is neither a known alias nor
+    anywhere in the catalogue. Fails open (None) when the catalogue is unavailable.
+    """
+    m = re.search(r"\b(?:in|near|at)\s+(?:the\s+)?([A-Z][A-Za-z'\-]{3,}(?:\s+[A-Z][A-Za-z'\-]{2,})?)", message or "")
+    if not m:
+        return None
+    cand = m.group(1).strip()
+    low = cand.lower()
+    if low in _NOT_A_PLACE or any(w in _NOT_A_PLACE for w in low.split()[:1]):
+        return None
+    for kw, _ in LOCATION_ALIASES:
+        if kw in low or low in kw:
+            return None
+    if get_close_matches(low, [kw for kw, _ in LOCATION_ALIASES if re.search(r"[a-z]", kw)], n=1, cutoff=0.8):
+        return None
+    blob = _catalog_place_text()
+    if not blob:
+        return None
+    if low.replace("-", " ") in blob or low.split()[0] in blob:
+        return None
+    return cand
+
+
 def extract_search_filters_deterministic(message: str) -> Dict[str, Any]:
     """
     Extracts structured search criteria from natural language without calling an LLM.
@@ -878,6 +933,12 @@ def extract_search_filters_deterministic(message: str) -> Dict[str, Any]:
             if re.search(r'\b' + re.escape(kw) + r'\b', msg_low):
                 filters["foreign_location"] = val
                 break
+
+    # A place we know nothing about ("villa in Antarctica"): do not silently search somewhere else.
+    if not filters.get("location") and not filters.get("foreign_location"):
+        unknown = _unknown_place_in_message(message)
+        if unknown:
+            filters["foreign_location"] = unknown
 
     broad_thailand_phrases = [
         "in thailand", "across thailand", "around thailand", "throughout thailand",
