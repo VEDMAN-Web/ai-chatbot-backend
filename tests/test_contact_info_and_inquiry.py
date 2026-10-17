@@ -41,3 +41,14 @@ def test_contact_info_endpoint_function():
 def test_public_request_accepts_listing_reference_for_the_form():
     req = chat_api.PublicChatRequest(session_id="s1", contact_email="a@b.com", property_id="MIijGwytZdYL1EiGumjV")
     assert req.property_id == "MIijGwytZdYL1EiGumjV" and not req.message
+
+
+def test_widget_copy_present_for_all_languages():
+    from app.core.tenant import resolve_tenant
+    from app.services.contact_info import build_contact_info
+    for lang in ("en", "pl", "th"):
+        w = build_contact_info(resolve_tenant(None), lang)["widget"]
+        assert w["cta_action"] == "open_inquiry_form"
+        assert w["cta_label"] and w["greeting"] and w["suggestions"]
+    assert build_contact_info(resolve_tenant(None), "en")["widget"]["cta_label"] == "Talk to an advisor"
+    assert build_contact_info(resolve_tenant(None), "pl")["widget"]["cta_label"] == "Porozmawiaj z doradcą"
