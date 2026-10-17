@@ -387,6 +387,15 @@ class PropertyNameIndex:
                     if ev is not None:
                         ev.set()
 
+    def has_data(self) -> bool:
+        with self._lock:
+            return bool(self._entries)
+
+    def get_entry(self, key: str) -> Optional[NameIndexEntry]:
+        """Exact doc-id lookup in memory (no network)."""
+        with self._lock:
+            return self._by_id.get(key)
+
     def match(self, query: str) -> NameMatchResult:
         self.ensure_fresh()
         q_raw = (query or "").strip()
