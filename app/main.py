@@ -18,12 +18,16 @@ from app.api.v1.auth import router as auth_router
 
 logger = logging.getLogger(__name__)
 
+# API docs list every route, so they are off unless ENABLE_API_DOCS=true (e.g. on a developer machine).
+_DOCS_ON = os.getenv("ENABLE_API_DOCS", "").strip().lower() in ("1", "true", "yes")
+
 app = FastAPI(
     title="Tajlandia AI Property Intelligence Platform API",
     description="Multi-tenant backend for Public Customer Chatbot & Internal Admin Agent.",
     version="1.0.0",
-    docs_url="/docs",
-    redoc_url="/redoc"
+    docs_url="/docs" if _DOCS_ON else None,
+    redoc_url="/redoc" if _DOCS_ON else None,
+    openapi_url="/openapi.json" if _DOCS_ON else None,
 )
 
 # Mount Static Assets & Frontend

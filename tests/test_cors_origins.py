@@ -19,3 +19,11 @@ def test_foreign_origins_refused():
     for o in ("https://evil.example", "https://varsoviaestate.com.evil.example", "https://notvarsoviaestate.com",
               "https://other-app.vercel.app", "http://localhost.evil.example"):
         assert not _ok(o), o
+
+
+def test_api_docs_are_hidden_by_default():
+    from fastapi.testclient import TestClient
+    from app.main import app
+    c = TestClient(app)
+    for path in ("/docs", "/redoc", "/openapi.json"):
+        assert c.get(path).status_code == 404, path
