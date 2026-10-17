@@ -22,6 +22,34 @@ def _firestore_sync_enabled(agent_type: str) -> bool:
     return bool(settings.get_user_enable_firestore_sync())
 
 
+def bind_conversation_site_origin(conversation, site_origin: Optional[str]) -> Any:
+    """
+    Force conversation branding to THIS request's validated site_origin.
+
+    The web client may reuse one session_id across tajlandia.com / thai.estate /
+    varsoviaestate.com. Cached or Firestore-stored siteOrigin must not stick.
+    """
+    from app.core.config import settings
+    from app.services.firestore_service import update_conversation_site_origin_firestore
+
+    clean = (site_origin or getattr(settings, "SITE_ORIGIN", "varsoviaestate.com") or "").strip()
+    if not conversation or not clean:
+        return conversation
+
+    prev = getattr(conversation, "site_origin", None)
+    if prev == clean:
+        return conversation
+
+    conversation.site_origin = clean
+    agent_type = getattr(conversation, "agent_type", "public") or "public"
+    if _firestore_sync_enabled(agent_type):
+        try:
+            update_conversation_site_origin_firestore(conversation, clean)
+        except Exception as e:
+            logger.warning("Failed to persist site_origin=%s for session %s: %s", clean, getattr(conversation, "session_id", "?"), e)
+    return conversation
+
+
 def get_or_create_conversation(
     db=None,
     session_id: str = "",
@@ -31,6 +59,9 @@ def get_or_create_conversation(
     """
     Load or create a conversation. Persists entirely in Firestore (conversations collection).
     `db` is accepted for API compatibility but is not used for chat storage.
+
+    Always rebinds site_origin to the current request so multi-site session reuse
+    cannot leave stale brand / advisor email on the conversation.
     """
     from app.core.config import settings
     from app.services.firestore_service import get_or_create_conversation_firestore
@@ -39,47 +70,49 @@ def get_or_create_conversation(
     clean_site_origin = (site_origin or getattr(settings, "SITE_ORIGIN", "varsoviaestate.com")).strip()
     session_key = f"{agent_type}:{clean_session_id}"
 
+    conversation = None
+
     # 1. In-process cache
     if session_key in _IN_SESSION_CONVERSATIONS:
-        return _IN_SESSION_CONVERSATIONS[session_key]
-
+        conversation = _IN_SESSION_CONVERSATIONS[session_key]
     # 2. Firestore is the durable store for ALL chat history + property_context
-    if _firestore_sync_enabled(agent_type):
+    elif _firestore_sync_enabled(agent_type):
         try:
-            conv = get_or_create_conversation_firestore(
+            conversation = get_or_create_conversation_firestore(
                 session_id=clean_session_id,
                 site_origin=clean_site_origin,
                 agent_type=agent_type,
             )
-            _IN_SESSION_CONVERSATIONS[session_key] = conv
-            return conv
+            _IN_SESSION_CONVERSATIONS[session_key] = conversation
         except Exception as e:
             logger.error(f"Firestore get_or_create_conversation failed: {e}")
 
     # 3. Ephemeral fallback only if Firestore is unavailable (not written to Postgres)
-    from app.services.firestore_service import FirestoreConversation
+    if conversation is None:
+        from app.services.firestore_service import FirestoreConversation
 
-    now_iso = datetime.now(timezone.utc).isoformat()
-    conversation = FirestoreConversation(
-        clean_session_id,
-        {
-            "sessionId": clean_session_id,
-            "siteOrigin": clean_site_origin,
-            "agentType": agent_type,
-            "messageHistory": [],
-            "preferences": {},
-            "leadScore": 0.0,
-            "createdAt": now_iso,
-            "updatedAt": now_iso,
-        },
-    )
-    _IN_SESSION_CONVERSATIONS[session_key] = conversation
-    logger.warning(
-        "Conversation %s created in-memory only — Firestore unavailable. "
-        "History will not survive restart until Firestore is reachable.",
-        session_key,
-    )
-    return conversation
+        now_iso = datetime.now(timezone.utc).isoformat()
+        conversation = FirestoreConversation(
+            clean_session_id,
+            {
+                "sessionId": clean_session_id,
+                "siteOrigin": clean_site_origin,
+                "agentType": agent_type,
+                "messageHistory": [],
+                "preferences": {},
+                "leadScore": 0.0,
+                "createdAt": now_iso,
+                "updatedAt": now_iso,
+            },
+        )
+        _IN_SESSION_CONVERSATIONS[session_key] = conversation
+        logger.warning(
+            "Conversation %s created in-memory only — Firestore unavailable. "
+            "History will not survive restart until Firestore is reachable.",
+            session_key,
+        )
+
+    return bind_conversation_site_origin(conversation, clean_site_origin)
 
 
 def append_conversation_turn(

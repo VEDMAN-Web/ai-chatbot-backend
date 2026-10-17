@@ -9,6 +9,7 @@ traceable via AmenityFact.sources.
 from __future__ import annotations
 
 import re
+from functools import lru_cache
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
@@ -129,6 +130,7 @@ class AmenityFact:
         }
 
 
+@lru_cache(maxsize=100_000)
 def _norm_token(text: str) -> str:
     s = (text or "").strip().lower()
     s = s.replace("_", "-").replace("/", " ")
@@ -158,6 +160,7 @@ def _flatten_strings(value: Any) -> List[str]:
     return out
 
 
+@lru_cache(maxsize=100_000)
 def map_token_to_canonical(token: str) -> Optional[str]:
     """Map a single tag/slug/phrase to a canonical amenity key.
 
@@ -193,8 +196,7 @@ def _alias_present_in_text(text: str, aliases: Sequence[str]) -> Optional[str]:
         # word-ish / slug match
         if a in low or a.replace(" ", "-") in low.replace(" ", "-"):
             return alias
-        if " " not in a and re.search(rf"\b{re.escape(a)}\b", low):
-            return alias
+        # (a word-boundary regex check used to follow here; it can only match when `a in low` already did)
     return None
 
 

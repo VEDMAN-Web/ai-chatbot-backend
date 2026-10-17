@@ -1513,6 +1513,35 @@ def is_off_topic_query(message: str) -> bool:
     return False
 
 
+def _openai_timeout_sec() -> float:
+    try:
+        return float(getattr(settings, "OPENAI_TIMEOUT", 25.0) or 25.0)
+    except Exception:
+        return 25.0
+
+
+def _openai_max_retries() -> int:
+    try:
+        return int(getattr(settings, "OPENAI_MAX_RETRIES", 1) or 0)
+    except Exception:
+        return 1
+
+
+def _is_openai_timeout_error(exc: BaseException) -> bool:
+    name = type(exc).__name__.lower()
+    msg = str(exc).lower()
+    if "timeout" in name or "timed out" in msg or "timeout" in msg:
+        return True
+    try:
+        import openai
+        timeout_cls = getattr(openai, "APITimeoutError", None)
+        if timeout_cls is not None and isinstance(exc, timeout_cls):
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def _safe_openai_create(client: Any, **kwargs) -> Any:
     """
     Safely executes client.chat.completions.create with forward/backward compatibility.
@@ -1522,9 +1551,11 @@ def _safe_openai_create(client: Any, **kwargs) -> Any:
        (as mandated by OpenAI API for gpt-6-astra and other reasoning models with function tools).
     3. Gracefully self-heals if OpenAI API throws BadRequestError for unsupported parameters or reasoning_effort.
     4. Automatically falls back to gpt-4o / gpt-4o-mini if an advanced model is rejected or inaccessible.
+    5. Applies OPENAI_TIMEOUT; on timeout does not cascade through model fallbacks (caller uses honest fallback).
     """
     call_kwargs = dict(kwargs)
     model_name = str(call_kwargs.get("model", "")).lower()
+    timeout_sec = _openai_timeout_sec()
 
     is_reasoning_or_advanced = any(prefix in model_name for prefix in ["gpt-5", "gpt-6", "o1", "o3", "o4"])
 
@@ -1537,11 +1568,28 @@ def _safe_openai_create(client: Any, **kwargs) -> Any:
         if call_kwargs.get("tools") or call_kwargs.get("functions"):
             call_kwargs["reasoning_effort"] = "none"
 
-    call_kwargs.setdefault("timeout", getattr(settings, "OPENAI_TIMEOUT", 600.0))
+    call_kwargs.setdefault("timeout", timeout_sec)
 
+    t0 = time.monotonic()
     try:
-        return client.chat.completions.create(**call_kwargs)
+        # Client-level OPENAI_MAX_RETRIES handles one retry on timeout/transient errors.
+        resp = client.chat.completions.create(**call_kwargs)
+        logger.info(
+            "timing.openai_call duration_sec=%.3f model=%s",
+            time.monotonic() - t0,
+            call_kwargs.get("model"),
+        )
+        return resp
     except Exception as e:
+        if _is_openai_timeout_error(e):
+            logger.warning(
+                "OpenAI timeout after %.3fs (timeout=%ss, max_retries=%s): %s",
+                time.monotonic() - t0,
+                timeout_sec,
+                _openai_max_retries(),
+                e,
+            )
+            raise
         err_str = str(e).lower()
         logger.warning(f"Initial OpenAI API call for model '{model_name}' encountered: {e}. Applying self-healing...")
 
@@ -1553,19 +1601,30 @@ def _safe_openai_create(client: Any, **kwargs) -> Any:
             call_kwargs.pop("temperature", None)
 
         try:
-            return client.chat.completions.create(**call_kwargs)
+            t1 = time.monotonic()
+            resp = client.chat.completions.create(**call_kwargs)
+            logger.info(
+                "timing.openai_call duration_sec=%.3f model=%s attempt=selfheal",
+                time.monotonic() - t1,
+                call_kwargs.get("model"),
+            )
+            return resp
         except Exception as retry_err:
+            if _is_openai_timeout_error(retry_err):
+                raise
             logger.error(f"Retry for model '{model_name}' failed: {retry_err}. Attempting fallback to gpt-4o...")
-            # Fallback to gpt-4o for zero downtime
+            # Fallback to gpt-4o for zero downtime (not used for timeouts)
             fallback_kwargs = dict(kwargs)
             fallback_kwargs["model"] = "gpt-4o"
-            fallback_kwargs.setdefault("timeout", getattr(settings, "OPENAI_TIMEOUT", 600.0))
+            fallback_kwargs.setdefault("timeout", timeout_sec)
             fallback_kwargs.pop("reasoning_effort", None)
             if "max_completion_tokens" in fallback_kwargs:
                 fallback_kwargs["max_tokens"] = fallback_kwargs.pop("max_completion_tokens")
             try:
                 return client.chat.completions.create(**fallback_kwargs)
             except Exception as final_err:
+                if _is_openai_timeout_error(final_err):
+                    raise
                 logger.error(f"Fallback to gpt-4o also failed: {final_err}. Attempting gpt-4o-mini...")
                 fallback_kwargs["model"] = "gpt-4o-mini"
                 return client.chat.completions.create(**fallback_kwargs)
@@ -1738,9 +1797,14 @@ class PublicAgentService:
         self.model = settings.OPENAI_MODEL
         self.temperature = settings.OPENAI_TEMPERATURE
         self.api_key = settings.OPENAI_API_KEY
-        self.timeout = getattr(settings, "OPENAI_TIMEOUT", 600.0)
+        self.timeout = _openai_timeout_sec()
+        self.max_retries = _openai_max_retries()
         if self.api_key:
-            self.client = OpenAI(api_key=self.api_key, timeout=self.timeout)
+            self.client = OpenAI(
+                api_key=self.api_key,
+                timeout=self.timeout,
+                max_retries=self.max_retries,
+            )
         else:
             self.client = None
 
@@ -1805,11 +1869,23 @@ class PublicAgentService:
         name_miss = any(str(r).startswith("named_property_missing:") for r in reasons)
         if name_miss or (asked and any(str(r).startswith("named_property_missing") for r in reasons)):
             from app.services.property_name_index import get_last_name_search_suggestions
+            # Prefer suggestions carried on tool results (survives thread/context switches)
+            tips: List[str] = []
+            for tr in tool_results or []:
+                res = tr.get("result") if isinstance(tr, dict) else None
+                if not isinstance(res, dict):
+                    continue
+                raw_tips = res.get("name_suggestions")
+                if raw_tips:
+                    tips = [str(s) for s in raw_tips if s]
+                    break
+            if not tips:
+                tips = get_last_name_search_suggestions()
             fallback = build_name_not_found_reply(
                 language=language,
                 site_origin=site_origin,
                 asked_name=str(asked) if asked else None,
-                suggestions=get_last_name_search_suggestions(),
+                suggestions=tips,
             )
             # Pending candidates are stored by the caller when conversation is available
             # (execute_tool / _sync_pending_name_candidates_from_last_search).
@@ -1972,7 +2048,7 @@ class PublicAgentService:
                 ]
             }
             # Named search with zero confident matches: honest message + Did you mean (no invented facts)
-            # But if the query also looks like filters and we somehow still have zero, skip name-not-found
+            # Prefer values already on tool_summary; ContextVar is only a fallback (cross-thread safe).
             if query_term and not matched_cards and not message_looks_like_filter_search(str(query_term)):
                 from app.services.property_name_index import (
                     get_last_name_search_suggestions,
@@ -1980,8 +2056,15 @@ class PublicAgentService:
                     get_last_name_search_query,
                 )
                 from app.services.name_confirmation import store_pending_name_candidates
-                tips = get_last_name_search_suggestions()
-                cands = get_last_name_search_candidates()
+                tips = list(tool_summary.get("name_suggestions") or []) or get_last_name_search_suggestions()
+                cands = list(tool_summary.get("name_candidates") or []) or get_last_name_search_candidates()
+                # If search left ContextVar tips but empty candidates, recover via index
+                if tips and not cands:
+                    set_last_name_search_meta = __import__(
+                        "app.services.property_name_index", fromlist=["set_last_name_search_meta"]
+                    ).set_last_name_search_meta
+                    set_last_name_search_meta(str(query_term), suggestions=tips, candidates=None)
+                    cands = get_last_name_search_candidates()
                 lang_pref = (conversation.preferences or {}).get("language") or "en"
                 tool_summary["name_suggestions"] = tips
                 tool_summary["name_candidates"] = cands
@@ -2307,13 +2390,21 @@ class PublicAgentService:
         requested_language: Optional[str] = None
     ) -> Dict[str, Any]:
         """Runs one conversational turn using deterministic intent routing and token-efficient synthesis."""
-        res = self._run_conversation_internal(
-            db=db,
-            conversation=conversation,
-            user_message=user_message,
-            requested_language=requested_language
-        )
-        return self._post_process_response(res, user_message=user_message)
+        t0 = time.time()
+        try:
+            res = self._run_conversation_internal(
+                db=db,
+                conversation=conversation,
+                user_message=user_message,
+                requested_language=requested_language
+            )
+            return self._post_process_response(res, user_message=user_message)
+        finally:
+            logger.info(
+                "timing.request_total duration_sec=%.3f session=%s",
+                time.time() - t0,
+                getattr(conversation, "session_id", "?"),
+            )
 
     def _run_conversation_internal(
         self,
@@ -2569,6 +2660,8 @@ class PublicAgentService:
         self,
         conversation: Conversation,
         asked_name: Optional[str] = None,
+        candidates: Optional[List[Dict[str, Any]]] = None,
+        tool_results: Optional[List[Any]] = None,
     ) -> None:
         """Persist Did-you-mean candidates into conversation.preferences when present."""
         from app.services.property_name_index import (
@@ -2577,7 +2670,15 @@ class PublicAgentService:
         )
         from app.services.name_confirmation import store_pending_name_candidates
 
-        cands = get_last_name_search_candidates()
+        cands = list(candidates or [])
+        if not cands and tool_results:
+            for tr in tool_results:
+                res = (tr or {}).get("result") if isinstance(tr, dict) else None
+                if isinstance(res, dict) and res.get("name_candidates"):
+                    cands = list(res.get("name_candidates") or [])
+                    break
+        if not cands:
+            cands = get_last_name_search_candidates()
         if not cands:
             return
         conversation.preferences = store_pending_name_candidates(
@@ -5144,10 +5245,24 @@ class PublicAgentService:
                         # Prefer honest Did-you-mean from search_properties when present
                         all_cards = []
                         name_msg = None
+                        name_cands_from_tool: List[Dict[str, Any]] = []
                         for tr in logged_tool_results:
                             res = (tr or {}).get("result") or {}
                             if isinstance(res, dict) and res.get("name_suggestions") is not None:
-                                name_msg = res.get("message")
+                                name_msg = res.get("message") or build_name_not_found_reply(
+                                    language=language,
+                                    site_origin=getattr(conversation, "site_origin", None),
+                                    asked_name=(raw_user_message or user_message or "")[:120] or None,
+                                    suggestions=list(res.get("name_suggestions") or []),
+                                )
+                                name_cands_from_tool = list(res.get("name_candidates") or [])
+                                if name_cands_from_tool:
+                                    from app.services.name_confirmation import store_pending_name_candidates
+                                    conversation.preferences = store_pending_name_candidates(
+                                        conversation.preferences,
+                                        query=(raw_user_message or user_message or ""),
+                                        candidates=name_cands_from_tool,
+                                    )
                                 break
                         if name_msg:
                             final_text = name_msg
@@ -5250,7 +5365,9 @@ class PublicAgentService:
                     or (raw_user_message or user_message)
                 )
                 self._sync_pending_name_candidates_from_last_search(
-                    conversation, asked_name=str(asked) if asked else None
+                    conversation,
+                    asked_name=str(asked) if asked else None,
+                    tool_results=logged_tool_results,
                 )
                 updated_prefs = dict(updated_prefs or {})
                 updated_prefs.update(conversation.preferences or {})

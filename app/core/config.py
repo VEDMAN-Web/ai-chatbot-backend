@@ -69,16 +69,24 @@ class Settings(BaseSettings):
     ADMIN_DATABASE_URL: Optional[str] = None
     USER_DATABASE_URL: Optional[str] = None
     
-    # AI Configuration — accuracy over speed/cost: strongest models, low temperature, long timeouts
+    # AI Configuration — accuracy over speed/cost; harden timeouts so one stuck call cannot hang Cloud Run
     OPENAI_API_KEY: str = ""
     OPENAI_MODEL: str = "gpt-5.5"
     OPENAI_TEMPERATURE: float = 0.0
-    OPENAI_TIMEOUT: float = 600.0  # 10 minutes — prevent premature "Service temporarily unavailable"
+    OPENAI_TIMEOUT: float = 25.0  # seconds per request; honest fallback on timeout
+    OPENAI_MAX_RETRIES: int = 1  # one retry after timeout/transient failure
 
     ANTHROPIC_API_KEY: str = ""
     ANTHROPIC_MODEL: str = "claude-opus-5-5"
     ANTHROPIC_TEMPERATURE: float = 0.0
     ANTHROPIC_TIMEOUT: float = 600.0  # 10 minutes — same for admin bot
+
+    # Property catalog / name-index in-memory cache (stale-while-revalidate)
+    CATALOG_CACHE_TTL_SEC: float = 900.0  # 15 minutes
+    # Fixed FX used ONLY to compare listing prices against THB budgets (a few listings are priced in USD/EUR)
+    FX_USD_THB: float = 35.0
+    FX_EUR_THB: float = 38.0
+    NAME_INDEX_TTL_SEC: float = 600.0  # 10 minutes
 
     # In-session memory: support 100+ consecutive property follow-ups
     SESSION_MEMORY_TURNS: int = 100
@@ -120,7 +128,7 @@ class Settings(BaseSettings):
     SMTP_PORT: int = 587
     SMTP_USER: str = ""
     SMTP_PASSWORD: str = ""
-    TAJLANDIA_SALES_EMAIL: str = "sales@varsoviaestate.com"
+    TAJLANDIA_SALES_EMAIL: str = "sales@tajlandia.com"
 
     # Report Generation Storage
     REPORT_STORAGE_DIR: str = "data/reports"

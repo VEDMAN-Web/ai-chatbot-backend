@@ -16,10 +16,33 @@ logger = logging.getLogger(__name__)
 _admin_firestore_client = None
 _user_firestore_client = None
 
-# Short-lived in-memory catalog cache (lazy; concurrent-safe)
+# In-memory catalog cache with single-flight + stale-while-revalidate
 _CATALOG_LOCK = threading.RLock()
 _CATALOG_CACHE: Dict[str, Tuple[float, List[Dict[str, Any]]]] = {}
-_CATALOG_TTL_SEC = 120  # 2 minutes — balances freshness vs 925-doc reload cost
+_CATALOG_INFLIGHT: Dict[str, threading.Event] = {}
+_CATALOG_REFRESHING: set = set()
+# Legacy module constant (tests may read); runtime TTL comes from settings
+_CATALOG_TTL_SEC = 900
+
+def to_thb(amount: Optional[float], currency: Optional[str]) -> Optional[float]:
+    """Convert a listing price to THB so budget filters compare like with like.
+    Uses fixed, configurable rates (settings.FX_*_THB). Unknown currency -> None (never guessed)."""
+    if amount is None:
+        return None
+    cur = (currency or "THB").strip().upper()
+    if cur in ("THB", "BAHT", "฿"):
+        return float(amount)
+    rate = {"USD": settings.FX_USD_THB, "EUR": settings.FX_EUR_THB}.get(cur)
+    return float(amount) * float(rate) if rate else None
+
+
+
+
+def _catalog_ttl_sec() -> float:
+    try:
+        return float(getattr(settings, "CATALOG_CACHE_TTL_SEC", 900) or 900)
+    except Exception:
+        return 900.0
 
 
 class FirestoreDatabaseError(Exception):
@@ -259,7 +282,7 @@ def normalize_firestore_project(doc_id: str, data: Dict[str, Any]) -> Dict[str, 
 
     # Bedrooms & Area
     layouts = data.get("layouts") or []
-    bedrooms_str = "1-4 Beds"
+    bedrooms_str = ""  # unknown unless the listing has layout data: never invent a bedroom count
     if layouts and isinstance(layouts, list):
         bed_nums = [l.get("bedrooms") for l in layouts if isinstance(l, dict) and l.get("bedrooms") is not None]
         if bed_nums:
@@ -329,7 +352,9 @@ def normalize_firestore_project(doc_id: str, data: Dict[str, Any]) -> Dict[str, 
         desc_str = data.get("_descriptionRu") or data.get("_shortDescriptionRu") or ""
 
     if not desc_str:
-        desc_str = f"Exclusive development '{name_str}' in {location_str}. Featuring {bedrooms_str}, {area_str}, with pricing starting from {price_display}."
+        _facts = [f for f in (bedrooms_str, area_str if area_str != "N/A" else "") if f]
+        _feat = f" Featuring {', '.join(_facts)}." if _facts else ""
+        desc_str = f"Development '{name_str}' in {location_str}.{_feat} Pricing: {price_display}."
     desc_str = sanitize_marketing_claims(desc_str, mode="description")
 
     # Websites & Domains Scope
@@ -348,6 +373,8 @@ def normalize_firestore_project(doc_id: str, data: Dict[str, Any]) -> Dict[str, 
         "price": price_display,
         "price_numeric_min": price_num_min,
         "price_numeric_max": price_num_max,
+        "price_thb_min": to_thb(price_num_min, currency),
+        "price_thb_max": to_thb(price_num_max, currency),
         "currency": currency,
         "bedrooms": bedrooms_str,
         "area": area_str,
@@ -385,9 +412,15 @@ def normalize_firestore_project(doc_id: str, data: Dict[str, Any]) -> Dict[str, 
 
 
 def clear_property_catalog_cache() -> None:
-    """Test/helper: drop the short-lived catalog cache."""
+    """Test/helper: drop the catalog cache (does not interrupt in-flight loads)."""
     with _CATALOG_LOCK:
         _CATALOG_CACHE.clear()
+
+
+def _slice_catalog(cached: List[Dict[str, Any]], limit: int) -> List[Dict[str, Any]]:
+    if limit and int(limit) > 0:
+        return list(cached[: int(limit)])
+    return list(cached)
 
 
 def _fetch_properties_from_firestore_uncached(
@@ -396,6 +429,7 @@ def _fetch_properties_from_firestore_uncached(
     active_only: bool = True,
     target: str = "user",
 ) -> List[Dict[str, Any]]:
+    t0 = time.monotonic()
     client = get_firestore_client(target=target)
     if not client:
         logger.warning("Firestore client not available.")
@@ -447,7 +481,44 @@ def _fetch_properties_from_firestore_uncached(
         ]
 
     results.sort(key=lambda p: str(p.get("property_id") or ""))
+    logger.info(
+        "timing.catalog_load duration_sec=%.3f count=%s target=%s city_id=%s",
+        time.monotonic() - t0,
+        len(results),
+        target,
+        city_id or "",
+    )
     return results
+
+
+def _store_catalog_cache(cache_key: str, results: List[Dict[str, Any]]) -> None:
+    with _CATALOG_LOCK:
+        _CATALOG_CACHE[cache_key] = (time.monotonic(), list(results))
+
+
+def _background_refresh_catalog(
+    cache_key: str,
+    limit: int,
+    city_id: Optional[str],
+    active_only: bool,
+    target: str,
+) -> None:
+    try:
+        results = _fetch_properties_from_firestore_uncached(
+            limit=limit, city_id=city_id, active_only=active_only, target=target
+        )
+        _store_catalog_cache(cache_key, results)
+        logger.info(
+            "Catalog cache refreshed in background key=%s count=%s",
+            cache_key,
+            len(results),
+        )
+    except Exception as e:
+        # Failed refresh must never wipe good cached data
+        logger.warning("Background catalog refresh failed (keeping stale): %s", e)
+    finally:
+        with _CATALOG_LOCK:
+            _CATALOG_REFRESHING.discard(cache_key)
 
 
 def fetch_properties_from_firestore(
@@ -458,27 +529,107 @@ def fetch_properties_from_firestore(
 ) -> List[Dict[str, Any]]:
     """
     Fetches real property projects from Firestore `projects` collection.
-    Uses a short-lived in-memory cache (lazy load) so concurrent searches do not
-    each re-stream all ~925 documents. Cache key ignores small `limit` when the
-    caller wants a large catalog slice (search path uses limit=5000).
+
+    Cache behaviour (full catalog fetches, limit >= 500):
+    - Fresh hit: return immediately.
+    - Expired hit (stale-while-revalidate): return stale immediately; one background refresh.
+    - Cold miss: single-flight — only one thread streams Firestore; others wait for that result.
+    - Failed refresh never clears a good cache entry.
     """
     # Cache full-ish catalog fetches; small one-off limits bypass cache
     use_cache = (not limit or int(limit) >= 500) and active_only
     cache_key = f"{target}|{city_id or ''}|{bool(active_only)}"
+    ttl = _catalog_ttl_sec()
+    # Large enough fetch for cache population (search path uses limit=5000)
+    load_limit = max(int(limit) if limit else 5000, 5000) if use_cache else int(limit or 150)
+
     if use_cache:
+        leader = False
+        wait_event: Optional[threading.Event] = None
         with _CATALOG_LOCK:
             hit = _CATALOG_CACHE.get(cache_key)
-            if hit and (time.monotonic() - hit[0]) < _CATALOG_TTL_SEC:
-                cached = hit[1]
-                return list(cached[: int(limit)]) if limit and int(limit) > 0 else list(cached)
+            now = time.monotonic()
+            if hit:
+                ts, cached = hit
+                age = now - ts
+                if age < ttl:
+                    return _slice_catalog(cached, limit)
+                # Stale: serve immediately, refresh in background (single-flight)
+                if cache_key not in _CATALOG_REFRESHING:
+                    _CATALOG_REFRESHING.add(cache_key)
+                    threading.Thread(
+                        target=_background_refresh_catalog,
+                        args=(cache_key, load_limit, city_id, active_only, target),
+                        daemon=True,
+                        name=f"catalog-swr-{cache_key[:24]}",
+                    ).start()
+                return _slice_catalog(cached, limit)
+
+            # Cold miss — single-flight
+            if cache_key in _CATALOG_INFLIGHT:
+                wait_event = _CATALOG_INFLIGHT[cache_key]
+            else:
+                wait_event = threading.Event()
+                _CATALOG_INFLIGHT[cache_key] = wait_event
+                leader = True
+
+        if not leader and wait_event is not None:
+            wait_event.wait(timeout=90.0)
+            with _CATALOG_LOCK:
+                hit = _CATALOG_CACHE.get(cache_key)
+                if hit:
+                    return _slice_catalog(hit[1], limit)
+            # Leader failed with nothing cached — fall through to own load
+            with _CATALOG_LOCK:
+                if cache_key not in _CATALOG_INFLIGHT:
+                    wait_event = threading.Event()
+                    _CATALOG_INFLIGHT[cache_key] = wait_event
+                    leader = True
+                else:
+                    wait_event = _CATALOG_INFLIGHT[cache_key]
+                    leader = False
+            if not leader:
+                wait_event.wait(timeout=90.0)
+                with _CATALOG_LOCK:
+                    hit = _CATALOG_CACHE.get(cache_key)
+                    if hit:
+                        return _slice_catalog(hit[1], limit)
+                raise FirestoreDatabaseError("Catalog load failed (single-flight waiter).")
+
+        try:
+            results = _fetch_properties_from_firestore_uncached(
+                limit=load_limit, city_id=city_id, active_only=active_only, target=target
+            )
+            _store_catalog_cache(cache_key, results)
+            logger.info(
+                "Successfully fetched %s properties from Firestore 'projects' (cold).",
+                len(results),
+            )
+            return _slice_catalog(results, limit)
+        except FirestoreDatabaseError:
+            with _CATALOG_LOCK:
+                hit = _CATALOG_CACHE.get(cache_key)
+                if hit:
+                    logger.warning("Catalog cold load failed; returning existing cache.")
+                    return _slice_catalog(hit[1], limit)
+            raise
+        except Exception as e:
+            logger.error(f"Error fetching properties from Firestore: {e}")
+            with _CATALOG_LOCK:
+                hit = _CATALOG_CACHE.get(cache_key)
+                if hit:
+                    return _slice_catalog(hit[1], limit)
+            raise FirestoreDatabaseError(f"Error communicating with Firestore: {e}")
+        finally:
+            with _CATALOG_LOCK:
+                ev = _CATALOG_INFLIGHT.pop(cache_key, None)
+                if ev is not None:
+                    ev.set()
 
     try:
         results = _fetch_properties_from_firestore_uncached(
             limit=limit, city_id=city_id, active_only=active_only, target=target
         )
-        if use_cache:
-            with _CATALOG_LOCK:
-                _CATALOG_CACHE[cache_key] = (time.monotonic(), list(results))
         logger.info(f"Successfully fetched {len(results)} properties from Firestore 'projects'.")
         return results
     except FirestoreDatabaseError:
@@ -486,6 +637,15 @@ def fetch_properties_from_firestore(
     except Exception as e:
         logger.error(f"Error fetching properties from Firestore: {e}")
         raise FirestoreDatabaseError(f"Error communicating with Firestore: {e}")
+
+
+def prewarm_property_catalog(target: str = "user") -> None:
+    """Best-effort catalog warm — safe to call from a startup background thread."""
+    try:
+        fetch_properties_from_firestore(limit=5000, active_only=True, target=target)
+        logger.info("Property catalog pre-warm complete (target=%s).", target)
+    except Exception as e:
+        logger.warning("Property catalog pre-warm skipped (Firestore unavailable?): %s", e)
 
 
 def score_property_relevance(
@@ -526,7 +686,7 @@ def score_property_relevance(
             # Prefer tighter bedroom ranges
             span = max(b_nums) - min(b_nums)
             score += max(0.0, 5.0 - span)
-    p_min = prop.get("price_numeric_min")
+    p_min = prop.get("price_thb_min")
     try:
         p_min_f = float(p_min) if p_min is not None else None
     except (TypeError, ValueError):
@@ -731,24 +891,33 @@ def search_properties_firestore(
         if mr.confident:
             direct_prop = get_property_by_id_from_firestore(mr.confident.doc_id, target=target)
             if direct_prop:
-                set_last_name_search_meta(q_clean, [])
+                set_last_name_search_meta(q_clean, suggestions=[], candidates=[])
                 return _enrich_and_return_one(direct_prop)
+        # Pass candidates (id + name) with suggestions so pending/"yes" confirmation works
+        _dym = list(mr.candidates or [])[:3]
         set_last_name_search_meta(
             q_clean,
-            [c.display_name for c in (mr.candidates or [])[:3]],
+            suggestions=[c.display_name for c in _dym],
+            candidates=_dym,
         )
         return []
 
     # Known regions must never trigger direct single-property resolution
     known_regions = [
         "phuket", "samui", "koh samui", "pattaya", "bangkok", "phangan", "koh phangan",
-        "hua hin", "hua-hin", "krabi", "chiang mai", "thailand", "tajlandia"
+        "hua hin", "hua-hin", "krabi", "chiang mai", "thailand", "tajlandia",
+        # Cambodia (priority market), Vietnam, Maldives: places, never property names
+        "cambodia", "kambodza", "kambodża", "phnom penh", "phnom-penh", "sihanoukville", "siem reap",
+        "kampot", "kep", "vietnam", "wietnam", "ho chi minh", "da nang", "danang", "nha trang",
+        "maldives", "malediwy", "tajlandia", "tajska", "thai",
     ]
+    # Normalised comparison (hyphen/space and case-insensitive)
+    loc_clean = loc_clean.replace("-", " ") if loc_clean.replace("-", " ") in [r.replace("-", " ") for r in known_regions] else loc_clean
 
     # If location looks like a specific project name rather than a region, same matcher as query
     name_like_location = (
         bool(loc_clean)
-        and loc_clean not in known_regions
+        and loc_clean not in [r.replace('-', ' ') for r in known_regions]
         and len(loc_clean) >= 3
         and bool(distinctive_tokens(location or loc_clean))
     )
@@ -761,12 +930,14 @@ def search_properties_firestore(
         if mr.confident:
             direct_prop = get_property_by_id_from_firestore(mr.confident.doc_id, target=target)
             if direct_prop:
-                set_last_name_search_meta(location or loc_clean, [])
+                set_last_name_search_meta(location or loc_clean, suggestions=[], candidates=[])
                 return _enrich_and_return_one(direct_prop)
         # Name-as-location with no confident match: do not treat as geography filter
+        _dym = list(mr.candidates or [])[:3]
         set_last_name_search_meta(
             location or loc_clean,
-            [c.display_name for c in (mr.candidates or [])[:3]],
+            suggestions=[c.display_name for c in _dym],
+            candidates=_dym,
         )
         return []
 
@@ -809,7 +980,9 @@ def search_properties_firestore(
             p_name = (p.get("name") or "").lower()
             p_addr = (p.get("address") or "").lower()
             p_dist = (p.get("district") or "").lower()
-            if not any(loc_clean in field for field in [p_loc, p_name, p_addr, p_dist]):
+            p_prov = (p.get("province") or "").lower()
+            _lc_h = loc_clean.replace(" ", "-")
+            if not any((loc_clean in field) or (_lc_h in field) for field in [p_loc, p_name, p_addr, p_dist, p_prov]):
                 continue
 
         # Property type filter
@@ -847,9 +1020,13 @@ def search_properties_firestore(
         if min_price is not None or max_price is not None:
             if is_por:
                 continue
-        if min_price is not None and p_min is not None and p_min < min_price:
+        # Compare in THB (a few listings are priced in USD/EUR); unknown-currency listings are excluded
+        p_thb = p.get("price_thb_min")
+        if (min_price is not None or max_price is not None) and p_thb is None:
             continue
-        if max_price is not None and p_min is not None and p_min > max_price:
+        if min_price is not None and p_thb < min_price:
+            continue
+        if max_price is not None and p_thb > max_price:
             continue
 
         # Amenities filter (legacy flags + canonical amenity keys)
@@ -1294,6 +1471,30 @@ def _conversation_doc_id(session_id: str, agent_type: str = "public") -> str:
     return f"{at}__{clean_sid}"
 
 
+def update_conversation_site_origin_firestore(conversation, site_origin: str) -> None:
+    """Persist the current request's siteOrigin onto the conversation document (merge)."""
+    if conversation is None or not site_origin:
+        return
+    agent_type = getattr(conversation, "agent_type", "public") or "public"
+    client = get_firestore_client(target="admin" if agent_type == "admin" else "user")
+    if not client:
+        return
+    doc_id = getattr(conversation, "id", None) or _conversation_doc_id(
+        getattr(conversation, "session_id", "anonymous"),
+        agent_type,
+    )
+    now_iso = datetime.now(timezone.utc).isoformat()
+    try:
+        client.collection("conversations").document(str(doc_id)).set(
+            {"siteOrigin": site_origin, "updatedAt": now_iso},
+            merge=True,
+        )
+        conversation.site_origin = site_origin
+        conversation.updated_at = now_iso
+    except Exception as e:
+        logger.warning("Failed to update conversation siteOrigin in Firestore: %s", e)
+
+
 def get_or_create_conversation_firestore(
     session_id: str,
     site_origin: Optional[str] = None,
@@ -1302,6 +1503,9 @@ def get_or_create_conversation_firestore(
     """
     Retrieves or creates a conversation in Firestore `conversations`.
     Stores full messageHistory + preferences (property_context). No PostgreSQL.
+
+    Existing docs are rebound to the request site_origin so multi-site session
+    reuse cannot keep a stale brand / advisor email.
     """
     client = get_firestore_client(target="admin" if agent_type == "admin" else "user")
     clean_sid = session_id.strip() if session_id else "anonymous"
@@ -1329,6 +1533,13 @@ def get_or_create_conversation_firestore(
         doc = doc_ref.get()
         if doc.exists:
             data = doc.to_dict() or {}
+            if (data.get("siteOrigin") or "") != clean_origin:
+                data["siteOrigin"] = clean_origin
+                data["updatedAt"] = now_iso
+                try:
+                    doc_ref.set({"siteOrigin": clean_origin, "updatedAt": now_iso}, merge=True)
+                except Exception as e:
+                    logger.warning("Failed to rebind siteOrigin on existing conversation: %s", e)
             return FirestoreConversation(doc.id, data)
 
         # Backward compatible: legacy docs keyed only by session_id (public)
@@ -1338,6 +1549,8 @@ def get_or_create_conversation_firestore(
                 data = legacy.to_dict() or {}
                 data["agentType"] = agent_type
                 data["sessionId"] = clean_sid
+                data["siteOrigin"] = clean_origin
+                data["updatedAt"] = now_iso
                 # Migrate to agent-scoped id
                 doc_ref.set(data, merge=True)
                 return FirestoreConversation(doc_id, data)

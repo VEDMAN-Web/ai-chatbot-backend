@@ -1,5 +1,6 @@
 import os
 import logging
+import time
 from decimal import Decimal
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse, FileResponse
@@ -169,6 +170,7 @@ def handle_public_chat(
     req: PublicChatRequest,
     db: Session = Depends(get_db)
 ):
+    req_t0 = time.monotonic()
     has_contact = bool(
         (req.contact_name and req.contact_name.strip()) or
         (req.contact_email and req.contact_email.strip()) or
@@ -183,12 +185,17 @@ def handle_public_chat(
         )
 
     try:
+        request_origin = req.site_origin or getattr(settings, "SITE_ORIGIN", "varsoviaestate.com")
         conversation = get_or_create_conversation(
             db=db,
             session_id=req.session_id,
-            site_origin=req.site_origin or getattr(settings, "SITE_ORIGIN", "varsoviaestate.com"),
+            site_origin=request_origin,
             agent_type="public"
         )
+        # Belt-and-suspenders: branding for this reply must follow THIS request origin
+        # (session ids are shared across sites on the multi-tenant web client).
+        from app.services.conversation_service import bind_conversation_site_origin
+        conversation = bind_conversation_site_origin(conversation, request_origin)
 
         recorded_lead_id = None
         if has_contact:
@@ -333,6 +340,12 @@ def handle_public_chat(
             except Exception as e:
                 logger.warning(f"Firestore query logging error: {e}")
 
+        logger.info(
+            "timing.chat_endpoint duration_sec=%.3f session=%s origin=%s",
+            time.monotonic() - req_t0,
+            req.session_id,
+            req.site_origin,
+        )
         return response
     except HTTPException:
         raise
