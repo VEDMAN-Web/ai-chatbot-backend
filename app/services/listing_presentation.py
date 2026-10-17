@@ -33,6 +33,9 @@ _MARKETING_CLAIM_PATTERNS = [
         r"assured\s+(?:rental\s+)?(?:income|yield|return)",
         r"risk[- ]free\s+(?:investment|return)",
         r"no\s+construction\s+risk",
+        # Yield / ROI figures: the production data holds none (all 0), so a % from marketing text is unverified
+        r"(?:(?:rental|net|gross|annual|expected|projected|total)\s+)*(?:yields?|roi|returns?)\s*(?:projections?\s*)?(?:of|at|up\s+to|around|from|:)?\s*(?:~|about|approximately|up\s+to)?\s*\d+(?:[.,]\d+)?\s*(?:[-–]\s*\d+(?:[.,]\d+)?\s*)?%",
+        r"\d+(?:[.,]\d+)?\s*(?:[-–]\s*\d+(?:[.,]\d+)?\s*)?%\s*(?:(?:rental|net|gross|annual|expected|projected)\s+)*(?:yields?|returns?)",
     )
 ]
 

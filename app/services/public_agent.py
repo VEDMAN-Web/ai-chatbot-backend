@@ -1891,6 +1891,35 @@ class PublicAgentService:
         if ok:
             return reply_text, cards
         logger.warning("reply_validation_failed reasons=%s", reasons)
+        # The cards came from the database; the model's WORDING is what failed (e.g. it rewrote a price).
+        # Retry with the deterministic card text before throwing away valid, verified results.
+        if cards and not any(str(r).startswith("named_property_missing") for r in reasons):
+            try:
+                det_text = build_rich_property_recommendation_text(
+                    cards=cards,
+                    language=language,
+                    is_alternative=False,
+                    is_sparse=False,
+                    searched_location=filters.get("location"),
+                    searched_bedrooms=filters.get("bedrooms"),
+                    searched_budget=filters.get("max_price"),
+                    site_origin=site_origin,
+                )
+                det_text = sanitize_listing_line_text(det_text or "")
+                det_ok, det_reasons = validate_reply(
+                    reply_text=det_text,
+                    cards=cards,
+                    tool_results=tool_results,
+                    applied_filters=filters,
+                    language=language,
+                    tenant_advisor_email=getattr(tenant, "advisor_email", None),
+                )
+                if det_ok and det_text:
+                    logger.info("reply_validation_recovered_with_deterministic_text")
+                    return det_text, cards
+                logger.warning("deterministic_text_validation_failed reasons=%s", det_reasons)
+            except Exception as e:  # never let recovery break the reply path
+                logger.warning("deterministic recovery failed: %s", e)
         asked = (
             filters.get("query")
             or filters.get("property_name")

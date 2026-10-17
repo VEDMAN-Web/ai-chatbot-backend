@@ -261,6 +261,53 @@ _SHOW_SEARCH_VERBS = re.compile(
 )
 
 
+# Everyday words that can appear in a search sentence without being part of a project name.
+_SEARCH_SENTENCE_WORDS = frozenset("""
+a an the in at on of for to from with without and or near around by under below over above up max min about
+me my our we you your i is are do does have has any some all what which where who how many much more most
+tell show find search looking look want need like see give get list take
+cheap cheaper cheapest best top luxury premium nice good new modern affordable beachfront sea ocean beach view views
+pool private shared sea-view gym parking garden furnished ready budget price prices cost costs
+bed beds bedroom bedrooms bath bathroom bathrooms sqm million mln thb baht usd eur pln euro dollars
+villa villas condo condos condominium condominiums apartment apartments penthouse house houses property properties
+listing listings project projects development developments resort residence residences
+thailand thai island city area region
+w we na do od z za po przy dla o i a u ile kosztuje cena ceny koszt mam macie czy jakie jaki jaka jakie
+pokaż pokaz zobacz szukam szukamy chcę chce znajdź znajdz opowiedz powiedz mi o
+willa wille willi willę willy apartament apartamenty mieszkanie mieszkania nieruchomość nieruchomości nieruchomosci
+oferta oferty ofert basen basenem sypialnie sypialni sypialnia widok morze morza plaża plaza tanie tanią tani najtańsze
+mln milionów milionow tys
+""".split())
+
+
+def looks_like_project_name(message: str) -> bool:
+    """
+    True for a short message that contains words which are NOT search vocabulary, e.g.
+    "Azure Sky Residences Phuket" or "Paragon Villas Bophut". Such text is a project name that
+    merely contains a place word, so it must be looked up by name, not run as a location search.
+    A message with an explicit search verb or a number (budget / bedrooms) is always a search.
+    """
+    text = (message or "").strip()
+    if not text or len(text) > 90 or _SHOW_SEARCH_VERBS.search(text):
+        return False
+    if re.search(r"\d", text) and re.search(r"(?:mln|million|m\b|thb|bed|sypial|budget|under|do\s+\d)", text.lower()):
+        return False
+    tokens = re.findall(r"[a-zA-ZąćęłńóśźżĄĆĘŁŃÓŚŹŻ][a-zA-ZąćęłńóśźżĄĆĘŁŃÓŚŹŻ'\-]{2,}", text)
+    if not tokens:
+        return False
+    loc_words = {w for kw, _ in LOCATION_ALIASES for w in kw.lower().replace("-", " ").split()}
+    alias_keys = [kw for kw, _ in LOCATION_ALIASES if re.search(r"[a-z]", kw)]
+    unexplained = 0
+    for tok in tokens:
+        t = tok.lower().strip("'-")
+        if t in _SEARCH_SENTENCE_WORDS or t in loc_words:
+            continue
+        if get_close_matches(t, alias_keys, n=1, cutoff=0.8):
+            continue  # typo of a place (puket)
+        unexplained += 1
+    return unexplained >= 1
+
+
 def message_looks_like_filter_search(message: str) -> bool:
     """
     True when the message is a location/type/budget/bedroom search (EN or PL),
@@ -269,6 +316,8 @@ def message_looks_like_filter_search(message: str) -> bool:
     """
     text = (message or "").strip()
     if not text:
+        return False
+    if looks_like_project_name(text):
         return False
     filters = extract_search_filters_deterministic(text)
     has_loc = bool(filters.get("location") or filters.get("foreign_location") or filters.get("is_broad_thailand"))
@@ -756,6 +805,8 @@ def detect_deterministic_intent(
     ]
     if message_looks_like_filter_search(msg_clean):
         return IntentType.PROPERTY_SEARCH, extract_search_filters_deterministic(message)
+    if looks_like_project_name(msg_clean):
+        return None, {}  # a project name that contains a place word: resolve by name, not by location
     extracted_test = extract_search_filters_deterministic(message)
     location_followup = bool(extracted_test.get("location")) and (
         re.search(r"\b(?:in|at|around|near|w|ใน)\b", msg_low)
