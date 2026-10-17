@@ -18,6 +18,15 @@ from app.api.v1.auth import router as auth_router
 
 logger = logging.getLogger(__name__)
 
+# Make the app's own "timing.*" lines visible in Cloud Run logs (they were silently dropped before,
+# because nothing set a log level). Set APP_LOG_LEVEL=WARNING to turn them off again.
+_app_log = logging.getLogger("app")
+_app_log.setLevel(os.getenv("APP_LOG_LEVEL", "INFO").strip().upper() or "INFO")
+if not _app_log.handlers:
+    _h = logging.StreamHandler()
+    _h.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
+    _app_log.addHandler(_h)
+
 # API docs list every route, so they are off unless ENABLE_API_DOCS=true (e.g. on a developer machine).
 _DOCS_ON = os.getenv("ENABLE_API_DOCS", "").strip().lower() in ("1", "true", "yes")
 

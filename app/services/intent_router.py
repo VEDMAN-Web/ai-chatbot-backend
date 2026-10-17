@@ -645,10 +645,20 @@ def detect_deterministic_intent(
                     "focus_question": msg_clean,
                     "from_property_context": True,
                 }
-        named_fact = re.search(
-            r"(?:does|do|has|have|what(?:'s| is)|how much|price of|cena|czy)\s+(.+?)\s+(?:have|has|include|with|cost|price|pool|beach|bedroom|อยู่|มี)",
-            msg_low
+        # "What is the price of X?" / "How much does X cost?" / "price of X": take X as the name.
+        # (The generic pattern below would capture "the" or "does x" for these phrasings.)
+        named_fact = None
+        _price_q = (
+            re.search(r"(?:what(?:'s| is| are)\s+)?(?:the\s+)?(?:prices?|cost)\s+(?:of|for)\s+(?:the\s+)?(.+?)\s*[?.!]*$", msg_low)
+            or re.search(r"how much\s+(?:does|is|do|are)\s+(?:the\s+)?(.+?)(?:\s+cost)?\s*[?.!]*$", msg_low)
         )
+        if _price_q and looks_like_project_name(_price_q.group(1)):
+            named_fact = _price_q
+        if not named_fact and not _price_q:
+            named_fact = re.search(
+                r"(?:does|do|has|have|what(?:'s| is)|how much|price of|cena|czy)\s+(.+?)\s+(?:have|has|include|with|cost|price|pool|beach|bedroom|อยู่|มี)",
+                msg_low
+            )
         if not named_fact:
             named_fact = re.search(
                 r"(?:does|do)\s+(.+?)\s+have\s+",
@@ -657,7 +667,8 @@ def detect_deterministic_intent(
         if named_fact:
             named = named_fact.group(1).strip(" .,?!")
             named = re.sub(r"^(?:the|a|an)\s+", "", named).strip()
-            if named and len(named) >= 3 and named.lower() not in _DETAIL_SKIP_NAMES and "property" not in named.lower():
+            if (named and len(named) >= 3 and named.lower() not in _DETAIL_SKIP_NAMES and "property" not in named.lower()
+                    and named.split()[0].lower() not in {"the", "a", "an", "does", "do", "is", "are"}):
                 return IntentType.PROPERTY_DETAILS, {
                     "property_name": named,
                     "property_id": named,
@@ -755,6 +766,11 @@ def detect_deterministic_intent(
                 ):
                     named = ref_s
                     break
+        # A phrase made only of search words ("villas in Phuket") is a search, not a project name
+        # (unless the session already knows it as a listing).
+        _ctx_names = {str(r).lower() for r in ((pctx or {}).get("reference_map") or {})}
+        if named and named.lower() not in _ctx_names and not looks_like_project_name(named):
+            named = None
         if named and len(named) >= 3 and named.lower() not in _DETAIL_SKIP_NAMES:
             # Prefer known session id when available
             mapped_id = None
