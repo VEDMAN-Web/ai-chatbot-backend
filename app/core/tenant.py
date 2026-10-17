@@ -13,7 +13,7 @@ Resolves tenant based on:
 import logging
 import os
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, Dict, Any, List
 from app.core.config import settings
 
@@ -29,6 +29,8 @@ class TenantProfile:
     domain: str
     advisor_email: str
     website_url: str
+    # Public phone / WhatsApp numbers shown in the Inquire form (label, number in international format).
+    contacts: List[Dict[str, str]] = field(default_factory=list)
 
 
 TENANT_REGISTRY: Dict[str, TenantProfile] = {
@@ -60,7 +62,12 @@ TENANT_REGISTRY: Dict[str, TenantProfile] = {
         brand_subtitle="Exclusive Estates",
         domain="varsoviaestate.com",
         advisor_email="advisor@varsoviaestate.com",
-        website_url="https://varsoviaestate.com/en"
+        website_url="https://varsoviaestate.com/en",
+        # Taken from the varsoviaestate.com footer (Oct 2026).
+        contacts=[
+            {"label": "Thailand", "phone": "+66 81 679 4414"},
+            {"label": "Cambodia", "phone": "+855 96 301 5807"},
+        ],
     ),
 }
 

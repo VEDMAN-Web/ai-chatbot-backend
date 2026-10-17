@@ -734,8 +734,8 @@ async function appendAssistantResponse(data, animate = false) {
           </div>
           <div class="property-item-actions">
             <button class="btn-card-action btn-card-map" title="View on Google Maps" onclick="openPropertyMap('${escapeHtml(propId)}')">📍 Map</button>
-            <button class="btn-card-action btn-card-cal" title="Schedule Tour on Google Calendar" onclick="openPropertyCalendar('${escapeHtml(propId)}')">📅 Tour</button>
-            <button class="btn-card-action btn-card-email" title="Email Specs via Gmail" onclick="openPropertyEmail('${escapeHtml(propId)}')">✉️ Email</button>
+            <button class="btn-card-action btn-card-cal" title="Request a viewing" onclick="openPropertyCalendar('${escapeHtml(propId)}')">📅 Tour</button>
+            <button class="btn-card-action btn-card-email" title="Request specs by email" onclick="openPropertyEmail('${escapeHtml(propId)}')">✉️ Email</button>
             <button class="btn-card-action btn-card-secondary" title="Download Verified PDF" onclick="generatePdfForProperty('${escapeHtml(propId)}')">📄 PDF</button>
             <button class="btn-card-action btn-card-primary" onclick="inquireProperty('${escapeHtml(propId || name)}')">Inquire</button>
           </div>
@@ -885,99 +885,110 @@ async function rejectAction(actionId) {
   }
 }
 
+// ================= Inquire form (pop-up, no chat prompt) =================
+let activeInquiryPropId = '';
+let inquiryInfoCache = {};
+
+function _inquiryInfo(lang) {
+  const key = `${activeTenantOrigin}|${lang}`;
+  if (inquiryInfoCache[key]) return Promise.resolve(inquiryInfoCache[key]);
+  return fetch(`/api/v1/chat/contact-info?site_origin=${encodeURIComponent(activeTenantOrigin)}&language=${encodeURIComponent(lang)}`)
+    .then((r) => (r.ok ? r.json() : null))
+    .then((info) => {
+      if (info) inquiryInfoCache[key] = info;
+      return info;
+    })
+    .catch(() => null);
+}
+
 function inquireProperty(propId) {
-  const input = document.getElementById('chatInput');
-  if (input) {
-    input.value = `I am interested in ${propId}. Can you provide details and arrange a viewing?`;
-    handleSendMessage();
-  }
-}
+  const p = propertyCache[propId] || {};
+  activeInquiryPropId = propId;
+  const modal = document.getElementById('inquiryModal');
+  const overlay = document.getElementById('inquiryModalOverlay');
+  if (!modal || !overlay) return;
+  const set = (id, text) => { const el = document.getElementById(id); if (el) el.textContent = text; };
+  set('inquiryPropName', p.name || p.property_name || propId);
+  ['inquiryError', 'inquiryResult'].forEach((id) => { const el = document.getElementById(id); if (el) el.style.display = 'none'; });
+  const btn = document.getElementById('btnSubmitInquiry');
+  if (btn) btn.disabled = false;
+  overlay.style.display = 'block';
+  modal.style.display = 'flex';
 
-function requestReport(propId) {
-  if (currentMode !== 'admin') setAgentMode('admin', false);
-  const input = document.getElementById('chatInput');
-  if (input) {
-    input.value = propId ? `What are the private developer specs for ${propId}?` : 'Generate a PDF property report';
-    handleSendMessage();
-  }
-}
-
-function generatePdfForProperty(propId) {
-  if (!propId) return;
-
-  // Download the brochure directly (no chat message): the button shows progress while the PDF is built (~10 s).
-  const btn = event && event.currentTarget ? event.currentTarget : (event && event.target ? event.target : null);
-  const originalText = btn ? btn.innerHTML : '';
-  if (btn) {
-    btn.innerHTML = '⏳ Preparing PDF...';
-    btn.disabled = true;
-  }
-  const restore = () => {
-    if (btn) {
-      btn.innerHTML = originalText;
-      btn.disabled = false;
+  _inquiryInfo(currentLanguage).then((info) => {
+    if (!info) return;
+    const c = info.inquiry_form || {};
+    set('inquiryTitle', c.title); set('inquiryIntro', c.intro);
+    set('inquiryNameLabel', c.name_label); set('inquiryEmailLabel', c.email_label);
+    set('inquiryPhoneLabel', c.phone_label); set('inquiryMessageLabel', c.message_label);
+    set('inquiryContactLine', c.contact_line);
+    if (btn) btn.textContent = c.submit_label;
+    const list = document.getElementById('inquiryContactList');
+    if (list) {
+      list.innerHTML = '';
+      (info.contacts || []).forEach((ct) => {
+        const row = document.createElement('div');
+        const label = document.createElement('strong');
+        label.textContent = `${ct.label}: `;
+        const tel = document.createElement('a');
+        tel.href = ct.tel_url; tel.textContent = `${c.call} ${ct.phone}`; tel.style.cssText = 'margin-right:14px; color:#e8c77a; font-weight:600; text-decoration:underline;';
+        const wa = document.createElement('a');
+        wa.href = ct.whatsapp_url; wa.target = '_blank'; wa.rel = 'noopener'; wa.textContent = c.whatsapp; wa.style.cssText = 'color:#6ee7a0; font-weight:600; text-decoration:underline;';
+        row.append(label, tel, wa);
+        list.appendChild(row);
+      });
+      const box = document.getElementById('inquiryContactBox');
+      if (box) box.style.display = (info.contacts || []).length ? 'block' : 'none';
     }
-  };
+  });
+}
 
-  const prop = propertyCache[propId];
-  const pName = prop ? (prop.name || prop.property_name || propId) : propId;
-  const url = `/api/v1/chat/brochure/${encodeURIComponent(propId)}?site_origin=${encodeURIComponent(activeTenantOrigin)}&session_id=${encodeURIComponent(currentSessionId)}`;
+function closeInquiryModal() {
+  const modal = document.getElementById('inquiryModal');
+  const overlay = document.getElementById('inquiryModalOverlay');
+  if (modal) modal.style.display = 'none';
+  if (overlay) overlay.style.display = 'none';
+}
 
-  fetch(url)
-    .then((resp) => {
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-      return resp.blob();
+function submitInquiry() {
+  const val = (id) => { const el = document.getElementById(id); return el ? el.value.trim() : ''; };
+  const name = val('inquiryNameInput'), email = val('inquiryEmailInput'), phone = val('inquiryPhoneInput');
+  const note = val('inquiryMessageInput');
+  const showErr = (msg) => { const el = document.getElementById('inquiryError'); if (el) { el.textContent = msg; el.style.display = 'block'; } };
+  const info = inquiryInfoCache[`${activeTenantOrigin}|${currentLanguage}`];
+  const copy = (info && info.inquiry_form) || {};
+  document.getElementById('inquiryError').style.display = 'none';
+  if (!email && !phone) { showErr(copy.need_contact || 'Please enter an email address or a phone number so we can reach you.'); return; }
+  if (email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) { showErr(copy.bad_email || 'Please enter a valid email address.'); return; }
+
+  const p = propertyCache[activeInquiryPropId] || {};
+  const btn = document.getElementById('btnSubmitInquiry');
+  if (btn) btn.disabled = true;
+  fetch('/api/v1/chat/public', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      session_id: currentSessionId || `inquiry_${Date.now()}`,
+      site_origin: activeTenantOrigin,
+      language: currentLanguage,
+      contact_name: name || null,
+      contact_email: email || null,
+      contact_phone: phone || null,
+      property_id: activeInquiryPropId || null,
+      notes: `Inquire form for ${p.name || p.property_name || activeInquiryPropId}${note ? ': ' + note : ''}`,
+    }),
+  })
+    .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+    .then((data) => {
+      const el = document.getElementById('inquiryResult');
+      if (el) {
+        el.textContent = data.lead_saved === false ? (copy.not_stored || 'Online requests are not switched on yet. Please call or WhatsApp us.') : (copy.success || 'Thank you! Our agent will reach out to you shortly.');
+        el.style.display = 'block';
+      }
     })
-    .then((blob) => {
-      const objectUrl = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = objectUrl;
-      a.download = `${String(pName).replace(/[^A-Za-z0-9]+/g, '_')}_Brochure.pdf`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      setTimeout(() => URL.revokeObjectURL(objectUrl), 10000);
-      restore();
-    })
-    .catch(() => {
-      // Fall back to opening the link in a new tab so the visitor still gets the file.
-      window.open(url, '_blank');
-      restore();
-    });
+    .catch(() => { showErr('Something went wrong. Please try again, or call or WhatsApp us.'); if (btn) btn.disabled = false; });
 }
 
-
-
-// Image Lightbox Modal View
-function openLightbox(imgUrl, caption) {
-  const existing = document.getElementById('appLightbox');
-  if (existing) existing.remove();
-
-  const modal = document.createElement('div');
-  modal.className = 'image-lightbox';
-  modal.id = 'appLightbox';
-
-  modal.innerHTML = `
-    <div class="lightbox-content">
-      <button class="lightbox-close" onclick="closeLightbox()">&times;</button>
-      <img src="${escapeHtml(imgUrl)}" class="lightbox-img" alt="${escapeHtml(caption)}" />
-      <div class="lightbox-caption">${escapeHtml(caption)}</div>
-    </div>
-  `;
-
-  modal.onclick = (e) => {
-    if (e.target === modal) closeLightbox();
-  };
-
-  document.body.appendChild(modal);
-}
-
-function closeLightbox() {
-  const modal = document.getElementById('appLightbox');
-  if (modal) modal.remove();
-}
-
-// ================= Google Maps Modal Handler =================
 function openPropertyMap(propId) {
   const p = propertyCache[propId] || {};
   const modal = document.getElementById('mapModal');
@@ -1020,11 +1031,9 @@ function openPropertyMap(propId) {
   // Render nearby landmarks
   if (proxGrid) {
     proxGrid.innerHTML = '';
-    const landmarks = (p.nearby_landmarks && p.nearby_landmarks.length > 0) ? p.nearby_landmarks : [
-      { name: 'Nearest White Sand Beach', distance_km: 1.8, drive_time_mins: 4 },
-      { name: 'International Airport', distance_km: 19.5, drive_time_mins: 25 },
-      { name: 'Shopping & Dining Marina', distance_km: 8.2, drive_time_mins: 12 },
-    ];
+    const landmarks = (p.nearby_landmarks && p.nearby_landmarks.length > 0) ? p.nearby_landmarks : [];
+    const proxSection = proxGrid.closest('.proximity-section');
+    if (proxSection) proxSection.style.display = landmarks.length ? '' : 'none';
     landmarks.forEach(lm => {
       const chip = document.createElement('div');
       chip.className = 'proximity-chip';
@@ -1178,6 +1187,7 @@ document.addEventListener('keydown', (e) => {
     closeMapModal();
     closeCalendarModal();
     closeEmailModal();
+    closeInquiryModal();
     closeBatchOpsModal();
     closeFocusDrawer();
     closeLightbox();
