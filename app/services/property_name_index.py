@@ -235,11 +235,109 @@ class NameMatchResult:
     suggestions: List[str] = field(default_factory=list)
 
 
+def _is_typo_of_everyday_word(w: str) -> bool:
+    """"condominuim", "vila", "apartmnet": a misspelt generic word is not part of a listing's name."""
+    if len(w) < 5:
+        return False
+    for ref in _EVERYDAY_LONG:
+        if abs(len(ref) - len(w)) <= 2 and SequenceMatcher(None, w, ref).ratio() >= 0.84:
+            return True
+    return False
+
+
+@dataclass
+class MentionResult:
+    """A listing name found somewhere inside a longer message (typos tolerated)."""
+    confident: Optional[NameIndexEntry] = None
+    candidates: List[NameIndexEntry] = field(default_factory=list)
+    span: str = ""        # the words of the message that formed the match
+    typo: bool = False    # at least one word was corrected
+    n_core: int = 0       # how many distinctive words matched (1 = single-word name)
+
+
+# Everyday words that are never corrected towards a listing name (keeps "pool" / "price" out of fuzzy matching)
+_COMMON_WORDS = frozenset({
+    "price", "prices", "cost", "costs", "much", "many", "have", "has", "does", "show", "tell", "about", "what",
+    "whats", "how", "which", "where", "when", "with", "without", "from", "that", "this", "there", "here", "near",
+    "sale", "buy", "rent", "rental", "yield", "return", "returns", "invest", "investment", "available", "list",
+    "listing", "listings", "property", "properties", "bedroom", "bedrooms", "bed", "beds", "bath", "baths",
+    "sqm", "area", "size", "floor", "floors", "unit", "units", "ownership", "freehold", "leasehold", "foreigner",
+    "foreigners", "foreign", "own", "owner", "land", "title", "deed", "budget", "million", "thb", "baht", "euro",
+    "dollar", "cheap", "cheaper", "cheapest", "expensive", "best", "good", "nice", "great", "like", "love", "want",
+    "need", "looking", "interested", "please", "thanks", "thank", "hello", "hi", "hey", "yes", "no", "ok", "okay",
+    "sure", "more", "less", "other", "another", "same", "similar", "compare", "details", "info", "information",
+    "gym", "parking", "garden", "spa", "balcony", "furnished", "ready", "new", "old", "modern", "quiet", "close",
+    "walk", "walking", "distance", "minutes", "airport", "school", "schools", "shop", "shops", "mall", "center",
+    "centre", "city", "town", "village", "street", "road", "soi", "complex", "project", "developer", "payment",
+    "plan", "deposit", "visit", "viewing", "brochure", "photos", "photo", "pictures", "video", "contact",
+    "agent", "advisor", "call", "email", "phone", "number", "name", "tell", "give", "send", "get", "see",
+    "check", "find", "search", "wille", "willa", "willi", "cena", "ceny", "ile", "kosztuje", "czy", "jest", "ma",
+    "mam", "chce", "chcę", "szukam", "pokaż", "pokaz", "powiedz", "opowiedz", "mnie", "mi", "jaka", "jaki", "jakie",
+    "dla", "oraz", "albo", "tego", "tej", "tym", "gdzie", "kiedy", "dlaczego", "basen", "sypialnie", "sypialni",
+    "mieszkanie", "mieszkania", "apartament", "apartamenty", "nieruchomosc", "nieruchomosci", "morze", "morza",
+    "plaza", "plazy", "blisko", "okolica", "okolicy", "tanio", "drogo", "zwrot", "inwestycja", "inwestycji",
+})
+
+
+_COMMON_WORDS = _COMMON_WORDS | frozenset({
+    "place", "house", "home", "homes", "is", "are", "was", "were", "it", "its", "in", "on", "at", "of", "to", "for",
+    "by", "and", "or", "but", "if", "as", "be", "been", "do", "did", "can", "will", "would", "should", "may", "might",
+    "my", "we", "our", "you", "your", "he", "she", "they", "them", "their", "these", "those", "who", "whom",
+    "whose", "why", "also", "just", "only", "very", "too", "so", "than", "then", "any", "some", "all", "each", "both",
+    "not", "again", "still", "really", "maybe", "perhaps", "think", "know", "say", "said", "ask", "asked", "want",
+    "wanted", "going", "went", "come", "make", "made", "take", "took", "put", "keep", "let", "look", "looks", "looked",
+    "see", "seen", "show", "shown", "help", "work", "works", "worth", "worry", "bit", "lot", "lots", "little", "big",
+    "small", "large", "high", "low", "full", "free", "per", "plus", "around", "over", "under", "above", "below",
+    "between", "during", "after", "before", "today", "tomorrow", "week", "month", "year", "years", "time", "day",
+    "days", "night", "evening", "morning", "discount", "discounts", "offer", "offers", "deal", "deals", "option",
+    "options", "question", "questions", "answer", "answers", "sorry", "welcome", "regards", "kind", "sir", "madam",
+    "jest", "sa", "sie", "się", "ale", "lub", "jak", "co", "to", "ten", "ta", "te", "tym", "na", "po", "od", "za",
+    "przy", "nad", "pod", "bez", "oraz", "tylko", "bardzo", "tez", "też", "juz", "już", "prosze", "proszę", "dziekuje",
+    "dziękuję", "dzien", "dzień", "dobry", "pytanie", "odpowiedz", "odpowiedź", "wiecej", "więcej", "cos", "coś",
+})
+
+
+# Place words a visitor may attach to a project name -> city slug used in the catalog
+_PLACE_WORDS = {
+    "phuket": "phuket", "samui": "samui", "bangkok": "bangkok", "pattaya": "pattaya",
+    "phangan": "phangan", "maldives": "maldives", "sihanoukville": "sihanoukville",
+}
+_KNOWN_CITY_SLUGS = frozenset(set(_PLACE_WORDS.values()) | {"phnom-penh"})
+# Words that look like places (incl. Polish/typo forms): never "corrected" into a listing name
+_PLACE_LIKE = ("phuket", "samui", "bangkok", "pattaya", "phangan", "thailand", "tajlandia", "maldives", "malediwy",
+               "cambodia", "kambodza", "sihanoukville", "phnom", "penh", "vietnam", "wietnam", "krabi", "chiang")
+
+
+def _place_contradiction(norm_message: str, entry: "NameIndexEntry") -> bool:
+    """The message names a place the listing is not in ("Villa Mirage Samui" vs a Bangkok listing)."""
+    if entry.city_id not in _KNOWN_CITY_SLUGS:
+        return False
+    asked = {_PLACE_WORDS[w] for w in norm_message.split() if w in _PLACE_WORDS}
+    if not asked or entry.city_id in asked:
+        return False
+    return not any(w in a.split() for w in asked for a in entry.aliases_norm)
+
+
+def _looks_like_place(token: str) -> bool:
+    """bangkok, bangkoku, puket, kambodzy ...: place words are never listing-name vocabulary."""
+    if len(token) < 5:
+        return False
+    return any(token.startswith(p[:6]) or SequenceMatcher(None, token, p).ratio() >= 0.8 for p in _PLACE_LIKE)
+
+
+def _is_idlike(token: str) -> bool:
+    """Random Firestore-style ids / very long tokens never become vocabulary."""
+    return len(token) > 18
+
+
 class PropertyNameIndex:
     def __init__(self) -> None:
         self._lock = threading.RLock()
         self._entries: List[NameIndexEntry] = []
         self._by_id: Dict[str, NameIndexEntry] = {}
+        self._vocab: Dict[str, List[int]] = {}
+        self._vocab_by_len: Dict[int, List[str]] = {}
+        self._cores: List[List[Tuple[str, ...]]] = []
         self._loaded_at: float = 0.0
         self._loader: Optional[Callable[[], List[Dict[str, Any]]]] = None
         self._refreshing = False
@@ -300,9 +398,13 @@ class PropertyNameIndex:
             )
             entries.append(entry)
             by_id[doc_id] = entry
+        vocab, by_len, cores = self._build_mention_index(entries)
         with self._lock:
             self._entries = entries
             self._by_id = by_id
+            self._vocab = vocab
+            self._vocab_by_len = by_len
+            self._cores = cores
             self._loaded_at = time.time()
         logger.info(
             "PropertyNameIndex loaded %s entries (timing.name_index_load duration_sec=%.3f)",
@@ -387,6 +489,241 @@ class PropertyNameIndex:
                     if ev is not None:
                         ev.set()
 
+    @staticmethod
+    def _build_mention_index(entries: List["NameIndexEntry"]):
+        """
+        vocab: word -> entry indexes.
+        cores[i]: list of (core_words, full_words, alias_string) per alias, where core = the words that identify the
+        listing (no places/streets/numbers/everyday words) and full = every distinctive word of the alias.
+        """
+        vocab: Dict[str, List[int]] = {}
+        cores: List[List[Tuple[Tuple[str, ...], Tuple[str, ...], str]]] = []
+        for i, e in enumerate(entries):
+            seen = set()
+            lst_i: List[Tuple[Tuple[str, ...], Tuple[str, ...], str]] = []
+            for a in e.aliases_norm:
+                if len(a.split()) > 6:
+                    # marketing titles / sentences are not word-level names; a whole long NAME is still matched
+                    # verbatim (path A) when it appears word-for-word in the message.
+                    if len(a.split()) <= 12 and any(t not in _COMMON_WORDS and t not in GENERIC_TOKENS for t in a.split()):
+                        lst_i.append(((), (a.split()[0],), a))
+                    continue
+                full = tuple(t for t in distinctive_tokens(a) if not _is_idlike(t) and t not in _COMMON_WORDS
+                             and not _looks_like_place(t))
+                core = tuple(t for t in full if t not in LOCATIONISH_TOKENS and not t.isdigit())
+                if not full:
+                    if len(a.split()) >= 3 and len(a) <= 90:
+                        lst_i.append(((), (), a))     # whole name made of everyday words: verbatim matching only
+                    continue
+                if not core and len(full) < 2:
+                    if re.search(r"\b\d{3,}\b", a) and 2 <= len(a.split()) <= 5:
+                        lst_i.append(((), (), a))     # "777 Beach Condo": a number + words, verbatim only
+                    continue                           # a lone street/number word never identifies a listing
+                if (core, full) in seen:
+                    continue
+                seen.add((core, full))
+                lst_i.append((core, full, a))
+                for t in (core or full):
+                    lst = vocab.setdefault(t, [])
+                    if not lst or lst[-1] != i:
+                        lst.append(i)
+            cores.append(lst_i)
+        by_len: Dict[int, List[str]] = {}
+        for t in vocab:
+            by_len.setdefault(len(t), []).append(t)
+        return vocab, by_len, cores
+
+    def _closest_word(self, token: str) -> Optional[Tuple[str, float]]:
+        """Typo correction against the listing vocabulary (same length +-2). None when nothing is close enough."""
+        n = len(token)
+        if n < 5:
+            return None
+        if any(SequenceMatcher(None, token, p).ratio() >= 0.8 for p in _PLACE_LIKE):
+            return None  # "bangkoku", "puket": a place, not a name
+        pool: List[str] = []
+        for L in range(n - 2, n + 3):
+            pool.extend(self._vocab_by_len.get(L, ()))
+        cutoff = 0.84 if n < 8 else 0.8
+        best, best_r, second_r = None, 0.0, 0.0
+        for w in pool:
+            if w[0] != token[0] and w[1:2] != token[1:2]:
+                continue  # first two letters almost always survive a typo
+            r = SequenceMatcher(None, token, w).ratio()
+            if r > best_r:
+                best, second_r, best_r = w, best_r, r
+            elif r > second_r:
+                second_r = r
+        if best is None or best_r < cutoff:
+            return None
+        if best_r - second_r < 0.03 and second_r >= cutoff:
+            return None  # two equally plausible corrections: do not guess
+        return best, best_r
+
+    @staticmethod
+    def _name_continues(toks: List[str], start: int, end: int) -> bool:
+        """True when the word right before/after toks[start:end+1] looks like more of a name (unknown word, 4+ letters)."""
+        for j in (start - 1, end + 1):
+            if 0 <= j < len(toks):
+                w = toks[j]
+                if (w.isalpha() and len(w) >= 4 and w not in FILLER_TOKENS and w not in GENERIC_TOKENS
+                        and w not in _COMMON_WORDS and w not in LOCATIONISH_TOKENS
+                        and not _is_typo_of_everyday_word(w)):
+                    return True
+        return False
+
+    def _longer_names(self, alias: str, owner: int, limit: int = 3) -> List["NameIndexEntry"]:
+        """Listings whose name contains `alias` as a prefix/part but is longer (the likely intended name)."""
+        out: List[NameIndexEntry] = []
+        with self._lock:
+            entries = self._entries
+            cores = self._cores
+        for ei, aliases in enumerate(cores):
+            if ei == owner:
+                continue
+            if any(alias in a and a != alias for _c, _f, a in aliases):
+                out.append(entries[ei])
+                if len(out) >= limit:
+                    break
+        return out
+
+    def find_mention(self, message: str) -> MentionResult:
+        """
+        Find a listing name ANYWHERE in a message ("how much is anava in samui?", "does aura condominum have a pool").
+        Handles typos and any wording around the name. It answers "confident" only when the full name is present
+        (or one tiny typo from it) and exactly one listing fits; anything less certain returns up to 3 candidates so
+        the visitor is asked "Did you mean ...?" instead of being given a possibly wrong listing.
+        """
+        self.ensure_fresh()
+        norm = normalize_property_name(message)
+        toks = norm.split()
+        with self._lock:
+            entries = self._entries
+            vocab = self._vocab
+            cores = self._cores
+        if not toks or not entries:
+            return MentionResult()
+
+        # A. A listing's full name appears word-for-word in the message: the longest such name wins.
+        padded = f" {norm} "
+        exact: Dict[str, List[int]] = {}
+        for ei, aliases in enumerate(cores):
+            for core, full, alias in aliases:
+                if len(alias) >= 4 and f" {alias} " in padded:
+                    exact.setdefault(alias, []).append(ei)
+        if exact:
+            longest = max(exact, key=lambda a: (len(a.split()), len(a)))
+            owners = sorted(set(exact[longest]))
+            # A shorter name fully inside the longest one belongs to the same mention; ignore it.
+            start = len(padded[: padded.index(f" {longest} ")].split())
+            end = start + len(longest.split()) - 1
+            if len(owners) == 1:
+                if self._name_continues(toks, start, end):
+                    # "Sunshine Beach Resdents": the visitor is probably typing a longer name
+                    cands = self._longer_names(longest, owners[0]) + [entries[owners[0]]]
+                    return MentionResult(candidates=cands[:3], span=longest, typo=True, n_core=len(longest.split()))
+                if _place_contradiction(norm, entries[owners[0]]):
+                    return MentionResult(candidates=[entries[owners[0]]], span=longest, n_core=len(longest.split()))
+                return MentionResult(confident=entries[owners[0]], span=longest, n_core=len(longest.split()))
+            return MentionResult(candidates=[entries[i] for i in owners][:3], span=longest, n_core=len(longest.split()))
+
+        # B. Word-level matching with typo correction.
+        msg_digits = {t for t in toks if t.isdigit()}
+        matched: Dict[str, Tuple[float, int]] = {}   # vocab word -> (similarity, message position)
+        for pos, t in enumerate(toks):
+            if t in FILLER_TOKENS or t in GENERIC_TOKENS or t in _COMMON_WORDS or len(t) < 2 or _looks_like_place(t):
+                continue
+            if t in vocab:
+                matched[t] = (1.0, pos)
+                continue
+            if t.isdigit():
+                continue
+            fix = self._closest_word(t)
+            if fix:
+                w, r = fix
+                if w not in matched or matched[w][0] < r:
+                    matched[w] = (r, pos)
+        if not matched:
+            return MentionResult()
+
+        reach: set = set()
+        for w in matched:
+            reach.update(vocab.get(w, ()))
+        full_hits: List[tuple] = []     # every core word present
+        part_hits: List[tuple] = []     # most (not all) core words present: only ever a suggestion
+        for ei in reach:
+            best_full = best_part = None
+            for core, full, alias in cores[ei]:
+                key_words = core or full
+                got = [w for w in key_words if w in matched]
+                if not got:
+                    continue
+                sims = [matched[w][0] for w in got]
+                extra = sum(1 for w in full if w in matched and w not in key_words)
+                alias_digits = {t for t in alias.split() if t.isdigit()}
+                dscore = len(alias_digits & msg_digits) - len(alias_digits - msg_digits)
+                if len(got) == len(key_words):
+                    key = (len(key_words), dscore, len(got) + extra, sum(sims) / len(sims), min(sims), -len(full))
+                    if best_full is None or key > best_full:
+                        best_full = key
+                elif len(key_words) >= 2 and len(got) / len(key_words) >= 0.6:
+                    key = (len(got) / len(key_words), dscore, len(got), sum(sims) / len(sims))
+                    if best_part is None or key > best_part:
+                        best_part = key
+            if best_full:
+                full_hits.append((best_full, ei))
+            elif best_part:
+                part_hits.append((best_part, ei))
+
+        if not full_hits:
+            part_hits.sort(key=lambda h: h[0], reverse=True)
+            return MentionResult(candidates=[entries[ei] for _k, ei in part_hits[:3]],
+                                 span=" ".join(toks[p] for p in sorted(v[1] for v in matched.values())),
+                                 typo=True)
+        full_hits.sort(key=lambda h: h[0], reverse=True)
+        topk, top_ei = full_hits[0]
+        group = [h for h in full_hits if h[0][0] == topk[0] and h[0][1] == topk[1] and h[0][3] >= topk[3] - 0.02]
+        used_words = [w for w in (cores[top_ei][0][0] or cores[top_ei][0][1])]
+        # words of the winning alias that were matched
+        best_alias = max(
+            (c for c in cores[top_ei] if all(w in matched for w in (c[0] or c[1]))),
+            key=lambda c: (len(c[0] or c[1]), sum(1 for w in c[1] if w in matched)),
+        )
+        used = set(best_alias[0] or best_alias[1]) | {w for w in best_alias[1] if w in matched}
+        span = " ".join(toks[p] for p in sorted(matched[w][1] for w in used))
+        typo = any(matched[w][0] < 1.0 for w in used)
+        n_core = topk[0]
+        res = MentionResult(candidates=[entries[ei] for _k, ei in full_hits[:3]], span=span, typo=typo, n_core=n_core)
+        if len(group) > 1:
+            return res                                  # several listings share these words: ask
+        # Other listing words in the message that this listing does not explain => unsure.
+        winner_words = {w for c in cores[top_ei] for w in c[1]}
+        unexplained = [w for w in matched if w not in winner_words]
+        if unexplained:
+            return res
+        positions = sorted(matched[w][1] for w in used)
+        if self._name_continues(toks, positions[0], positions[-1]):
+            return res
+        if n_core == 1:
+            word = next(iter(used & set(best_alias[0] or best_alias[1])), None)
+            shared = len(vocab.get(word, ())) if word else 0
+            unknown_elsewhere = sum(
+                1 for k, t in enumerate(toks)
+                if k not in positions and t.isalpha() and len(t) >= 4 and t not in matched
+                and t not in FILLER_TOKENS and t not in GENERIC_TOKENS and t not in _COMMON_WORDS
+            )
+            if shared >= 3 and unknown_elsewhere >= 1:
+                return res                              # a word many listings share + unexplained words: ask
+        min_sim = topk[4]
+        word_len = len(span.replace(" ", ""))
+        if n_core == 1 and word_len < 4:
+            return res                                  # "le", "sun": too short to trust on their own
+        if _place_contradiction(norm, entries[top_ei]):
+            return res
+        if min_sim >= 0.999 or (min_sim >= 0.9 and (n_core >= 2 or word_len >= 6)):
+            res.confident = entries[top_ei]
+            res.candidates = []
+        return res
+
     def has_data(self) -> bool:
         with self._lock:
             return bool(self._entries)
@@ -469,6 +806,8 @@ class PropertyNameIndex:
                 # Skip very short alias fuzzy with short query noise
                 if len(q_norm) < 4 or len(a) < 4:
                     continue
+                if {t for t in q_norm.split() if t.isdigit()} != {t for t in a.split() if t.isdigit()}:
+                    continue  # "Phase 3" is not "Phase 4"
                 r = SequenceMatcher(None, q_norm, a).ratio()
                 if r > best_ratio:
                     best_ratio = r
@@ -476,6 +815,21 @@ class PropertyNameIndex:
                 scored.append((best_ratio, "fuzzy", e))
 
         if not scored:
+            # Typos / a name buried in a longer text: word-level matching with correction.
+            try:
+                mention = self.find_mention(q_raw)
+            except Exception as _e:  # never let the helper break name lookup
+                logger.warning("find_mention failed: %s", _e)
+                mention = MentionResult()
+            if mention.confident:
+                set_last_name_search_meta(q_raw, suggestions=[], candidates=[])
+                return NameMatchResult(confident=mention.confident, reason="mention", query=q_raw, suggestions=[])
+            if mention.candidates:
+                set_last_name_search_meta(q_raw, candidates=mention.candidates)
+                return NameMatchResult(
+                    candidates=mention.candidates, reason="mention", query=q_raw,
+                    suggestions=[c.display_name for c in mention.candidates],
+                )
             set_last_name_search_meta(q_raw, [])
             return NameMatchResult(reason="no_match")
 
@@ -557,12 +911,6 @@ class PropertyNameIndex:
         )
 
 
-# Place words a visitor may attach to a project name -> city slug used in the catalog
-_PLACE_WORDS = {
-    "phuket": "phuket", "samui": "samui", "bangkok": "bangkok", "pattaya": "pattaya",
-    "phangan": "phangan", "maldives": "maldives", "sihanoukville": "sihanoukville",
-}
-_KNOWN_CITY_SLUGS = frozenset(set(_PLACE_WORDS.values()) | {"phnom-penh"})
 
 # Process-wide index
 _INDEX = PropertyNameIndex()
@@ -625,3 +973,5 @@ def prewarm_property_name_index(target: str = "user") -> None:
         logger.info("Property name index pre-warm complete (target=%s).", target)
     except Exception as e:
         logger.warning("Property name index pre-warm skipped: %s", e)
+
+_EVERYDAY_LONG = tuple(sorted(w for w in (set(GENERIC_TOKENS) | set(FILLER_TOKENS) | set(_COMMON_WORDS)) if len(w) >= 5))

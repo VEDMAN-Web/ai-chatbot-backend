@@ -358,6 +358,46 @@ def message_looks_like_filter_search(message: str) -> bool:
     return False
 
 
+def _mention_intent(msg_clean: str) -> Optional[Tuple[IntentType, Dict[str, Any]]]:
+    """
+    A listing name anywhere in the message (typos allowed) decides the intent: the visitor is asking about THAT
+    listing. A confident name goes straight to its details; an uncertain one becomes a "Did you mean ...?".
+    Real filter searches ("3 bedroom villas under 10M", "villas near Anava") are left alone.
+    """
+    low = msg_clean.lower()
+    if re.search(r"\b(?:compare|comparison|versus|vs)\b|porówn|porown|เปรียบเทียบ", low):
+        return None
+    try:
+        from app.services.property_name_index import get_property_name_index
+        mention = get_property_name_index().find_mention(msg_clean)
+    except Exception:
+        return None
+    if not (mention.confident or mention.candidates):
+        return None
+    f = extract_search_filters_deterministic(msg_clean)
+    # Budget / bedroom counts mean a real search ("3 bedroom villas near Anava under 10M"). Types, places and
+    # amenities are normal around a name ("does Raintree Villa Phuket have a pool?").
+    constrained = (f.get("max_price") is not None or f.get("min_price") is not None
+                   or f.get("bedrooms") is not None or bool(f.get("is_multiple_types")))
+    if constrained and not (mention.confident and mention.n_core >= 2):
+        return None
+    if mention.confident:
+        name = mention.confident.display_name
+        return IntentType.PROPERTY_DETAILS, {"property_name": name, "property_id": name, "focus_question": msg_clean}
+    msg_digits = set(re.findall(r"\b\d+\b", low))
+    digit_hit = bool(msg_digits) and any(
+        msg_digits & set(re.findall(r"\b\d+\b", a)) for c in mention.candidates[:3]
+        for a in (getattr(c, "aliases_norm", None) or [])
+    )
+    if len(mention.span.replace(" ", "")) >= 6 and (mention.typo or mention.n_core >= 2 or digit_hit):
+        # Not sure which listing: hand the visitor's own words to the lookup, which answers "Did you mean ...?"
+        return IntentType.PROPERTY_DETAILS, {
+            "property_name": msg_clean, "property_id": msg_clean, "focus_question": msg_clean,
+            "name_uncertain": True,
+        }
+    return None
+
+
 def _name_lookup_after_search_verb(msg_clean: str) -> Optional[Tuple[IntentType, Dict[str, Any]]]:
     """
     "Show me satoshi paradise" / "find Anava Samui" / "Show me aura condominium": a search verb followed by a
@@ -397,6 +437,12 @@ def detect_deterministic_intent(
     msg_low = msg_clean.lower()
     state = stored_state or {}
     last_result_ids = list(state.get("last_result_ids") or [])
+
+    # A listing named anywhere in the message (typos allowed) decides the intent before any pattern guessing.
+    if len(msg_clean) >= 4:
+        _by_mention = _mention_intent(msg_clean)
+        if _by_mention:
+            return _by_mention
     selected_ids = list(state.get("selected_property_ids") or [])
 
     # Hydrate from persistent property_context (survives long chats / restarts)
@@ -869,6 +915,16 @@ def detect_deterministic_intent(
         )
     ) or ("property_type" in extracted_test and any(k in msg_low for k in ["cheapest", "lowest", "affordable", "najtańszy", "najtanszy", "ถูกที่สุด", "ราคาต่ำสุด"])) or bool(extracted_test.get("foreign_location")) or bool(extracted_test.get("required_amenities"))
     if has_search_intent:
+        _has_filter = any(
+            extracted_test.get(k) not in (None, "", [], False)
+            for k in ("location", "property_type", "bedrooms", "max_price", "min_price", "required_amenities",
+                      "foreign_location", "is_broad_thailand", "is_multiple_types", "has_pool", "beach_access",
+                      "sea_view", "show_all")
+        )
+        if not _has_filter and not re.search(
+            r"cheapest|lowest|affordable|najta|ถูกที่สุด|anything|something|options|oferty|coś|cos w|cokolwiek", msg_low
+        ):
+            return None, {}  # a search with no filters would return arbitrary listings: let the assistant clarify
         return IntentType.PROPERTY_SEARCH, extracted_test
 
     return None, {}
@@ -929,7 +985,7 @@ def _unknown_place_in_message(message: str) -> Optional[str]:
     return cand
 
 
-def extract_search_filters_deterministic(message: str) -> Dict[str, Any]:
+def _extract_search_filters_deterministic_impl(message: str) -> Dict[str, Any]:
     """
     Extracts structured search criteria from natural language without calling an LLM.
     Supports English, Polish, and Thai expressions, including real-time currency conversion (EUR, USD, PLN -> THB).
@@ -1043,7 +1099,7 @@ def extract_search_filters_deterministic(message: str) -> Dict[str, Any]:
 
     # Max Price / Budget with Currency Conversion
     # A. Prefix currency (e.g. $500,000, €1,000,000)
-    pfx_m = re.search(r"([$€£])\s*([0-9,.]+)\s*(k|m|million|mln)?", msg_low)
+    pfx_m = re.search(r"([$€£])\s*([0-9][0-9,.]*)\s*(k|m|million|mln)?", msg_low)
     if pfx_m:
         symbol = pfx_m.group(1)
         val = float(pfx_m.group(2).replace(",", ""))
@@ -1057,7 +1113,7 @@ def extract_search_filters_deterministic(message: str) -> Dict[str, Any]:
 
     # B. Suffix currency (e.g. 4.5 million PLN, 1 million EUR, 30,000,000 THB)
     if "max_price" not in filters:
-        sfx_m = re.search(r"([0-9,.]+)\s*(k|m|million|mln|milionów|ล้าน)?\s*(pln|eur|usd|thb|baht|บาท|zł|zl|dollars|euro|zlote|złotych)", msg_low)
+        sfx_m = re.search(r"([0-9][0-9,.]*)\s*(k|m|million|mln|milionów|ล้าน)?\s*(pln|eur|usd|thb|baht|บาท|zł|zl|dollars|euro|zlote|złotych)", msg_low)
         if sfx_m:
             val = float(sfx_m.group(1).replace(",", ""))
             unit = (sfx_m.group(2) or "").lower()
@@ -1071,7 +1127,7 @@ def extract_search_filters_deterministic(message: str) -> Dict[str, Any]:
 
     # C. Keyword-based budget without explicit currency (defaults to THB)
     if "max_price" not in filters:
-        p_match = re.search(r"(?:under|below|max|budget|up to|poniżej|ponizej|do|maksymalnie|budżet|budzet|ไม่เกิน|ต่ำกว่า|งบ|สูงสุด|ไม่เกินงบ)\s*(?:is|\s*[:=]|\s+around|\s+about)?\s*([0-9,.]+)\s*(m|million|mln|milionów|ล้าน|ล้านบาท|k)?\s*(?:thb|baht|บาท)?", msg_low)
+        p_match = re.search(r"(?:under|below|max|budget|up to|poniżej|ponizej|do|maksymalnie|budżet|budzet|ไม่เกิน|ต่ำกว่า|งบ|สูงสุด|ไม่เกินงบ)\s*(?:is|\s*[:=]|\s+around|\s+about)?\s*([0-9][0-9,.]*)\s*(m|million|mln|milionów|ล้าน|ล้านบาท|k)?\s*(?:thb|baht|บาท)?", msg_low)
         if p_match and "bed" not in p_match.group(0) and "ห้อง" not in p_match.group(0):
             val = float(p_match.group(1).replace(",", ""))
             unit = (p_match.group(2) or "").lower()
@@ -1082,7 +1138,7 @@ def extract_search_filters_deterministic(message: str) -> Dict[str, Any]:
             filters["max_price"] = val
 
     # Min Price
-    min_match = re.search(r"(?:from|above|minimum|min|od|powyżej|powyzej|ตั้งแต่|มากกว่า|เริ่มต้น)\s*(?:is|\s*[:=])?\s*([0-9,.]+)\s*(m|million|mln|milionów|ล้าน|ล้านบาท|k)?\s*(?:thb|baht|บาท)?", msg_low)
+    min_match = re.search(r"(?:from|above|minimum|min|od|powyżej|powyzej|ตั้งแต่|มากกว่า|เริ่มต้น)\s*(?:is|\s*[:=])?\s*([0-9][0-9,.]*)\s*(m|million|mln|milionów|ล้าน|ล้านบาท|k)?\s*(?:thb|baht|บาท)?", msg_low)
     if min_match and "bed" not in min_match.group(0) and "ห้อง" not in min_match.group(0):
         val = float(min_match.group(1).replace(",", ""))
         unit = (min_match.group(2) or "").lower()
@@ -1101,3 +1157,11 @@ def extract_search_filters_deterministic(message: str) -> Dict[str, Any]:
         filters["sea_view"] = True
 
     return filters
+def extract_search_filters_deterministic(message: str, *args: Any, **kwargs: Any) -> Dict[str, Any]:
+    """Never raises: a malformed number in the text must not break the chat (falls back to no filters)."""
+    try:
+        return _extract_search_filters_deterministic_impl(message, *args, **kwargs)
+    except (ValueError, OverflowError):
+        return {}
+
+
