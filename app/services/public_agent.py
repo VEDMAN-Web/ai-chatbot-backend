@@ -2176,6 +2176,53 @@ class PublicAgentService:
                 }, matched_cards, False
             else:
                 target_name = args.get("property_name") or pid or "requested property"
+                # Name lookup by the same matcher as search: confident match -> that listing,
+                # otherwise honest "not found" plus Did-you-mean (never a generic dead end).
+                try:
+                    from app.services.property_name_index import (
+                        ensure_name_index_from_firestore, match_property_name, set_last_name_search_meta,
+                        get_last_name_search_candidates as _glnc,
+                    )
+                    from app.services.firestore_service import get_property_by_id_from_firestore as _gp
+                    from app.core.tenant import allowed_countries_for_site
+                    ensure_name_index_from_firestore(target="user")
+                    _mr = match_property_name(str(target_name))
+                    if _mr.confident:
+                        _fp = _gp(_mr.confident.doc_id)
+                        _allowed = allowed_countries_for_site()
+                        _ok = _fp and not (_allowed and str(_fp.get("province") or "").lower() not in _allowed)
+                        if _ok:
+                            return {
+                                "found": True,
+                                "property_id": _fp.get("property_id"),
+                                "name": _fp.get("name"),
+                                "price": _fp.get("price"),
+                                "bedrooms": _fp.get("bedrooms"),
+                                "area": _fp.get("area"),
+                                "location": _fp.get("location"),
+                                "status": _fp.get("status"),
+                                "description": _fp.get("description") or _fp.get("name"),
+                                "ownership": (_fp.get("ownership") or _fp.get("ownership_type") or None),
+                                "amenities": _fp.get("highlights", []),
+                                "detail_page_url": _fp.get("detail_page_url"),
+                            }, [_fp], False
+                    _dym = list(_mr.candidates or [])[:3]
+                    set_last_name_search_meta(str(target_name), suggestions=[c.display_name for c in _dym], candidates=_dym)
+                    _lang = (conversation.preferences or {}).get("language") or "en"
+                    _tips = [c.display_name for c in _dym]
+                    return {
+                        "found": False,
+                        "message": build_name_not_found_reply(
+                            language=str(_lang),
+                            site_origin=getattr(conversation, "site_origin", None),
+                            asked_name=str(target_name),
+                            suggestions=_tips,
+                        ),
+                        "name_suggestions": _tips,
+                        "name_candidates": _glnc(),  # plain dicts, JSON-serialisable (sent back to the model)
+                    }, [], False
+                except Exception as _e:
+                    logger.warning("name did-you-mean in get_property_by_id failed: %s", _e)
                 return {
                     "found": False,
                     "message": f"No property found in database with ID or name '{target_name}'."

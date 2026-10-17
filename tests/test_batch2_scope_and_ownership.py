@@ -85,3 +85,26 @@ def test_cards_never_claim_freehold_or_invent_amenities():
         low = out.lower()
         assert "100% foreign freehold" not in low and "30-year registered" not in low
         assert "tropical gardens" not in low and "luxury amenities" not in low
+
+
+def test_get_property_by_id_miss_gives_did_you_mean(monkeypatch):
+    """The model sometimes looks a bare name up with get_property_by_id; a miss must still suggest near names."""
+    import json
+    from types import SimpleNamespace
+    import app.services.property_name_index as pni
+    from app.services.public_agent import public_agent
+    monkeypatch.setattr(fs, "get_property_by_id_from_firestore", lambda pid, target="user": None)
+    rows = [{"doc_id": "a1", "id": "a1", "name": {"pl": "Satoshi's Paradise", "en": ""}, "cityId": "sihanoukville"},
+            {"doc_id": "a2", "id": "a2", "name": {"pl": "Anava Samui", "en": ""}, "cityId": "samui"}]
+    idx = pni.get_property_name_index()
+    monkeypatch.setattr(idx, "_loader", lambda: rows)
+    idx.ensure_fresh(force=True)
+    conv = SimpleNamespace(session_id="t", site_origin="varsoviaestate.com", preferences={}, id="1")
+    try:
+        res, cards_out, _ = public_agent.execute_tool(None, conv, "get_property_by_id", {"property_name": "Satoshi Residence"})
+        assert res["found"] is False and cards_out == []
+        assert res["name_suggestions"] == ["Satoshi's Paradise"]
+        assert "Did you mean" in res["message"]
+        json.dumps(res)  # must be serialisable: it is sent back to the model
+    finally:
+        idx.clear()  # do not leak the fake index into other tests
