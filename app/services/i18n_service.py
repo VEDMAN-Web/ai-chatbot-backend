@@ -1231,7 +1231,7 @@ def build_rich_property_recommendation_text(
 
         features = []
         if c.get("has_pool") is True:
-            features.append("Private Pool" if language == "en" else ("Prywatny basen" if language == "pl" else "สระว่ายน้ำส่วนตัว"))
+            features.append("Pool" if language == "en" else ("Basen" if language == "pl" else "สระว่ายน้ำ"))
         if c.get("beach_access") is True:
             features.append("Beach Access" if language == "en" else ("Blisko plaży" if language == "pl" else "ใกล้ชายหาด"))
         if beds_str:

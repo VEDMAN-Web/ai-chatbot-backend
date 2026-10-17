@@ -470,6 +470,26 @@ def _lead_target_ref(msg_clean: str) -> Optional[str]:
     return None
 
 
+_PL_ORDINAL_ONLY_RE = re.compile(
+    r"^(pierwsz\w*|drug\w*|trzec\w*|czwart\w*|pi[ąa]t\w*)"
+    r"(?:\s+(?:ofert\w*|nieruchomo\w*|willa|will\w*|apartament\w*|projekt\w*|opcj\w*))?$",
+    re.IGNORECASE,
+)
+
+
+def _pl_ordinal_index(target_raw: str) -> Optional[int]:
+    """'pierwszy', 'drugą', 'trzecim', 'pierwszej oferty' -> 0/1/2 (only when the WHOLE target is an ordinal)."""
+    m = _PL_ORDINAL_ONLY_RE.match((target_raw or "").strip(" .,?!"))
+    if not m:
+        return None
+    stem = m.group(1).lower()
+    for prefix, idx in (("pierwsz", 0), ("drug", 1), ("trzec", 2), ("czwart", 3), ("pi", 4)):
+        if stem.startswith(prefix):
+            return idx
+    return None
+
+
+
 def detect_deterministic_intent(
     message: str,
     stored_state: Optional[Dict[str, Any]] = None
@@ -653,8 +673,8 @@ def detect_deterministic_intent(
             target_id = None
             if target.startswith("PROP-"):
                 target_id = target
-            elif target in _ORDINAL_WORD_TO_IDX:
-                idx = _ORDINAL_WORD_TO_IDX[target]
+            elif target in _ORDINAL_WORD_TO_IDX or _pl_ordinal_index(target_raw) is not None:
+                idx = _ORDINAL_WORD_TO_IDX[target] if target in _ORDINAL_WORD_TO_IDX else _pl_ordinal_index(target_raw)
                 if len(last_result_ids) > idx:
                     target_id = last_result_ids[idx]
                 else:
