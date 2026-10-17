@@ -40,6 +40,7 @@ class PublicChatRequest(BaseModel):
     preferred_location: Optional[str] = Field(None, max_length=200, description="Preferred area or island", example="Bang Tao, Phuket")
     budget: Optional[float] = Field(None, ge=0, description="Stated budget in THB", example=25000000)
     notes: Optional[str] = Field(None, max_length=2000, description="Inquiry comments or viewing preferences", example="Interested in viewing next week")
+    property_id: Optional[str] = Field(None, max_length=128, description="Listing the Inquire form was opened from (id or name)")
 
     @field_validator("site_origin", mode="before")
     def validate_origin(cls, v):
@@ -121,6 +122,7 @@ class PublicChatResponse(BaseModel):
     pdf_url: Optional[str] = Field(None, description="Direct URL to view or download the generated PDF brochure", example="https://s3.hf.co/...")
     download_url: Optional[str] = Field(None, description="Direct URL to download the generated PDF brochure")
     lead_id: Optional[str] = Field(None, description="UUID of recorded lead if contact details were submitted", example="b182cb82-...")
+    lead_saved: Optional[bool] = Field(None, description="Contact submissions only: True when the lead was really stored (ENABLE_LEAD_SAVING), False when it was not")
     session_limit_reached: Optional[bool] = Field(
         False,
         description="True when this chat has reached MAX_USER_MESSAGES_PER_SESSION and further messages are blocked",
@@ -210,7 +212,7 @@ def handle_public_chat(
                     preferred_location=req.preferred_location,
                     budget_max=budget_dec,
                     buying_signal=f"Direct contact submission: {req.contact_email or req.contact_phone or req.contact_name}",
-                    notes=req.notes
+                    notes=(f"[Listing: {req.property_id}] " if req.property_id else "") + (req.notes or "") or None
                 )
                 recorded_lead_id = str(lead.id)
 
@@ -227,7 +229,7 @@ def handle_public_chat(
                             "brand": _tenant.brand_name,
                             "source_url": _tenant.website_url,
                             "message": req.notes or user_msg,
-                            "property_id": req.preferred_location or ""
+                            "property_id": req.property_id or req.preferred_location or ""
                         })
                     except Exception as e:
                         logger.warning(f"Firestore lead sync error: {e}")
@@ -266,6 +268,7 @@ def handle_public_chat(
                 "language": lang,
                 "brochure_property_id": None,
                 "lead_id": recorded_lead_id,
+                "lead_saved": bool(getattr(settings, "ENABLE_LEAD_SAVING", False)),
                 "session_limit_reached": False,
                 "message_limit": None,
                 "session_limit_warning": False,
@@ -481,6 +484,20 @@ def submit_direct_lead(
         "lead_score": lead_score,
         "message": "Thank you! Your inquiry has been registered. An advisor will contact you shortly."
     }
+
+
+@router.get(
+    "/contact-info",
+    summary="Contact numbers and localized copy for the Inquire form",
+    description="Returns the public phone / WhatsApp numbers of the site and the localized texts of the Inquire pop-up form.",
+)
+def get_contact_info(
+    site_origin: Optional[str] = Query(None, description="Tenant site origin domain"),
+    language: str = Query("en", description="'en', 'pl' or 'th'"),
+):
+    from app.core.tenant import resolve_tenant
+    from app.services.contact_info import build_contact_info
+    return build_contact_info(resolve_tenant(site_origin), language)
 
 
 @router.get(
