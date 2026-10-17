@@ -500,6 +500,17 @@ class PropertyNameIndex:
             if best_score >= FUZZY_THRESHOLD and (best_score - second) >= FUZZY_GAP:
                 confident = best_entry
 
+        # Place contradiction: the visitor named a place ("Villa Mirage Samui") that the
+        # matched listing is not in (Mirage Sukhumvit 27 is in Bangkok). A shared brand word
+        # is not enough to present it as "the" listing, so treat it as did-you-mean instead.
+        if confident is not None and confident.city_id in _KNOWN_CITY_SLUGS:
+            q_words = set(re.findall(r"[a-z]+", q_norm))
+            asked = {_PLACE_WORDS[w] for w in q_words if w in _PLACE_WORDS}
+            if asked and confident.city_id not in asked and not any(
+                w in a.split() for w in asked for a in confident.aliases_norm
+            ):
+                confident = None
+
         # Partial brand names: demote only when the query equals the *primary*
         # brand token but the listing still has another name-like token
         # (e.g. "Satoshi" vs "Satoshi's Paradise"). Location suffixes
@@ -536,6 +547,13 @@ class PropertyNameIndex:
             suggestions=tips,
         )
 
+
+# Place words a visitor may attach to a project name -> city slug used in the catalog
+_PLACE_WORDS = {
+    "phuket": "phuket", "samui": "samui", "bangkok": "bangkok", "pattaya": "pattaya",
+    "phangan": "phangan", "maldives": "maldives", "sihanoukville": "sihanoukville",
+}
+_KNOWN_CITY_SLUGS = frozenset(set(_PLACE_WORDS.values()) | {"phnom-penh"})
 
 # Process-wide index
 _INDEX = PropertyNameIndex()
