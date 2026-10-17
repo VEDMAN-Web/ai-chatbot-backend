@@ -108,3 +108,43 @@ def test_get_property_by_id_miss_gives_did_you_mean(monkeypatch):
         json.dumps(res)  # must be serialisable: it is sent back to the model
     finally:
         idx.clear()  # do not leak the fake index into other tests
+
+
+def test_valid_cards_survive_when_the_model_rewords_a_price():
+    """If only the model's wording fails validation, the verified cards must still be shown (deterministic text)."""
+    from app.services.public_agent import public_agent
+    card = _cards()[0]  # Phuket Villa One, 5.0M THB
+    bad_text = f"Here is **{card['name']}** in Phuket for only 1,234,567 THB!"
+    text, out = public_agent._validate_or_fallback(
+        bad_text, [card], language="en", site_origin="varsoviaestate.com",
+        applied_filters={"location": "Phuket"}, criteria_summary="Phuket")
+    assert out and out[0]["name"] == card["name"]
+    assert "1,234,567" not in text
+    assert "No verified listing matches" not in text
+
+
+def test_project_names_that_contain_a_place_word_are_names_not_searches():
+    from app.services.intent_router import looks_like_project_name, message_looks_like_filter_search
+    for name in ["Paragon Villas Bophut", "Azure Sky Residences Phuket", "Villa Mirage Samui",
+                 "Ile kosztuje Golden Lotus Penthouse Bangkok?", "Royal Orchid Beachfront Estate"]:
+        assert looks_like_project_name(name), name
+        assert not message_looks_like_filter_search(name), name
+
+
+def test_real_searches_are_still_searches():
+    from app.services.intent_router import looks_like_project_name, message_looks_like_filter_search
+    for q in ["Show me villas in Pattaya", "Pokaż wille w Phuket do 15 mln THB", "Villas in Koh Samui under 10 million THB",
+              "3 bedroom villas in Phuket under 25 million THB", "villas Pattaya", "villa in puket",
+              "Pokaż nieruchomości w Kambodży", "Szukam czegoś z widokiem na morze w Phuket"]:
+        assert not looks_like_project_name(q), q
+    for q in ["Show me villas in Pattaya", "Pokaż wille w Phuket do 15 mln THB", "Villas in Koh Samui under 10 million THB"]:
+        assert message_looks_like_filter_search(q), q
+
+
+def test_yield_and_roi_percentages_from_marketing_text_are_removed():
+    from app.services.listing_presentation import sanitize_marketing_claims as m
+    for t in ["The area offers rental yields of 6-9% for investors.", "a total ROI projection of 9% over five years",
+              "Expect 7.5% rental yield annually"]:
+        assert "%" not in m(t), t
+    assert "35,744 THB/sqm" in m("Competitive entry at 35,744 THB/sqm")
+    assert "5% interest" in m("Loan at 5% interest, 30% deposit")
