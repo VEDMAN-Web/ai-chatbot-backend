@@ -126,6 +126,312 @@ def _allowed_text_blob(cards: List[Dict[str, Any]], tool_results: Optional[List[
     return " ".join(parts).lower()
 
 
+_AMENITY_CLAIM_PATTERNS: List[Tuple[str, re.Pattern]] = [
+    # Affirmative amenity claims only — not bare words inside titles like "Luxury Pool Villas"
+    ("spa", re.compile(
+        r"(?:spa\s*:\s*(?:yes|✓|available|included))|\b(?:has|with|includes?|offers?)\s+(?:a\s+)?spa\b|\bspa\s+yes\b",
+        re.I,
+    )),
+    ("gym", re.compile(
+        r"(?:gym\s*:\s*(?:yes|✓))|\b(?:has|with|includes?|offers?)\s+(?:a\s+)?(?:gym|fitness(?:\s+center)?)\b",
+        re.I,
+    )),
+    ("pool", re.compile(
+        r"(?:(?:private\s+)?pool\s*:\s*(?:yes|✓))|\b(?:has|with|includes?|offers?)\s+(?:a\s+)?(?:private\s+)?pool\b",
+        re.I,
+    )),
+    ("parking", re.compile(
+        r"(?:parking\s*:\s*(?:yes|✓))|\b(?:has|with|includes?|offers?)\s+parking\b",
+        re.I,
+    )),
+    ("sea_view", re.compile(
+        r"\b(?:has|with|includes?|offers?)\s+(?:a\s+)?(?:sea|ocean)\s*view\b|"
+        r"(?:sea|ocean)\s*view\s*:\s*(?:yes|✓)",
+        re.I,
+    )),
+    ("beach_access", re.compile(
+        r"\b(?:has|with|includes?|offers?)\s+beach(?:\s*access|\s*front)?\b|"
+        r"beach\s*(?:access|front)?\s*:\s*(?:yes|✓)",
+        re.I,
+    )),
+    ("concierge", re.compile(
+        r"\b(?:has|with|includes?|offers?)\s+(?:a\s+)?concierge\b|concierge\s*:\s*(?:yes|✓)",
+        re.I,
+    )),
+]
+
+_OWNERSHIP_CLAIM = re.compile(
+    r"\bfreehold\s+for\s+foreigners?\b|\bforeign(?:er)?\s+freehold\b|"
+    r"\bfreehold\b|\bleasehold\b|\bforeign\s+quota\b",
+    re.I,
+)
+
+_YIELD_CLAIM = re.compile(
+    r"(\d+(?:[.,]\d+)?)\s*%\s*(?:rental\s+)?(?:yield|roi|return|net)|"
+    r"(?:rental\s+)?(?:yield|roi|return)\s*(?:of\s*)?(\d+(?:[.,]\d+)?)\s*%|"
+    r"\bguaranteed?\s+(?:rental\s+)?(?:income|yield|return)\b|"
+    r"\bappreciation\b",
+    re.I,
+)
+
+_COMPLETION_CLAIM = re.compile(
+    r"\b(?:completion|completes?|handover|ready)\s*(?:in\s*)?(?:q[1-4]\s*)?(\d{4})\b|"
+    r"\b(q[1-4]\s*\d{4})\b|"
+    r"\bcompletion\s*:\s*([^\n.]+)",
+    re.I,
+)
+
+_DISTANCE_CLAIM = re.compile(
+    r"(\d+(?:[.,]\d+)?)\s*(?:km|kilometers?|minutes?|mins?)\b",
+    re.I,
+)
+
+_AREA_CLAIM = re.compile(
+    r"(\d+(?:[.,]\d+)?)\s*(?:sq\.?\s*m|sqm|m²|m2)\b",
+    re.I,
+)
+
+_BED_CLAIM = re.compile(
+    r"(\d+)\s*(?:-?\s*)?(?:bedrooms?|beds?|br)\b",
+    re.I,
+)
+
+
+def _normalize_number_tokens(blob: str) -> set:
+    """Collect comparable numeric tokens (raw digits and million-scaled)."""
+    out: set = set()
+    text = blob or ""
+    for m in re.finditer(r"(\d+(?:[.,]\d+)?)\s*[Mm](?:illion)?\b", text):
+        try:
+            v = float(m.group(1).replace(",", ""))
+            out.add(str(int(v * 1_000_000)))
+            out.add(f"{v:g}m")
+        except ValueError:
+            pass
+    for m in re.finditer(r"\d+(?:[.,]\d+)?", text):
+        raw = m.group(0).replace(",", "")
+        try:
+            f = float(raw)
+        except ValueError:
+            continue
+        digits = re.sub(r"[^\d]", "", raw)
+        if digits:
+            out.add(digits)
+        if f >= 1000:
+            out.add(str(int(f)))
+        # Also store million form
+        if f >= 1_000_000:
+            out.add(f"{f / 1_000_000:g}m")
+        elif 1 <= f < 500 and "m" in text[max(0, m.start() - 2): m.end() + 8].lower():
+            out.add(str(int(f * 1_000_000)))
+    return out
+
+
+def _facts_amenity_keys(cards: List[Dict[str, Any]], facts_text: str) -> set:
+    keys: set = set()
+    low = (facts_text or "").lower()
+    try:
+        from app.services.amenity_service import collect_property_amenities, AMENITY_LABELS_EN
+        for c in cards:
+            facts = collect_property_amenities(c)
+            for k, f in facts.items():
+                if getattr(f, "present", False):
+                    keys.add(k)
+                    keys.add(AMENITY_LABELS_EN.get(k, k).lower())
+    except Exception:
+        pass
+    for k in ("pool", "private pool", "gym", "spa", "parking", "sea view", "beach", "concierge"):
+        if k in low:
+            keys.add(k.replace(" ", "_") if " " in k else k)
+            keys.add(k)
+    return keys
+
+
+def verify_claims(
+    reply_text: str,
+    cards: Optional[List[Dict[str, Any]]] = None,
+    *,
+    facts_text: str = "",
+    tool_results: Optional[List[Any]] = None,
+    allowed_property_ids: Optional[set] = None,
+    allowed_property_names: Optional[set] = None,
+) -> Tuple[bool, List[str]]:
+    """
+    Extract factual claims from reply and check against this-turn FACTS/cards.
+    Pure Python, no network. Returns (ok, reasons).
+    """
+    reasons: List[str] = []
+    text = reply_text or ""
+    cards = [c for c in (cards or []) if isinstance(c, dict)]
+    facts_blob = (facts_text or "") + " " + _allowed_text_blob(cards, tool_results)
+    facts_low = facts_blob.lower()
+    num_ok = _normalize_number_tokens(facts_blob)
+
+    allowed_ids = {str(x).lower() for x in (allowed_property_ids or set()) if x}
+    allowed_names = {str(x).lower().strip() for x in (allowed_property_names or set()) if x}
+    for c in cards:
+        for k in ("property_id", "id", "slug"):
+            if c.get(k):
+                allowed_ids.add(str(c.get(k)).lower())
+        for k in ("name", "property_name"):
+            if c.get(k):
+                allowed_names.add(str(c.get(k)).lower().strip())
+
+    # --- Property names / Title Case projects ---
+    _GENERIC = {
+        "luxury", "pool", "villas", "villa", "condo", "condos", "apartment", "beachfront",
+        "sea", "view", "phuket", "samui", "bangkok", "thailand", "property", "properties",
+        "residences", "residence", "estate", "verified", "listings", "lake",
+    }
+    for m in re.finditer(r"\b([A-Z][a-zA-Z0-9]+(?:\s+[A-Z][a-zA-Z0-9\-]+){1,6})\b", text):
+        name = m.group(1).strip()
+        low = name.lower()
+        toks = [t for t in re.split(r"[^a-z0-9]+", low) if t and t not in _GENERIC]
+        if not toks:
+            continue
+        if any(low == n or low in n or n in low for n in allowed_names):
+            continue
+        if all(t in facts_low for t in toks):
+            continue
+        if any(k in low for k in ("villa", "villas", "condo", "tower", "towers", "residence", "residences", "estate")):
+            reasons.append(f"invented_property_name:{name}")
+
+    # --- Amenity claims ---
+    am_keys = _facts_amenity_keys(cards, facts_blob)
+    for canon, pat in _AMENITY_CLAIM_PATTERNS:
+        if not pat.search(text):
+            continue
+        # Negation / "not in verified" is fine
+        for m in pat.finditer(text):
+            window = text[max(0, m.start() - 40): m.end() + 40].lower()
+            if any(x in window for x in ("not listed", "not in our", "not documented", "brak w", "ไม่ระบุ", "confirm with")):
+                continue
+            aliases = {canon, canon.replace("_", " "), canon.replace("_", "")}
+            if canon == "pool":
+                aliases.update({"private pool", "pool_private"})
+            if not (aliases & am_keys) and canon not in facts_low and canon.replace("_", " ") not in facts_low:
+                # Only fail affirmative claims
+                if re.search(r"(?:yes|✓|has|with|includes?|offers?)\b", window) or ":" in m.group(0):
+                    reasons.append(f"amenity_not_in_facts:{canon}")
+
+    # --- Ownership ---
+    for m in _OWNERSHIP_CLAIM.finditer(text):
+        claim = m.group(0).lower()
+        window = text[max(0, m.start() - 50): m.end() + 50].lower()
+        if any(x in window for x in ("confirm", "advisor", "not documented", "not in our", "doradca")):
+            continue
+        own_blob = " ".join(
+            str(c.get("ownership") or c.get("tenure") or "") for c in cards
+        ).lower() + " " + facts_low
+        if "freehold" in claim and "freehold" not in own_blob:
+            reasons.append(f"ownership_not_in_facts:{m.group(0)[:40]}")
+        elif "leasehold" in claim and "leasehold" not in own_blob:
+            reasons.append(f"ownership_not_in_facts:{m.group(0)[:40]}")
+        elif "foreign" in claim and "foreign" not in own_blob and "freehold" not in own_blob:
+            reasons.append(f"ownership_not_in_facts:{m.group(0)[:40]}")
+
+    # --- Yield / ROI / appreciation / stray % — never unless in verified yield data ---
+    from app.services.approved_statements import DEVELOPER_MARKETING_CLAIM_LABEL
+    for m in re.finditer(r"(\d+(?:[.,]\d+)?)\s*%", text):
+        window = text[max(0, m.start() - 48): m.end() + 48].lower()
+        pct_token = m.group(0).lower().replace(" ", "")
+        in_yield_facts = (
+            pct_token in facts_low.replace(" ", "")
+            and any(k in facts_low for k in ("yield", "roi", "return", "%"))
+        )
+        approved = any(pct_token in str(s).lower().replace(" ", "") for s in (APPROVED_STATEMENTS or []))
+        labelled = DEVELOPER_MARKETING_CLAIM_LABEL.lower() in window
+        yieldish = bool(_YIELD_CLAIM.search(window)) or any(
+            k in window for k in ("yield", "roi", "return", "guaranteed", "marketing claim", "zwrot", "gwarant")
+        )
+        # Any percentage tied to investment language (or left after sanitiser) must be in FACTS
+        if yieldish or labelled:
+            if not in_yield_facts and not approved:
+                reasons.append(f"yield_or_roi_not_in_facts:{m.group(0)[:50]}")
+        elif not in_yield_facts and not approved and labelled:
+            reasons.append(f"yield_or_roi_not_in_facts:{m.group(0)[:50]}")
+
+    # --- Completion dates / years ---
+    for m in _COMPLETION_CLAIM.finditer(text):
+        year_bits = [g for g in m.groups() if g]
+        token = (year_bits[0] if year_bits else m.group(0)).strip()
+        if token.lower() in facts_low or any(tok in facts_low for tok in re.findall(r"\d{4}", token)):
+            continue
+        # Generic "under construction" without a year is ok if status matches
+        if re.search(r"under\s+construction|off-?plan|completed", m.group(0), re.I) and not re.search(r"\d{4}", m.group(0)):
+            continue
+        if re.search(r"\d{4}|q[1-4]", m.group(0), re.I):
+            reasons.append(f"completion_date_not_in_facts:{m.group(0)[:40]}")
+
+    # --- Distances ---
+    for m in _DISTANCE_CLAIM.finditer(text):
+        num = m.group(1).replace(",", ".")
+        window = text[max(0, m.start() - 30): m.end() + 20].lower()
+        if any(x in window for x in ("not in our", "not documented", "confirm")):
+            continue
+        digs = re.sub(r"[^\d]", "", num)
+        if digs and digs not in re.sub(r"[^\d]", "", facts_blob) and f"{num} km" not in facts_low and f"{num} min" not in facts_low:
+            reasons.append(f"distance_not_in_facts:{m.group(0)[:30]}")
+
+    # --- Areas ---
+    for m in _AREA_CLAIM.finditer(text):
+        num = m.group(1).replace(",", "")
+        digs = re.sub(r"[^\d]", "", num)
+        if digs and digs not in re.sub(r"[^\d]", "", facts_blob):
+            reasons.append(f"area_not_in_facts:{m.group(0)[:30]}")
+
+    # --- Bedroom counts ---
+    for m in _BED_CLAIM.finditer(text):
+        n = m.group(1)
+        if n in re.findall(r"\d+", facts_blob) or n in facts_low:
+            continue
+        # Allow ordinals / "first bedroom" style rare; fail clear inventory claims
+        window = text[max(0, m.start() - 20): m.end() + 10].lower()
+        if any(x in window for x in ("has", "with", "bedrooms:", "beds:", "•")):
+            reasons.append(f"bedrooms_not_in_facts:{m.group(0)[:30]}")
+
+    # --- Prices / large money (reuse digit check with million normalisation) ---
+    for m in re.finditer(
+        r"(?:THB|USD|EUR|PLN|฿|€|\$)\s*[\d,.]+(?:\s*[Mm](?:illion)?)?|"
+        r"[\d,.]+\s*(?:M\s*)?(?:THB|USD|EUR|PLN|฿)|"
+        r"(\d+(?:\.\d+)?)\s*[Mm]\b",
+        text,
+        flags=re.IGNORECASE,
+    ):
+        chunk = m.group(0)
+        window = text[max(0, m.start() - 24): m.end() + 12].lower()
+        # Budget / filter phrasing ("under 5M", "below 10M") is not a listing price claim
+        if re.search(r"\b(?:under|below|up to|max(?:imum)?|budget|less than|poniżej|do)\b", window):
+            continue
+        claim_nums = _normalize_number_tokens(chunk)
+        if not claim_nums:
+            continue
+        if claim_nums & num_ok:
+            continue
+        # Millions soft match: 12.5M vs 12500000
+        ok_soft = False
+        for cn in claim_nums:
+            if cn.endswith("m"):
+                try:
+                    mill = float(cn[:-1])
+                    approx = str(int(mill * 1_000_000))
+                    if approx in num_ok or approx[:4] in {x[:4] for x in num_ok if x.isdigit() and len(x) >= 4}:
+                        ok_soft = True
+                except ValueError:
+                    pass
+        if not ok_soft:
+            reasons.append(f"price_not_in_facts:{chunk[:40]}")
+
+    # Deduplicate while preserving order
+    seen_r: set = set()
+    uniq: List[str] = []
+    for r in reasons:
+        if r not in seen_r:
+            seen_r.add(r)
+            uniq.append(r)
+    return (len(uniq) == 0, uniq)
+
+
 def validate_reply(
     reply_text: str,
     cards: Optional[List[Dict[str, Any]]] = None,
@@ -133,6 +439,9 @@ def validate_reply(
     applied_filters: Optional[Dict[str, Any]] = None,
     language: str = "en",
     tenant_advisor_email: Optional[str] = None,
+    facts_text: str = "",
+    allowed_property_ids: Optional[set] = None,
+    allowed_property_names: Optional[set] = None,
 ) -> Tuple[bool, List[str]]:
     """
     Returns (ok, reasons). Pure and fast. No network I/O.
@@ -266,6 +575,10 @@ def validate_reply(
         for c in cards
         if c.get("name") or c.get("property_name")
     ]
+    if allowed_property_names:
+        known_names = list(known_names) + [
+            str(n).strip().lower() for n in allowed_property_names if n
+        ]
     _GENERIC_NAME_TOKENS = {
         "luxury", "pool", "villas", "villa", "condo", "condos", "condominium",
         "apartment", "apartments", "beachfront", "sea", "view", "seaview",
@@ -306,5 +619,17 @@ def validate_reply(
         for em in emails:
             if em.lower() != allowed_email:
                 reasons.append(f"wrong_advisor_email:{em}")
+
+    # d. Free-text claim verification against this-turn FACTS / cards
+    claim_ok, claim_reasons = verify_claims(
+        reply_text=text,
+        cards=cards,
+        facts_text=facts_text or allowed,
+        tool_results=tool_results,
+        allowed_property_ids=allowed_property_ids,
+        allowed_property_names=allowed_property_names,
+    )
+    if not claim_ok:
+        reasons.extend(claim_reasons)
 
     return (len(reasons) == 0, reasons)

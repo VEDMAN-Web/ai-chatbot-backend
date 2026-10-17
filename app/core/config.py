@@ -107,6 +107,10 @@ class Settings(BaseSettings):
     # Persistent property context (reference memory separate from live facts)
     PROPERTY_CONTEXT_RECENT_MESSAGES: int = 20
     PROPERTY_CONTEXT_SUMMARY_CHARS: int = 4000
+    # User-only turns fed to the public LLM (never prior assistant prose)
+    PUBLIC_LLM_HISTORY_USER_TURNS: int = 3
+    # Cap temperature for factual / tool-required public turns
+    PUBLIC_LLM_FACTUAL_TEMPERATURE: float = 0.2
     # Chat history + property_context always go to Firestore (not Postgres)
     ENABLE_PROPERTY_CONTEXT_PERSISTENCE: bool = True
 

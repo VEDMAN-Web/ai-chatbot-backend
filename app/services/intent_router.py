@@ -171,8 +171,8 @@ DETAILS_PATTERNS = [
     # Ordinals (singular + plural): "first property", "first properties", "the first ones"
     r"(?:tell\s+me\s+more\s+about|tell\s+me\s+about|details\s+for|specs\s+for|more\s+(?:details|info)\s+(?:about|on)|info\s+on)\s+(?:the\s+)?(first|second|third|fourth|fifth|1st|2nd|3rd|4th|5th)\s+(?:ones?|propert(?:y|ies)|villas?|condos?|listings?)",
     r"^(?:the\s+)?(first|second|third|fourth|fifth|1st|2nd|3rd|4th|5th)\s+(?:ones?|propert(?:y|ies)|villas?|condos?|listings?)?\s*[\?\!\.]*$",
-    # Named property follow-ups: "can you tell me more about Mono Champaca?"
-    r"(?:(?:can\s+you|could\s+you|please)\s+)?(?:tell\s+me\s+more\s+about|tell\s+me\s+about|more\s+(?:details|info)\s+(?:about|on|for)|details\s+(?:about|for|on)|specs\s+for|info\s+(?:about|on))\s+(?:the\s+)?([a-z0-9][\w\s\-'&.]{2,80}?)\s*[\?\!\.]*$",
+    # Named property follow-ups: "can you tell me more about Mono Champaca?" / "ok show me more about Pirak Villa"
+    r"(?:(?:can\s+you|could\s+you|please|ok|okay)\s+)?(?:tell\s+me\s+more\s+about|tell\s+me\s+about|show\s+me\s+more\s+about|more\s+(?:details|info)\s+(?:about|on|for)|details\s+(?:about|for|on)|specs\s+for|info\s+(?:about|on))\s+(?:the\s+)?([a-z0-9][\w\s\-'&.]{2,80}?)\s*[\?\!\.]*$",
     r"(?:pokaż|pokaz|szczegóły|szczegoly|informacje\s+o)\s+(PROP-[A-Z0-9\-]+)",
     r"(?:pokaż|pokaz|szczegóły|szczegoly|więcej\s+o|opowiedz\s+o|powiedz\s+więcej\s+o)\s+(?:tę|ta|tą|o\s+)?([a-ząćęłńóśźż0-9][\w\s\-'&.]{2,80}?)\s*[\?\!\.]*$",
     r"(?:pokaż|pokaz|szczegóły|szczegoly)\s+(?:tę|ta|tą)\s+(?:pierwszą|druga|trzecią|1|2|3)",
@@ -186,8 +186,12 @@ DETAILS_PATTERNS = [
 REFINE_PATTERNS = [
     r"(?:show\s+me\s+)?cheaper(?:\s+ones|\s+villas|\s+options)?",
     r"(?:make\s+it\s+)?cheaper",
-    r"(?:under|below|max|budget)\s*(\d+(?:\.\d+)?)\s*(?:m|million)?\s*(?:thb|baht)?",
+    r"(?:under|below|max|budget|only\s+under)\s*(\d+(?:\.\d+)?)\s*(?:m|million)?\s*(?:thb|baht)?",
     r"(?:with|add)\s+(?:a\s+)?(?:private\s+)?pool",
+    r"(?:which|that|ones?\s+that)\s+have\s+(?:a\s+)?(?:private\s+)?pool",
+    r"(?:which|that)\s+have\s+(?:a\s+)?(?:private\s+)?(?:gym|parking|sea\s*view)",
+    r"(?:have|has)\s+(?:a\s+)?(?:private\s+)?pool\b",
+    r"(?:private\s+)?pool\s*\??$",
     r"(?:remove|without|no)\s+pool",
     r"(?:with|add)\s+sea\s*view",
     r"(?:with|add)\s+beach(?:front)?",
@@ -242,6 +246,17 @@ PDF_EXPORT_PATTERNS = [
 
 
 # Words that are filter vocabulary, not project names (EN / PL / TH)
+_DETAIL_SKIP_NAMES = {
+    "phuket", "samui", "koh samui", "bangkok", "pattaya", "thailand", "tajlandia",
+    "villas", "villa", "condo", "condominium", "properties", "property", "more",
+    "options", "results", "listings", "first properties", "second properties",
+    "third properties", "first ones", "second ones", "third ones",
+    "willa", "wille", "willi", "willę", "willą", "willy",
+    "apartament", "apartamenty", "apartamentów", "apartamentow",
+    "mieszkanie", "mieszkania", "nieruchomości", "nieruchomosci",
+    "oferty", "ofert", "kondominium",
+}
+
 _FILTER_TYPE_TOKENS = {
     "villa", "villas", "willa", "wille", "willi", "willę", "willy", "willą", "willem",
     "condo", "condos", "condominium", "condominiums",
@@ -254,11 +269,280 @@ _FILTER_TYPE_TOKENS = {
     "วิลล่า", "คอนโด", "คอนโดมิเนียม", "อพาร์ทเมนท์", "บ้าน",
 }
 
+# Amenity / feature words — never treat as a property name
+_AMENITY_NAME_TOKENS = {
+    "private", "pool", "pools", "gym", "fitness", "parking", "garage", "sea", "view",
+    "seaview", "beach", "beachfront", "spa", "sauna", "elevator", "lift", "balcony",
+    "terrace", "garden", "furnished", "unfurnished", "wifi", "internet",
+    "basen", "prywatny", "prywatnym", "siłownia", "silownia", "garaż", "garaz",
+    "widok", "morze", "plaża", "plaza",
+    "สระ", "สระว่ายน้ำ", "ยิม", "ฟิตเนส", "ที่จอด", "วิวทะเล", "ชายหาด",
+    "which", "ones", "have", "has", "with", "without", "any", "that",
+}
+
+# Question / generic words that can never be a property name (EN / PL / TH)
+_PROPERTY_NAME_STOPWORDS = frozenset({
+    "you", "your", "yours", "there", "anything", "something", "everything", "nothing",
+    "any", "one", "ones", "it", "this", "that", "these", "those",
+    "what", "which", "who", "where", "how", "do", "does", "have", "has", "got",
+    "is", "are", "some", "other", "others", "more", "else",
+    "bigger", "smaller", "cheaper", "better", "largest", "smallest",
+    "properties", "property", "villas", "villa", "condos", "condo", "apartments",
+    "listings", "options", "places", "homes", "listing", "apartment",
+    # Polish
+    "masz", "macie", "czy", "coś", "cos", "jest", "są", "sa", "jakie", "jaki", "jaka",
+    "czegoś", "czegos", "nic", "wszystko", "inne", "innych",
+    # Thai
+    "มี", "ไหม", "คุณ", "อะไร", "ที่ไหน", "ไหมครับ", "ไหมคะ",
+})
+
+_FILTER_WORD_EXTRAS = frozenset({
+    "bedroom", "bedrooms", "bed", "beds", "br", "sypialnia", "sypialnie", "sypialni",
+    "ห้องนอน", "ห้อง", "budget", "under", "below", "above", "over", "million", "mln",
+    "thb", "baht", "pool", "private", "sea", "view", "gym", "parking", "beach",
+    "or", "more", "fewer", "least", "most", "minimum", "maximum", "between", "up", "to",
+    "with", "without", "a", "an", "the", "plus", "lub", "więcej", "wiecej", "mniej",
+    "co", "najmniej", "od", "do", "ขึ้นไป", "อย่างน้อย",
+    "phuket", "samui", "bangkok", "pattaya", "thailand", "layan", "karon",
+})
+
+
+def is_valid_property_name_candidate(named: str) -> bool:
+    """
+    True when `named` may be treated as a property name:
+    (a) name-index confident match, or (b) slug / PROP- id, or
+    (c) contains at least one token that is not a stop/filter word.
+    Candidates made only of stop + filter words are rejected.
+    """
+    raw = (named or "").strip(" .,?!")
+    if not raw or len(raw) < 2:
+        return False
+    low = raw.lower()
+    if low in _PROPERTY_NAME_STOPWORDS or low in _DETAIL_SKIP_NAMES:
+        return False
+    if re.fullmatch(r"prop-[a-z0-9\-]+", low) or re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)+", low):
+        return True
+    # Whole phrase of stop words only ("there anything")
+    tokens = [t for t in re.split(r"[^\wąćęłńóśźżก-๙]+", low, flags=re.I) if t]
+    if not tokens:
+        return False
+    if all(
+        t in _PROPERTY_NAME_STOPWORDS
+        or t in _DETAIL_SKIP_NAMES
+        or t in _FILTER_TYPE_TOKENS
+        or t in _AMENITY_NAME_TOKENS
+        or t in _FILTER_WORD_EXTRAS
+        or t.isdigit()
+        for t in tokens
+    ):
+        return False
+    try:
+        from app.services.property_name_index import match_property_name
+        mr = match_property_name(raw)
+        if mr.confident is not None:
+            return True
+    except Exception:
+        pass
+    # At least one distinctive non-filter token (proper-name-ish)
+    return any(
+        t not in _PROPERTY_NAME_STOPWORDS
+        and t not in _DETAIL_SKIP_NAMES
+        and t not in _FILTER_TYPE_TOKENS
+        and t not in _AMENITY_NAME_TOKENS
+        and t not in _FILTER_WORD_EXTRAS
+        and not t.isdigit()
+        and len(t) >= 2
+        for t in tokens
+    )
+
 _SHOW_SEARCH_VERBS = re.compile(
     r"\b(?:show\s+me|find|search|looking\s+for|list|pokaż|pokaz|zobacz|wyświetl|wyswietl|"
     r"szukam|szukamy|chcę|chce|daj\s+mi|znajdź|znajdz|ค้นหา|แสดง|ขอดู|หา)\b",
     re.IGNORECASE,
 )
+
+# Fact / amenity questions about one property (must beat amenity→search routing)
+_FACT_QUESTION_RE = re.compile(
+    r"(?:^|\b)(?:does|do|has|have|is|are|what(?:'s|\s+is)|how\s+much|price\s+of|cena|czy|ile|มี|ราคา)",
+    re.IGNORECASE,
+)
+_FACT_TOPIC_RE = re.compile(
+    r"(?:pool|spa|gym|parking|brochure|pdf|swimming|beach|price|cost|bedroom|bedrooms|"
+    r"area|size|sqm|location|status|amenit|available|availability|basen|sypialn|"
+    r"cena|สระ|ห้องนอน|ราคา|ทำเล|ที่จอด|ownership|tenure)",
+    re.IGNORECASE,
+)
+_NAMED_FACT_CAPTURE_RES = [
+    # "What is the price of X?" / "price of X" — before generic how-much (which would swallow "does")
+    re.compile(
+        r"(?:what(?:'s|\s+is|\s+are)\s+)?(?:the\s+)?(?:prices?|cost)\s+(?:of|for)\s+(?:the\s+)?(.+?)\s*[?.!]*$",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"how\s+much\s+(?:does|is|do|are)\s+(?:the\s+|a\s+|an\s+)?(.+?)(?:\s+cost)?\s*[?.!]*$",
+        re.IGNORECASE,
+    ),
+    # "does Pirak Villa have a pool?" — subject must not be you/it/there (handled separately)
+    re.compile(
+        r"(?:does|do|has|have|is|are)\s+(?!you\b|it\b|there\b|this\b|that\b|they\b|we\b)"
+        r"(.+?)\s+(?:have|has|include|with)\s+(?:a\s+|an\s+)?"
+        r"(?:spa|gym|parking|pool|brochure|beach|bedroom|price|status|location|pdf)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?:does|do|has|have|is|are|what(?:'s|\s+is)|price\s+of|cena|czy)\s+"
+        r"(?!you\b|it\b|there\b|this\b|that\b)"
+        r"(.+?)\s+"
+        r"(?:have|has|include|with|cost|price|pool|beach|bedroom|spa|gym|parking|brochure|อยู่|มี)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?:does|do)\s+(?!you\b|it\b|there\b)(.+?)\s+have\s+",
+        re.IGNORECASE,
+    ),
+]
+
+
+def _is_amenity_only_name_candidate(named: str) -> bool:
+    """True when every token is amenity/filter vocabulary — never a property name."""
+    named_l = (named or "").strip().lower()
+    if not named_l:
+        return True
+    if named_l in _AMENITY_NAME_TOKENS or named_l in _DETAIL_SKIP_NAMES:
+        return True
+    tokens = [t for t in re.split(r"[^\w]+", named_l) if t and len(t) > 1]
+    if not tokens:
+        return True
+    return all(
+        t in _AMENITY_NAME_TOKENS
+        or t in _FILTER_TYPE_TOKENS
+        or t in _DETAIL_SKIP_NAMES
+        or t in {"w", "in", "at", "under", "with", "a", "an", "the", "also", "too", "and", "or"}
+        or t.isdigit()
+        for t in tokens
+    )
+
+
+def extract_named_property_fact_candidate(message: str) -> Optional[str]:
+    """Pull a property-name span from a fact question like 'is Above Element Villas have spa?'."""
+    text = (message or "").strip()
+    if not text:
+        return None
+    # Plural filter questions ("Which have a private pool?") are not named-property facts
+    if re.search(
+        r"\b(?:which|what)\s+(?:ones?\s+)?(?:have|has|with)\b|\bwhich\s+have\b",
+        text,
+        re.IGNORECASE,
+    ):
+        return None
+    for cre in _NAMED_FACT_CAPTURE_RES:
+        m = cre.search(text)
+        if not m:
+            continue
+        named = m.group(1).strip(" .,?!")
+        named = re.sub(r"^(?:the|a|an|does|do|is|are)\s+", "", named, flags=re.I).strip()
+        if named and len(named) >= 3 and named.lower() not in _DETAIL_SKIP_NAMES:
+            named_l = named.lower()
+            # Pronoun / anaphoric follow-ups ("does it also have a pool?") use active context
+            if re.fullmatch(
+                r"(?:it|this|that|these|those|one|ones?)(?:\s+(?:also|too|still|even))?",
+                named_l,
+            ):
+                continue
+            if _is_amenity_only_name_candidate(named):
+                continue
+            if not is_valid_property_name_candidate(named):
+                continue
+            # Category / place searches ("villa in Phuket", "villas in Phuket") are not names
+            if re.search(r"\b(?:in|at|near|around|w)\b", named_l) and not looks_like_project_name(named):
+                continue
+            # Skip pure filter vocabulary ("villas in Phuket")
+            tokens = [t for t in re.split(r"[^\w]+", named_l) if t and len(t) > 1]
+            if tokens and all(
+                t in _FILTER_TYPE_TOKENS
+                or t in _DETAIL_SKIP_NAMES
+                or t in {"w", "in", "at", "under", "with", "a", "an", "the", "also", "too"}
+                or t.isdigit()
+                for t in tokens
+            ):
+                continue
+            return named
+    return None
+
+
+def try_named_property_fact_intent(
+    message: str,
+    *,
+    active_property_id: Optional[str] = None,
+) -> Optional[Tuple[IntentType, Dict[str, Any]]]:
+    """
+    Before search routing: fact question about a named property → PROPERTY_DETAILS
+    only when the candidate matches the name index or the active property.
+    Amenity words (private, pool, gym, …) are never treated as names.
+    """
+    text = (message or "").strip()
+    if not text:
+        return None
+    # Genuine catalogue searches stay searches
+    if _SHOW_SEARCH_VERBS.search(text) and message_looks_like_filter_search(text):
+        return None
+    if not _FACT_QUESTION_RE.search(text):
+        return None
+    if not _FACT_TOPIC_RE.search(text):
+        return None
+
+    candidate = extract_named_property_fact_candidate(text)
+    if not candidate:
+        return None
+    if _is_amenity_only_name_candidate(candidate) or not is_valid_property_name_candidate(candidate):
+        return None
+
+    focus = text
+    try:
+        from app.services.property_name_index import match_property_name
+        mr = match_property_name(candidate)
+        if mr.confident is not None:
+            return IntentType.PROPERTY_DETAILS, {
+                "property_id": mr.confident.doc_id,
+                "property_name": mr.confident.display_name,
+                "focus_question": focus,
+                "named_fact": True,
+                "ignore_stored_filters": True,
+            }
+        # Suggestions only — not confident enough; do not invent a name lookup
+    except Exception as e:
+        logger.warning("named property fact name-index lookup failed: %s", e)
+
+    # Active property only when the candidate clearly refers to it (pronouns already skipped)
+    if active_property_id and candidate.lower() in {
+        str(active_property_id).lower(),
+        str(active_property_id).lower().replace("-", " "),
+    }:
+        return IntentType.PROPERTY_DETAILS, {
+            "property_id": active_property_id,
+            "focus_question": focus,
+            "named_fact": True,
+            "from_property_context": True,
+            "ignore_stored_filters": True,
+        }
+
+    # Proper-looking unknown project name → details path for honest not-found
+    # (never amenities / stop words; never invent a search from stored filters)
+    if (
+        is_valid_property_name_candidate(candidate)
+        and looks_like_project_name(candidate)
+        and not re.search(r"\b(?:in|at|near|around|w)\b", candidate, flags=re.I)
+    ):
+        return IntentType.PROPERTY_DETAILS, {
+            "property_name": candidate,
+            "property_id": candidate,
+            "focus_question": focus,
+            "named_fact": True,
+            "ignore_stored_filters": True,
+        }
+
+    # Weak / amenity-like fragment → let refine/search handle it
+    return None
 
 
 # Everyday words that can appear in a search sentence without being part of a project name.
@@ -266,6 +550,7 @@ _SEARCH_SENTENCE_WORDS = frozenset("""
 a an the in at on of for to from with without and or near around by under below over above up max min about
 me my our we you your i is are do does have has any some all what which where who how many much more most
 tell show find search looking look want need like see give get list take
+ok okay maybe perhaps please just now then also still
 cheap cheaper cheapest best top luxury premium nice good new modern affordable beachfront sea ocean beach view views
 pool private shared sea-view gym parking garden furnished ready budget price prices cost costs
 bed beds bedroom bedrooms bath bathroom bathrooms sqm million mln thb baht usd eur pln euro dollars
@@ -317,13 +602,21 @@ def message_looks_like_filter_search(message: str) -> bool:
     text = (message or "").strip()
     if not text:
         return False
+    filters = extract_search_filters_deterministic(text)
+    # Non-Thailand places must route as search (Thailand-only reply), even if other
+    # tokens look project-name-like ("I want to buy properties in India").
+    if filters.get("foreign_location"):
+        return True
     if looks_like_project_name(text):
         return False
-    filters = extract_search_filters_deterministic(text)
-    has_loc = bool(filters.get("location") or filters.get("foreign_location") or filters.get("is_broad_thailand"))
+    has_loc = bool(filters.get("location") or filters.get("is_broad_thailand"))
     has_type = bool(filters.get("property_type") or filters.get("is_multiple_types"))
     has_budget = filters.get("max_price") is not None or filters.get("min_price") is not None
-    has_beds = filters.get("bedrooms") is not None
+    has_beds = (
+        filters.get("bedrooms") is not None
+        or filters.get("min_bedrooms") is not None
+        or filters.get("max_bedrooms") is not None
+    )
     has_amenity = bool(
         filters.get("required_amenities")
         or filters.get("has_pool")
@@ -337,6 +630,9 @@ def message_looks_like_filter_search(message: str) -> bool:
         return True
     # Type + budget/beds without needing location
     if has_type and (has_budget or has_beds):
+        return True
+    # Bedroom-only asks ("4 or more bedrooms", "20 or more bedrooms")
+    if has_beds:
         return True
     # "Pokaż/Show me" + any structured filter
     if has_show and (has_loc or has_type or has_budget or has_beds or has_amenity):
@@ -400,8 +696,20 @@ def _mention_intent(msg_clean: str) -> Optional[Tuple[IntentType, Dict[str, Any]
     if constrained and not (mention.confident and mention.n_core >= 2):
         return None
     if mention.confident:
-        name = mention.confident.display_name
-        return IntentType.PROPERTY_DETAILS, {"property_name": name, "property_id": name, "focus_question": msg_clean}
+        entry = mention.confident
+        name = entry.display_name
+        pid = entry.doc_id or name
+        # Bare typed name alone ("Anava") — leave for later name-index / agent resolution.
+        # In-sentence mentions ("tell me more about Anava") still become PROPERTY_DETAILS.
+        span = (getattr(mention, "span", None) or name or "").strip()
+        msg_compact = re.sub(r"\s+", " ", msg_clean).strip(" .,?!")
+        if msg_compact.lower() in {span.lower(), name.lower(), (pid or "").lower()}:
+            return None
+        return IntentType.PROPERTY_DETAILS, {
+            "property_name": name,
+            "property_id": pid,
+            "focus_question": msg_clean,
+        }
     msg_digits = set(re.findall(r"\b\d+\b", low))
     digit_hit = bool(msg_digits) and any(
         msg_digits & set(re.findall(r"\b\d+\b", a)) for c in mention.candidates[:3]
@@ -425,7 +733,11 @@ def _name_lookup_after_search_verb(msg_clean: str) -> Optional[Tuple[IntentType,
     if not _SHOW_SEARCH_VERBS.search(msg_clean):
         return None
     rem = re.sub(r"\s+", " ", _SHOW_SEARCH_VERBS.sub(" ", msg_clean)).strip(" .,?!")
-    rem = re.sub(r"^(?:me|us|the|a|an|please|for)\s+", "", rem, flags=re.I).strip()
+    rem = re.sub(r"^(?:me|us|the|a|an|please|for|ok|okay)\s+", "", rem, flags=re.I).strip()
+    # "show me more about X" → extract X (DETAILS phrasing left after stripping the search verb)
+    _more = re.match(r"^(?:more\s+about|details?\s+(?:about|for|on)|info\s+(?:about|on))\s+(.+)$", rem, flags=re.I)
+    if _more:
+        rem = _more.group(1).strip(" .,?!")
     if len(rem) < 3 or not looks_like_project_name(rem):
         return None  # only search vocabulary / places / numbers: a genuine filter search
     if re.search(r"\b(?:in|at|near|around|w|we|na|z|ze|do|dla|nad|ใน)\b", rem, flags=re.I):
@@ -437,7 +749,13 @@ def _name_lookup_after_search_verb(msg_clean: str) -> Optional[Tuple[IntentType,
         # An unknown Capitalised name ("Show me Atlantis Bay Villas") is also a name lookup, so the
         # visitor hears "not found" instead of being shown arbitrary villas.
         if known or re.search(r"[A-Z]", rem):
-            return IntentType.PROPERTY_DETAILS, {"property_name": rem, "property_id": rem, "focus_question": msg_clean}
+            pid = mr.confident.doc_id if mr.confident is not None else rem
+            name = mr.confident.display_name if mr.confident is not None else rem
+            return IntentType.PROPERTY_DETAILS, {
+                "property_name": name,
+                "property_id": pid,
+                "focus_question": msg_clean,
+            }
     except Exception:
         pass
     return None
@@ -534,6 +852,61 @@ def detect_deterministic_intent(
             "target_ref": _lead_target_ref(msg_clean),
         }
 
+    # 0.2 Inventory asks: "Do you have …?", "Is there …?", "Have you got …?"
+    # Never treat "you" / "there" / "anything" as a property name.
+    _inv = re.match(
+        r"^(?:do\s+you\s+have|have\s+you\s+got|is\s+there|are\s+there|"
+        r"czy\s+(?:masz|macie|jest)|มี(?:ไหม)?)\s+"
+        r"(?:a\s+|an\s+|any\s+|some\s+)?(.+?)\s*[?.!]*$",
+        msg_clean,
+        flags=re.IGNORECASE,
+    )
+    if _inv:
+        rem = _inv.group(1).strip(" .,?!")
+        rem = re.sub(r"^(?:a|an|any|some|the)\s+", "", rem, flags=re.I).strip()
+        extracted_inv = extract_search_filters_deterministic(message)
+        _has_filters = any(
+            extracted_inv.get(k) is not None
+            for k in (
+                "bedrooms", "min_bedrooms", "max_bedrooms", "location", "property_type",
+                "max_price", "min_price", "has_pool", "required_amenities", "beach_access",
+                "sea_view", "foreign_location",
+            )
+        )
+        # Strip trailing filter phrases so "Pirak Villa under 30M" still resolves the name
+        rem_name = re.split(
+            r"\b(?:with|under|below|over|above|between|or\s+more|or\s+fewer|"
+            r"at\s+least|at\s+most|up\s+to|in|w|do|od)\b",
+            rem,
+            maxsplit=1,
+            flags=re.I,
+        )[0].strip(" .,?!")
+        if rem_name and is_valid_property_name_candidate(rem_name):
+            try:
+                from app.services.property_name_index import match_property_name
+                mr = match_property_name(rem_name)
+                if mr.confident is not None:
+                    return IntentType.PROPERTY_DETAILS, {
+                        "property_id": mr.confident.doc_id,
+                        "property_name": mr.confident.display_name,
+                        "focus_question": msg_clean,
+                        "ignore_stored_filters": True,
+                    }
+            except Exception:
+                pass
+            if looks_like_project_name(rem_name):
+                return IntentType.PROPERTY_DETAILS, {
+                    "property_name": rem_name,
+                    "property_id": rem_name,
+                    "focus_question": msg_clean,
+                    "ignore_stored_filters": True,
+                }
+        if _has_filters or message_looks_like_filter_search(msg_clean) or not is_valid_property_name_candidate(rem):
+            if _has_filters or message_looks_like_filter_search(msg_clean):
+                return IntentType.PROPERTY_SEARCH, extracted_inv
+            # "Do you have anything?" with no filters → soft search / clarify via search path
+            return IntentType.PROPERTY_SEARCH, extracted_inv or {}
+
     # 1. Show All Properties (Reset all filters)
     for pat in SHOW_ALL_PATTERNS:
         if re.search(pat, msg_low):
@@ -543,11 +916,35 @@ def detect_deterministic_intent(
     for pat in SHOW_MORE_PATTERNS:
         if re.search(pat, msg_low):
             curr_offset = state.get("pagination_offset", 0)
+            # NEW filter values in the same message override stored ones
+            # (e.g. "show me other under 20 million" must not keep a 40M budget).
+            extracted = extract_search_filters_deterministic(message)
+            override_keys = (
+                "location",
+                "property_type",
+                "bedrooms",
+                "min_bedrooms",
+                "max_bedrooms",
+                "max_price",
+                "min_price",
+                "has_pool",
+                "required_amenities",
+                "beach_access",
+            )
+            filter_overrides = {
+                k: extracted[k]
+                for k in override_keys
+                if k in extracted and extracted[k] is not None
+            }
+            filters_changed = bool(filter_overrides)
             return IntentType.SHOW_MORE, {
-                "offset": curr_offset + state.get("limit", 4),
+                # New filters → fresh result list (offset 0); else paginate
+                "offset": 0 if filters_changed else (curr_offset + state.get("limit", 4)),
                 "limit": state.get("limit", 4),
                 "reject_active": message_rejects_active_property(msg_low),
                 "reuse_active_filters": True,
+                "filter_overrides": filter_overrides,
+                "filters_changed": filters_changed,
             }
 
     # 1.2 PDF / Brochure request — detect and extract target property ID
@@ -626,17 +1023,6 @@ def detect_deterministic_intent(
             "property_id": prop_matches[0].upper()
         }
 
-    _DETAIL_SKIP_NAMES = {
-        "phuket", "samui", "koh samui", "bangkok", "pattaya", "thailand", "tajlandia",
-        "villas", "villa", "condo", "condominium", "properties", "property", "more",
-        "options", "results", "listings", "first properties", "second properties",
-        "third properties", "first ones", "second ones", "third ones",
-        # Polish type / listing vocabulary (never project names)
-        "willa", "wille", "willi", "willę", "willą", "willy",
-        "apartament", "apartamenty", "apartamentów", "apartamentow",
-        "mieszkanie", "mieszkania", "nieruchomości", "nieruchomosci",
-        "oferty", "ofert", "kondominium",
-    }
     _filter_search_message = message_looks_like_filter_search(msg_clean)
     _ORDINAL_WORD_TO_IDX = {
         "FIRST": 0, "1ST": 0, "1": 0, "อันแรก": 0,
@@ -673,11 +1059,14 @@ def detect_deterministic_intent(
                 name_match = re.search(pat, msg_clean, flags=re.IGNORECASE)
                 named = (name_match.group(1).strip() if name_match else target_raw).strip(" .,?!")
                 named_l = named.lower()
+                if _is_amenity_only_name_candidate(named):
+                    break
                 # Skip if captured "name" is only type/location filter words
                 named_tokens = [t for t in re.split(r"[^\wąćęłńóśźż]+", named_l) if t and len(t) > 1]
                 if named_tokens and all(
                     t in _FILTER_TYPE_TOKENS
                     or t in _DETAIL_SKIP_NAMES
+                    or t in _AMENITY_NAME_TOKENS
                     or t in {"w", "do", "od", "na", "in", "under", "mln", "thb", "baht", "million"}
                     or t.isdigit()
                     for t in named_tokens
@@ -704,6 +1093,19 @@ def detect_deterministic_intent(
                         ):
                             mapped_id = str(rid)
                             break
+                # Prefer name-index id; unknown-but-plausible project names still go to DETAILS (honest not-found)
+                if not mapped_id and not slug_like:
+                    try:
+                        from app.services.property_name_index import match_property_name
+                        mr = match_property_name(named)
+                        if mr.confident is not None:
+                            mapped_id = mr.confident.doc_id
+                            named = mr.confident.display_name
+                        elif not looks_like_project_name(named):
+                            break
+                    except Exception:
+                        if not looks_like_project_name(named):
+                            break
                 return IntentType.PROPERTY_DETAILS, {
                     "property_name": named,
                     "property_id": mapped_id or named,
@@ -718,15 +1120,38 @@ def detect_deterministic_intent(
                     "from_property_context": True,
                 }
 
-    # Anaphoric + active property context (supports 100+ follow-ups without renaming the property)
     active_id = (selected_ids[0] if selected_ids else None) or (pctx.get("active_property_id") if pctx else None)
-    if any(phrase in msg_low for phrase in [
+
+    # Named-property fact question (spa/pool/parking/…) — before amenity→search
+    named_fact_intent = try_named_property_fact_intent(msg_clean, active_property_id=active_id)
+    if named_fact_intent is not None:
+        return named_fact_intent
+
+    # Amenity refine on an active search ("Which have a private pool?") beats single-property facts
+    _plural_amenity_filter = bool(re.search(
+        r"\b(?:which|what)\s+(?:ones?\s+)?(?:have|has|with)\b|"
+        r"\bwhich\s+have\b|"
+        r"\b(?:any|ones?)\s+with\b",
+        msg_low,
+    ))
+    _has_active_search = bool(
+        state.get("active_filters") or state.get("location") or state.get("last_result_ids")
+    )
+
+    # Anaphoric + active property context (supports 100+ follow-ups without renaming the property)
+    if not _plural_amenity_filter and any(phrase in msg_low for phrase in [
         "that one", "give me that", "show that", "tell me about it", "อันนั้น", "ขออันนี้", "ดูอันนั้น",
         "this property", "that property", "this villa", "that villa", "its price", "its amenities",
         "its location", "does it", "is it ", "has it", "what about it", "does it also",
         "and does it", "and has it", "where is it", "where is this", "located",
         "have pool", "has pool", "have a pool", "has a parking", "have parking",
-    ]) or (active_id and re.search(r"\b(pool|parking|price|bedroom|location|beach|amenit)", msg_low)):
+        "how many bedroom", "bedrooms in this", "bedrooms in it",
+    ]) or (
+        active_id
+        and not _plural_amenity_filter
+        and re.search(r"\b(pool|parking|price|bedroom|location|beach|amenit)", msg_low)
+        and not (_has_active_search and re.search(r"\b(?:which|any|ones?)\b", msg_low))
+    ):
         focus = active_id or (last_result_ids[0] if last_result_ids else None)
         if focus:
             return IntentType.PROPERTY_DETAILS, {
@@ -741,8 +1166,9 @@ def detect_deterministic_intent(
         msg_low
     ))
     amenity_or_fact = bool(re.search(
-        r"(?:pool|swimming|beach|price|cost|bedroom|bedrooms|area|size|sqm|location|status|parking|"
-        r"amenit|available|availability|basen|sypialn|cena|สระ|ห้องนอน|ราคา|ทำเล|ที่จอด)",
+        r"(?:pool|spa|gym|parking|brochure|pdf|swimming|beach|price|cost|bedroom|bedrooms|"
+        r"area|size|sqm|location|status|amenit|available|availability|basen|sypialn|"
+        r"cena|สระ|ห้องนอน|ราคา|ทำเล|ที่จอด)",
         msg_low
     ))
     if attr_q and amenity_or_fact:
@@ -773,30 +1199,56 @@ def detect_deterministic_intent(
         named_fact = None
         _price_q = (
             re.search(r"(?:what(?:'s| is| are)\s+)?(?:the\s+)?(?:prices?|cost)\s+(?:of|for)\s+(?:the\s+)?(.+?)\s*[?.!]*$", msg_low)
-            or re.search(r"how much\s+(?:does|is|do|are)\s+(?:the\s+)?(.+?)(?:\s+cost)?\s*[?.!]*$", msg_low)
+            or re.search(r"how much\s+(?:does|is|do|are)\s+(?:the\s+|a\s+|an\s+)?(.+?)(?:\s+cost)?\s*[?.!]*$", msg_low)
         )
         if _price_q and looks_like_project_name(_price_q.group(1)):
             named_fact = _price_q
-        if not named_fact and not _price_q:
+        if not named_fact:
             named_fact = re.search(
-                r"(?:does|do|has|have|what(?:'s| is)|how much|price of|cena|czy)\s+(.+?)\s+(?:have|has|include|with|cost|price|pool|beach|bedroom|อยู่|มี)",
+                r"(?:does|do|has|have|is|are|what(?:'s| is)|price of|cena|czy)\s+(.+?)\s+"
+                r"(?:have|has|include|with|cost|price|pool|beach|bedroom|spa|gym|parking|brochure|อยู่|มี)",
                 msg_low
             )
         if not named_fact:
             named_fact = re.search(
-                r"(?:does|do)\s+(.+?)\s+have\s+",
+                r"(?:does|do|is)\s+(.+?)\s+have\s+",
                 msg_low
             )
-        if named_fact:
+        if named_fact and not _plural_amenity_filter:
             named = named_fact.group(1).strip(" .,?!")
-            named = re.sub(r"^(?:the|a|an)\s+", "", named).strip()
-            if (named and len(named) >= 3 and named.lower() not in _DETAIL_SKIP_NAMES and "property" not in named.lower()
-                    and named.split()[0].lower() not in {"the", "a", "an", "does", "do", "is", "are"}):
-                return IntentType.PROPERTY_DETAILS, {
-                    "property_name": named,
-                    "property_id": named,
-                    "focus_question": msg_clean,
-                }
+            named = re.sub(r"^(?:the|a|an|does|do|is|are)\s+", "", named).strip()
+            if (
+                named
+                and len(named) >= 3
+                and named.lower() not in _DETAIL_SKIP_NAMES
+                and "property" not in named.lower()
+                and named.split()[0].lower() not in {"the", "a", "an", "does", "do", "is", "are"}
+                and not _is_amenity_only_name_candidate(named)
+                and not (
+                    re.search(r"\b(?:in|at|near|around|w)\b", named.lower())
+                    and not looks_like_project_name(named)
+                )
+            ):
+                try:
+                    from app.services.property_name_index import match_property_name
+                    mr = match_property_name(named)
+                    if mr.confident is not None:
+                        return IntentType.PROPERTY_DETAILS, {
+                            "property_id": mr.confident.doc_id,
+                            "property_name": mr.confident.display_name,
+                            "focus_question": msg_clean,
+                            "named_fact": True,
+                            "ignore_stored_filters": True,
+                        }
+                except Exception:
+                    pass
+                # Unknown-but-plausible project name → still PROPERTY_DETAILS (honest not-found)
+                if looks_like_project_name(named):
+                    return IntentType.PROPERTY_DETAILS, {
+                        "property_name": named,
+                        "property_id": named,
+                        "focus_question": msg_clean,
+                    }
 
     # Named property comparison: "Compare Larimar Villa and Nile Residence"
     if any(k in msg_low for k in ["compare", "comparison", "vs", "versus", "porównaj", "porownaj", "เปรียบเทียบ"]):
@@ -817,9 +1269,11 @@ def detect_deterministic_intent(
                 }
 
     # 4. Filter Refinement on active search
-    has_refine_clue = any(re.search(p, msg_low) for p in REFINE_PATTERNS)
-    is_short = len(msg_low.split()) <= 8
-    if has_refine_clue and is_short and (state.get("active_filters") or state.get("location") or state.get("property_type")):
+    has_refine_clue = any(re.search(p, msg_low) for p in REFINE_PATTERNS) or (
+        _plural_amenity_filter and bool(re.search(r"\b(?:pool|gym|parking|sea\s*view|basen)\b", msg_low))
+    )
+    is_short = len(msg_low.split()) <= 12
+    if has_refine_clue and is_short and (state.get("active_filters") or state.get("location") or state.get("property_type") or state.get("bedrooms") or state.get("last_result_ids")):
         refinements = {}
         # Cheaper delta
         if "cheaper" in msg_low or "tańsze" in msg_low or "ถูกกว่า" in msg_low:
@@ -894,7 +1348,12 @@ def detect_deterministic_intent(
         _ctx_names = {str(r).lower() for r in ((pctx or {}).get("reference_map") or {})}
         if named and named.lower() not in _ctx_names and not looks_like_project_name(named):
             named = None
-        if named and len(named) >= 3 and named.lower() not in _DETAIL_SKIP_NAMES:
+        if (
+            named
+            and len(named) >= 3
+            and named.lower() not in _DETAIL_SKIP_NAMES
+            and not _is_amenity_only_name_candidate(named)
+        ):
             # Prefer known session id when available
             mapped_id = None
             ref_map = (pctx or {}).get("reference_map") or {}
@@ -904,12 +1363,24 @@ def detect_deterministic_intent(
                 if len(ref_l) >= 3 and (named_l == ref_l or named_l in ref_l or ref_l in named_l):
                     mapped_id = str(rid)
                     break
-            return IntentType.PROPERTY_DETAILS, {
-                "property_name": named,
-                "property_id": mapped_id or named,
-                "focus_question": msg_clean,
-                "from_property_context": True,
-            }
+            if not mapped_id:
+                try:
+                    from app.services.property_name_index import match_property_name
+                    mr = match_property_name(named)
+                    if mr.confident is not None:
+                        mapped_id = mr.confident.doc_id
+                        named = mr.confident.display_name
+                    else:
+                        named = None
+                except Exception:
+                    named = None
+            if named:
+                return IntentType.PROPERTY_DETAILS, {
+                    "property_name": named,
+                    "property_id": mapped_id or named,
+                    "focus_question": msg_clean,
+                    "from_property_context": True,
+                }
 
     # 6. General Real Estate Informational Questions (only when no named listing)
     general_topics = [
@@ -945,6 +1416,11 @@ def detect_deterministic_intent(
     _by_name = _name_lookup_after_search_verb(msg_clean)
     if _by_name:
         return _by_name
+    # Last-chance: amenity words must not force a search when this is a named fact Q
+    named_fact_late = try_named_property_fact_intent(msg_clean, active_property_id=active_id)
+    if named_fact_late is not None:
+        return named_fact_late
+
     if message_looks_like_filter_search(msg_clean):
         return IntentType.PROPERTY_SEARCH, extract_search_filters_deterministic(message)
     if looks_like_project_name(msg_clean):
@@ -958,18 +1434,34 @@ def detect_deterministic_intent(
         or bool(extracted_test.get("location_fuzzy"))
         or bool(state.get("active_filters") or state.get("location") or state.get("last_result_ids"))
     )
+    # Amenity alone is NOT search intent when it looks like a named-property fact
+    amenity_alone = bool(extracted_test.get("required_amenities")) and not (
+        extracted_test.get("location")
+        or extracted_test.get("max_price")
+        or extracted_test.get("bedrooms")
+        or _SHOW_SEARCH_VERBS.search(msg_low)
+    )
     has_search_intent = any(k in msg_low for k in search_keywords) or (
         ("location" in extracted_test) and (
             "property_type" in extracted_test
             or "bedrooms" in extracted_test
+            or "min_bedrooms" in extracted_test
+            or "max_bedrooms" in extracted_test
             or "max_price" in extracted_test
             or location_followup
         )
-    ) or ("property_type" in extracted_test and any(k in msg_low for k in ["cheapest", "lowest", "affordable", "najtańszy", "najtanszy", "ถูกที่สุด", "ราคาต่ำสุด"])) or bool(extracted_test.get("foreign_location")) or bool(extracted_test.get("required_amenities"))
+    ) or ("property_type" in extracted_test and any(k in msg_low for k in ["cheapest", "lowest", "affordable", "najtańszy", "najtanszy", "ถูกที่สุด", "ราคาต่ำสุด"])) or bool(extracted_test.get("foreign_location")) or (
+        bool(extracted_test.get("required_amenities")) and not amenity_alone
+    ) or (
+        extracted_test.get("bedrooms") is not None
+        or extracted_test.get("min_bedrooms") is not None
+        or extracted_test.get("max_bedrooms") is not None
+    )
     if has_search_intent:
         _has_filter = any(
             extracted_test.get(k) not in (None, "", [], False)
-            for k in ("location", "property_type", "bedrooms", "max_price", "min_price", "required_amenities",
+            for k in ("location", "property_type", "bedrooms", "min_bedrooms", "max_bedrooms",
+                      "max_price", "min_price", "required_amenities",
                       "foreign_location", "is_broad_thailand", "is_multiple_types", "has_pool", "beach_access",
                       "sea_view", "show_all")
         )
@@ -1136,13 +1628,57 @@ def _extract_search_filters_deterministic_impl(message: str) -> Dict[str, Any]:
     except Exception:
         pass
 
-    # Bedrooms (allow hyphen: "50-bedroom", "3-bed", Polish "3 sypialnie")
-    bed_match = re.search(
-        r"(\d+)\s*[-–]?\s*(?:bedrooms?|beds?|br|sypialni[aeę]?|sypialn|pokoj(?:e|i)?|ห้องนอน|ห้อง)\b",
-        msg_low,
+    # Bedroom ranges / min / max BEFORE exact count
+    # "4 or more", "4+", "at least 4", "more than 3" (→ min 4), "over 3" (→ min 4)
+    # "3 or fewer", "up to 3", "at most 3"
+    # "between 3 and 5", "3-5 bedrooms", "5-6 beds"
+    # PL: "co najmniej 4 sypialnie", "4 lub więcej", "od 3 do 5"
+    # TH: "4 ห้องนอนขึ้นไป", "อย่างน้อย 4 ห้องนอน"
+    _bed_unit = r"(?:bedrooms?|beds?|br|sypialni[aeę]?|sypialn|pokoj(?:e|i)?|ห้องนอน|ห้อง)?"
+    _min_bed = (
+        re.search(rf"(\d+)\s*\+\s*{_bed_unit}", msg_low)
+        or re.search(rf"(\d+)\s+(?:or\s+more|bedrooms?\s+or\s+more|beds?\s+or\s+more)\b", msg_low)
+        or re.search(rf"(?:at\s+least|minimum|min\.?)\s+(\d+)\s*{_bed_unit}", msg_low)
+        or re.search(rf"(?:more\s+than|over)\s+(\d+)\s*{_bed_unit}", msg_low)
+        or re.search(rf"co\s+najmniej\s+(\d+)\s*{_bed_unit}", msg_low)
+        or re.search(rf"(\d+)\s+lub\s+wi[eę]cej\s*{_bed_unit}", msg_low)
+        or re.search(rf"(\d+)\s*ห้องนอน\s*ขึ้นไป", msg_low)
+        or re.search(rf"อย่างน้อย\s*(\d+)\s*{_bed_unit}", msg_low)
     )
-    if bed_match:
-        filters["bedrooms"] = int(bed_match.group(1))
+    if _min_bed:
+        n = int(_min_bed.group(1))
+        # "more than 3" / "over 3" → minimum 4
+        if re.search(r"(?:more\s+than|over)\s+\d+", _min_bed.group(0) or ""):
+            n = n + 1
+        filters["min_bedrooms"] = n
+
+    _max_bed = (
+        re.search(rf"(\d+)\s+or\s+fewer\b", msg_low)
+        or re.search(rf"(?:up\s+to|at\s+most|maximum|max\.?|no\s+more\s+than)\s+(\d+)\s*{_bed_unit}", msg_low)
+        or re.search(rf"(?:nie\s+wi[eę]cej\s+ni[zż]|maksymalnie)\s+(\d+)\s*{_bed_unit}", msg_low)
+    )
+    if _max_bed and "min_bedrooms" not in filters:
+        filters["max_bedrooms"] = int(_max_bed.group(1))
+
+    _range_bed = (
+        re.search(rf"between\s+(\d+)\s+and\s+(\d+)\s*{_bed_unit}", msg_low)
+        or re.search(rf"od\s+(\d+)\s+do\s+(\d+)\s*{_bed_unit}", msg_low)
+        or re.search(rf"(\d+)\s*[-–]\s*(\d+)\s*{_bed_unit}", msg_low)
+    )
+    if _range_bed:
+        a, b = int(_range_bed.group(1)), int(_range_bed.group(2))
+        filters["min_bedrooms"] = min(a, b)
+        filters["max_bedrooms"] = max(a, b)
+        filters.pop("bedrooms", None)
+
+    # Exact bedrooms (allow hyphen: "50-bedroom", "3-bed") — skip if range already set
+    if "min_bedrooms" not in filters and "max_bedrooms" not in filters:
+        bed_match = re.search(
+            r"(\d+)\s*[-–]?\s*(?:bedrooms?|beds?|br|sypialni[aeę]?|sypialn|pokoj(?:e|i)?|ห้องนอน|ห้อง)\b",
+            msg_low,
+        )
+        if bed_match:
+            filters["bedrooms"] = int(bed_match.group(1))
 
     # Bathrooms
     bath_match = re.search(r"(\d+)\s*(?:bath|bathroom|lazienk|łazienk|ห้องน้ำ)", msg_low)

@@ -92,6 +92,107 @@ def get_brochure_unavailable_text(
     )
 
 
+def get_viewing_request_recorded_text(
+    language: str = "en",
+    *,
+    property_label: str = "",
+    preferred_date: str = "",
+    preferred_time: str = "",
+) -> str:
+    """
+    Public chat reply after schedule_viewing records a request (no calendar / no email).
+    Must never say confirmed, booked, or added to calendar.
+    """
+    lang = normalize_language(language) or "en"
+    prop = (property_label or "this property").strip() or "this property"
+    date = (preferred_date or "").strip() or "the requested date"
+    time = (preferred_time or "").strip() or "the requested time"
+
+    if lang == "th":
+        return (
+            f"ระบบได้บันทึกคำขอนัดชม {prop} ในวันที่ {date} เวลา {time} แล้ว "
+            "ทีมที่ปรึกษาจะติดต่อกลับเพื่อยืนยันนัดหมายครับ"
+        )
+    if lang == "pl":
+        return (
+            f"Twoja prośba o oglądanie obiektu {prop} w dniu {date} o {time} została zapisana. "
+            "Nasz zespół doradców skontaktuje się z Tobą, aby potwierdzić termin."
+        )
+    return (
+        f"Your viewing request for {prop} on {date} at {time} has been recorded. "
+        "Our advisory team will contact you to confirm."
+    )
+
+
+def get_brochure_email_not_available_text(
+    language: str = "en",
+    site_origin: Optional[str] = None,
+) -> str:
+    """Honest reply: chat cannot email brochures; use PDF download / capture lead."""
+    tenant = resolve_tenant(site_origin)
+    advisor = getattr(tenant, "advisor_email", None) or ""
+    lang = normalize_language(language) or "en"
+    if lang == "th":
+        return (
+            "แชทนี้ไม่สามารถส่งอีเมลได้ครับ กรุณาใช้ปุ่มดาวน์โหลดโบรชัวร์ PDF บนการ์ดอสังหาริมทรัพย์ "
+            f"หรือแจ้งอีเมลของคุณเพื่อให้ทีมที่ปรึกษา ({advisor}) ส่งเอกสารให้"
+        )
+    if lang == "pl":
+        return (
+            "Z czatu nie wysyłamy e-maili. Skorzystaj z przycisku pobierania broszury PDF na karcie oferty "
+            f"albo podaj swój e-mail, a zespół doradców ({advisor}) prześle dokumenty."
+        )
+    return (
+        "We cannot send emails from this chat. Please use the PDF brochure download button / link on the property card, "
+        f"or share your email so our advisory team ({advisor}) can send it to you."
+    )
+
+
+def get_cannot_email_or_calendar_text(
+    language: str = "en",
+    site_origin: Optional[str] = None,
+    visitor_email: Optional[str] = None,
+) -> str:
+    """
+    Honest reply when the visitor asks the bot to email them or add a calendar event.
+    {email} is the current tenant's advisory email (never invent a brand address).
+    """
+    tenant = resolve_tenant(site_origin)
+    advisor = getattr(tenant, "advisor_email", None) or ""
+    lang = normalize_language(language) or "en"
+    noted = bool((visitor_email or "").strip())
+
+    if lang == "th":
+        if noted:
+            return (
+                "แชทนี้ไม่สามารถส่งอีเมลหรือเพิ่มนัดหมายในปฏิทินได้ครับ "
+                f"ระบบได้บันทึกรายละเอียดของคุณแล้ว และทีมที่ปรึกษาจะติดต่อคุณที่ {advisor}"
+            )
+        return (
+            "แชทนี้ไม่สามารถส่งอีเมลหรือเพิ่มนัดหมายในปฏิทินได้ครับ "
+            f"โปรดแจ้งอีเมลของคุณ ทีมที่ปรึกษาจะติดต่อกลับที่ {advisor}"
+        )
+    if lang == "pl":
+        if noted:
+            return (
+                "Nie mogę wysyłać e-maili ani dodawać wydarzeń do kalendarza z tego czatu. "
+                f"Zapisałem Twoje dane, a nasz zespół doradców skontaktuje się z Tobą pod adresem {advisor}."
+            )
+        return (
+            "Nie mogę wysyłać e-maili ani dodawać wydarzeń do kalendarza z tego czatu. "
+            f"Podaj swój e-mail, a zespół doradców skontaktuje się z Tobą pod adresem {advisor}."
+        )
+    if noted:
+        return (
+            "I can't send emails or add calendar events from this chat. "
+            f"I have noted your details, and our advisory team will contact you at {advisor}."
+        )
+    return (
+        "I can't send emails or add calendar events from this chat. "
+        f"Please share your email, and our advisory team will contact you at {advisor}."
+    )
+
+
 def build_session_limit_reply(
     language: str = "en",
     site_origin: Optional[str] = None,
@@ -588,7 +689,7 @@ TON & CORE RULES (Main Scope §5.6):
 - STRICT GROUNDING & ZERO HALLUCINATION: Rely ONLY on live verified production data provided in context. Never invent prices, property IDs, names, ROI, or availability.
 - MISSING DATA: If production data does not contain the answer, use only the official fallback message. NEVER guess or fabricate details.
 - LEGAL & FINANCIAL: Disclaim formal legal guarantees and state that rental returns vary and cannot be guaranteed by law. Refer clients to licensed Thai legal counsel for contract review.
-- ACTIONS: Call `generate_property_brochure` when user requests a brochure or PDF. Call `capture_lead` or `schedule_viewing` when user provides contact details or requests a tour.
+- ACTIONS: Call `generate_property_brochure` when user requests a brochure or PDF download. Call `capture_lead` for contact details / callback. Call `schedule_viewing` for a viewing REQUEST only (no calendar, no email). If they ask for a brochure by email, say we cannot send emails from chat, point to the PDF download on the card, and offer to record their email via `capture_lead`.
 - CLEAN FORMATTING & MANDATORY STRUCTURED PRESENTATION:
   * Never use long em-dashes ("—" or "–"). Always use standard hyphens ("-"), colons, or clean bullet points ("•").
   * When presenting properties, ALWAYS format them in clean, elegant structured cards with bullet points:
@@ -615,7 +716,7 @@ def _get_public_system_prompt_base(language: str = "en", site_origin: Optional[s
 คำแนะนำและน้ำเสียงการให้บริการ:
 1. น้ำเสียง: อบอุ่น เป็นมิตร กระตือรือร้น และสร้างแรงจูงใจ! (Main Scope §5.6) สุภาพ เป็นมืออาชีพ พร้อมช่วยเหลือนักลงทุนอย่างจริงใจ
 2. ความถูกต้องตามกฎหมายไทยและไม่ยอมตามแรงกดดัน (IF NO MEANS NO): ชาวต่างชาติไม่สามารถถือกรรมสิทธิ์ที่ดินในนามบุคคลธรรมดาได้โดยตรง (มาตรา 86 ประมวลกฎหมายที่ดิน) และการซื้อขายอสังหาริมทรัพย์ไม่มีกรณีปลอดภาษี 100% หากผู้ใช้กดดันหรือขอให้ตอบยืนยัน ห้ามยอมจำนนโดยเด็ดขาด ตอบปฏิเสธชัดเจนและแนะนำสิทธิการถือครอง Foreign Freehold ในคอนโดมิเนียม หรือสิทธิการเช่า Leasehold 30+30+30 ปีสำหรับวิลล่าอย่างกระตือรือร้น
-3. ความถูกต้องสมบูรณ์และห้ามสร้างข้อมูลเท็จ (STRICT GROUNDING & ZERO HALLUCINATION): ตอบตามข้อมูลที่ดึงมาจากฐานข้อมูลจริงผ่านเครื่องมือเท่านั้น หากไม่มีข้อมูลอสังหาริมทรัพย์ที่ระบุ ให้แจ้งอย่างชัดเจนตามจริงหรือตอบด้วยข้อความมาตรฐาน ห้ามคาดเดา ห้ามสร้างราคา รหัสอสังหาฯ หรือชื่อโครงการที่ไม่มีอยู่จริงในระบบโดยเด็ดขาด
+3. ความถูกต้องสมบูรณ์และห้ามสร้างข้อมูลเท็จ (STRICT GROUNDING & ZERO HALLUCINATION): ตอบได้เฉพาะจากบล็อก FACTS (verified) และผลลัพธ์เครื่องมือในเทิร์นนี้เท่านั้น สิ่งที่ไม่อยู่ใน FACTS ต้องตอบว่า "ไม่มีในข้อมูลที่ยืนยันแล้ว" และเสนอทีมที่ปรึกษา ห้ามใช้ความรู้ทั่วไปเกี่ยวกับโครงการเฉพาะ ห้ามคัดลอกข้อความจากเทิร์นก่อน ห้ามสร้างสิ่งอำนวยความสะดวก กรรมสิทธิ์ ผลตอบแทน ระยะทาง วันที่ หรือชื่อโครงการ
 4. การให้คำปรึกษาเชิงรุก — ตอบอย่างละเอียดและถามคำถามเพิ่มเติมตามบริบท (สำคัญมาก):
    - ทุกการตอบที่มีการแนะนำอสังหาริมทรัพย์ต้องประกอบด้วย:
      ก) บทนำที่อบอุ่น กระตือรือร้น (2-3 ประโยค) อธิบายว่าพบอะไรและทำไมโครงการเหล่านี้จึงโดดเด่น
@@ -626,7 +727,7 @@ def _get_public_system_prompt_base(language: str = "en", site_origin: Optional[s
    - เมื่อผู้ใช้ให้ข้อมูลครบถ้วน: แสดงอสังหาริมทรัพย์ที่ตรงกันโดยตรง ถามเพิ่มเฉพาะเมื่อมีสิ่งสำคัญที่ยังขาดอยู่
 5. การปฏิเสธความรับผิดทางกฎหมายและผลตอบแทน: อัตราผลตอบแทนจากการเช่าอาจมีความผันผวนและไม่สามารถรับประกันทางกฎหมายได้ แนะนำให้ปรึกษาที่ปรึกษากฎหมายที่มีใบอนุญาตสำหรับการตรวจสอบสัญญา
 6. การดาวน์โหลดโบรชัวร์และ PDF: เมื่อผู้ใช้ขอโบรชัวร์, PDF, หรือเอกสารโครงการ ให้เรียกใช้ `generate_property_brochure` พร้อมรหัสอสังหาริมทรัพย์ ระบบจะสร้างโบรชัวร์ PDF ระดับพรีเมียมให้ผู้ใช้ดาวน์โหลดทันที
-7. การบันทึกข้อมูลติดต่อและนัดหมาย: เมื่อผู้ใช้ระบุข้อมูลติดต่อ (อีเมล, เบอร์โทร, ชื่อ) หรือขอนัดหมาย ให้เรียกใช้ `capture_lead` หรือ `schedule_viewing`
+7. การบันทึกข้อมูลติดต่อและคำขอนัดชม: เมื่อผู้ใช้ระบุข้อมูลติดต่อหรือขอให้ติดต่อกลับ ให้เรียก `capture_lead` หากขอนัดชมทรัพย์ ให้เรียก `schedule_viewing` (บันทึกคำขอเท่านั้น ไม่สร้างปฏิทินและไม่ส่งอีเมล) หากขอโบรชัวร์ทางอีเมล ให้แจ้งว่าแชทส่งอีเมลไม่ได้ แนะนำปุ่มดาวน์โหลด PDF บนการ์ด และเสนอบันทึกอีเมลผ่าน `capture_lead` ห้ามกล่าวว่าส่งอีเมลแล้วหรือสร้างนัดในปฏิทินแล้ว
 8. การสอบถามเกี่ยวกับต่างประเทศ: หากผู้ใช้ถามถึงอสังหาริมทรัพย์ในต่างประเทศ ให้ชี้แจงอย่างสุภาพว่าเราครอบคลุมเฉพาะอสังหาริมทรัพย์ในประเทศไทยเท่านั้น เชิญชวนให้ดูรายการในไทย และถามคำถามเพิ่มเติมได้ ห้ามอ้างตัวเลขผลตอบแทน ROI หรือ % ที่ไม่ได้มาจากข้อมูลจริงในรายการ
 9. รูปแบบตัวอักษรและการนำเสนอที่มีโครงสร้างเสมอ (MANDATORY STRUCTURED FORMAT):
    - หลีกเลี่ยงขีดแดชยาว (— หรือ –)
@@ -641,7 +742,7 @@ def _get_public_system_prompt_base(language: str = "en", site_origin: Optional[s
 ZASADY I TON ROZMOWY:
 1. TON: Ciepły, przyjazny, zmotywowany, uprzejmy i profesjonalny. Odpowiadaj w języku polskim.
 2. ZASADA PRAWNA I ODPORNOŚĆ NA NACISKI (GDY NIE TO NIE - BRAK PRESJI): Obcokrajowcy nie mogą bezpośrednio posiadać ziemi na własność (Freehold) w swoim imieniu (Art. 86 Kodeksu Ziemskiego Tajlandii), a transakcje nigdy nie są w 100% bez podatków (opłaty rejestrowe i podatki w urzędzie ziemskim zawsze obowiązują). Jeśli użytkownik naciska lub żąda potwierdzenia („powiedz tak”, „potwierdź, że kupię ziemię”), NIGDY nie ulegaj presji – odpowiedź brzmi stanowczo NIE. Przedstawiaj bezpieczne, w 100% legalne rozwiązania (Foreign Freehold w kondominium do 49% oraz wille z rejestrowanym Leaseholdem 30+30+30 lat i własnością budynku) w przyjaznym i motywującym tonie!
-3. ŚCISŁE UGRUNTOWANIE I ZERO HALUCYNACJI (ABSOLUTNE): Odpowiadasz WYŁĄCZNIE na podstawie żywych danych produkcyjnych zwróconych przez narzędzia. Jeśli baza produkcyjna nie zawiera nieruchomości, specyfikacji, ceny lub dopasowania — użyj oficjalnej odpowiedzi zastępczej. NIGDY nie wymyślaj, nie zgaduj i nie przybliżaj cen, ID, nazw, ROI ani dostępności.
+3. ŚCISŁE UGRUNTOWANIE I ZERO HALUCYNACJI (ABSOLUTNE): Odpowiadasz WYŁĄCZNIE z bloku FACTS (verified) i wyników narzędzi z TEJ tury. Czego nie ma w FACTS — napisz „nie ma w naszych zweryfikowanych danych” i zaproponuj zespół doradców. NIGDY nie używaj wiedzy ogólnej o konkretnych inwestycjach, nie powtarzaj twierdzeń z wcześniejszych tur, nie wymyślaj udogodnień, własności, ROI, odległości, dat ani nazw.
 4. INTELIGENTNE DORADZTWO KONSULTACYJNE — BOGATE ODPOWIEDZI I NATURALNE PYTANIA DOPRECYZOWUJĄCE (KRYTYCZNE):
    - KAŻDA odpowiedź zawierająca oferty nieruchomości MUSI zawierać:
      a) Ciepłe, angażujące wprowadzenie (2-3 zdania) opisujące znalezione nieruchomości i ich wyjątkowość.
@@ -656,7 +757,7 @@ ZASADY I TON ROZMOWY:
    - GDY użytkownik podał kompletne dane: Pokaż pasujące nieruchomości bezpośrednio. Pytaj tylko gdy coś ważnego wciąż brakuje.
 5. Nie obiecuj gwarantowanego ROI ani nie udzielaj wiążących porad prawnych - zalecaj kontakt z licencjonowanym tajskim prawnikiem.
 6. GENEROWANIE BROSZUR I PDF: Gdy użytkownik pyta o broszurę, PDF lub ofertę w PDF, wywołaj narzędzie `generate_property_brochure` z ID nieruchomości. System wygeneruje luksusową broszurę PDF i automatycznie rozpocznie pobieranie.
-7. ZAPISYWANIE KONTAKTÓW: Gdy użytkownik podaje e-mail, telefon lub prosi o prezentację, użyj `capture_lead` lub `schedule_viewing`.
+7. ZAPISYWANIE KONTAKTÓW I PROŚBY O OGLĄDANIE: Gdy użytkownik podaje dane kontaktowe lub prosi o telefon, użyj `capture_lead`. Gdy prosi o oglądanie, użyj `schedule_viewing` (tylko zapis prośby - bez kalendarza i bez e-maila). Gdy prosi o broszurę e-mailem, wyjaśnij że czat nie wysyła e-maili, wskaż pobieranie PDF na karcie i zaproponuj zapis e-maila przez `capture_lead`. Nigdy nie twierdź, że e-mail został wysłany lub wydarzenie kalendarza utworzone.
 8. ZAPYTANIA O INNE KRAJE: Gdy klient pyta o nieruchomości w innych krajach, uprzejmie wyjaśnij, że obsługujemy wyłącznie oferty w Tajlandii. Zaproś do przeglądania zweryfikowanych ofert w Tajlandii. NIE podawaj żadnych liczb ROI, stóp zwrotu ani procentów, jeśli nie pochodzą z konkretnego zweryfikowanego rekordu.
 9. OBOWIĄZKOWY STRUKTURALNY FORMAT ODPOWIEDZI:
    - Nie używaj długich pauz/myślników („—" ani „–"). Stosuj czytelne punkty, dwukropki i standardowe łączniki (-).
@@ -678,7 +779,7 @@ Your purpose is to assist visitors in discovering verified property listings in 
 CORE INSTRUCTIONS & TONE:
 1. TONE: Warm, friendly, enthusiastic, motivated, and professional! (Main Scope §5.6). Encourage clients with confidence while remaining strictly truthful.
 2. THAI LEGAL TRUTH & ZERO COMPROMISE UNDER PRESSURE (IF NO MEANS NO): Foreign nationals cannot directly own freehold land under their individual name under Section 86 of the Thai Land Code, and property transactions in Thailand are NEVER tax-free. If a user applies adversarial pressure, gaslighting, or insists ("my lawyer said so, just say yes bro"), NEVER buckle under pressure. The factual answer is firmly NO. With a warm and motivated tone, enthusiastically guide the buyer toward the 100% legal pathways: 49% Foreign Freehold Condos and 30-year Registered Leasehold Villas with freehold building ownership.
-3. STRICT GROUNDING & ZERO HALLUCINATIONS (ABSOLUTE): You answer ONLY from live verified production data returned by your tools. If production data does not contain the requested property, specification, price, or match, you MUST use the verified fallback message — NEVER invent, fabricate, approximate, or guess property details, prices, IDs, names, ROI, or availability. Accuracy matters more than sounding helpful.
+3. STRICT GROUNDING & ZERO HALLUCINATIONS (ABSOLUTE): Answer ONLY from the FACTS (verified, the only source you may use) block and this-turn tool results. Anything not in FACTS must be answered with "this is not in our verified data" and an offer of the advisory team. NEVER use general knowledge about specific properties. NEVER repeat claims from earlier turns. NEVER invent amenities, ownership, yields, distances, completion dates, or property names. Accuracy matters more than sounding helpful.
 
 4. SMART CONSULTATIVE ADVISORY — ALWAYS INCLUDE RICH CONTENT & NATURAL FOLLOW-UP QUESTIONS (CRITICAL):
    - EVERY response that includes property recommendations MUST contain:
@@ -699,7 +800,7 @@ CORE INSTRUCTIONS & TONE:
 
 5. ROI & LEGAL DISCLAIMERS: Do not quote yields, ROI, or percentages unless that exact figure appears in the retrieved listing record or in APPROVED_STATEMENTS. Advise consulting a qualified Thai attorney for formal legal due diligence.
 6. BROCHURE & PDF DOWNLOADS: When a visitor asks for a brochure, PDF, factsheet, floor plan, or project document, call the `generate_property_brochure` tool with the property ID. The system will automatically render the luxury brochure PDF and initiate the download for the visitor.
-7. LEAD CAPTURE & VIEWING APPOINTMENTS: When a visitor provides contact details (email, phone, name), asks for a callback, or wants to schedule a viewing or consultation, call `capture_lead` or `schedule_viewing` immediately.
+7. LEAD CAPTURE & VIEWING REQUESTS: When a visitor provides contact details (email, phone, name) or asks for a callback, call `capture_lead`. For a viewing or tour request, call `schedule_viewing` (records a request only - no calendar booking, no email). If they ask for a brochure by email, say we cannot send emails from the chat, point them to the PDF brochure download on the property card, and offer to record their email via `capture_lead` so the advisory team can send it. Never claim an email was sent or a calendar event was created.
 8. FOREIGN INQUIRIES: If a visitor asks about properties outside Thailand, politely say we only cover Thailand listings, invite them to browse verified Thailand properties, and do not quote any yield or ROI numbers.
 8b. STRICT OFF-TOPIC REFUSAL (CRITICAL): NEVER answer politics, politicians, celebrities, famous private homes (e.g. Antilia), landmark trivia, homework, coding, recipes, health, sports, or general knowledge. Do NOT provide facts and then soft-pitch Thailand. Politely refuse in one short message and invite Thailand property questions only.
 9. MANDATORY STRUCTURED PRESENTATION FORMAT (NEVER UNSTRUCTURED OR RAW TABLES):
@@ -924,11 +1025,66 @@ def get_language_switch_confirmation(language: str, is_admin: bool = False) -> s
         return "We will now continue in English. 🇬🇧 Are you looking for a pool villa in Phuket or a condominium in Koh Samui?"
 
 
+def get_thailand_only_foreign_reply(
+    language: str,
+    site_origin: Optional[str] = None,
+    foreign_place: Optional[str] = None,
+) -> str:
+    """Thailand-only coverage reply for foreign location asks — no yield/ROI numbers."""
+    tenant = resolve_tenant(site_origin)
+    place = (foreign_place or "").strip()
+    place_bit_en = f" ({place})" if place else ""
+    place_bit_pl = f" ({place})" if place else ""
+    place_bit_th = f" ({place})" if place else ""
+    if language == "th":
+        return (
+            f"{tenant.brand_name} ครอบคลุมเฉพาะอสังหาริมทรัพย์ในประเทศไทยเท่านั้น"
+            f"{place_bit_th} และไม่เป็นตัวแทนโครงการนอกประเทศไทย\n\n"
+            f"ทีมที่ปรึกษา ({tenant.advisor_email}) พร้อมช่วยเหลือ "
+            "แจ้งทำเล / งบประมาณ / ประเภทอสังหาฯ ในไทย เพื่อค้นหาจากรายการที่ผ่านการตรวจสอบแล้วครับ"
+        )
+    if language == "pl":
+        return (
+            f"{tenant.brand_name} ({tenant.domain}) obsługuje wyłącznie zweryfikowane oferty w Tajlandii"
+            f"{place_bit_pl} i nie reprezentuje nieruchomości poza Tajlandią.\n\n"
+            f"Nasz zespół doradców ({tenant.advisor_email}) chętnie pomoże. "
+            "Podaj lokalizację, budżet lub typ w Tajlandii — wyszukam tylko wśród zweryfikowanych ofert."
+        )
+    return (
+        f"{tenant.brand_name} only covers verified real estate in Thailand"
+        f"{place_bit_en}. We do not represent properties outside Thailand.\n\n"
+        f"Our advisory team ({tenant.advisor_email}) can help. "
+        "Share a Thailand location, budget, or property type and I will search only among verified listings."
+    )
+
+
 def get_greeting_text(language: str, user_message: str, site_origin: Optional[str] = None) -> str:
     tenant = resolve_tenant(site_origin)
     u_low = user_message.lower()
     is_thanks = any(w in u_low for w in ["thank", "thx", "dzięk", "dziek", "ok", "okay", "super", "świetnie", "swietnie", "cool", "great", "ขอบคุณ", "แต๊ง"])
     is_who = any(w in u_low for w in ["who are you", "kim jesteś", "kim jestes", "what can you do", "co potrafisz", "help", "pomoc", "คุณคือใคร", "ทำอะไรได้บ้าง", "ช่วยอะไรได้บ้าง"])
+    is_how_are_you = any(
+        w in u_low
+        for w in (
+            "how are you",
+            "how're you",
+            "how's it going",
+            "how are things",
+            "jak się masz",
+            "jak sie masz",
+            "co słychać",
+            "co slychac",
+            "สบายดีไหม",
+            "เป็นไงบ้าง",
+            "อย่างไรบ้าง",
+        )
+    )
+    if is_how_are_you and not is_who:
+        if language == "th":
+            return "สบายดีครับ ขอบคุณที่ถาม — พร้อมช่วยค้นหาอสังหาริมทรัพย์ในไทยให้คุณครับ อยากเริ่มจากทำเลหรืองบประมาณไหมครับ?"
+        if language == "pl":
+            return "Dziękuję, wszystko w porządku. W czym mogę dziś pomóc przy nieruchomościach w Tajlandii?"
+        return "I'm doing well, thank you. How can I help with Thailand property today?"
 
     if language == "th":
         if is_thanks:
@@ -1019,26 +1175,8 @@ def get_off_topic_text(language: str, site_origin: Optional[str] = None, user_me
     is_foreign_property_inquiry = (not is_pure_trivia) and has_foreign and has_buy
 
     if is_foreign_property_inquiry:
-        if language == "th":
-            return (
-                f"{tenant.brand_name} ครอบคลุมเฉพาะอสังหาริมทรัพย์ในประเทศไทยเท่านั้น "
-                f"(ภูเก็ต เกาะสมุย กรุงเทพฯ และพื้นที่ใกล้เคียง) และไม่เป็นตัวแทนโครงการนอกประเทศไทย\n\n"
-                f"หากต้องการความช่วยเหลือเพิ่มเติม ติดต่อทีมที่ปรึกษาได้ที่ {tenant.advisor_email}\n"
-                "หรือแจ้งทำเล / งบประมาณ / ประเภทอสังหาฯ ในไทย เพื่อค้นหาจากรายการที่ผ่านการตรวจสอบแล้วครับ"
-            )
-        elif language == "pl":
-            return (
-                f"{tenant.brand_name} ({tenant.domain}) obsługuje wyłącznie zweryfikowane oferty w Tajlandii "
-                f"(Phuket, Koh Samui, Bangkok i okolice) i nie reprezentuje nieruchomości poza Tajlandią.\n\n"
-                f"Nasz zespół doradców ({tenant.advisor_email}) chętnie pomoże. "
-                "Podaj lokalizację, budżet lub typ nieruchomości w Tajlandii, a wyszukam wyłącznie wśród dostępnych, zweryfikowanych ofert."
-            )
-        return (
-            f"{tenant.brand_name} only covers verified real estate in Thailand "
-            f"(Phuket, Koh Samui, Bangkok and nearby areas). We do not represent properties outside Thailand.\n\n"
-            f"Our advisory team ({tenant.advisor_email}) can help. "
-            "Share a Thailand location, budget, or property type and I will search only among verified listings."
-        )
+        place = next((fl for fl in foreign_locs if fl in u_low), None)
+        return get_thailand_only_foreign_reply(language, site_origin=site_origin, foreign_place=place)
 
     # General off-topic / trivia / politics — refuse the question itself, redirect smoothly
     if language == "th":

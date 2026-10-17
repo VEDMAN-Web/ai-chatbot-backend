@@ -648,12 +648,63 @@ def prewarm_property_catalog(target: str = "user") -> None:
         logger.warning("Property catalog pre-warm skipped (Firestore unavailable?): %s", e)
 
 
+def bedroom_nums_from_listing(bedrooms_val: Any) -> List[int]:
+    """Extract integer bedroom counts from a display string or list; empty if unknown."""
+    if bedrooms_val is None:
+        return []
+    if isinstance(bedrooms_val, (list, tuple)):
+        out: List[int] = []
+        for x in bedrooms_val:
+            try:
+                out.append(int(x))
+            except (TypeError, ValueError):
+                out.extend(int(n) for n in re.findall(r"\d+", str(x or "")))
+        return out
+    return [int(n) for n in re.findall(r"\d+", str(bedrooms_val or ""))]
+
+
+def listing_matches_bedroom_constraints(
+    bedrooms_val: Any,
+    *,
+    bedrooms: Optional[int] = None,
+    min_bedrooms: Optional[int] = None,
+    max_bedrooms: Optional[int] = None,
+) -> bool:
+    """
+    Exact / min / max bedroom match against a listing's bedroom field.
+    Unknown bedroom data is excluded when any bedroom constraint is set.
+    Min uses the listing's *largest* configuration ("4 or more" matches "3-5").
+    Max ("at most 3") requires the largest config <= max.
+    A min+max range uses overlap with the listing's [lo, hi].
+    """
+    constrained = bedrooms is not None or min_bedrooms is not None or max_bedrooms is not None
+    if not constrained:
+        return True
+    nums = bedroom_nums_from_listing(bedrooms_val)
+    if not nums:
+        return False
+    lo, hi = min(nums), max(nums)
+    if bedrooms is not None:
+        if not (lo <= int(bedrooms) <= hi):
+            return False
+    if min_bedrooms is not None and max_bedrooms is not None:
+        # Overlap between listing [lo, hi] and requested [min, max]
+        return lo <= int(max_bedrooms) and hi >= int(min_bedrooms)
+    if min_bedrooms is not None:
+        return hi >= int(min_bedrooms)
+    if max_bedrooms is not None:
+        return hi <= int(max_bedrooms)
+    return True
+
+
 def score_property_relevance(
     prop: Dict[str, Any],
     *,
     location: Optional[str] = None,
     property_type: Optional[str] = None,
     bedrooms: Optional[int] = None,
+    min_bedrooms: Optional[int] = None,
+    max_bedrooms: Optional[int] = None,
     max_price: Optional[float] = None,
     min_price: Optional[float] = None,
     has_pool: Optional[bool] = None,
@@ -679,11 +730,15 @@ def score_property_relevance(
             score += 25.0
         elif "condo" in pt and ("condo" in ptype or "apart" in ptype):
             score += 25.0
-    if bedrooms is not None and bedrooms > 0:
-        b_nums = [int(n) for n in re.findall(r"\d+", str(prop.get("bedrooms") or ""))]
-        if b_nums and min(b_nums) <= bedrooms <= max(b_nums):
+    if listing_matches_bedroom_constraints(
+        prop.get("bedrooms"),
+        bedrooms=bedrooms,
+        min_bedrooms=min_bedrooms,
+        max_bedrooms=max_bedrooms,
+    ) and (bedrooms or min_bedrooms or max_bedrooms):
+        b_nums = bedroom_nums_from_listing(prop.get("bedrooms"))
+        if b_nums:
             score += 15.0
-            # Prefer tighter bedroom ranges
             span = max(b_nums) - min(b_nums)
             score += max(0.0, 5.0 - span)
     p_min = prop.get("price_thb_min")
@@ -874,6 +929,8 @@ def search_properties_firestore(
     min_price: Optional[float] = None,
     max_price: Optional[float] = None,
     bedrooms: Optional[int] = None,
+    min_bedrooms: Optional[int] = None,
+    max_bedrooms: Optional[int] = None,
     has_pool: Optional[bool] = None,
     beach_access: Optional[bool] = None,
     required_amenities: Optional[List[str]] = None,
@@ -1056,16 +1113,14 @@ def search_properties_firestore(
             elif is_condo_query and "condo" not in p_type and "apart" not in p_type:
                 continue
 
-        # Bedroom filter — exclude listings with unknown beds when a count was requested
-        if bedrooms is not None and bedrooms > 0:
-            b_str = str(p.get("bedrooms") or "")
-            import re
-            b_nums = [int(n) for n in re.findall(r"\d+", b_str)]
-            if not b_nums:
-                continue
-            min_b, max_b = min(b_nums), max(b_nums)
-            if not (min_b <= bedrooms <= max_b):
-                continue
+        # Bedroom filter — exclude unknown beds when any bedroom constraint is set
+        if not listing_matches_bedroom_constraints(
+            p.get("bedrooms"),
+            bedrooms=bedrooms,
+            min_bedrooms=min_bedrooms,
+            max_bedrooms=max_bedrooms,
+        ):
+            continue
 
         # Price filters — exclude unknown / "price on request" on budget searches
         p_min = p.get("price_numeric_min")
@@ -1110,6 +1165,8 @@ def search_properties_firestore(
                 location=location,
                 property_type=property_type,
                 bedrooms=bedrooms,
+                min_bedrooms=min_bedrooms,
+                max_bedrooms=max_bedrooms,
                 max_price=max_price,
                 min_price=min_price,
                 has_pool=has_pool,
