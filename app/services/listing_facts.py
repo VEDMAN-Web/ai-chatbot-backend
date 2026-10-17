@@ -348,6 +348,7 @@ def short_summary(text: Any, max_chars: int = 260, sentences: int = 2) -> str:
     if m and m.start() > 40:
         t = t[:m.start()].strip()
     parts = re.split(r"(?<=[.!?])\s+(?=[A-Z0-9“\"'])", t)
+    parts = [x for x in parts if "developer marketing claim" not in x.lower()]
     out = ""
     for part in parts[:sentences]:
         cand = (out + " " + part).strip()

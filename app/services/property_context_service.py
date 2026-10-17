@@ -49,6 +49,10 @@ _FACT_HINTS = re.compile(
     r"furnish|maintenance|taxes|visa|euro|\beur\b|zloty|z[lł]ot|\bpln\b|\busd\b|dollar|cheaper|expensive|"
     r"how many|lift|elevator|storey|floors?\b|\bview|good (?:investment|deal)|recommend|guarantee|"
     r"owns?\b|title|lease|mortgage|financ|per sq|one-bedroom|two-bedroom|1-bed|2-bed|"
+    r"\bready\b|\bwhen\b|\bvisit|viewing|\btour\b|\bnearby\b|\bnear\b|"
+    r"\bile\b|kosztuj|koszt\b|\bkiedy\b|uko[nń]cz|gotow|oddani|siłown|silown|parking|plaż|plaz|"
+    r"odległo|odleglo|lotnisk|metra[zż]|powierzchni|cudzoziem|wynaj|zwrot|rentown|zysk|deweloper|"
+    r"płatno|platno|rat[ay]\b|tańsz|tansz|droż|droz|widok|ogr[oó]d|ochron|windy|winda|"
     r"ราคา|สระ|ที่จอด|ทำเล|ห้องนอน|มี\s)",
     re.IGNORECASE,
 )

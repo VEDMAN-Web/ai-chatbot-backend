@@ -38,6 +38,7 @@ from app.services.reply_validator import validate_reply
 from app.core.tenant import resolve_tenant as _resolve_tenant_for_validation
 from app.services.guardrails import ThaiPropertyLegalGuardrail
 from app.services.property_context_service import (
+    _FACT_HINTS,
     load_property_context,
     save_property_context,
     set_active_property,
@@ -1846,6 +1847,12 @@ def _listing_fact_reply(focus_q: str, card: Any, language: str, conversation: An
         return None
 
 
+def _clean_field(v: Any) -> str:
+    """Display-safe string for a listing field; '' for None / 'None' / 'N/A' / empty."""
+    t = str(v).strip() if v is not None else ""
+    return "" if t.lower() in ("", "none", "n/a", "null", "nan") else t
+
+
 class PublicAgentService:
     def __init__(self):
         self.model = settings.OPENAI_MODEL
@@ -2637,6 +2644,31 @@ class PublicAgentService:
         pctx = clear_active_if_new_conversation(pctx, str(getattr(conversation, "id", "") or ""))
         save_property_context(conversation, pctx)
 
+        # 2b. Questions about the listings currently on screen ("which is cheapest?", "który jest tańszy?")
+        from app.services.shown_set import answer_shown_set_question, last_shown_cards
+        _shown_reply = answer_shown_set_question(
+            user_message, last_shown_cards(conversation.message_history or []), active_lang
+        )
+        if _shown_reply:
+            append_conversation_turn(
+                db=db,
+                conversation=conversation,
+                user_message=user_message,
+                assistant_message=_shown_reply,
+                new_preferences=save_property_context(conversation, pctx),
+            )
+            return {
+                "type": "text",
+                "text": _shown_reply,
+                "properties": [],
+                "quick_replies": self._generate_quick_replies(user_message, [], language=active_lang),
+                "lead_captured": False,
+                "preferences": conversation.preferences or {},
+                "session_id": conversation.session_id,
+                "conversation_id": str(conversation.id),
+                "language": active_lang,
+            }
+
         # 3. Deterministic intent routing (0-token fast path for real estate commands)
         intent, parsed_args = detect_deterministic_intent(
             message=user_message,
@@ -2722,6 +2754,24 @@ class PublicAgentService:
                 message=user_message,
                 history=history_list
             )
+
+        if is_off_topic and len(user_message.split()) <= 6 and _FACT_HINTS.search(user_message.lower()) \
+                and not is_off_topic_query(user_message, lenient=True):
+            # Looks like a property question but no property is in focus: ask which one, never refuse.
+            from app.services.property_context_service import _clarification
+            reply_text = _clarification(active_lang, reason="none")
+            append_conversation_turn(db=db, conversation=conversation, user_message=user_message, assistant_message=reply_text)
+            return {
+                "type": "text",
+                "text": reply_text,
+                "properties": [],
+                "quick_replies": self._generate_quick_replies(user_message, [], language=active_lang),
+                "lead_captured": False,
+                "preferences": conversation.preferences or {},
+                "session_id": conversation.session_id,
+                "conversation_id": str(conversation.id),
+                "language": active_lang,
+            }
 
         if is_off_topic:
             reply_text = get_off_topic_text(active_lang, site_origin=conversation.site_origin, user_message=user_message)
@@ -3690,6 +3740,9 @@ class PublicAgentService:
                     "freehold / leasehold",
                 ):
                     p_owner = None
+            p_beds = _clean_field(p_beds)
+            p_area = _clean_field(p_area)
+            _ba = " | ".join(x for x in (p_beds, p_area) if x)  # "Bedrooms / Area" value, only what exists
             amenity_facts = collect_property_amenities(card if isinstance(card, dict) else {})
             has_pool = bool(amenity_facts.get("pool") and amenity_facts["pool"].present) or bool(
                 amenity_facts.get("pool_private") and amenity_facts["pool_private"].present
@@ -3711,15 +3764,15 @@ class PublicAgentService:
                     body = yes_en if ok else no_en
                 return (
                     f"**{p_name}**: {body}\n\n"
-                    f"• **Price:** {p_price}\n• **Location:** {p_loc}\n• **Bedrooms:** {p_beds}"
+                    f"• **Price:** {p_price}\n• **Location:** {p_loc}" + (f"\n• **Bedrooms:** {p_beds}" if p_beds else "")
                     if language == "en"
                     else (
                         f"**{p_name}**: {body}\n\n"
-                        f"• **Cena:** {p_price}\n• **Lokalizacja:** {p_loc}\n• **Sypialnie:** {p_beds}"
+                        f"• **Cena:** {p_price}\n• **Lokalizacja:** {p_loc}" + (f"\n• **Sypialnie:** {p_beds}" if p_beds else "")
                         if language == "pl"
                         else (
                             f"**{p_name}**: {body}\n\n"
-                            f"• **ราคา:** {p_price}\n• **ทำเล:** {p_loc}\n• **ห้องนอน:** {p_beds}"
+                            f"• **ราคา:** {p_price}\n• **ทำเล:** {p_loc}" + (f"\n• **ห้องนอน:** {p_beds}" if p_beds else "")
                         )
                     )
                 )
@@ -3780,16 +3833,16 @@ class PublicAgentService:
                 )
             elif (_fact_reply := _listing_fact_reply(focus_q, card, language, conversation, p_owner)) is not None:
                 reply_text = _fact_reply
-            elif any(k in focus_q for k in ["price", "cost", "how much", "cena", "ราคา"]) and not any(
+            elif any(k in focus_q for k in ["price", "cost", "how much", "cena", "koszt", "ราคา"]) and not any(
                 k in focus_q for k in ["bedroom", "ownership", "status", "sypialn", "własno", "wlasno", "กรรมสิทธิ์"]
             ):
                 price_out = p_price if p_price not in (None, "", "N/A") else "Not documented in verified database"
                 if language == "th":
-                    reply_text = f"**{p_name}** ราคา: **{price_out}**\n\n• **ทำเล:** {p_loc or 'ไม่ระบุในฐานข้อมูล'}\n• **ห้องนอน / พื้นที่:** {p_beds or 'ไม่ระบุในฐานข้อมูล'} | {p_area or 'ไม่ระบุในฐานข้อมูล'}"
+                    reply_text = f"**{p_name}** ราคา: **{price_out}**\n\n• **ทำเล:** {p_loc or 'ไม่ระบุในฐานข้อมูล'}" + (f"\n• **ห้องนอน / พื้นที่:** {_ba}" if _ba else "")
                 elif language == "pl":
-                    reply_text = f"**{p_name}** cena: **{price_out}**\n\n• **Lokalizacja:** {p_loc or 'Brak w bazie'}\n• **Sypialnie / Powierzchnia:** {p_beds or 'Brak w bazie'} | {p_area or 'Brak w bazie'}"
+                    reply_text = f"**{p_name}** cena: **{price_out}**\n\n• **Lokalizacja:** {p_loc or 'Brak w bazie'}" + (f"\n• **Sypialnie / Powierzchnia:** {_ba}" if _ba else "")
                 else:
-                    reply_text = f"**{p_name}** verified price: **{price_out}**\n\n• **Location:** {p_loc or 'Not documented in verified database'}\n• **Bedrooms / Area:** {p_beds or 'Not documented in verified database'} | {p_area or 'Not documented in verified database'}"
+                    reply_text = f"**{p_name}** verified price: **{price_out}**\n\n• **Location:** {p_loc or 'Not documented in verified database'}" + (f"\n• **Bedrooms / Area:** {_ba}" if _ba else "")
             elif sum(1 for k in ("price", "bedroom", "ownership", "cena", "sypialn", "własno", "wlasno", "ราคา", "ห้องนอน", "กรรมสิทธิ์") if k in focus_q) >= 2:
                 # Multi-fact ask: only emit fields that exist; say not available when missing
                 def _field(label_en, label_pl, label_th, value):
@@ -3819,7 +3872,7 @@ class PublicAgentService:
                     "",
                     f"• **ทำเล:** {p_loc}",
                     f"• **ราคา:** {p_price}",
-                    f"• **ห้องนอน / พื้นที่ใช้สอย:** {p_beds} | {p_area}",
+                    *([f"• **ห้องนอน / พื้นที่ใช้สอย:** {_ba}"] if _ba else []),
                     f"• **สถานะ:** {p_status}",
                 ]
                 if pool_lab:
@@ -3838,7 +3891,7 @@ class PublicAgentService:
                     "",
                     f"• **Lokalizacja:** {humanize_location(p_loc)}",
                     f"• **Cena:** {p_price}",
-                    f"• **Sypialnie / Powierzchnia:** {p_beds} | {p_area}",
+                    *([f"• **Sypialnie / Powierzchnia:** {_ba}"] if _ba else []),
                     f"• **Status:** {humanize_status(p_status, 'pl')}",
                 ]
                 if pool_lab:
@@ -3857,7 +3910,7 @@ class PublicAgentService:
                     "",
                     f"• **Location:** {humanize_location(p_loc)}",
                     f"• **Price:** {p_price}",
-                    f"• **Bedrooms / Area:** {p_beds} | {p_area}",
+                    *([f"• **Bedrooms / Area:** {_ba}"] if _ba else []),
                     f"• **Status:** {humanize_status(p_status, 'en')}",
                 ]
                 if pool_lab:
