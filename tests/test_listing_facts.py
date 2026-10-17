@@ -111,4 +111,4 @@ def test_humanized_status_and_location():
     assert humanize_status("under_construction") == "Under construction"
     assert humanize_status("pre_sale", "pl") == "W przedsprzedaży"
     assert humanize_location("sihanoukville") == "Sihanoukville" and humanize_location("Koh Samui") == "Koh Samui"
-    assert humanize_location("samui, Koh Samui") == "Samui, Koh Samui"
+    assert humanize_location("samui, Koh Samui") == "Koh Samui"

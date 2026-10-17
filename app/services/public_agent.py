@@ -562,6 +562,8 @@ def ensure_structured_response(
                 break
 
         loc = (matched_card.get("location") if matched_card else None) or item.get("location") or "N/A"
+        if isinstance(loc, str) and loc != "N/A":
+            loc = humanize_location(loc) or loc
         price = (matched_card.get("price") if matched_card else None) or item.get("price") or "Price on request"
         beds = (matched_card.get("bedrooms") if matched_card else None) or item.get("bedrooms") or "N/A"
         
@@ -1830,7 +1832,7 @@ def rewrite_public_query(
     return current_message
 
 
-from app.services.listing_facts import short_summary, humanize_status, humanize_location  # noqa: E402
+from app.services.listing_facts import short_summary, humanize_status, humanize_location, display_status  # noqa: E402
 
 
 def _listing_fact_reply(focus_q: str, card: Any, language: str, conversation: Any, p_owner: Any) -> Optional[str]:
@@ -2525,6 +2527,12 @@ class PublicAgentService:
                         p["area"] = clean_response_text(p["area"])
                     if p.get("price") and isinstance(p["price"], str):
                         p["price"] = clean_response_text(p["price"])
+                    if isinstance(p.get("status"), str) and p["status"]:
+                        p["status"] = display_status(p["status"], resp.get("language") or "en") or p["status"]
+                    # Display boundary: lower-case slugs ("phuket", "samui") -> "Phuket", "Koh Samui". Strings only.
+                    for _k in ("location", "city", "district", "province"):
+                        if isinstance(p.get(_k), str) and p[_k]:
+                            p[_k] = humanize_location(p[_k]) or p[_k]
         return resp
 
     def run_conversation(
@@ -2645,17 +2653,20 @@ class PublicAgentService:
         save_property_context(conversation, pctx)
 
         # 2b. Questions about the listings currently on screen ("which is cheapest?", "który jest tańszy?")
-        from app.services.shown_set import answer_shown_set_question, shown_cards, _REF_RE as _SHOWN_REF
+        from app.services.shown_set import answer_shown_set, contextual_quick_replies, shown_cards, _REF_RE as _SHOWN_REF
         _shown_reply = None
+        _shown_name = None
         if active_lang in ("en", "pl") and _SHOWN_REF.search(user_message or ""):
             def _enrich_shown(_pid: str):
                 from app.services.firestore_service import get_property_by_id_from_firestore
                 return get_property_by_id_from_firestore(_pid)
-            _shown_reply = answer_shown_set_question(
+            _shown = answer_shown_set(
                 user_message,
                 shown_cards(conversation.message_history or [], pctx.reference_map or {}, _enrich_shown),
                 active_lang,
             )
+            if _shown:
+                _shown_reply, _shown_name = _shown
         if _shown_reply:
             append_conversation_turn(
                 db=db,
@@ -2668,7 +2679,7 @@ class PublicAgentService:
                 "type": "text",
                 "text": _shown_reply,
                 "properties": [],
-                "quick_replies": self._generate_quick_replies(user_message, [], language=active_lang),
+                "quick_replies": contextual_quick_replies(active_lang, _shown_name),
                 "lead_captured": False,
                 "preferences": conversation.preferences or {},
                 "session_id": conversation.session_id,
@@ -2687,6 +2698,7 @@ class PublicAgentService:
 
         # 3b. Viewing / visit request without contact details -> hand over to the advisor (no invented slots)
         from app.services.viewing_handoff import build_viewing_reply, is_viewing_request, name_for_id
+        from app.services.shown_set import contextual_quick_replies
         if intent != IntentType.LEAD_CAPTURE and is_viewing_request(user_message):
             from app.core.tenant import resolve_tenant as _rt_view
             _ten = _rt_view(getattr(conversation, "site_origin", None))
@@ -2709,7 +2721,11 @@ class PublicAgentService:
                 "type": "text",
                 "text": _view_reply,
                 "properties": [],
-                "quick_replies": self._generate_quick_replies(user_message, [], language=active_lang),
+                "quick_replies": (
+                    contextual_quick_replies(active_lang, _name, advisor_first=True)
+                    if active_lang in ("en", "pl")
+                    else self._generate_quick_replies(user_message, [], language=active_lang)
+                ),
                 "lead_captured": False,
                 "preferences": conversation.preferences or {},
                 "session_id": conversation.session_id,
@@ -3082,21 +3098,21 @@ class PublicAgentService:
         if language == "th":
             opening = (
                 f"ขอบคุณครับ{', คุณ' + c_name if c_name else ''}! "
-                f"ระบบได้ลงทะเบียนการนัดหมายเข้าชมโครงการส่วนตัวสำหรับวิลล่าใน{pref_loc or 'ภูเก็ต'}เรียบร้อยแล้วครับ\n\n"
+                f"ระบบได้ลงทะเบียนการนัดหมายเข้าชมโครงการส่วนตัวสำหรับวิลล่าใน{humanize_location(pref_loc) if pref_loc else 'ภูเก็ต'}เรียบร้อยแล้วครับ\n\n"
                 f"ที่ปรึกษาอาวุโสของ {tenant.brand_name} ({tenant.advisor_email}) จะติดต่อกลับผ่านทาง "
                 f"**{c_phone or c_email or 'ข้อมูลที่ระบุ'}** ภายใน 15-30 นาทีเพื่อยืนยันกำหนดการและอำนวยความสะดวกเรื่องการเดินทางครับ"
             )
         elif language == "pl":
             opening = (
                 f"Dziękujemy{', ' + c_name if c_name else ''}! "
-                f"Twoje zgłoszenie na prywatną prezentację willi w rejonie **{pref_loc or 'Phuket'}** zostało pomyślnie zarejestrowane.\n\n"
+                f"Twoje zgłoszenie na prywatną prezentację willi w rejonie **{humanize_location(pref_loc) if pref_loc else 'Phuket'}** zostało pomyślnie zarejestrowane.\n\n"
                 f"Dedykowany doradca {tenant.brand_name} ({tenant.advisor_email}) skontaktuje się z Tobą pod adresem "
                 f"**{c_phone or c_email or 'Twoim kontaktem'}** w celu potwierdzenia dogodnego terminu wizyty i organizacji transportu."
             )
         else:
             opening = (
                 f"Thank you{', ' + c_name if c_name else ''}! "
-                f"Your request for a private property viewing in **{pref_loc or 'Phuket'}** has been successfully registered.\n\n"
+                f"Your request for a private property viewing in **{humanize_location(pref_loc) if pref_loc else 'Phuket'}** has been successfully registered.\n\n"
                 f"A senior advisor from {tenant.brand_name} ({tenant.advisor_email}) will contact you directly via "
                 f"**{c_phone or c_email or 'your contact details'}** to confirm your schedule, arrange private VIP transport, and prepare property access."
             )
@@ -3779,6 +3795,8 @@ class PublicAgentService:
                     "freehold / leasehold",
                 ):
                     p_owner = None
+            if isinstance(p_loc, str) and p_loc:
+                p_loc = humanize_location(p_loc) or p_loc
             p_beds = _clean_field(p_beds)
             p_area = _clean_field(p_area)
             _ba = " | ".join(x for x in (p_beds, p_area) if x)  # "Bedrooms / Area" value, only what exists
@@ -3901,7 +3919,7 @@ class PublicAgentService:
                 ]
                 if p_owner:
                     lines.append(_field("Ownership", "Forma własności", "กรรมสิทธิ์", p_owner))
-                lines.append(_field("Status", "Status", "สถานะ", p_status))
+                lines.append(_field("Status", "Status", "สถานะ", display_status(p_status, language) or p_status))
                 if "location" in focus_q or "ทำเล" in focus_q:
                     lines.append(_field("Location", "Lokalizacja", "ทำเล", p_loc))
                 reply_text = "\n".join(lines)
@@ -3912,7 +3930,7 @@ class PublicAgentService:
                     f"• **ทำเล:** {p_loc}",
                     f"• **ราคา:** {p_price}",
                     *([f"• **ห้องนอน / พื้นที่ใช้สอย:** {_ba}"] if _ba else []),
-                    f"• **สถานะ:** {p_status}",
+                    f"• **สถานะ:** {display_status(p_status, 'th') or p_status}",
                 ]
                 if pool_lab:
                     lines_th.append(f"• **สระว่ายน้ำ:** {pool_lab}")
@@ -4173,7 +4191,7 @@ class PublicAgentService:
                     f"| **ห้องนอน** | {p1.bedrooms_display or 'ไม่ระบุ'} | {p2.bedrooms_display or 'ไม่ระบุ'} |\n"
                     f"| **พื้นที่ใช้สอย** | {p1.area_display or 'ไม่ระบุ'} | {p2.area_display or 'ไม่ระบุ'} |\n"
                     f"| **สระว่ายน้ำส่วนตัว** | {'มี' if p1.has_pool else 'ไม่มี'} | {'มี' if p2.has_pool else 'ไม่มี'} |\n"
-                    f"| **สถานะ** | {p1.status or 'พร้อมขาย'} | {p2.status or 'พร้อมขาย'} |\n"
+                    f"| **สถานะ** | {display_status(p1.status, 'th') or 'พร้อมขาย'} | {display_status(p2.status, 'th') or 'พร้อมขาย'} |\n"
                     f"| **รูปแบบกรรมสิทธิ์** | {p1.ownership_type or 'ยืนยันกับที่ปรึกษา'} | {p2.ownership_type or 'ยืนยันกับที่ปรึกษา'} |\n\n"
                     f"ทั้งสองโครงการสร้างตามมาตรฐานคุณภาพในทำเลยอดนิยม "
                     f"คุณต้องการดูผังอาคารเพิ่มเติมหรือนัดหมายเข้าชมโครงการไหมครับ?"
@@ -4190,7 +4208,7 @@ class PublicAgentService:
                     f"| **Sypialnie** | {p1.bedrooms_display or 'Brak danych'} | {p2.bedrooms_display or 'Brak danych'} |\n"
                     f"| **Powierzchnia** | {p1.area_display or 'Brak danych'} | {p2.area_display or 'Brak danych'} |\n"
                     f"| **Prywatny basen** | {'Tak' if p1.has_pool else 'Nie'} | {'Tak' if p2.has_pool else 'Nie'} |\n"
-                    f"| **Status** | {p1.status or 'Dostępne'} | {p2.status or 'Dostępne'} |\n"
+                    f"| **Status** | {display_status(p1.status, 'pl') or 'Dostępne'} | {display_status(p2.status, 'pl') or 'Dostępne'} |\n"
                     f"| **Forma własności** | {p1.ownership_type or 'Potwierdź z doradcą'} | {p2.ownership_type or 'Potwierdź z doradcą'} |\n\n"
                     f"Obie inwestycje reprezentują zweryfikowane standardy budowlane w prestiżowych lokalizacjach. "
                     f"Czy chciałbyś zapoznać się ze szczegółowymi rzutami architektonicznymi lub umówić prezentację?"
@@ -4207,7 +4225,7 @@ class PublicAgentService:
                     f"| **Bedrooms** | {p1.bedrooms_display or 'N/A'} | {p2.bedrooms_display or 'N/A'} |\n"
                     f"| **Built Area** | {p1.area_display or 'N/A'} | {p2.area_display or 'N/A'} |\n"
                     f"| **Private Pool** | {'Yes' if p1.has_pool else 'No'} | {'Yes' if p2.has_pool else 'No'} |\n"
-                    f"| **Status** | {p1.status or 'Available'} | {p2.status or 'Available'} |\n"
+                    f"| **Status** | {display_status(p1.status, 'en') or 'Available'} | {display_status(p2.status, 'en') or 'Available'} |\n"
                     f"| **Ownership** | {p1.ownership_type or 'Confirm with advisor'} | {p2.ownership_type or 'Confirm with advisor'} |\n\n"
                     f"Both developments offer verified construction quality in high-demand investment locations. "
                     f"Would you like to examine the architectural floor plans or schedule a viewing tour?"

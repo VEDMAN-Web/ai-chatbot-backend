@@ -16,9 +16,11 @@ _MONTHS_EN = ["January", "February", "March", "April", "May", "June", "July", "A
 _MONTHS_PL = ["styczeń", "luty", "marzec", "kwiecień", "maj", "czerwiec", "lipiec", "sierpień",
               "wrzesień", "październik", "listopad", "grudzień"]
 _STATUS_EN = {"under_construction": "under construction", "completed": "completed", "ready": "completed",
-              "pre_sale": "in pre-sale", "off_plan": "off-plan"}
+              "pre_sale": "in pre-sale", "off_plan": "off-plan", "planned": "planned"}
 _STATUS_PL = {"under_construction": "w budowie", "completed": "ukończona", "ready": "ukończona",
-              "pre_sale": "w przedsprzedaży", "off_plan": "w fazie projektu"}
+              "pre_sale": "w przedsprzedaży", "off_plan": "w fazie projektu", "planned": "planowana"}
+_STATUS_TH = {"under_construction": "อยู่ระหว่างก่อสร้าง", "completed": "สร้างเสร็จแล้ว", "ready": "สร้างเสร็จแล้ว",
+              "pre_sale": "เปิดขายก่อนก่อสร้าง", "off_plan": "ขายก่อนก่อสร้าง", "planned": "อยู่ในแผนพัฒนา"}
 _PLN_PER_THB = 8.5  # same indicative rate the search budget parser uses (1 PLN = 8.5 THB)
 
 _RE_COMPLETION = re.compile(
@@ -363,13 +365,25 @@ def short_summary(text: Any, max_chars: int = 260, sentences: int = 2) -> str:
 def humanize_status(status: Any, language: str = "en") -> str:
     raw = str(status or "").strip()
     key = raw.lower()
-    table = _STATUS_PL if language == "pl" else _STATUS_EN
+    table = _STATUS_PL if language == "pl" else _STATUS_TH if language == "th" else _STATUS_EN
     if key in table:
         return table[key][:1].upper() + table[key][1:]
     return raw.replace("_", " ").capitalize() if raw else raw
 
 
+def display_status(status: Any, language: str = "en") -> str:
+    """Status for visitors: raw enum values ('under_construction', 'UNDER_CONSTRUCTION', 'off_plan') become readable
+    text; ordinary values such as 'Available' or 'Sold Out' are returned unchanged."""
+    raw = str(status or "").strip()
+    if raw.lower() in ("none", "null", "nan"):
+        return ""
+    key = raw.lower().replace(" ", "_").replace("-", "_")
+    if "_" in raw or key in _STATUS_EN:
+        return humanize_status(key, language)
+    return raw
+
+
 def humanize_location(loc: Any) -> str:
-    """'samui, Koh Samui' -> 'Samui, Koh Samui': capitalise only the parts stored in all lower case."""
-    parts = [p.strip() for p in str(loc or "").split(",")]
-    return ", ".join(p.title() if p and p == p.lower() else p for p in parts if p)
+    """'samui, Koh Samui' -> 'Koh Samui'; 'phuket' -> 'Phuket' (display only; see listing_presentation.display_location)."""
+    from app.services.listing_presentation import display_location
+    return display_location(loc)
