@@ -26,8 +26,14 @@ _UNVERIFIED_MARKETING_PATTERNS = [
 
 def sanitize_listing_line_text(text: str) -> str:
     """Strip / label investment promises so they are not repeated as bot facts."""
+    import re
     from app.services.listing_presentation import sanitize_marketing_claims
-    return sanitize_marketing_claims(text or "", mode="description")
+    out = sanitize_marketing_claims(text or "", mode="description")
+    # "(~€confirm with advisor / ~PLN available on request)" placeholders when no conversion exists
+    out = re.sub(
+        r"\s*\((?:~?\s*€[^()\d]*|~?\s*PLN[^()\d]*)(?:/\s*~?[^()\d]*PLN[^()\d]*)?\)",
+        "", out, flags=re.IGNORECASE)
+    return out
 
 
 def _card_price_numeric(card: Dict[str, Any]) -> Optional[float]:

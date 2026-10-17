@@ -158,3 +158,15 @@ def test_unknown_place_is_not_silently_replaced_by_another_search(monkeypatch):
     for ok in ["Show me villas in Phuket", "Show me condos in Phnom Penh", "Show me villas in Thailand"]:
         assert not ir.extract_search_filters_deterministic(ok).get("foreign_location"), ok
     ir._PLACE_BLOB.update({"at": 0.0, "text": None})
+
+
+def test_conversion_placeholders_are_removed_but_real_conversions_stay():
+    from app.services.reply_validator import sanitize_listing_line_text as sl
+    assert "confirm" not in sl("from 4.90M THB (~€confirm with advisor / ~PLN confirm with advisor)")
+    assert "available" not in sl("from 4.90M THB (~€ available on request / ~PLN available on request)")
+    assert "(~€128,947 / ~576,470 PLN)" in sl("from 4.90M THB (~€128,947 / ~576,470 PLN)")
+
+
+def test_search_reply_is_deterministic_by_default():
+    from app.core.config import settings
+    assert settings.SEARCH_REPLY_USE_LLM is False

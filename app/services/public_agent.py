@@ -4767,11 +4767,14 @@ class PublicAgentService:
                 only_id = stored_prefs["last_result_ids"][0]
                 _pctx = set_active_property(_pctx, only_id, reference=names.get(only_id))
             stored_prefs.update(save_property_context(conversation, _pctx))
-            if self.client:
+            # Plain filter searches use the deterministic card text by default: it is verified against the
+            # database, takes ~2 s instead of 10+ s, and cannot reword a price. Set SEARCH_REPLY_USE_LLM=true
+            # to let the model write the wording again (the validator still guards it).
+            if self.client and getattr(settings, "SEARCH_REPLY_USE_LLM", False):
                 try:
                     projections = []
                     for c in cards:
-                        p_min = c.get("price_numeric_min")
+                        p_min = c.get("price_thb_min")  # THB only: a USD/EUR price is never shown as baht
                         approx_eur = f"~€{round(p_min / 38):,}" if p_min else None
                         approx_pln = f"~{round(p_min / 8.5):,} PLN" if p_min else None
                         projections.append({
