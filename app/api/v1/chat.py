@@ -197,18 +197,34 @@ def handle_public_chat(
         if has_contact:
             budget_dec = Decimal(str(req.budget)) if req.budget is not None else None
             if getattr(settings, "ENABLE_LEAD_SAVING", False):
-                lead = record_or_update_lead(
-                    db=db,
-                    conversation=conversation,
-                    contact_name=req.contact_name,
-                    contact_email=req.contact_email,
-                    contact_phone=req.contact_phone,
-                    preferred_location=req.preferred_location,
-                    budget_max=budget_dec,
-                    buying_signal=f"Direct contact submission: {req.contact_email or req.contact_phone or req.contact_name}",
-                    notes=req.notes
-                )
-                recorded_lead_id = str(lead.id)
+                try:
+                    from app.services.lead_service import enqueue_lead_save
+                    lead = record_or_update_lead(
+                        db=None,
+                        conversation=conversation,
+                        contact_name=req.contact_name,
+                        contact_email=req.contact_email,
+                        contact_phone=req.contact_phone,
+                        preferred_location=req.preferred_location,
+                        budget_max=budget_dec,
+                        buying_signal=f"Direct contact submission: {req.contact_email or req.contact_phone or req.contact_name}",
+                        notes=req.notes,
+                    )
+                    recorded_lead_id = str(getattr(lead, "id", "") or "")
+                    enqueue_lead_save(
+                        db=db,
+                        conversation=conversation,
+                        contact_name=req.contact_name,
+                        contact_email=req.contact_email,
+                        contact_phone=req.contact_phone,
+                        preferred_location=req.preferred_location,
+                        budget_max=budget_dec,
+                        buying_signal=f"Direct contact submission: {req.contact_email or req.contact_phone or req.contact_name}",
+                        notes=req.notes,
+                    )
+                except Exception as lead_err:
+                    logger.warning("Lead save failed (chat reply unaffected): %s", lead_err)
+                    recorded_lead_id = None
 
                 # Sync lead to Firestore
                 if getattr(settings, "ENABLE_FIRESTORE_SYNC", False):
@@ -444,18 +460,32 @@ def submit_direct_lead(
     recorded_lead_id = f"lead_session_{uuid.uuid4().hex[:8]}"
     lead_score = 0.8
     if getattr(settings, "ENABLE_LEAD_SAVING", False):
-        lead = record_or_update_lead(
-            db=db,
-            conversation=conversation,
-            contact_name=req.contact_name,
-            contact_email=req.contact_email,
-            contact_phone=req.contact_phone,
-            preferred_location=req.preferred_location,
-            notes=req.notes,
-            buying_signal="Direct frontend lead submission"
-        )
-        recorded_lead_id = str(lead.id)
-        lead_score = lead.lead_score
+        try:
+            from app.services.lead_service import enqueue_lead_save
+            lead = record_or_update_lead(
+                db=None,
+                conversation=conversation,
+                contact_name=req.contact_name,
+                contact_email=req.contact_email,
+                contact_phone=req.contact_phone,
+                preferred_location=req.preferred_location,
+                notes=req.notes,
+                buying_signal="Direct frontend lead submission",
+            )
+            recorded_lead_id = str(getattr(lead, "id", recorded_lead_id))
+            lead_score = float(getattr(lead, "lead_score", 0.8) or 0.8)
+            enqueue_lead_save(
+                db=db,
+                conversation=conversation,
+                contact_name=req.contact_name,
+                contact_email=req.contact_email,
+                contact_phone=req.contact_phone,
+                preferred_location=req.preferred_location,
+                notes=req.notes,
+                buying_signal="Direct frontend lead submission",
+            )
+        except Exception as lead_err:
+            logger.warning("Direct lead save failed (response unaffected): %s", lead_err)
 
         if getattr(settings, "ENABLE_FIRESTORE_SYNC", False):
             try:
@@ -509,16 +539,17 @@ def download_property_brochure(
         # Record lead against conversation for staff follow-up if session_id provided
         if session_id:
             try:
+                from app.services.lead_service import enqueue_lead_save
                 conv = get_or_create_conversation(db=db, session_id=session_id, site_origin=tenant.site_origin)
                 prop = db.query(Property).filter(Property.property_id == property_id.upper()).first()
                 pref_loc = f"{prop.district}, {prop.province}" if prop and prop.district else (prop.province if prop else None)
-                record_or_update_lead(
+                enqueue_lead_save(
                     db=db,
                     conversation=conv,
                     preferred_location=pref_loc,
                     preferred_type=prop.property_type if prop else None,
                     buying_signal=f"Downloaded brochure for {property_id.upper()} ({prop.property_name if prop else ''})",
-                    notes=f"Customer downloaded brochure PDF via {tenant.brand_name} ({tenant.domain})"
+                    notes=f"Customer downloaded brochure PDF via {tenant.brand_name} ({tenant.domain})",
                 )
             except Exception as le:
                 logger.warning(f"Could not record lead on brochure download: {le}")

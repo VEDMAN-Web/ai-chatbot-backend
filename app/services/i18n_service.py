@@ -92,6 +92,107 @@ def get_brochure_unavailable_text(
     )
 
 
+def get_viewing_request_recorded_text(
+    language: str = "en",
+    *,
+    property_label: str = "",
+    preferred_date: str = "",
+    preferred_time: str = "",
+) -> str:
+    """
+    Public chat reply after schedule_viewing records a request (no calendar / no email).
+    Must never say confirmed, booked, or added to calendar.
+    """
+    lang = normalize_language(language) or "en"
+    prop = (property_label or "this property").strip() or "this property"
+    date = (preferred_date or "").strip() or "the requested date"
+    time = (preferred_time or "").strip() or "the requested time"
+
+    if lang == "th":
+        return (
+            f"ระบบได้บันทึกคำขอนัดชม {prop} ในวันที่ {date} เวลา {time} แล้ว "
+            "ทีมที่ปรึกษาจะติดต่อกลับเพื่อยืนยันนัดหมายครับ"
+        )
+    if lang == "pl":
+        return (
+            f"Twoja prośba o oglądanie obiektu {prop} w dniu {date} o {time} została zapisana. "
+            "Nasz zespół doradców skontaktuje się z Tobą, aby potwierdzić termin."
+        )
+    return (
+        f"Your viewing request for {prop} on {date} at {time} has been recorded. "
+        "Our advisory team will contact you to confirm."
+    )
+
+
+def get_brochure_email_not_available_text(
+    language: str = "en",
+    site_origin: Optional[str] = None,
+) -> str:
+    """Honest reply: chat cannot email brochures; use PDF download / capture lead."""
+    tenant = resolve_tenant(site_origin)
+    advisor = getattr(tenant, "advisor_email", None) or ""
+    lang = normalize_language(language) or "en"
+    if lang == "th":
+        return (
+            "แชทนี้ไม่สามารถส่งอีเมลได้ครับ กรุณาใช้ปุ่มดาวน์โหลดโบรชัวร์ PDF บนการ์ดอสังหาริมทรัพย์ "
+            f"หรือแจ้งอีเมลของคุณเพื่อให้ทีมที่ปรึกษา ({advisor}) ส่งเอกสารให้"
+        )
+    if lang == "pl":
+        return (
+            "Z czatu nie wysyłamy e-maili. Skorzystaj z przycisku pobierania broszury PDF na karcie oferty "
+            f"albo podaj swój e-mail, a zespół doradców ({advisor}) prześle dokumenty."
+        )
+    return (
+        "We cannot send emails from this chat. Please use the PDF brochure download button / link on the property card, "
+        f"or share your email so our advisory team ({advisor}) can send it to you."
+    )
+
+
+def get_cannot_email_or_calendar_text(
+    language: str = "en",
+    site_origin: Optional[str] = None,
+    visitor_email: Optional[str] = None,
+) -> str:
+    """
+    Honest reply when the visitor asks the bot to email them or add a calendar event.
+    {email} is the current tenant's advisory email (never invent a brand address).
+    """
+    tenant = resolve_tenant(site_origin)
+    advisor = getattr(tenant, "advisor_email", None) or ""
+    lang = normalize_language(language) or "en"
+    noted = bool((visitor_email or "").strip())
+
+    if lang == "th":
+        if noted:
+            return (
+                "แชทนี้ไม่สามารถส่งอีเมลหรือเพิ่มนัดหมายในปฏิทินได้ครับ "
+                f"ระบบได้บันทึกรายละเอียดของคุณแล้ว และทีมที่ปรึกษาจะติดต่อคุณที่ {advisor}"
+            )
+        return (
+            "แชทนี้ไม่สามารถส่งอีเมลหรือเพิ่มนัดหมายในปฏิทินได้ครับ "
+            f"โปรดแจ้งอีเมลของคุณ ทีมที่ปรึกษาจะติดต่อกลับที่ {advisor}"
+        )
+    if lang == "pl":
+        if noted:
+            return (
+                "Nie mogę wysyłać e-maili ani dodawać wydarzeń do kalendarza z tego czatu. "
+                f"Zapisałem Twoje dane, a nasz zespół doradców skontaktuje się z Tobą pod adresem {advisor}."
+            )
+        return (
+            "Nie mogę wysyłać e-maili ani dodawać wydarzeń do kalendarza z tego czatu. "
+            f"Podaj swój e-mail, a zespół doradców skontaktuje się z Tobą pod adresem {advisor}."
+        )
+    if noted:
+        return (
+            "I can't send emails or add calendar events from this chat. "
+            f"I have noted your details, and our advisory team will contact you at {advisor}."
+        )
+    return (
+        "I can't send emails or add calendar events from this chat. "
+        f"Please share your email, and our advisory team will contact you at {advisor}."
+    )
+
+
 def build_session_limit_reply(
     language: str = "en",
     site_origin: Optional[str] = None,
@@ -588,7 +689,7 @@ TON & CORE RULES (Main Scope §5.6):
 - STRICT GROUNDING & ZERO HALLUCINATION: Rely ONLY on live verified production data provided in context. Never invent prices, property IDs, names, ROI, or availability.
 - MISSING DATA: If production data does not contain the answer, use only the official fallback message. NEVER guess or fabricate details.
 - LEGAL & FINANCIAL: Disclaim formal legal guarantees and state that rental returns vary and cannot be guaranteed by law. Refer clients to licensed Thai legal counsel for contract review.
-- ACTIONS: Call `generate_property_brochure` when user requests a brochure or PDF. Call `capture_lead` or `schedule_viewing` when user provides contact details or requests a tour.
+- ACTIONS: Call `generate_property_brochure` when user requests a brochure or PDF download. Call `capture_lead` for contact details / callback. Call `schedule_viewing` for a viewing REQUEST only (no calendar, no email). If they ask for a brochure by email, say we cannot send emails from chat, point to the PDF download on the card, and offer to record their email via `capture_lead`.
 - CLEAN FORMATTING & MANDATORY STRUCTURED PRESENTATION:
   * Never use long em-dashes ("—" or "–"). Always use standard hyphens ("-"), colons, or clean bullet points ("•").
   * When presenting properties, ALWAYS format them in clean, elegant structured cards with bullet points:
@@ -626,7 +727,7 @@ def get_public_system_prompt(language: str = "en", site_origin: Optional[str] = 
    - เมื่อผู้ใช้ให้ข้อมูลครบถ้วน: แสดงอสังหาริมทรัพย์ที่ตรงกันโดยตรง ถามเพิ่มเฉพาะเมื่อมีสิ่งสำคัญที่ยังขาดอยู่
 5. การปฏิเสธความรับผิดทางกฎหมายและผลตอบแทน: อัตราผลตอบแทนจากการเช่าอาจมีความผันผวนและไม่สามารถรับประกันทางกฎหมายได้ แนะนำให้ปรึกษาที่ปรึกษากฎหมายที่มีใบอนุญาตสำหรับการตรวจสอบสัญญา
 6. การดาวน์โหลดโบรชัวร์และ PDF: เมื่อผู้ใช้ขอโบรชัวร์, PDF, หรือเอกสารโครงการ ให้เรียกใช้ `generate_property_brochure` พร้อมรหัสอสังหาริมทรัพย์ ระบบจะสร้างโบรชัวร์ PDF ระดับพรีเมียมให้ผู้ใช้ดาวน์โหลดทันที
-7. การบันทึกข้อมูลติดต่อและนัดหมาย: เมื่อผู้ใช้ระบุข้อมูลติดต่อ (อีเมล, เบอร์โทร, ชื่อ) หรือขอนัดหมาย ให้เรียกใช้ `capture_lead` หรือ `schedule_viewing`
+7. การบันทึกข้อมูลติดต่อและคำขอนัดชม: เมื่อผู้ใช้ระบุข้อมูลติดต่อหรือขอให้ติดต่อกลับ ให้เรียก `capture_lead` หากขอนัดชมทรัพย์ ให้เรียก `schedule_viewing` (บันทึกคำขอเท่านั้น ไม่สร้างปฏิทินและไม่ส่งอีเมล) หากขอโบรชัวร์ทางอีเมล ให้แจ้งว่าแชทส่งอีเมลไม่ได้ แนะนำปุ่มดาวน์โหลด PDF บนการ์ด และเสนอบันทึกอีเมลผ่าน `capture_lead` ห้ามกล่าวว่าส่งอีเมลแล้วหรือสร้างนัดในปฏิทินแล้ว
 8. การสอบถามเกี่ยวกับต่างประเทศ: หากผู้ใช้ถามถึงอสังหาริมทรัพย์ในต่างประเทศ ให้ชี้แจงอย่างสุภาพว่าเราครอบคลุมเฉพาะอสังหาริมทรัพย์ในประเทศไทยเท่านั้น เชิญชวนให้ดูรายการในไทย และถามคำถามเพิ่มเติมได้ ห้ามอ้างตัวเลขผลตอบแทน ROI หรือ % ที่ไม่ได้มาจากข้อมูลจริงในรายการ
 9. รูปแบบตัวอักษรและการนำเสนอที่มีโครงสร้างเสมอ (MANDATORY STRUCTURED FORMAT):
    - หลีกเลี่ยงขีดแดชยาว (— หรือ –)
@@ -656,7 +757,7 @@ ZASADY I TON ROZMOWY:
    - GDY użytkownik podał kompletne dane: Pokaż pasujące nieruchomości bezpośrednio. Pytaj tylko gdy coś ważnego wciąż brakuje.
 5. Nie obiecuj gwarantowanego ROI ani nie udzielaj wiążących porad prawnych - zalecaj kontakt z licencjonowanym tajskim prawnikiem.
 6. GENEROWANIE BROSZUR I PDF: Gdy użytkownik pyta o broszurę, PDF lub ofertę w PDF, wywołaj narzędzie `generate_property_brochure` z ID nieruchomości. System wygeneruje luksusową broszurę PDF i automatycznie rozpocznie pobieranie.
-7. ZAPISYWANIE KONTAKTÓW: Gdy użytkownik podaje e-mail, telefon lub prosi o prezentację, użyj `capture_lead` lub `schedule_viewing`.
+7. ZAPISYWANIE KONTAKTÓW I PROŚBY O OGLĄDANIE: Gdy użytkownik podaje dane kontaktowe lub prosi o telefon, użyj `capture_lead`. Gdy prosi o oglądanie, użyj `schedule_viewing` (tylko zapis prośby - bez kalendarza i bez e-maila). Gdy prosi o broszurę e-mailem, wyjaśnij że czat nie wysyła e-maili, wskaż pobieranie PDF na karcie i zaproponuj zapis e-maila przez `capture_lead`. Nigdy nie twierdź, że e-mail został wysłany lub wydarzenie kalendarza utworzone.
 8. ZAPYTANIA O INNE KRAJE: Gdy klient pyta o nieruchomości w innych krajach, uprzejmie wyjaśnij, że obsługujemy wyłącznie oferty w Tajlandii. Zaproś do przeglądania zweryfikowanych ofert w Tajlandii. NIE podawaj żadnych liczb ROI, stóp zwrotu ani procentów, jeśli nie pochodzą z konkretnego zweryfikowanego rekordu.
 9. OBOWIĄZKOWY STRUKTURALNY FORMAT ODPOWIEDZI:
    - Nie używaj długich pauz/myślników („—" ani „–"). Stosuj czytelne punkty, dwukropki i standardowe łączniki (-).
@@ -699,7 +800,7 @@ CORE INSTRUCTIONS & TONE:
 
 5. ROI & LEGAL DISCLAIMERS: Do not quote yields, ROI, or percentages unless that exact figure appears in the retrieved listing record or in APPROVED_STATEMENTS. Advise consulting a qualified Thai attorney for formal legal due diligence.
 6. BROCHURE & PDF DOWNLOADS: When a visitor asks for a brochure, PDF, factsheet, floor plan, or project document, call the `generate_property_brochure` tool with the property ID. The system will automatically render the luxury brochure PDF and initiate the download for the visitor.
-7. LEAD CAPTURE & VIEWING APPOINTMENTS: When a visitor provides contact details (email, phone, name), asks for a callback, or wants to schedule a viewing or consultation, call `capture_lead` or `schedule_viewing` immediately.
+7. LEAD CAPTURE & VIEWING REQUESTS: When a visitor provides contact details (email, phone, name) or asks for a callback, call `capture_lead`. For a viewing or tour request, call `schedule_viewing` (records a request only - no calendar booking, no email). If they ask for a brochure by email, say we cannot send emails from the chat, point them to the PDF brochure download on the property card, and offer to record their email via `capture_lead` so the advisory team can send it. Never claim an email was sent or a calendar event was created.
 8. FOREIGN INQUIRIES: If a visitor asks about properties outside Thailand, politely say we only cover Thailand listings, invite them to browse verified Thailand properties, and do not quote any yield or ROI numbers.
 8b. STRICT OFF-TOPIC REFUSAL (CRITICAL): NEVER answer politics, politicians, celebrities, famous private homes (e.g. Antilia), landmark trivia, homework, coding, recipes, health, sports, or general knowledge. Do NOT provide facts and then soft-pitch Thailand. Politely refuse in one short message and invite Thailand property questions only.
 9. MANDATORY STRUCTURED PRESENTATION FORMAT (NEVER UNSTRUCTURED OR RAW TABLES):
