@@ -85,6 +85,11 @@ LOCATION_ALIASES: List[Tuple[str, str]] = [
     ("krabi", "Krabi"), ("กระบี่", "Krabi"),
     ("chiang mai", "Chiang Mai"), ("เชียงใหม่", "Chiang Mai"),
     ("phang nga", "Phang Nga"), ("พังงา", "Phang Nga"),
+    # Cambodia (priority market) and Maldives. Polish stems cover declensions (Kambodży, Kambodzie).
+    ("phnom penh", "Phnom Penh"), ("phnom-penh", "Phnom Penh"), ("pnom pen", "Phnom Penh"),
+    ("sihanoukville", "Sihanoukville"), ("siem reap", "Siem Reap"), ("kampot", "Kampot"),
+    ("cambodia", "Cambodia"), ("kambodż", "Cambodia"), ("kambodz", "Cambodia"),
+    ("maldives", "Maldives"), ("malediw", "Maldives"),
 ]
 
 _FUZZY_LOCATION_STOPWORDS = frozenset({

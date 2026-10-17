@@ -55,6 +55,19 @@ from app.services.property_context_service import (
 
 logger = logging.getLogger(__name__)
 
+# Markets we hold listings for outside Thailand. Shown only on varsoviaestate.com;
+# tajlandia.com and thai.estate are Thailand-only and treat these as outside their scope.
+_NON_THAI_MARKET_TERMS = [
+    "cambodia", "kambodza", "kambodża", "kambodży", "kambodzy", "kambodzie", "phnom penh", "phnom-penh",
+    "sihanoukville", "siem reap", "kampot", "maldives", "malediwy", "malediwach",
+]
+
+
+def _out_of_scope_markets(site_origin: Optional[str]) -> List[str]:
+    """Non-Thai market words that count as 'foreign' for this site (empty on varsoviaestate.com)."""
+    from app.core.tenant import allowed_countries_for_site
+    return list(_NON_THAI_MARKET_TERMS) if allowed_countries_for_site(site_origin or "") else []
+
 COMPACT_SYSTEM_PROMPT = """You are a professional real estate advisor for Tajlandia.com, thai.estate, and varsoviaestate.com in Thailand.
 CORE RULES & TONE (Main Scope §5.6):
 - TONE: Warm, friendly, enthusiastic, motivated, and professional! Avoid salesy hype, but encourage buyers with confidence.
@@ -85,7 +98,7 @@ PUBLIC_TOOLS = [
         "type": "function",
         "function": {
             "name": "search_properties",
-            "description": "Searches verified Thailand properties using structured criteria. Converts natural language queries into exact criteria.",
+            "description": "Searches verified properties (Thailand; also Cambodia and Maldives on varsoviaestate.com) using structured criteria. Converts natural language queries into exact criteria.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -95,7 +108,7 @@ PUBLIC_TOOLS = [
                     },
                     "location": {
                         "type": "string",
-                        "description": "Island, city, or district name (e.g. Phuket, Bang Tao, Layan, Karon, Samui, Maenam, Koh Phangan, Bangkok, Pattaya)"
+                        "description": "Island, city, district or country name (e.g. Phuket, Bang Tao, Layan, Karon, Samui, Maenam, Koh Phangan, Bangkok, Pattaya, Phnom Penh, Sihanoukville, Cambodia, Maldives). Use ONLY for places. A property or project NAME belongs in `query`."
                     },
                     "province": {
                         "type": "string",
@@ -535,7 +548,7 @@ def ensure_structured_response(
                 "location": c.get("location"),
                 "price": c.get("price"),
                 "bedrooms": c.get("bedrooms"),
-                "amenities": "Private Pool" if c.get("has_pool") else "Luxury Amenities"
+                "amenities": "Private Pool" if c.get("has_pool") else ""
             })
 
     card_sections = []
@@ -547,13 +560,14 @@ def ensure_structured_response(
                 matched_card = c_val
                 break
 
-        loc = (matched_card.get("location") if matched_card else None) or item.get("location") or "Thailand"
+        loc = (matched_card.get("location") if matched_card else None) or item.get("location") or "N/A"
         price = (matched_card.get("price") if matched_card else None) or item.get("price") or "Price on request"
         beds = (matched_card.get("bedrooms") if matched_card else None) or item.get("bedrooms") or "N/A"
         
         currency_info = ""
-        p_num = matched_card.get("price_numeric_min") if matched_card else None
-        if not p_num:
+        # THB amount only: a USD/EUR listing must never be converted as if it were baht
+        p_num = matched_card.get("price_thb_min") if matched_card else None
+        if not p_num and not matched_card:
             m_num = re.search(r'(\d+(?:\.\d+)?)\s*M?\s*THB', price, re.IGNORECASE)
             if m_num:
                 val = float(m_num.group(1))
@@ -580,13 +594,20 @@ def ensure_structured_response(
                 amenities = ", ".join(amenities_list)
 
         if not amenities:
-            amenities = "Private Pool, Tropical Gardens" if language == "en" else "Prywatny basen, ogród"
+            amenities = "Not listed" if language == "en" else ("Brak danych w ofercie" if language == "pl" else "ไม่มีข้อมูล")
 
-        prop_type = (matched_card.get("property_type") if matched_card else None) or "Villa"
-        is_condo = "condo" in prop_type.lower() or "apart" in prop_type.lower()
+        prop_type = (matched_card.get("property_type") if matched_card else None) or (
+            "N/A" if language == "en" else ("brak danych" if language == "pl" else "ไม่มีข้อมูล")
+        )
+        # Ownership is NEVER assumed. Use the listing's own field if it has one, otherwise defer to the advisor.
+        _own = str((matched_card or {}).get("ownership") or "").strip()
+        _own_default = {
+            "pl": "do potwierdzenia z doradcą",
+            "th": "โปรดสอบถามที่ปรึกษา",
+        }.get(language, "to be confirmed with your advisor")
 
         if language == "pl":
-            ownership_str = "100% Foreign Freehold (w ramach kwoty 49%)" if is_condo else "Własność budynku (Freehold) + 30-letni rejestrowany Leasehold gruntu"
+            ownership_str = _own or _own_default
             card_md = (
                 f"**{idx}. {name}**\n"
                 f"• 📍 **Lokalizacja:** {loc}\n"
@@ -596,7 +617,7 @@ def ensure_structured_response(
                 f"• 📜 **Forma własności:** {ownership_str}"
             )
         elif language == "th":
-            ownership_str = "Foreign Freehold 100% (โควต้าต่างชาติ 49%)" if is_condo else "กรรมสิทธิ์ตัวอาคาร Freehold 100% + สิทธิการเช่าที่ดินระยะยาว 30 ปี (Leasehold)"
+            ownership_str = _own or _own_default
             card_md = (
                 f"**{idx}. {name}**\n"
                 f"• 📍 **ทำเล:** {loc}\n"
@@ -606,7 +627,7 @@ def ensure_structured_response(
                 f"• 📜 **กรรมสิทธิ์:** {ownership_str}"
             )
         else:
-            ownership_str = "100% Foreign Freehold (within 49% Quota)" if is_condo else "100% Freehold Villa Building + 30-Year Registered Renewable Land Lease"
+            ownership_str = _own or _own_default
             card_md = (
                 f"**{idx}. {name}**\n"
                 f"• 📍 **Location:** {loc}\n"
@@ -671,22 +692,25 @@ def _format_legal_and_next_steps(text: str, user_message: str = "", language: st
                     callout = (
                         "> ℹ️ **Zasady zakupu dla obcokrajowców:**\n"
                         f"> {legal_body}\n"
-                        "> • **Kondominia:** 100% Foreign Freehold na nazwisko kupującego.\n"
-                        "> • **Wille:** Pełna własność budynku + 30-letnia rejestrowana dzierżawa gruntu w urzędzie ziemskim."
+                        "> • **Kondominia:** zwykle cudzoziemiec może mieć własność lokalu w ramach kwoty 49%.\n"
+                        "> • **Wille:** zwykle własność budynku + długoterminowa dzierżawa gruntu.\n"
+                        "> • Konkretną formę własności dla wybranej oferty potwierdzi doradca."
                     )
                 elif language == "th":
                     callout = (
                         "> ℹ️ **ข้อมูลกรรมสิทธิ์สำหรับชาวต่างชาติ:**\n"
                         f"> {legal_body}\n"
-                        "> • **คอนโดมิเนียม:** สิทธิ์ Foreign Freehold 100% ในชื่อของท่าน\n"
-                        "> • **พูลวิลล่า:** กรรมสิทธิ์ตัวอาคาร Freehold 100% + สิทธิการเช่าที่ดินจดทะเบียน 30 ปี"
+                        "> • **คอนโดมิเนียม:** โดยทั่วไปชาวต่างชาติถือกรรมสิทธิ์ห้องชุดได้ภายในโควต้า 49%\n"
+                        "> • **พูลวิลล่า:** โดยทั่วไปเป็นกรรมสิทธิ์ตัวอาคาร + สิทธิการเช่าที่ดินระยะยาว\n"
+                        "> • โครงสร้างกรรมสิทธิ์ของแต่ละโครงการ โปรดยืนยันกับที่ปรึกษา"
                     )
                 else:
                     callout = (
                         "> ℹ️ **Foreign Ownership Overview:**\n"
                         f"> {legal_body}\n"
-                        "> • **Condominiums:** 100% direct Foreign Freehold registered on title deed.\n"
-                        "> • **Luxury Villas:** 100% freehold building ownership + 30-year registered renewable land lease."
+                        "> • **Condominiums:** foreigners can typically own a unit within the 49% foreign quota.\n"
+                        "> • **Villas:** typically building ownership plus a long-term land lease.\n"
+                        "> • The exact ownership structure of a specific listing must be confirmed with an advisor."
                     )
                 res = res[:legal_match.start()].strip() + "\n\n" + callout + "\n\n" + res[legal_match.end():].strip()
         else:
@@ -1423,6 +1447,9 @@ def is_off_topic_query(message: str) -> bool:
         "bangkok", "pattaya", "layan", "bang tao", "bangtao", "karon", "kata", "rawai", "kamala",
         "surin", "patong", "maenam", "bophut", "chaweng", "lamai", "hua hin", "krabi", "chiang mai",
         "chalong", "nai harn", "plai laem", "choeng mon",
+        # Other markets we list (scoped per site at search time)
+        "cambodia", "kambodz", "kambodż", "phnom penh", "sihanoukville", "siem reap", "kampot",
+        "maldives", "malediw",
         # Property types & nouns (EN & PL) — note: bare "house"/"home" alone are NOT enough
         "villa", "villas", "willa", "wille", "willi", "willę", "wille",
         "condo", "condos", "condominium", "kondominium", "penthouse",
@@ -2049,6 +2076,14 @@ class PublicAgentService:
             }
             # Named search with zero confident matches: honest message + Did you mean (no invented facts)
             # Prefer values already on tool_summary; ContextVar is only a fallback (cross-thread safe).
+            # The model sometimes passes a property NAME in the `location` argument ("Satoshi Residence").
+            # The search treats a non-region location as a name lookup and records Did-you-mean for it, so
+            # honour that here too, otherwise the visitor gets the generic "not available" reply.
+            if not query_term and not matched_cards and loc:
+                from app.services.property_name_index import get_last_name_search_query as _glnq
+                _lq = (_glnq() or "").strip().lower()
+                if _lq and _lq == str(loc).strip().lower():
+                    query_term = str(loc)
             if query_term and not matched_cards and not message_looks_like_filter_search(str(query_term)):
                 from app.services.property_name_index import (
                     get_last_name_search_suggestions,
@@ -2391,6 +2426,8 @@ class PublicAgentService:
     ) -> Dict[str, Any]:
         """Runs one conversational turn using deterministic intent routing and token-efficient synthesis."""
         t0 = time.time()
+        from app.core.tenant import set_request_site, reset_request_site
+        _site_token = set_request_site(getattr(conversation, "site_origin", None))
         try:
             res = self._run_conversation_internal(
                 db=db,
@@ -2400,6 +2437,7 @@ class PublicAgentService:
             )
             return self._post_process_response(res, user_message=user_message)
         finally:
+            reset_request_site(_site_token)
             logger.info(
                 "timing.request_total duration_sec=%.3f session=%s",
                 time.time() - t0,
@@ -4252,7 +4290,7 @@ class PublicAgentService:
                             f"• 💰 **Cena wyjściowa:** **[Cena w THB]** (~€[EUR] / ~[PLN] PLN)\n"
                             f"• 🛏️ **Sypialnie:** [Sypialnie] | 📐 **Typ:** [Typ]\n"
                             f"• 🏊 **Udogodnienia:** [Basen itp.]\n"
-                            f"• 📜 **Forma własności:** [Foreign Freehold w condo / Leasehold na willę]\n"
+                            f"• 📜 **Forma własności:** [tylko jeśli dane oferty to podają; w przeciwnym razie: formę własności potwierdzi doradca]\n"
                             f"NIGDY nie generuj tabel markdown. Zakończ sekcją **Kolejne kroki** z punktorami •."
                         )
                     else:
@@ -4266,7 +4304,7 @@ class PublicAgentService:
                             f"• 💰 **Starting Price:** **[Price in THB]** (~€[EUR] / ~[PLN] PLN)\n"
                             f"• 🛏️ **Bedrooms:** [Bedrooms] | 📐 **Type:** [Type]\n"
                             f"• 🏊 **Amenities & Highlights:** [Pool, Sea View, etc.]\n"
-                            f"• 📜 **Ownership Structure:** [Foreign Freehold Condominium / 30-Year Registered Leasehold Villa]\n"
+                            f"• 📜 **Ownership:** [only if the listing data states it; otherwise write: confirm ownership structure with your advisor. NEVER assume freehold or leasehold]\n"
                             f"NEVER output markdown tables. Conclude with **Recommended next steps** using • bullets."
                         )
                     resp = _safe_openai_create(
@@ -4699,7 +4737,7 @@ class PublicAgentService:
                             f"• 💰 **Cena wyjściowa:** **[Cena w THB]** (~€[EUR] / ~[PLN] PLN)\n"
                             f"• 🛏️ **Sypialnie:** [Sypialnie] | 📐 **Typ:** [Typ]\n"
                             f"• 🏊 **Udogodnienia:** [Basen itp.]\n"
-                            f"• 📜 **Forma własności:** [Foreign Freehold w condo / Leasehold na willę]\n"
+                            f"• 📜 **Forma własności:** [tylko jeśli dane oferty to podają; w przeciwnym razie: formę własności potwierdzi doradca]\n"
                             f"NIGDY nie generuj tabel markdown. Zakończ sekcją **Kolejne kroki** z punktorami •."
                         )
                     else:
@@ -4717,7 +4755,7 @@ class PublicAgentService:
                             f"• 💰 **Starting Price:** **[Price in THB]** (~€[EUR] / ~[PLN] PLN)\n"
                             f"• 🛏️ **Bedrooms:** [Bedrooms] | 📐 **Type:** [Type]\n"
                             f"• 🏊 **Amenities & Highlights:** [Pool, Sea View, etc.]\n"
-                            f"• 📜 **Ownership Structure:** [Foreign Freehold Condominium / 30-Year Registered Leasehold Villa]\n"
+                            f"• 📜 **Ownership:** [only if the listing data states it; otherwise write: confirm ownership structure with your advisor. NEVER assume freehold or leasehold]\n"
                             f"NEVER output markdown tables. Conclude with **Recommended next steps** using • bullets."
                         )
 
@@ -5214,7 +5252,7 @@ class PublicAgentService:
                             "• 💰 **Starting Price:** **[Price in THB]** (~€[EUR] / ~[PLN] PLN)\n"
                             "• 🛏️ **Bedrooms:** [Bedrooms] | 📐 **Type:** [Type]\n"
                             "• 🏊 **Amenities & Highlights:** [Amenities]\n"
-                            "• 📜 **Ownership Structure:** [Foreign Freehold Condominium / 30-Year Registered Leasehold Villa]\n"
+                            "• 📜 **Ownership:** [only if the listing data states it; otherwise write: confirm ownership structure with your advisor. NEVER assume freehold or leasehold]\n"
                             "NEVER output markdown tables.\n"
                             "If follow-up is about 'it/this property', keep the same active listing.\n"
                             "If the user provided sparse details, ask at most 2-3 clarifying questions, then **Recommended next steps** with • bullets."
@@ -5225,7 +5263,7 @@ class PublicAgentService:
                         "india", "indie", "indii", "dubai", "miami", "spain", "hiszpania",
                         "london", "londyn", "bali", "poland", "polsce", "cyprus", "greece",
                         "italy", "portugal", "france", "turkey", "germany", "singapore", "australia"
-                    ]
+                    ] + _out_of_scope_markets(getattr(conversation, "site_origin", None))
                     is_foreign_query = any(re.search(r'\b' + re.escape(fl) + r'\b', (raw_user_message or user_message).lower()) for fl in foreign_keywords)
                     if is_foreign_query:
                         messages_for_second.append({
@@ -5530,7 +5568,7 @@ class PublicAgentService:
             "india", "indie", "indii", "mumbai", "delhi", "bangalore", "goa", "dubai", "warsaw", "warszawa",
             "poland", "polsce", "spain", "hiszpania", "miami", "florida", "london", "londyn", "bali", "cyprus",
             "greece", "italy", "portugal", "france", "turkey", "germany", "singapore", "australia", "canada", "usa", "uk"
-        ]
+        ] + _out_of_scope_markets(getattr(conversation, "site_origin", None))
         is_foreign = any(re.search(r'\b' + re.escape(fl) + r'\b', u_lower) for fl in foreign_locs) or (loc and any(fl in loc.lower() for fl in foreign_locs))
         if is_foreign:
             text = get_off_topic_text(language, site_origin=conversation.site_origin, user_message=user_message)

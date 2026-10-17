@@ -819,6 +819,24 @@ def get_property_by_id_from_firestore(property_id: str, target: str = "user") ->
         return None
 
 
+# Polish / alternative spellings of non-Thai markets -> the English name used in listing data.
+_REGION_STEMS = (
+    ("kambodż", "cambodia"), ("kambodz", "cambodia"), ("cambodia", "cambodia"),
+    ("wietnam", "vietnam"),
+    ("malediw", "maldives"),
+    ("pnom pen", "phnom penh"), ("phnom pen", "phnom penh"),
+)
+
+
+def canonical_region_name(loc: str) -> str:
+    """Map Polish/variant spellings (Kambodża, Malediwy, Pnom Penh) to the names stored on listings."""
+    low = (loc or "").lower().strip()
+    for stem, canon in _REGION_STEMS:
+        if stem in low:
+            return canon
+    return low
+
+
 def search_properties_firestore(
     location: Optional[str] = None,
     property_type: Optional[str] = None,
@@ -846,7 +864,9 @@ def search_properties_firestore(
     )
 
     matched = []
-    loc_clean = (location or "").lower().strip()
+    from app.core.tenant import allowed_countries_for_site
+    _allowed_countries = allowed_countries_for_site()
+    loc_clean = canonical_region_name((location or "").lower().strip())
     pt_clean = (property_type or "").lower().strip()
     q_clean = (query or "").strip()
 
@@ -858,6 +878,9 @@ def search_properties_firestore(
     )
 
     def _enrich_and_return_one(direct_prop: Dict[str, Any]) -> List[Dict[str, Any]]:
+        # Thailand-only sites never show a listing from another country
+        if _allowed_countries and str(direct_prop.get("province") or "").lower() not in _allowed_countries:
+            return []
         maps_url = build_google_maps_url(
             latitude=direct_prop.get("latitude"),
             longitude=direct_prop.get("longitude"),
@@ -944,7 +967,7 @@ def search_properties_firestore(
     # Determine city hint for targeted Firestore query
     city_hint = None
     for c in ["phuket", "samui", "pattaya", "bangkok", "phangan", "hua-hin", "sihanoukville", "phnom-penh"]:
-        if c in loc_clean:
+        if c in loc_clean or c.replace("-", " ") in loc_clean:
             city_hint = c
             break
 
@@ -973,6 +996,10 @@ def search_properties_firestore(
                 key_w = [normalize_tenant_domain_key(w) for w in websites if w]
                 if not any(normalize_website_domain(s) in norm_w or normalize_tenant_domain_key(s) in key_w for s in p_sites):
                     continue
+
+        # Market scope of the site (tajlandia.com / thai.estate = Thailand only)
+        if _allowed_countries and str(p.get("province") or "").lower() not in _allowed_countries:
+            continue
 
         # Location filter
         if loc_clean:
