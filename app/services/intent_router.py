@@ -358,6 +358,33 @@ def message_looks_like_filter_search(message: str) -> bool:
     return False
 
 
+def _name_lookup_after_search_verb(msg_clean: str) -> Optional[Tuple[IntentType, Dict[str, Any]]]:
+    """
+    "Show me satoshi paradise" / "find Anava Samui" / "Show me aura condominium": a search verb followed by a
+    project name is a name lookup. Run as a search it returns arbitrary listings (or just the same type/place).
+    Returns a PROPERTY_DETAILS intent by name, or None when the text is a real filter search.
+    """
+    if not _SHOW_SEARCH_VERBS.search(msg_clean):
+        return None
+    rem = re.sub(r"\s+", " ", _SHOW_SEARCH_VERBS.sub(" ", msg_clean)).strip(" .,?!")
+    rem = re.sub(r"^(?:me|us|the|a|an|please|for)\s+", "", rem, flags=re.I).strip()
+    if len(rem) < 3 or not looks_like_project_name(rem):
+        return None  # only search vocabulary / places / numbers: a genuine filter search
+    if re.search(r"\b(?:in|at|near|around|w|we|na|z|ze|do|dla|nad|ใน)\b", rem, flags=re.I):
+        return None  # "a castle in Phuket", "czegoś z widokiem na morze w Phuket": a descriptive search
+    try:
+        from app.services.property_name_index import match_property_name
+        mr = match_property_name(rem)
+        known = bool(mr.confident or mr.candidates)
+        # An unknown Capitalised name ("Show me Atlantis Bay Villas") is also a name lookup, so the
+        # visitor hears "not found" instead of being shown arbitrary villas.
+        if known or re.search(r"[A-Z]", rem):
+            return IntentType.PROPERTY_DETAILS, {"property_name": rem, "property_id": rem, "focus_question": msg_clean}
+    except Exception:
+        pass
+    return None
+
+
 def detect_deterministic_intent(
     message: str,
     stored_state: Optional[Dict[str, Any]] = None
@@ -819,6 +846,9 @@ def detect_deterministic_intent(
         "ค้นหา", "แสดง", "ขอดู", "หาวิลล่า", "หาคอนโด", "พูลวิลล่าใน", "คอนโดใน",
         "วิลล่าใน", "อสังหาริมทรัพย์ใน", "ถูกที่สุด", "ราคาถูกที่สุด", "มีอะไรใน"
     ]
+    _by_name = _name_lookup_after_search_verb(msg_clean)
+    if _by_name:
+        return _by_name
     if message_looks_like_filter_search(msg_clean):
         return IntentType.PROPERTY_SEARCH, extract_search_filters_deterministic(message)
     if looks_like_project_name(msg_clean):
