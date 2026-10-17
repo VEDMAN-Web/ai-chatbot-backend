@@ -328,3 +328,46 @@ def answer_listing_fact(
         return _not_in_data(name, "That detail", "Ta informacja", advisor_email, language, card)
 
     return None
+
+
+# ---------------------------------------------------------------------------------------------
+# Short, readable summary for the first reply about a listing
+# ---------------------------------------------------------------------------------------------
+_SECTION_RE = re.compile(
+    r"\s*(?:•|•)|\b(?:Location and Project Details|Project Details|Pricing|Payment Plan|Rental Potential(?: and ROI)?|"
+    r"Investment (?:Summary|Highlights)|Key Features|Amenities|Unit Types?)\s*:", re.I)
+
+
+def short_summary(text: Any, max_chars: int = 260, sentences: int = 2) -> str:
+    """First one or two sentences of a marketing description, cut before any bullet list or section such as
+    'Pricing:' / 'Payment Plan:' / 'Rental Potential and ROI:'. Pure text trimming: adds nothing, invents nothing."""
+    t = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not t:
+        return ""
+    m = _SECTION_RE.search(t)
+    if m and m.start() > 40:
+        t = t[:m.start()].strip()
+    parts = re.split(r"(?<=[.!?])\s+(?=[A-Z0-9“\"'])", t)
+    out = ""
+    for part in parts[:sentences]:
+        cand = (out + " " + part).strip()
+        if out and len(cand) > max_chars:
+            break
+        out = cand
+    if len(out) > max_chars:
+        out = out[:max_chars].rsplit(" ", 1)[0].rstrip(",;:- ") + "…"
+    return out
+
+
+def humanize_status(status: Any, language: str = "en") -> str:
+    raw = str(status or "").strip()
+    key = raw.lower()
+    table = _STATUS_PL if language == "pl" else _STATUS_EN
+    if key in table:
+        return table[key][:1].upper() + table[key][1:]
+    return raw.replace("_", " ").capitalize() if raw else raw
+
+
+def humanize_location(loc: Any) -> str:
+    s = str(loc or "").strip()
+    return s.title() if s and s == s.lower() else s
