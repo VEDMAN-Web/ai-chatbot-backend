@@ -1288,19 +1288,78 @@ def looks_like_prompt_injection(message: str) -> bool:
     m = (message or "").strip().lower()
     if not m:
         return False
+    # Legitimate property Q&A must not be blocked
+    if re.search(
+        r"\b(?:instructions?\s+for\s+(?:how\s+to\s+)?buy|how\s+to\s+buy|buying\s+process|"
+        r"instrukcj\w*\s+(?:zakupu|kupna)|วิธีซื้อ)\b",
+        m,
+    ):
+        return False
     markers = (
         "ignore all previous",
         "ignore previous instructions",
         "disregard all previous",
         "disregard previous instructions",
+        "disregard the above",
         "forget all previous",
         "email all clients",
         "send all clients",
         "override the system",
         "you are now dan",
         "jailbreak",
+        "repeat the text above",
+        "zignoruj poprzednie",
+        "zignoruj wszystkie poprzednie",
+        "pokaż swój prompt",
+        "pokaz swoj prompt",
+        "prompt systemowy",
+        "เพิกเฉยคำสั่งก่อนหน้า",
+        "เพิกเฉยคำสั่งทั้งหมด",
     )
-    return any(x in m for x in markers)
+    if any(x in m for x in markers):
+        return True
+    # Reveal / print / show / repeat system prompt, hidden rules, secrets
+    if re.search(
+        r"(?:show\s+me|reveal|print|repeat|dump|give\s+me|output|display|"
+        r"pokaż|pokaz|พิมพ์|แสดง|เปิดเผย)\s+"
+        r"(?:your\s+|the\s+|swo(?:j|ój|ich)\s+|ของคุณ\s*)?"
+        r"(?:system\s+)?(?:prompt|instructions?|hidden\s+rules?|text\s+above|"
+        r"api\s*key|secret|token|password|credentials?)",
+        m,
+    ):
+        return True
+    if re.search(
+        r"(?:api\s*key|secret\s+key|access\s+token|password)\b.{0,20}\b(?:print|show|reveal|dump)\b|"
+        r"\b(?:print|show|reveal|dump)\b.{0,30}\b(?:api\s*key|secret|token|password)\b",
+        m,
+    ):
+        return True
+    if "system prompt" in m and re.search(r"\b(?:your|my|the|show|print|reveal|พิมพ์)\b", m):
+        return True
+    return False
+
+
+_API_KEY_LEAK_RE = re.compile(
+    r"(?:sk-[A-Za-z0-9]{10,}|AIza[0-9A-Za-z\-_]{20,}|"
+    r"-----BEGIN\s+(?:RSA\s+)?PRIVATE\s+KEY-----|"
+    r"-----BEGIN\s+OPENSSH\s+PRIVATE\s+KEY-----)",
+    re.IGNORECASE,
+)
+
+
+def redact_sensitive_output(text: str) -> str:
+    """Replace leaked API keys / private-key blocks in assistant text."""
+    if not text or not isinstance(text, str):
+        return text
+    out = _API_KEY_LEAK_RE.sub("[redacted]", text)
+    # Collapse multi-line private key remnants
+    out = re.sub(
+        r"-----BEGIN[^-]+-----.*?-----END[^-]+-----",
+        "[redacted]",
+        out,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    return out
 
 
 def extract_contact_email_from_message(message: str) -> Optional[str]:
@@ -2409,7 +2468,11 @@ class PublicAgentService:
                     response_text=resp["text"],
                     language=lang
                 )
-            resp["text"] = _professionalize_chat_text(clean_response_text(resp["text"]))
+            resp["text"] = redact_sensitive_output(
+                _professionalize_chat_text(clean_response_text(resp["text"]))
+            )
+            # Never leave literal None in visitor-facing text
+            resp["text"] = re.sub(r"\bNone\b", "not listed in our verified data", resp["text"])
         if "preferences" in resp and isinstance(resp["preferences"], dict):
             focus = resp["preferences"].get("focus_summary")
             if focus and isinstance(focus, str):
@@ -3608,9 +3671,58 @@ class PublicAgentService:
                     )
                 )
 
-            # Focused amenity/price answers from unified amenity helper — never invent
+            def _display_fact(val: Any, *, missing_en: str = "not listed in our verified data") -> str:
+                if val is None:
+                    return missing_en
+                s = str(val).strip()
+                if not s or s.lower() in {"none", "n/a", "null", "unknown"}:
+                    return missing_en
+                return s
+
+            p_beds_out = _display_fact(p_beds)
+            p_loc_out = _display_fact(p_loc, missing_en="not listed in our verified data")
+            p_area_out = _display_fact(p_area)
+            p_price_out = _display_fact(p_price, missing_en="Price on request")
+            # Prefer display helpers so specs never print literal None
+            p_beds = p_beds_out
+            p_loc = p_loc_out
+            p_area = p_area_out
+            if p_price_out:
+                p_price = p_price_out
+
+            reply_text = ""
             asked_amenities = extract_requested_amenities(focus_q)
-            if any(k in focus_q for k in ["pool", "swimming", "basen", "สระ"]) or "pool" in asked_amenities or "pool_private" in asked_amenities:
+
+            # Direct single-fact answers for the active property
+            if any(k in focus_q for k in [
+                "how many bedroom", "bedrooms in this", "bedrooms in it", "bedroom in this",
+                "ile sypialn", "กี่ห้องนอน", "how many beds",
+            ]) or (
+                "bedroom" in focus_q
+                and any(k in focus_q for k in ["how many", "how much", "number of", "ile", "กี่"])
+            ):
+                if language == "th":
+                    reply_text = f"**{p_name}**: ห้องนอน — {p_beds_out}"
+                elif language == "pl":
+                    reply_text = f"**{p_name}**: sypialnie — {p_beds_out}"
+                else:
+                    reply_text = (
+                        f"**{p_name}** has **{p_beds_out}** bedrooms."
+                        if p_beds_out != "not listed in our verified data"
+                        else f"**{p_name}**: bedrooms are not listed in our verified data."
+                    )
+            elif any(k in focus_q for k in [
+                "where is it", "where is this", "located", "location of", "where is the",
+                "gdzie jest", "ทำเล", "อยู่ที่ไหน",
+            ]) and not any(k in focus_q for k in ["pool", "bedroom", "price", "parking"]):
+                if language == "th":
+                    reply_text = f"**{p_name}** ตั้งอยู่ที่: **{p_loc_out}**"
+                elif language == "pl":
+                    reply_text = f"**{p_name}** znajduje się w: **{p_loc_out}**"
+                else:
+                    reply_text = f"**{p_name}** is located in **{p_loc_out}**."
+            # Focused amenity/price answers from unified amenity helper — never invent
+            elif any(k in focus_q for k in ["pool", "swimming", "basen", "สระ"]) or "pool" in asked_amenities or "pool_private" in asked_amenities:
                 reply_text = _amenity_reply(
                     "pool_private" if "private" in focus_q or "pool_private" in asked_amenities else "pool",
                     "Yes — verified data confirms a pool.",
