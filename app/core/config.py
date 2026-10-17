@@ -77,6 +77,8 @@ class Settings(BaseSettings):
     # Reasoning effort for calls WITHOUT tools (answer writing, guardrail checks). Default "medium" on
     # gpt-5.x is what made every reply take ~18 s. "low" keeps answers grounded (data comes from tools).
     OPENAI_REASONING_EFFORT: str = "low"
+    # Search results: deterministic verified text (fast, cannot misquote a price) vs model-written wording.
+    SEARCH_REPLY_USE_LLM: bool = False
     OPENAI_MAX_RETRIES: int = 1  # one retry after timeout/transient failure
 
     ANTHROPIC_API_KEY: str = ""
