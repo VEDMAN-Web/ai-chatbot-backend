@@ -14,7 +14,7 @@ RAW = {
     ],
 }
 CARD = {"name": "Anava Condominium", "status": "under_construction", "currency": "THB",
-        "price_numeric_min": 2990000, "raw_firestore_data": RAW, "amenities": RAW["amenities"]}
+        "price_numeric_min": 2990000, "price": "from 2.99M THB", "location": "Koh Samui", "raw_firestore_data": RAW, "amenities": RAW["amenities"]}
 ADV = "advisor@varsoviaestate.com"
 
 
@@ -47,7 +47,7 @@ def test_currency_is_arithmetic_and_labelled_indicative():
 ])
 def test_missing_data_is_said_plainly(q):
     r = a(q)
-    assert "isn't in our verified data" in r and ADV in r
+    assert "confirmed in our records" in r and ADV in r
 
 
 @pytest.mark.parametrize("q", [
@@ -61,12 +61,12 @@ def test_no_returns_or_forecasts(q):
 
 def test_ownership_states_record_value_and_defers_foreign_rules():
     assert "leasehold" in a("Can a foreigner buy it?", owner="leasehold")
-    assert "isn't in our verified data" in a("Is it freehold?", owner=None)
+    assert "confirmed in our records" in a("Is it freehold?", owner=None)
 
 
 def test_amenity_present_or_absent():
     assert "yes" in a("Is there a balcony?")
-    assert "isn't in our verified data" in a("Is there a sauna?")
+    assert "confirmed in our records" in a("Is there a sauna?")
 
 
 def test_unhandled_and_other_languages_fall_through():
@@ -77,3 +77,11 @@ def test_unhandled_and_other_languages_fall_through():
 
 def test_polish():
     assert "marzec 2027" in a("Kiedy będzie gotowe? ukończenie", lang="pl")
+
+
+def test_missing_data_answer_is_helpful_not_a_dead_end():
+    r = a("How far is it from the airport?")
+    assert "rather not guess" in r                      # honest
+    assert "from 2.99M THB" in r and "Koh Samui" in r   # still gives what we do know
+    assert "Inquire" in r                               # clear next step
+    assert "not in our" not in r.lower()                # no blunt denial

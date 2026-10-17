@@ -90,12 +90,22 @@ def _fx_thb(currency: str) -> Optional[float]:
         return None
 
 
-def _not_in_data(name: str, what_en: str, what_pl: str, advisor: str, lang: str) -> str:
+def _not_in_data(name: str, what_en: str, what_pl: str, advisor: str, lang: str, card: Optional[Dict[str, Any]] = None) -> str:
+    """Diplomatic 'we do not have that confirmed': says what we DO know, never guesses, offers the next step."""
+    price = str((card or {}).get("price") or "").strip()
+    loc = str((card or {}).get("location") or "").strip()
+    known_en = " and ".join(x for x in (f"prices start {price}" if price.lower().startswith("from") else (f"the price is {price}" if price else ""),
+                                       f"it is located in {loc}" if loc else "") if x)
+    known_pl = " oraz ".join(x for x in (f"cena {price}" if price else "", f"lokalizacja: {loc}" if loc else "") if x)
     if lang == "pl":
-        return (f"{what_pl} nie figuruje w zweryfikowanych danych dla **{name}**. "
-                f"Nasz doradca ({advisor}) może to potwierdzić — możesz też użyć przycisku „Zapytaj o ofertę”.")
-    return (f"{what_en} isn't in our verified data for **{name}**. "
-            f"Our advisor ({advisor}) can confirm it for you — you can also use the Inquire button.")
+        tail = f" Z potwierdzonych informacji mogę podać: {known_pl}." if known_pl else ""
+        return (f"{what_pl} dla **{name}** nie mam jeszcze potwierdzonej w naszej bazie i wolę nie zgadywać.{tail} "
+                f"Nasz doradca ({advisor}) sprawdzi to i wróci do Ciebie z dokładną odpowiedzią — wystarczy zostawić "
+                f"imię oraz e-mail lub telefon (przycisk „Zapytaj o ofertę”).")
+    tail = f" What I can confirm: {known_en}." if known_en else ""
+    return (f"I don't have {what_en[0].lower() + what_en[1:] if what_en else 'that'} for **{name}** confirmed in our records yet, "
+            f"and I'd rather not guess.{tail} Our advisor ({advisor}) can check and come back to you with the exact answer — "
+            f"just leave your name and an email or phone number (the Inquire button).")
 
 
 def _layouts(raw: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -179,7 +189,7 @@ def answer_listing_fact(
                             f"(przelicznik poglądowy, nie oferta wiążąca; ostateczną cenę potwierdza doradca).")
                 return (f"**{name}**: starting price {listed}, which is roughly {_money(round(val, -2), tgt)} "
                         f"(indicative conversion, not a binding quote; our advisor confirms the final price).")
-        return _not_in_data(name, "A converted price", "Przeliczona cena", advisor_email, language)
+        return _not_in_data(name, "A converted price", "Przeliczona cena", advisor_email, language, card)
 
     # ---- price per square metre
     if _RE_PER_SQM.search(q):
@@ -187,7 +197,7 @@ def answer_listing_fact(
         if v:
             return (f"**{name}**: cena za m² wynosi ok. {_money(v, currency)}." if pl
                     else f"**{name}**: the listed price per square metre is about {_money(v, currency)}.")
-        return _not_in_data(name, "The price per square metre", "Cena za m²", advisor_email, language)
+        return _not_in_data(name, "The price per square metre", "Cena za m²", advisor_email, language, card)
 
     # ---- address
     if _RE_ADDRESS.search(q):
@@ -197,7 +207,7 @@ def answer_listing_fact(
         if a:
             return (f"Adres **{name}** w zweryfikowanych danych: {a}" if pl
                     else f"The address of **{name}** in our verified data: {a}")
-        return _not_in_data(name, "The exact address", "Dokładny adres", advisor_email, language)
+        return _not_in_data(name, "The exact address", "Dokładny adres", advisor_email, language, card)
 
     # ---- completion / handover
     if _RE_COMPLETION.search(q):
@@ -215,7 +225,7 @@ def answer_listing_fact(
                     f"Nasz doradca ({advisor_email}) może ją potwierdzić." if pl
                     else f"**{name}** is currently {status}, but no completion date is in our verified data. "
                          f"Our advisor ({advisor_email}) can confirm it.")
-        return _not_in_data(name, "The completion date", "Termin ukończenia", advisor_email, language)
+        return _not_in_data(name, "The completion date", "Termin ukończenia", advisor_email, language, card)
 
     # ---- bedroom types on offer
     if _RE_BEDROOM_TYPES.search(q) and lays:
@@ -242,7 +252,7 @@ def answer_listing_fact(
         if avail:
             return (f"Według zweryfikowanych danych **{name}** ma {int(avail)} dostępnych jednostek." if pl
                     else f"Our verified data shows {int(avail)} units available at **{name}**.")
-        return _not_in_data(name, "The number of units", "Liczba jednostek", advisor_email, language)
+        return _not_in_data(name, "The number of units", "Liczba jednostek", advisor_email, language, card)
 
     # ---- a specific layout (studio / 1-bed / 2-bed): size, price, count
     if _RE_LAYOUT_WORD.search(q) and _RE_LAYOUT_ASK.search(q):
@@ -262,7 +272,7 @@ def answer_listing_fact(
                 parts.append((f"{int(n)} dostępnych" if pl else f"{int(n)} available"))
             if parts:
                 return f"**{name}** — {label}: " + ", ".join(parts) + "."
-        return _not_in_data(name, "That unit type", "Ten typ lokalu", advisor_email, language)
+        return _not_in_data(name, "That unit type", "Ten typ lokalu", advisor_email, language, card)
 
     # ---- price range / cheapest / most expensive unit
     if _RE_RANGE.search(q) and not _RE_OWNERSHIP.search(q):
@@ -282,7 +292,7 @@ def answer_listing_fact(
                     f"i prawnik." if pl
                     else f"The ownership structure in our verified data for **{name}** is: {ownership}. "
                          f"Rules for foreign buyers depend on that structure — our advisor ({advisor_email}) and a lawyer should confirm them.")
-        return _not_in_data(name, "The ownership structure", "Forma własności", advisor_email, language)
+        return _not_in_data(name, "The ownership structure", "Forma własności", advisor_email, language, card)
 
     # ---- payment plan / developer
     if _RE_PAYMENT.search(q):
@@ -290,9 +300,9 @@ def answer_listing_fact(
         if isinstance(plan, str) and plan.strip():
             return (f"Plan płatności w zweryfikowanych danych **{name}**: {plan.strip()}" if pl
                     else f"Payment plan in our verified data for **{name}**: {plan.strip()}")
-        return _not_in_data(name, "The payment plan", "Plan płatności", advisor_email, language)
+        return _not_in_data(name, "The payment plan", "Plan płatności", advisor_email, language, card)
     if _RE_DEVELOPER.search(q):
-        return _not_in_data(name, "The developer's name", "Nazwa dewelopera", advisor_email, language)
+        return _not_in_data(name, "The developer's name", "Nazwa dewelopera", advisor_email, language, card)
 
     # ---- returns / investment advice: never a figure, never a guarantee
     if _RE_YIELD.search(q) or _RE_ADVICE.search(q):
@@ -311,10 +321,10 @@ def answer_listing_fact(
             if ok:
                 return (f"**{name}**: tak — według zweryfikowanych danych: {label}." if pl
                         else f"**{name}**: yes — {label} is listed in our verified data.")
-            return _not_in_data(name, label.capitalize(), label.capitalize(), advisor_email, language)
+            return _not_in_data(name, label.capitalize(), label.capitalize(), advisor_email, language, card)
 
     # ---- everything else we simply do not hold
     if _RE_NOT_STATED.search(q):
-        return _not_in_data(name, "That detail", "Ta informacja", advisor_email, language)
+        return _not_in_data(name, "That detail", "Ta informacja", advisor_email, language, card)
 
     return None
