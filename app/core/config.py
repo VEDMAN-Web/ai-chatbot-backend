@@ -74,6 +74,9 @@ class Settings(BaseSettings):
     OPENAI_MODEL: str = "gpt-5.5"
     OPENAI_TEMPERATURE: float = 0.0
     OPENAI_TIMEOUT: float = 25.0  # seconds per request; honest fallback on timeout
+    # Reasoning effort for calls WITHOUT tools (answer writing, guardrail checks). Default "medium" on
+    # gpt-5.x is what made every reply take ~18 s. "low" keeps answers grounded (data comes from tools).
+    OPENAI_REASONING_EFFORT: str = "low"
     OPENAI_MAX_RETRIES: int = 1  # one retry after timeout/transient failure
 
     ANTHROPIC_API_KEY: str = ""

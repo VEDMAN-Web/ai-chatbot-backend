@@ -1594,6 +1594,10 @@ def _safe_openai_create(client: Any, **kwargs) -> Any:
         # OpenAI requires reasoning_effort="none" when function tools are used in /v1/chat/completions
         if call_kwargs.get("tools") or call_kwargs.get("functions"):
             call_kwargs["reasoning_effort"] = "none"
+        elif "reasoning_effort" not in call_kwargs:
+            _effort = str(getattr(settings, "OPENAI_REASONING_EFFORT", "") or "").strip().lower()
+            if _effort in ("none", "minimal", "low", "medium", "high"):
+                call_kwargs["reasoning_effort"] = _effort
 
     call_kwargs.setdefault("timeout", timeout_sec)
 
