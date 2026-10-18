@@ -283,8 +283,151 @@ const API_ROUTES = {
   adminHistory: (id) => `/api/v1/admin/chat/history/${id}`,
   confirmAction: (id) => `/api/v1/admin/actions/${id}/confirm`,
   rejectAction: (id) => `/api/v1/admin/actions/${id}/reject`,
-  properties: '/api/v1/properties'
+  properties: '/api/v1/properties',
+  login: '/api/v1/auth/login',
+  logout: '/api/v1/auth/logout',
 };
+
+const ADMIN_TOKEN_KEY = 'tajlandia_admin_access_token';
+const ADMIN_USER_KEY = 'tajlandia_admin_user';
+
+function getAdminAccessToken() {
+  return (localStorage.getItem(ADMIN_TOKEN_KEY) || '').trim();
+}
+
+function getAdminUser() {
+  try {
+    return JSON.parse(localStorage.getItem(ADMIN_USER_KEY) || 'null');
+  } catch (e) {
+    return null;
+  }
+}
+
+function isAdminLoggedIn() {
+  return Boolean(getAdminAccessToken());
+}
+
+function adminAuthHeaders(extra = {}) {
+  const token = getAdminAccessToken();
+  const headers = { ...extra };
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+  return headers;
+}
+
+function updateAdminLoginUI() {
+  const btn = document.getElementById('btnAdminLoginTop');
+  const label = document.getElementById('btnAdminLoginTopLabel');
+  const avatar = document.getElementById('staffAvatarBtn');
+  const user = getAdminUser();
+  const loggedIn = isAdminLoggedIn();
+  if (btn) {
+    btn.style.display = currentMode === 'admin' ? 'inline-flex' : 'none';
+    if (label) label.innerText = loggedIn ? (user?.email ? `Logout (${user.email.split('@')[0]})` : 'Logout') : 'Staff Login';
+    btn.onclick = loggedIn ? () => logoutAdminStaff() : () => openAdminLoginModal();
+  }
+  if (avatar && user?.name) {
+    const initials = String(user.name || user.email || 'AD').trim().slice(0, 2).toUpperCase();
+    avatar.innerText = initials;
+    avatar.title = loggedIn ? `${user.email || user.name} (${user.role || 'staff'})` : 'Staff Account';
+  }
+}
+
+function openAdminLoginModal() {
+  const overlay = document.getElementById('adminLoginOverlay');
+  const modal = document.getElementById('adminLoginModal');
+  const err = document.getElementById('adminLoginError');
+  const status = document.getElementById('adminLoginStatus');
+  if (err) { err.style.display = 'none'; err.innerText = ''; }
+  if (status) {
+    if (isAdminLoggedIn()) {
+      const u = getAdminUser();
+      status.style.display = 'block';
+      status.innerText = `Currently signed in as ${u?.email || 'staff'}. Sign in again to refresh token, or use Logout.`;
+    } else {
+      status.style.display = 'none';
+    }
+  }
+  if (overlay) overlay.style.display = 'block';
+  if (modal) modal.style.display = 'block';
+  const emailEl = document.getElementById('adminLoginEmail');
+  if (emailEl) setTimeout(() => emailEl.focus(), 50);
+}
+
+function closeAdminLoginModal() {
+  const overlay = document.getElementById('adminLoginOverlay');
+  const modal = document.getElementById('adminLoginModal');
+  if (overlay) overlay.style.display = 'none';
+  if (modal) modal.style.display = 'none';
+}
+
+async function submitAdminLogin() {
+  const email = (document.getElementById('adminLoginEmail')?.value || '').trim();
+  const password = document.getElementById('adminLoginPassword')?.value || '';
+  const domain = document.getElementById('adminLoginDomain')?.value || 'tajlandia.com';
+  const err = document.getElementById('adminLoginError');
+  const btn = document.getElementById('btnAdminLogin');
+  if (!email || !password) {
+    if (err) { err.style.display = 'block'; err.innerText = 'Email and password are required.'; }
+    return;
+  }
+  if (btn) { btn.disabled = true; btn.innerText = 'Signing in…'; }
+  if (err) err.style.display = 'none';
+  try {
+    const res = await fetch(API_ROUTES.login, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password, domain, site_origin: domain }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const detail = data.detail || data.message || `Login failed (${res.status})`;
+      throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail));
+    }
+    const token = data.access_token;
+    if (!token) throw new Error('Login response missing access_token');
+    localStorage.setItem(ADMIN_TOKEN_KEY, token);
+    localStorage.setItem(ADMIN_USER_KEY, JSON.stringify(data.user || { email }));
+    if (data.user?.domain) activeTenantOrigin = data.user.domain;
+    else activeTenantOrigin = domain;
+    updateAdminLoginUI();
+    closeAdminLoginModal();
+    appendMessageRow('assistant', `✅ Signed in as **${data.user?.email || email}** (${data.user?.role || 'staff'}). You can use Admin Team chat now.`);
+  } catch (e) {
+    if (err) {
+      err.style.display = 'block';
+      err.innerText = e.message || 'Login failed';
+    }
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerText = 'Sign in'; }
+  }
+}
+
+async function logoutAdminStaff() {
+  const token = getAdminAccessToken();
+  try {
+    if (token) {
+      await fetch(API_ROUTES.logout, {
+        method: 'POST',
+        headers: adminAuthHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({}),
+      });
+    }
+  } catch (e) { /* ignore */ }
+  localStorage.removeItem(ADMIN_TOKEN_KEY);
+  localStorage.removeItem(ADMIN_USER_KEY);
+  updateAdminLoginUI();
+  if (currentMode === 'admin') {
+    appendMessageRow('assistant', 'You have been logged out of Admin Team. Sign in again to continue.');
+    openAdminLoginModal();
+  }
+}
+
+async function ensureAdminAuthOrPrompt() {
+  if (isAdminLoggedIn()) return true;
+  openAdminLoginModal();
+  appendMessageRow('assistant', '⚠️ **Authentication required.** Please sign in with your staff email/password to use Admin Team chat.');
+  return false;
+}
 
 const FALLBACK_VILLA_IMAGES = [
   'https://images.unsplash.com/photo-1580587771525-78b9dba3b914?auto=format&fit=crop&w=800&q=80',
@@ -319,6 +462,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Batch dropzone drag and drop listeners
   initBatchDropzone();
+  updateAdminLoginUI();
+
+  // /admin-ui lands directly in Admin Team mode (+ login if needed)
+  if (window.location.pathname.replace(/\/$/, '') === '/admin-ui') {
+    setAgentMode('admin', false);
+  }
 });
 
 function initSession() {
@@ -400,11 +549,15 @@ function setAgentMode(mode, createNew = true) {
 
   // Update Hero texts & prompt cards according to current mode & language
   updateHeroAndInputUI();
+  updateAdminLoginUI();
 
   if (mode === 'admin') {
     const bar = document.getElementById('userFocusBar');
     if (bar) bar.style.display = 'none';
     closeFocusDrawer();
+    if (!isAdminLoggedIn()) {
+      openAdminLoginModal();
+    }
   } else {
     updateFocusBarUI();
   }
@@ -499,6 +652,12 @@ async function handleSendMessage() {
   const text = input.value.trim();
   if (!text) return;
 
+  if (currentMode === 'admin' && !isAdminLoggedIn()) {
+    openAdminLoginModal();
+    appendMessageRow('assistant', '⚠️ **Authentication required.** Please sign in with your staff email/password to use Admin Team chat.');
+    return;
+  }
+
   // Hide hero if visible
   const hero = document.getElementById('welcomeHero');
   if (hero) hero.style.display = 'none';
@@ -532,9 +691,12 @@ async function handleSendMessage() {
   };
 
   try {
+    const headers = currentMode === 'admin'
+      ? adminAuthHeaders({ 'Content-Type': 'application/json' })
+      : { 'Content-Type': 'application/json' };
     const res = await fetch(endpoint, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify(payload),
       signal: controller.signal
     });
@@ -543,6 +705,14 @@ async function handleSendMessage() {
 
     if (!res.ok) {
       const errData = await res.json().catch(() => ({}));
+      if (res.status === 401 && currentMode === 'admin') {
+        localStorage.removeItem(ADMIN_TOKEN_KEY);
+        localStorage.removeItem(ADMIN_USER_KEY);
+        updateAdminLoginUI();
+        openAdminLoginModal();
+        appendMessageRow('assistant', '⚠️ **Session expired.** Please sign in again.');
+        return;
+      }
       const fb = fallbackByLang[currentLanguage] || fallbackByLang.en;
       appendMessageRow('assistant', errData.detail ? `⚠️ **Error (${res.status}):** ${errData.detail}` : fb);
       return;
@@ -830,6 +1000,11 @@ function streamTextToElement(element, fullText, speedMs = 14) {
 // Action Confirmation API Calls (Two-Step Admin Security)
 async function confirmAction(actionId) {
   const card = document.getElementById(`action-card-${actionId}`);
+  if (!isAdminLoggedIn()) {
+    openAdminLoginModal();
+    if (card) card.innerHTML = `<div style="color: var(--accent-red); font-size: 13px;">Sign in required before confirming.</div>`;
+    return;
+  }
   if (card) {
     card.innerHTML = `<div style="color: var(--gold); font-size: 13px;">Executing action...</div>`;
   }
@@ -837,7 +1012,7 @@ async function confirmAction(actionId) {
   try {
     const res = await fetch(API_ROUTES.confirmAction(actionId), {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: adminAuthHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({})
     });
 
@@ -866,10 +1041,15 @@ async function confirmAction(actionId) {
 
 async function rejectAction(actionId) {
   const card = document.getElementById(`action-card-${actionId}`);
+  if (!isAdminLoggedIn()) {
+    openAdminLoginModal();
+    if (card) card.innerHTML = `<div style="color: var(--accent-red); font-size: 13px;">Sign in required before rejecting.</div>`;
+    return;
+  }
   try {
     const res = await fetch(API_ROUTES.rejectAction(actionId), {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: adminAuthHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ reason: 'Rejected by staff via UI' })
     });
 
@@ -1589,6 +1769,12 @@ function initBatchDropzone() {
 }
 
 function openBatchOpsModal(initialTab = 'upload') {
+  if (!isAdminLoggedIn()) {
+    if (currentMode !== 'admin') setAgentMode('admin', false);
+    openAdminLoginModal();
+    appendMessageRow('assistant', '⚠️ **Authentication required.** Sign in as staff before using bulk operations.');
+    return;
+  }
   const modal = document.getElementById('batchModal');
   const overlay = document.getElementById('batchModalOverlay');
   if (modal) modal.style.display = 'flex';
@@ -1703,11 +1889,13 @@ async function submitBatchOperation() {
   }
 
   try {
+    if (!isAdminLoggedIn()) {
+      openAdminLoginModal();
+      throw new Error('Sign in required for batch operations');
+    }
     const res = await fetch('/api/v1/admin/properties/batch-file', {
       method: 'POST',
-      headers: {
-        'Authorization': 'Bearer admin-token'
-      },
+      headers: adminAuthHeaders(),
       body: formData
     });
 
@@ -1770,10 +1958,12 @@ async function loadBatchHistory(manual = false) {
   }
 
   try {
+    if (!isAdminLoggedIn()) {
+      if (listEl) listEl.innerHTML = '<div class="batch-empty-placeholder">Sign in as staff to view batch history.</div>';
+      return;
+    }
     const res = await fetch('/api/v1/admin/operations/history?limit=50', {
-      headers: {
-        'Authorization': 'Bearer admin-token'
-      }
+      headers: adminAuthHeaders()
     });
 
     if (!res.ok) throw new Error('Failed to fetch history');
@@ -1852,11 +2042,13 @@ async function executeBatchUndo(operationId, count) {
   if (!ok) return;
 
   try {
+    if (!isAdminLoggedIn()) {
+      openAdminLoginModal();
+      throw new Error('Sign in required to undo batch operations');
+    }
     const res = await fetch(`/api/v1/admin/operations/${encodeURIComponent(operationId)}/undo`, {
       method: 'POST',
-      headers: {
-        'Authorization': 'Bearer admin-token'
-      }
+      headers: adminAuthHeaders()
     });
 
     const data = await res.json();
