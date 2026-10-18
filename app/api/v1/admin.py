@@ -1,9 +1,10 @@
+import json
 import os
 import logging
 from datetime import datetime
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Generator
 from fastapi import APIRouter, Depends, HTTPException, Query, status, UploadFile, File, Form, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -60,6 +61,8 @@ class AdminChatResponse(BaseModel):
     tools_used: Optional[List[Dict[str, Any]]] = Field(None, description="Claude tools invoked during turn")
     download_link: Optional[str] = Field(None, description="Direct download URL for generated report")
     language: str = Field("en", description="Active response language ('en' or 'pl')", example="en")
+    suggestions: Optional[List[str]] = Field(None, description="Optional follow-up suggestions")
+    debug: Optional[Dict[str, Any]] = Field(None, description="Present only when ADMIN_DEBUG_TIMING=true")
 
 
 class ActionConfirmRequest(BaseModel):
@@ -70,10 +73,15 @@ class ActionRejectRequest(BaseModel):
     reason: Optional[str] = Field(None, description="Reason for rejecting the proposed action")
 
 
+def _sse_pack(event: str, data: Dict[str, Any]) -> str:
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
 # 1. Admin Chat (Unified Action & Chatbot Endpoint)
-@router.post("/chat", response_model=AdminChatResponse)
+@router.post("/chat", response_model=None)
 def admin_chat_endpoint(
     req: AdminChatRequest,
+    stream: bool = Query(False, description="If true, return Server-Sent Events (status then final verified text)"),
     staff: AuthenticatedStaff = Depends(require_admin_or_employee_with_sites),
     db: Session = Depends(get_db)
 ):
@@ -82,6 +90,10 @@ def admin_chat_endpoint(
     Handles general inquiries, technical dossiers, reports, write proposals,
     and in-chat action confirmations/rejections in one single API.
     Strictly scoped to the staff member's active selected websites.
+
+    Default: JSON AdminChatResponse.
+    With ?stream=true: SSE — status events while working, then a final
+    verified text event (never streams unverified claim text mid-flight).
     """
     user_msg = (req.message or "").strip()
     if not user_msg and not req.action:
@@ -103,17 +115,48 @@ def admin_chat_endpoint(
 
     active_origin = staff.selected_websites[0] if staff.selected_websites else req.site_origin
 
-    res = process_admin_chat(
-        db=db,
-        session_id=req.session_id,
-        message=user_msg,
-        staff_user=staff,
-        site_origin=active_origin,
-        requested_language=req.language,
-        action=req.action,
-        pending_action_id=req.pending_action_id
-    )
-    return res
+    def _run() -> Dict[str, Any]:
+        return process_admin_chat(
+            db=db,
+            session_id=req.session_id,
+            message=user_msg,
+            staff_user=staff,
+            site_origin=active_origin,
+            requested_language=req.language,
+            action=req.action,
+            pending_action_id=req.pending_action_id
+        )
+
+    if not stream:
+        return _run()
+
+    def event_gen() -> Generator[str, None, None]:
+        yield _sse_pack("status", {"message": "Checking the database..."})
+        try:
+            res = _run()
+        except Exception as e:
+            logger.exception("admin chat stream failed: %s", e)
+            yield _sse_pack("error", {"message": "Service temporarily unavailable"})
+            return
+        # Only emit verified final text (claim verifier already ran inside process_admin_chat)
+        payload = {
+            "type": res.get("type", "text"),
+            "text": res.get("text") or "",
+            "session_id": res.get("session_id"),
+            "conversation_id": res.get("conversation_id"),
+            "requires_confirmation": bool(res.get("requires_confirmation")),
+            "pending_action_id": res.get("pending_action_id"),
+            "action_status": res.get("action_status"),
+            "tools_used": res.get("tools_used") or [],
+            "download_link": res.get("download_link"),
+            "language": res.get("language") or "en",
+        }
+        if res.get("debug") is not None:
+            payload["debug"] = res["debug"]
+        yield _sse_pack("final", payload)
+        yield _sse_pack("done", {"ok": True})
+
+    return StreamingResponse(event_gen(), media_type="text/event-stream")
 
 
 # 2. Admin Conversation History

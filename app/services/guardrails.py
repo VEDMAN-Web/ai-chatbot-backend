@@ -246,56 +246,20 @@ class AIIntentClassifier:
         if not msg:
             return AIIntentClassificationResult(primary_intent="general_chat", confidence=1.0)
 
-        # 1. If Anthropic client is available, use fast model for dynamic classification
-        if client and getattr(settings, "ANTHROPIC_API_KEY", None):
-            try:
-                recent_turns = (conversation_history or [])[-3:]
-                history_excerpt = ""
-                for t in recent_turns:
-                    role = str(t.get("role", "user")).title()
-                    cnt = str(t.get("content", ""))[:250]
-                    history_excerpt += f"{role}: {cnt}\n"
+        # 0. Rules first — skip LLM for obvious intents (speed)
+        from app.services.admin_perf import classify_obvious_intent, admin_fast_model
+        obvious = classify_obvious_intent(msg)
+        if obvious and obvious.get("skipped_llm"):
+            return AIIntentClassificationResult(
+                primary_intent=obvious.get("primary_intent", "general_chat"),
+                document_requested=bool(obvious.get("document_requested", False)),
+                negative_feedback=bool(obvious.get("negative_feedback", False)),
+                requires_verification=bool(obvious.get("requires_verification", False)),
+                confidence=float(obvious.get("confidence", 0.95)),
+                explanation=str(obvious.get("explanation", "rules")),
+            )
 
-                system_prompt = (
-                    "You are an AI conversational intent and action classifier for an internal property agency panel.\n"
-                    "Analyze the user's latest query given the recent turns and output valid JSON with EXACTLY these keys:\n"
-                    "- \"primary_intent\": one of [\"inventory_inquiry\", \"negative_feedback\", \"request_portfolio\", \"portfolio_answers\", \"request_report\", \"confirm_action\", \"reject_action\", \"property_search\", \"property_knowledge\", \"buyer_leads\", \"general_chat\"]\n"
-                    "- \"document_requested\": boolean (TRUE ONLY IF the user explicitly commanded to generate, export, or download a PDF, Excel, or portfolio dossier. If the user only asked how many properties are in the DB or asked 'did I ask for a pdf', this MUST BE FALSE)\n"
-                    "- \"negative_feedback\": boolean (TRUE IF the user is questioning an unsolicited action, stating they did not ask for something, or complaining)\n"
-                    "- \"requires_verification\": boolean (TRUE IF user asks a verification question like 'Did I ask you to create a pdf?' where the system must answer truthfully without falsely saying yes)\n"
-                    "- \"confidence\": float (0.0 to 1.0)\n"
-                    "- \"explanation\": short reason\n\n"
-                    "Respond with ONLY a raw JSON object."
-                )
-
-                content_prompt = f"Recent History:\n{history_excerpt or 'None'}\n\nUser Message: \"{msg}\""
-                if active_pending_action:
-                    content_prompt += f"\nActive Pending Action: {getattr(active_pending_action, 'tool_name', 'action')}"
-
-                res = _safe_client_create(
-                    client,
-                    model=getattr(settings, "ANTHROPIC_MODEL", "claude-opus-5-5"),
-                    max_tokens=1024,
-                    temperature=0.0,
-                    system=system_prompt,
-                    messages=[{"role": "user", "content": content_prompt}]
-                )
-                raw_text = "".join(getattr(b, "text", "") for b in res.content if getattr(b, "type", "") == "text").strip()
-                json_match = re.search(r'\{.*\}', raw_text, re.DOTALL)
-                if json_match:
-                    parsed = json.loads(json_match.group(0))
-                    return AIIntentClassificationResult(
-                        primary_intent=parsed.get("primary_intent", "general_chat"),
-                        document_requested=bool(parsed.get("document_requested", False)),
-                        negative_feedback=bool(parsed.get("negative_feedback", False)),
-                        requires_verification=bool(parsed.get("requires_verification", False)),
-                        confidence=float(parsed.get("confidence", 0.9)),
-                        explanation=str(parsed.get("explanation", ""))
-                    )
-            except Exception as e:
-                logger.debug(f"AIIntentClassifier LLM call fallback: {e}")
-
-        # 2. Deterministic Fallback if LLM unavailable
+        # Deterministic negative / inventory / doc before LLM
         msg_l = msg.lower()
         is_negative_doc = any(
             w in msg_l for w in [
@@ -311,7 +275,7 @@ class AIIntentClassifier:
                 negative_feedback=True,
                 requires_verification=True,
                 confidence=0.95,
-                explanation="Deterministic fallback: user clarifying they did not request a document"
+                explanation="Deterministic: user clarifying they did not request a document"
             )
         if any(w in msg_l for w in ["how many", "database", "inventory", "total properties", "count", "ile nieruchomości", "ile w bazie", "stan bazy"]):
             return AIIntentClassificationResult(
@@ -320,40 +284,72 @@ class AIIntentClassifier:
                 negative_feedback=False,
                 requires_verification=False,
                 confidence=0.95,
-                explanation="Deterministic fallback: user asking for property inventory count"
+                explanation="Deterministic: inventory count"
             )
 
-        # Check for explicit document generation / download requests
-        doc_request_keywords = [
-            "pdf", "dossier", "report", "raport", "excel", "xlsx", "csv", "export",
-            "pobierz", "wygeneruj", "download", "arkusz", "stwórz", "stworz", "zrób", "zrob", "make"
-        ]
-        has_doc_kw = any(w in msg_l for w in doc_request_keywords)
         is_direct_doc_request = (
             any(p in msg_l for p in ["in pdf", "as pdf", "to pdf", "give me pdf", "want pdf", "create pdf", "make pdf", "generate pdf", "download pdf", "w pdf", "na pdf", "zrób pdf", "zrob pdf", "pobierz pdf", "wygeneruj pdf"])
             or ("pdf" in msg_l and any(a in msg_l for a in ["give", "want", "send", "make", "create", "generate", "daj", "chcę", "chce", "wyślij", "wyslij"]))
             or any(p in msg_l for p in ["portfolio pdf", "client offer", "clint offer", "offer dossier", "investor offer", "wygeneruj portfolio", "create portfolio", "offer pdf", "investor portfolio"])
             or any(p in msg_l for p in ["generate report", "download report", "export to excel", "wygeneruj raport", "pobierz raport", "raport excel", "export report"])
         )
-
         if is_direct_doc_request and not is_negative_doc:
             is_portfolio = any(w in msg_l for w in ["portfolio", "client", "clint", "klient", "offer", "oferta", "ofert", "dossier", "alexander", "dariusz"])
-            if is_portfolio:
-                return AIIntentClassificationResult(
-                    primary_intent="request_portfolio",
-                    document_requested=True,
-                    negative_feedback=False,
-                    confidence=0.95,
-                    explanation="Deterministic fallback: explicit portfolio/offer dossier request"
+            return AIIntentClassificationResult(
+                primary_intent="request_portfolio" if is_portfolio else "request_report",
+                document_requested=True,
+                negative_feedback=False,
+                confidence=0.95,
+                explanation="Deterministic: explicit document request"
+            )
+
+        # 1. Fast model for ambiguous cases only (Haiku, max_tokens 200, last 4 msgs)
+        if client and getattr(settings, "ANTHROPIC_API_KEY", None):
+            try:
+                recent_turns = (conversation_history or [])[-4:]
+                history_excerpt = ""
+                for t in recent_turns:
+                    role = str(t.get("role", "user")).title()
+                    cnt = str(t.get("content", ""))[:200]
+                    history_excerpt += f"{role}: {cnt}\n"
+
+                system_prompt = (
+                    "You are an intent classifier for an internal property agency panel.\n"
+                    "Output ONLY JSON with keys: primary_intent, document_requested, negative_feedback, "
+                    "requires_verification, confidence, explanation.\n"
+                    "primary_intent one of: inventory_inquiry, negative_feedback, request_portfolio, "
+                    "portfolio_answers, request_report, confirm_action, reject_action, property_search, "
+                    "property_knowledge, buyer_leads, general_chat.\n"
+                    "document_requested=true ONLY for explicit PDF/Excel/dossier commands."
                 )
-            else:
-                return AIIntentClassificationResult(
-                    primary_intent="request_report",
-                    document_requested=True,
-                    negative_feedback=False,
-                    confidence=0.95,
-                    explanation="Deterministic fallback: explicit report request"
+                content_prompt = f"Recent History:\n{history_excerpt or 'None'}\n\nUser Message: \"{msg}\""
+                if active_pending_action:
+                    content_prompt += f"\nActive Pending Action: {getattr(active_pending_action, 'tool_name', 'action')}"
+
+                helper_timeout = float(getattr(settings, "ADMIN_HELPER_TIMEOUT", 30.0) or 30.0)
+                res = _safe_client_create(
+                    client,
+                    model=admin_fast_model(),
+                    max_tokens=200,
+                    temperature=0.0,
+                    system=system_prompt,
+                    messages=[{"role": "user", "content": content_prompt}],
+                    timeout=helper_timeout,
                 )
+                raw_text = "".join(getattr(b, "text", "") for b in res.content if getattr(b, "type", "") == "text").strip()
+                json_match = re.search(r'\{.*\}', raw_text, re.DOTALL)
+                if json_match:
+                    parsed = json.loads(json_match.group(0))
+                    return AIIntentClassificationResult(
+                        primary_intent=parsed.get("primary_intent", "general_chat"),
+                        document_requested=bool(parsed.get("document_requested", False)),
+                        negative_feedback=bool(parsed.get("negative_feedback", False)),
+                        requires_verification=bool(parsed.get("requires_verification", False)),
+                        confidence=float(parsed.get("confidence", 0.9)),
+                        explanation=str(parsed.get("explanation", ""))
+                    )
+            except Exception as e:
+                logger.debug(f"AIIntentClassifier LLM call fallback: {e}")
 
         return AIIntentClassificationResult(
             primary_intent="general_chat",
@@ -445,6 +441,7 @@ class ResponseConfidenceGuardrail:
         download_link: Optional[str] = None,
         language: str = "en",
         tool_results: Optional[List[Any]] = None,
+        run_llm_judge: bool = True,
     ) -> GuardrailEvaluationResult:
         tool_calls = tool_calls or []
         tool_results = tool_results or []
@@ -491,7 +488,7 @@ class ResponseConfidenceGuardrail:
                     needs_requery=True
                 )
 
-        # Check 2.5: Illegal Real Estate & Sycophancy Under Pressure Check ("if NO means NO, do not be pressured")
+        # Check 2.5: Illegal Real Estate & Sycophancy Under Pressure Check
         if ThaiPropertyLegalGuardrail.is_legal_inquiry_or_pressure(user_message):
             is_illegal, illegal_reason = ThaiPropertyLegalGuardrail.check_illegal_claims(response_text)
             if is_illegal:
@@ -500,45 +497,43 @@ class ResponseConfidenceGuardrail:
                     confidence_score=0.0,
                     violation_type="illegal_real_estate_claim",
                     critique=f"Response affirmed an illegal or false claim under Thai property law: {illegal_reason}",
-                    suggested_correction="State NO clearly and firmly regarding direct foreign land freehold or tax-free claims, while maintaining a friendly and motivated tone guiding them to legal pathways (foreign freehold condos & registered villa leaseholds).",
+                    suggested_correction="State NO clearly regarding foreign land freehold or tax-free claims.",
                     needs_requery=True
                 )
 
-        # Check 3: LLM Self-Confidence & Factuality Evaluation (with this turn's tool results)
-        if client and getattr(settings, "ANTHROPIC_API_KEY", None) and len(response_text) > 20:
+        # Check 3: LLM judge — ONLY when caller opts in (writes/docs/hard claim mismatches)
+        if (
+            run_llm_judge
+            and client
+            and getattr(settings, "ANTHROPIC_API_KEY", None)
+            and len(response_text) > 20
+        ):
             try:
-                tool_blob = cls._trim_tool_results_for_judge(tool_results)
+                from app.services.admin_perf import admin_fast_model
+                tool_blob = cls._trim_tool_results_for_judge(tool_results, max_chars=1500)
                 eval_system = (
-                    "You are a strict Response Confidence and Truthfulness Guardrail for a real estate agency AI.\n"
-                    "You MUST verify claims against THIS TURN'S TOOL RESULTS below. Do not speculate about facts you cannot see.\n"
-                    "Do NOT flag truncation / max_tokens / incomplete endings — that is handled separately.\n"
-                    "Do NOT flag vague uncertainty ('cannot verify') when tool results are present and the reply is consistent with them.\n"
-                    "Trigger a concrete problem ONLY when:\n"
-                    "A) The reply contradicts a number/id/status in the tool results,\n"
-                    "B) The reply fabricates an action that tools did not perform, or\n"
-                    "C) An unsolicited document was produced.\n\n"
-                    "Output JSON with keys: is_confident (bool), confidence_score (float), "
-                    "has_false_agreement (bool), has_unsolicited_action (bool), "
-                    "has_concrete_contradiction (bool), critique (str), correction_needed (str)."
+                    "Strict truthfulness judge. Verify against TOOL RESULTS only. "
+                    "Flag ONLY concrete contradictions, fabricated actions, or unsolicited docs. "
+                    "Output JSON: is_confident, confidence_score, has_false_agreement, "
+                    "has_unsolicited_action, has_concrete_contradiction, critique, correction_needed."
                 )
-
                 eval_user = (
-                    f"User Query: \"{user_message}\"\n"
-                    f"User Intent: {classification.primary_intent}\n"
-                    f"Document Requested by User: {user_wants_doc}\n"
-                    f"Requires Verification: {classification.requires_verification}\n"
-                    f"Tool Calls: {json.dumps([tc.get('name') for tc in tool_calls])}\n"
-                    f"TOOL RESULTS (source of truth):\n{tool_blob}\n\n"
-                    f"Candidate Response: \"{response_text[:1200]}\""
+                    f"User: \"{(user_message or '')[:300]}\"\n"
+                    f"Intent: {classification.primary_intent}\n"
+                    f"Doc requested: {user_wants_doc}\n"
+                    f"Tools: {json.dumps([tc.get('name') for tc in tool_calls])}\n"
+                    f"TOOL RESULTS:\n{tool_blob}\n\n"
+                    f"Reply (first 800 chars): \"{(response_text or '')[:800]}\""
                 )
-
+                helper_timeout = float(getattr(settings, "ADMIN_HELPER_TIMEOUT", 30.0) or 30.0)
                 eval_res = _safe_client_create(
                     client,
-                    model=getattr(settings, "ANTHROPIC_MODEL", "claude-opus-5-5"),
-                    max_tokens=1024,
+                    model=admin_fast_model(),
+                    max_tokens=300,
                     temperature=0.0,
                     system=eval_system,
-                    messages=[{"role": "user", "content": eval_user}]
+                    messages=[{"role": "user", "content": eval_user}],
+                    timeout=helper_timeout,
                 )
                 raw_eval = "".join(getattr(b, "text", "") for b in eval_res.content if getattr(b, "type", "") == "text").strip()
                 j_match = re.search(r'\{.*\}', raw_eval, re.DOTALL)
@@ -551,8 +546,6 @@ class ResponseConfidenceGuardrail:
                     critique = str(p.get("critique", ""))
                     if user_wants_doc:
                         has_ua = False
-
-                    # Re-query only for concrete issues (not vague low confidence)
                     concrete = has_fa or has_ua or has_cc or cls._critique_is_concrete(critique, tool_results)
                     if concrete:
                         v_type = (
@@ -570,11 +563,10 @@ class ResponseConfidenceGuardrail:
                     return GuardrailEvaluationResult(
                         is_confident=True,
                         confidence_score=conf_score if conf_score else 0.85,
-                        critique=critique or "Response consistent with tool results (or no concrete contradiction).",
+                        critique=critique or "Passed judge.",
                         needs_requery=False
                     )
             except Exception as e:
-                # Fail open: keep original reply
                 logger.warning(f"ResponseConfidenceGuardrail failed open (keeping reply): {e}")
                 return GuardrailEvaluationResult(
                     is_confident=True,
@@ -583,11 +575,10 @@ class ResponseConfidenceGuardrail:
                     needs_requery=False
                 )
 
-        # Deterministic check fallback: passes if no obvious rule violations
         return GuardrailEvaluationResult(
             is_confident=True,
             confidence_score=0.9,
-            critique="Passed deterministic checks.",
+            critique="Passed deterministic checks (LLM judge skipped)." if not run_llm_judge else "Passed deterministic checks.",
             needs_requery=False
         )
 

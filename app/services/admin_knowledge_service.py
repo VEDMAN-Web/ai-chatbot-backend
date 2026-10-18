@@ -177,6 +177,15 @@ def get_property_knowledge(
         and (not price_display or str(price_display).strip().lower() in ("", "n/a", "none", "—", "-"))
     )
 
+    has_pool_flag = merged.get("has_pool")
+    _notes_l = str(internal_notes or "").lower()
+    notes_mention_pool = ("pool" in _notes_l) or ("basen" in _notes_l)
+    pool_conflict_note = None
+    if has_pool_flag is False and notes_mention_pool:
+        pool_conflict_note = (
+            "The record has no pool flag; the internal notes mention a private pool"
+        )
+
     result: Dict[str, Any] = {
         "property_id": prop_id_val,
         "property_name": prop_name_val,
@@ -193,7 +202,9 @@ def get_property_knowledge(
         "area_display": merged.get("area_display"),
         "bathrooms": merged.get("bathrooms"),
         "property_type": merged.get("property_type"),
-        "has_pool": merged.get("has_pool"),
+        "has_pool": has_pool_flag,
+        "pool_record_vs_notes": pool_conflict_note,
+        "fact_source": "record_fields",
         "price_fields_present": bool(price_present),
         "price_fields_empty": bool(price_empty),
         "specifications": {

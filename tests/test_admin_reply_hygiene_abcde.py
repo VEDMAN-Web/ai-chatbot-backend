@@ -94,6 +94,8 @@ def test_date_window_stated_for_last_7_days():
 # ---- Task D guardrail ----
 
 def test_guardrail_judge_prompt_contains_tool_results():
+    from app.services.admin_perf import admin_fast_model
+
     classification = AIIntentClassificationResult(
         primary_intent="inventory_inquiry",
         document_requested=False,
@@ -109,6 +111,8 @@ def test_guardrail_judge_prompt_contains_tool_results():
         system = kwargs.get("system") or ""
         captured["system"] = system
         captured["user"] = msgs[0]["content"] if msgs else ""
+        captured["model"] = kwargs.get("model")
+        captured["max_tokens"] = kwargs.get("max_tokens")
         return SimpleNamespace(
             content=[SimpleNamespace(type="text", text='{"is_confident": true, "confidence_score": 0.95, "has_false_agreement": false, "has_unsolicited_action": false, "has_concrete_contradiction": false, "critique": "ok", "correction_needed": ""}')]
         )
@@ -120,6 +124,7 @@ def test_guardrail_judge_prompt_contains_tool_results():
     ):
         st.ANTHROPIC_API_KEY = "test-key"
         st.ANTHROPIC_MODEL = "claude-test"
+        st.ADMIN_HELPER_TIMEOUT = 30.0
         res = ResponseConfidenceGuardrail.evaluate(
             client=FakeClient(),
             user_message="Show me leads from this week",
@@ -127,9 +132,12 @@ def test_guardrail_judge_prompt_contains_tool_results():
             response_text="Here are 2 leads including Ada from Phuket with score 80.",
             tool_calls=[{"name": "get_buyer_leads"}],
             tool_results=tool_results,
+            run_llm_judge=True,
         )
     assert "TOOL RESULTS" in captured.get("user", "")
     assert "Ada" in captured.get("user", "") or "lead_id" in captured.get("user", "")
+    assert captured.get("model") == admin_fast_model()
+    assert captured.get("max_tokens") == 300
     assert res.needs_requery is False
 
 

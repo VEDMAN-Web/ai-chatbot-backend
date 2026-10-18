@@ -15,14 +15,17 @@ from sqlalchemy.orm import Session
 from app.services.admin_property_fields import (
     UNREADABLE,
     _TRACKED_FOR_DIFF,
+    coerce_price_storage,
     expand_proposed_fields,
     format_price_for_display,
+    format_price_thb,
     localize_name,
     normalize_compare_value,
     parse_price_amount,
     read_firestore_canonical,
     read_pg_canonical,
     resolve_alias,
+    resolve_existing_property,
     values_equal,
 )
 
@@ -46,11 +49,23 @@ def _norm(val: Any) -> str:
         return ""
     if isinstance(val, bool):
         return "Yes" if val else "No"
-    if isinstance(val, float):
-        return f"{val:g}"
+    if isinstance(val, (int, float)) and not isinstance(val, bool):
+        # Never scientific notation
+        try:
+            if float(val) == int(float(val)):
+                return f"{int(float(val)):,}"
+            return f"{float(val):,.2f}".rstrip("0").rstrip(".")
+        except Exception:
+            return str(val)
     if isinstance(val, (list, dict)):
         return localize_name(val) or str(val)
-    return str(val).strip()
+    s = str(val).strip()
+    if re.match(r"^-?\d+(\.\d+)?e[+-]?\d+$", s, re.I):
+        try:
+            return f"{int(float(s)):,}"
+        except Exception:
+            pass
+    return s
 
 
 def _values_equal(a: Any, b: Any) -> bool:
@@ -67,18 +82,15 @@ def read_stored_property_fields(
     field_keys: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """
-    Read current values under CANONICAL names.
-    Postgres first; Firestore fills fields Postgres does not have.
-    Same source order at proposal time and confirm time.
+    Read current values under CANONICAL names via resolve_existing_property
+    (Postgres first, then Firestore). Same source at proposal and confirm.
     """
-    # Normalize requested keys through aliases
     raw_keys = list(field_keys or _TRACKED_FOR_DIFF)
     keys: List[str] = []
     for k in raw_keys:
         canon = resolve_alias(k) or (k if k in _TRACKED_FOR_DIFF or k == "location" else None)
         if canon and canon not in keys:
             keys.append(canon)
-        # Always include price companions when price asked
         if canon in ("price_numeric_min", "price_display", "price_numeric_max"):
             for extra in ("price_numeric_min", "price_display", "currency"):
                 if extra not in keys:
@@ -88,50 +100,44 @@ def read_stored_property_fields(
 
     out: Dict[str, Any] = {"property_id": property_id}
     readable: Dict[str, bool] = {}
-    pg_hit = False
 
-    # 1) PostgreSQL
-    if db is not None and property_id:
-        try:
-            from app.db.models import Property
-
-            prop = db.query(Property).filter(Property.property_id == property_id).first()
-            if prop:
-                pg_hit = True
-                pg_vals = read_pg_canonical(prop, keys)
-                for k, v in pg_vals.items():
-                    out[k] = v
-                    readable[k] = True
-                if not out.get("property_name") and getattr(prop, "property_name", None):
-                    out["property_name"] = prop.property_name
-                    readable["property_name"] = True
-        except Exception as e:
-            logger.debug(f"SQL property read skipped for {property_id}: {e}")
-
-    # 2) Firestore — fill gaps only (or full read if no PG row)
-    try:
-        from app.services.firestore_service import get_firestore_client
-        from app.services.admin_batch_service import _resolve_firestore_document
-
-        fs = get_firestore_client(target="admin") or get_firestore_client()
-        if fs:
-            doc_id, doc = _resolve_firestore_document(
-                fs.collection("projects"), {"property_id": property_id, "name": property_id}
-            )
-            if doc_id and doc:
-                out["property_id"] = doc_id
-                fs_vals = read_firestore_canonical(doc, keys)
-                for k, v in fs_vals.items():
-                    if k not in out or out.get(k) is None or out.get(k) == "":
-                        out[k] = v
+    source, record = resolve_existing_property(db, property_id)
+    if source == "postgres" and record is not None:
+        pg_vals = read_pg_canonical(record, keys)
+        for k, v in pg_vals.items():
+            out[k] = v
+            readable[k] = True
+        if not out.get("property_name") and getattr(record, "property_name", None):
+            out["property_name"] = record.property_name
+            readable["property_name"] = True
+        out["property_id"] = getattr(record, "property_id", property_id) or property_id
+        out["_resolve_source"] = "postgres"
+        # Fill gaps from Firestore when available
+        fs_source, fs_rec = resolve_existing_property(None, str(out["property_id"]))
+        if fs_source == "firestore" and isinstance(fs_rec, dict):
+            for k in keys:
+                if k not in out or out.get(k) is None or out.get(k) == "":
+                    if fs_rec.get(k) is not None and fs_rec.get(k) != "":
+                        out[k] = fs_rec[k]
                         readable[k] = True
-                    elif not pg_hit:
-                        out[k] = v
-                        readable[k] = True
-    except Exception as e:
-        logger.debug(f"Firestore property read skipped for {property_id}: {e}")
+    elif source == "firestore" and isinstance(record, dict):
+        out["property_id"] = record.get("property_id") or record.get("_firestore_doc_id") or property_id
+        out["_resolve_source"] = "firestore"
+        for k in keys:
+            if record.get(k) is not None and record.get(k) != "":
+                out[k] = record[k]
+                readable[k] = True
+        if record.get("property_name"):
+            out["property_name"] = localize_name(record["property_name"]) or record["property_name"]
+            readable["property_name"] = True
 
-    # Mark requested keys that stayed empty as unreadable (not "was empty")
+    # Coerce stored prices to int for stable display / compare
+    for pk in ("price_numeric_min", "price_numeric_max"):
+        if out.get(pk) not in (None, "", UNREADABLE):
+            coerced = coerce_price_storage(out[pk])
+            if coerced is not None:
+                out[pk] = coerced
+
     for k in keys:
         if k not in out or out.get(k) is None or out.get(k) == "":
             if k not in readable:
@@ -191,24 +197,30 @@ def build_change_diff_rows(
         if is_readable and _values_equal(cur_val, new_val):
             continue
 
-        display_current: Any
-        if not is_readable:
-            display_current = UNREADABLE
-        elif field in ("price_numeric_min", "price_numeric_max") and cur_val not in (None, UNREADABLE):
-            display_current = format_price_for_display(cur_val)
-        else:
-            display_current = cur_val if cur_val is not None else "—"
-
         if field in ("price_numeric_min", "price_numeric_max"):
-            display_new = format_price_for_display(new_val)
+            coerced_new = coerce_price_storage(new_val)
+            if coerced_new is not None:
+                new_val = coerced_new
+            display_new = format_price_thb(new_val)
+            if not is_readable:
+                display_current = UNREADABLE
+            elif cur_val not in (None, UNREADABLE):
+                display_current = format_price_thb(cur_val)
+            else:
+                display_current = "—"
         else:
             display_new = new_val
+            if not is_readable:
+                display_current = UNREADABLE
+            else:
+                display_current = cur_val if cur_val is not None else "—"
 
         rows.append({
             "field": field,
             "current": display_current,
             "new": display_new,
             "readable": is_readable,
+            "raw_new": new_val,
         })
     return rows
 
@@ -415,7 +427,11 @@ def build_single_listing_change_diff(
     current = read_stored_property_fields(
         db, property_id, list((proposed_fields or {}).keys()) + list(_TRACKED_FOR_DIFF)
     )
-    # Canonicalize proposed (reject unknown handled by caller; here we expand)
+    # If the listing exists in either store, always treat as update for diff purposes
+    resolve_source = current.get("_resolve_source")
+    if resolve_source in ("postgres", "firestore"):
+        mode = "update"
+
     allow_web = "websites" in (proposed_fields or {})
     expanded, expand_errors = expand_proposed_fields(
         proposed_fields,
@@ -423,7 +439,27 @@ def build_single_listing_change_diff(
         user_message=user_message,
         allow_websites=allow_web,
     )
-    use_fields = expanded if expanded else (proposed_fields or {})
+    use_fields = expanded if expanded else dict(proposed_fields or {})
+    # Coerce prices in canonical payload
+    for pk in ("price_numeric_min", "price_numeric_max"):
+        if pk in use_fields and use_fields[pk] is not None:
+            coerced = coerce_price_storage(use_fields[pk])
+            if coerced is not None:
+                use_fields[pk] = coerced
+                if pk == "price_numeric_min":
+                    use_fields.setdefault("price_display", format_price_thb(coerced))
+
+    # Relative / absolute price: only min + display unless admin mentioned max/range top
+    um = (user_message or "").lower()
+    mentions_max = any(
+        w in um for w in ("max", "maximum", "up to", "range", "price_to", "price to", "ceiling")
+    )
+    if not mentions_max and "price_numeric_max" in use_fields and "price_numeric_min" in use_fields:
+        # Drop max unless it was the only price field proposed
+        if "price_numeric_max" not in (proposed_fields or {}) and "price_to" not in {
+            str(k).lower() for k in (proposed_fields or {})
+        }:
+            use_fields.pop("price_numeric_max", None)
 
     if mode != "create":
         rows = build_change_diff_rows(current, use_fields)
@@ -436,17 +472,43 @@ def build_single_listing_change_diff(
                 continue
             if k == "websites" and not allow_web:
                 continue
-            rows.append({"field": k, "current": "—", "new": v, "readable": True})
+            display_new = format_price_thb(v) if k.startswith("price_numeric") else v
+            rows.append({"field": k, "current": "—", "new": display_new, "readable": True, "raw_new": v})
+
+    # Restrict canonical_fields to rows that actually change (plus required companions)
+    if mode != "create" and rows:
+        changed_keys = {r["field"] for r in rows}
+        use_fields = {k: v for k, v in use_fields.items() if k in changed_keys}
+        # Keep price_display with price_numeric_min
+        if "price_numeric_min" in use_fields and "price_display" not in use_fields:
+            use_fields["price_display"] = format_price_thb(use_fields["price_numeric_min"])
+
+    no_change = bool(mode != "create" and not rows)
+    no_change_message = ""
+    if no_change:
+        cur_price = current.get("price_numeric_min") or current.get("price_display")
+        if cur_price and cur_price != UNREADABLE:
+            no_change_message = f"No change: price is already {format_price_thb(cur_price)}."
+        else:
+            no_change_message = "No change: proposed values already match the stored record."
 
     warnings = assess_risky_changes(operation_type=mode, rows=rows)
     name = current.get("property_name")
     if name == UNREADABLE:
         name = None
-    md = format_single_diff_markdown(property_id, rows, property_name=name)
-    if warnings:
-        md = md + "\n\n" + "\n".join(warnings)
+    if no_change:
+        md = no_change_message
+    else:
+        md = format_single_diff_markdown(property_id, rows, property_name=name)
+        if warnings:
+            md = md + "\n\n" + "\n".join(warnings)
+        # One-line summary of what changed for price-only updates
+        price_rows = [r for r in rows if r.get("field") in ("price_numeric_min", "price_display")]
+        if price_rows and len(rows) <= 3:
+            pr = next((r for r in price_rows if r.get("field") == "price_numeric_min"), price_rows[0])
+            md = md + f"\n\nChanging starting price: {_norm(pr.get('current'))} → {_norm(pr.get('new'))}."
     return {
-        "property_id": property_id,
+        "property_id": current.get("property_id") or property_id,
         "operation_type": mode,
         "rows": rows,
         "risk_warnings": warnings,
@@ -454,6 +516,9 @@ def build_single_listing_change_diff(
         "snapshot_current": {r["field"]: r["current"] for r in rows},
         "canonical_fields": use_fields,
         "expand_errors": expand_errors,
+        "no_change": no_change,
+        "no_change_message": no_change_message,
+        "resolve_source": resolve_source,
     }
 
 

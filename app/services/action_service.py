@@ -43,7 +43,14 @@ def validate_property_data(
     if not property_id or not str(property_id).strip() or str(property_id).strip().lower() in ["none", "null"]:
         missing.append("property_id")
 
-    is_create = (mode == "create") or (existing_property is None and not payload.get("is_update_only"))
+    # Required-field completeness ONLY for true creates of a brand-new id.
+    # Firestore-only / Postgres-existing listings use is_update_only or existing_property.
+    is_create = (
+        str(mode).lower() == "create"
+        and existing_property is None
+        and not payload.get("is_update_only")
+        and str(payload.get("resolve_source") or "").lower() not in ("postgres", "firestore")
+    )
 
     if is_create:
         # Check required fields for new property: property_name, property_type, location, price, bedrooms, status
@@ -117,8 +124,16 @@ def create_pending_action(
     Validates data completeness for listing creations and updates.
     """
     if tool_name in ["create_or_update_listing", "propose_listing_update"]:
-        prop = db.query(Property).filter(Property.property_id == action_payload.get("property_id")).first() if action_payload.get("property_id") else None
-        is_valid, missing, err_msg = validate_property_data(action_payload, existing_property=prop)
+        from app.services.admin_property_fields import resolve_existing_property
+        src, rec = resolve_existing_property(db, action_payload.get("property_id"))
+        if src:
+            action_payload = dict(action_payload)
+            action_payload["mode"] = "update"
+            action_payload["is_update_only"] = True
+            action_payload["resolve_source"] = src
+        is_valid, missing, err_msg = validate_property_data(
+            action_payload, existing_property=rec if src else None
+        )
         if not is_valid:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -243,6 +258,90 @@ def get_pending_action(db: Session, pending_action_id: str) -> PendingAction:
         db.refresh(action)
 
     return action
+
+
+def _append_action_lifecycle_note(
+    db: Session,
+    *,
+    conversation_id: Optional[str],
+    pending_action_id: str,
+    status: str,
+    tool_name: str,
+    result_data: Optional[Dict[str, Any]] = None,
+    verification_line: Optional[str] = None,
+    reason: Optional[str] = None,
+) -> None:
+    """
+    Append a system/assistant note to conversation history so the chat model
+    sees UI button confirms/rejects (not only free-text Confirm).
+    """
+    if not conversation_id or db is None:
+        return
+    try:
+        from app.db.models import Conversation
+        from app.services.admin_property_fields import format_price_thb
+
+        conv = db.query(Conversation).filter(Conversation.id == conversation_id).first()
+        if conv is None:
+            # conversation_id may be stored as string UUID
+            try:
+                conv = db.query(Conversation).filter(Conversation.id == str(conversation_id)).first()
+            except Exception:
+                conv = None
+        if conv is None:
+            return
+
+        result_data = result_data or {}
+        detail = ""
+        updated = result_data.get("updated_fields") or {}
+        if "price_numeric_min" in updated or "price_display" in updated:
+            new_p = updated.get("price_numeric_min") or updated.get("price_display")
+            # Prefer change_diff snapshot if present on result
+            detail = f" price → {format_price_thb(new_p)}"
+        elif updated:
+            detail = " fields=" + ",".join(list(updated.keys())[:5])
+
+        if status.upper() in ("CONFIRMED", "EXECUTED"):
+            text = (
+                f"[SYSTEM] Action `{pending_action_id}` was CONFIRMED and executed "
+                f"({tool_name}){detail}."
+            )
+            if verification_line:
+                text += f" {verification_line}"
+        else:
+            text = (
+                f"[SYSTEM] Action `{pending_action_id}` was REJECTED ({tool_name}). "
+                f"{reason or 'No changes applied.'}"
+            )
+
+        history = list(getattr(conv, "message_history", None) or [])
+        history.append({
+            "role": "assistant",
+            "content": text,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "system_note": True,
+            "pending_action_id": pending_action_id,
+            "action_lifecycle": status.upper(),
+        })
+        # Cap history growth
+        if len(history) > 400:
+            history = history[-400:]
+        conv.message_history = history
+        prefs = dict(getattr(conv, "preferences", None) or {})
+        if status.upper() in ("CONFIRMED", "EXECUTED", "REJECTED"):
+            # Clear stale pending id from session prefs
+            if prefs.get("last_pending_action_id") == str(pending_action_id):
+                prefs.pop("last_pending_action_id", None)
+            prefs["last_finished_action_id"] = str(pending_action_id)
+            prefs["last_finished_action_status"] = status.upper()
+        conv.preferences = prefs
+        db.commit()
+    except Exception as e:
+        logger.warning(f"_append_action_lifecycle_note failed: {e}")
+        try:
+            db.rollback()
+        except Exception:
+            pass
 
 
 def confirm_and_execute_action(
@@ -470,14 +569,72 @@ def confirm_and_execute_action(
             pending_action_id=str(action.id)
         )
 
+        from app.core.config import settings as _settings
+        audit_disabled = bool(
+            getattr(audit, "audit_logging_disabled", False)
+            or getattr(audit, "is_ephemeral", False)
+            or not getattr(_settings, "ENABLE_AUDIT_LOGGING", False)
+        )
+        audit_id = None if audit_disabled else str(getattr(audit, "id", "") or "") or None
+
+        # Read-back verification line for listing updates
+        verification_line = None
+        if isinstance(result_data, dict):
+            verified = result_data.get("verified_fields") or {}
+            if not verified and result_data.get("updated_fields"):
+                try:
+                    from app.services.admin_change_diff import read_stored_property_fields
+                    from app.services.admin_property_fields import format_price_thb
+                    live = read_stored_property_fields(
+                        db, str(result_data.get("property_id") or ""), list(result_data["updated_fields"].keys())
+                    )
+                    bits = []
+                    for k, expected in (result_data.get("updated_fields") or {}).items():
+                        actual = live.get(k)
+                        if k.startswith("price"):
+                            bits.append(f"{k}={format_price_thb(actual)}")
+                        else:
+                            bits.append(f"{k}={actual}")
+                    if bits:
+                        verification_line = "Verified in database: " + ", ".join(bits[:4])
+                except Exception:
+                    verification_line = None
+            elif verified:
+                from app.services.admin_property_fields import format_price_thb
+                bits = []
+                for k, actual in verified.items():
+                    if k.startswith("price"):
+                        bits.append(f"{k}={format_price_thb(actual)}")
+                    else:
+                        bits.append(f"{k}={actual}")
+                if bits:
+                    verification_line = "Verified in database: " + ", ".join(bits[:4])
+
+        # Append system note to conversation so the chat model sees button confirms
+        try:
+            _append_action_lifecycle_note(
+                db,
+                conversation_id=action.conversation_id,
+                pending_action_id=str(action.id),
+                status="CONFIRMED",
+                tool_name=action.tool_name,
+                result_data=result_data if isinstance(result_data, dict) else {},
+                verification_line=verification_line,
+            )
+        except Exception as note_exc:
+            logger.warning(f"Failed to append confirm history note: {note_exc}")
+
         return {
             "status": ACTION_STATUS_EXECUTED,
             "pending_action_id": str(action.id),
             "tool_name": action.tool_name,
             "execution_result": result_data,
             "operation_id": operation_id,
-            "audit_log_id": str(audit.id),
-            "confirmed_by": authenticated_staff.email
+            "audit_log_id": audit_id,
+            "audit_logging_disabled": audit_disabled,
+            "audit_logging_note": "Audit logging is disabled" if audit_disabled else None,
+            "verification_line": verification_line,
+            "confirmed_by": authenticated_staff.email,
         }
 
     except Exception as exc:
@@ -533,6 +690,17 @@ def reject_pending_action(
         conversation_id=action.conversation_id,
         pending_action_id=str(action.id)
     )
+    try:
+        _append_action_lifecycle_note(
+            db,
+            conversation_id=action.conversation_id,
+            pending_action_id=str(action.id),
+            status="REJECTED",
+            tool_name=action.tool_name,
+            reason=reason or "Rejected by staff.",
+        )
+    except Exception as note_exc:
+        logger.warning(f"Failed to append reject history note: {note_exc}")
 
     return {
         "status": ACTION_STATUS_REJECTED,
@@ -660,14 +828,46 @@ def _execute_update_listing(
     if "websites" not in orig_fields and "selected_websites" not in orig_fields and "websites" not in payload:
         fields.pop("websites", None)
 
-    prop = db.query(Property).filter(Property.property_id == property_id).first()
-    # Validation uses original payload shape; inject trimmed fields
+    from app.services.admin_property_fields import (
+        resolve_existing_property,
+        coerce_price_storage,
+        format_price_thb,
+    )
+
+    resolve_source, resolved = resolve_existing_property(db, property_id)
+    prop = resolved if resolve_source == "postgres" else (
+        db.query(Property).filter(Property.property_id == property_id).first()
+    )
+    if resolve_source == "firestore" and isinstance(resolved, dict):
+        property_id = str(resolved.get("property_id") or resolved.get("_firestore_doc_id") or property_id)
+        payload = dict(payload)
+        payload["property_id"] = property_id
+        payload["resolve_source"] = "firestore"
+        payload["is_update_only"] = True
+        payload["mode"] = "update"
+        mode = "update"
+
+    # Coerce price fields to int before write
+    for pk in ("price_numeric_min", "price_numeric_max"):
+        if pk in fields and fields[pk] is not None:
+            c = coerce_price_storage(fields[pk])
+            if c is not None:
+                fields[pk] = c
+                if pk == "price_numeric_min":
+                    fields.setdefault("price_display", format_price_thb(c))
+
     validation_payload = dict(payload)
     if "fields_to_update" in validation_payload or "fields_to_update" in payload:
         validation_payload["fields_to_update"] = fields
     else:
         validation_payload["fields"] = fields
-    is_valid, missing, err_msg = validate_property_data(validation_payload, existing_property=prop)
+    if resolve_source:
+        validation_payload["is_update_only"] = True
+        validation_payload["mode"] = "update"
+        validation_payload["resolve_source"] = resolve_source
+    is_valid, missing, err_msg = validate_property_data(
+        validation_payload, existing_property=resolved if resolve_source else prop
+    )
     if not is_valid:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -720,8 +920,55 @@ def _execute_update_listing(
         target_websites = payload.get("websites") or payload.get("selected_websites")
     norm_websites = normalize_website_list(target_websites) if target_websites else None
 
-    if not prop:
-        # Create a new property
+    firestore_only = (resolve_source == "firestore" and prop is None)
+
+    if firestore_only:
+        # Firestore-only listing: write Firestore; do NOT invent an incomplete PG row
+        is_created = False
+        updated_fields = dict(fields)
+        if getattr(settings, "ENABLE_FIRESTORE_SYNC", True) or True:
+            try:
+                from app.services.firestore_service import save_or_update_property_firestore
+                save_or_update_property_firestore(
+                    property_id=property_id,
+                    fields=fields,
+                    images=payload.get("images") or fields.get("images") or [],
+                    cover_image=payload.get("cover_image") or fields.get("cover_image"),
+                    target="admin",
+                )
+            except Exception as e:
+                logger.warning(f"Firestore-only listing update failed: {e}")
+                raise
+        # Verify read-back
+        from app.services.admin_change_diff import read_stored_property_fields
+        live = read_stored_property_fields(db, property_id, list(fields.keys()))
+        verified = {}
+        for k, v in fields.items():
+            verified[k] = live.get(k)
+        from app.services.cache_service import search_cache
+        search_cache.invalidate()
+        title = (
+            (resolved or {}).get("property_name")
+            if isinstance(resolved, dict)
+            else property_id
+        )
+        return {
+            "property_id": property_id,
+            "title": title,
+            "mode": "update",
+            "updated_fields": updated_fields,
+            "images_count": 0,
+            "images": [],
+            "current_status": live.get("status") or (resolved or {}).get("status") if isinstance(resolved, dict) else None,
+            "operation_id": operation_id,
+            "undoable": bool(operation_id),
+            "undo_window_days": 6 if operation_id else None,
+            "resolve_source": "firestore",
+            "verified_fields": verified,
+            "success": True,
+        }
+    elif not prop:
+        # Create a new property (truly new id)
         is_created = True
         prop_name = fields.get("property_name") or payload.get("title") or property_id
         prop = Property(
@@ -747,7 +994,7 @@ def _execute_update_listing(
         db.commit()
         db.refresh(prop)
     else:
-        # Update existing property — never inject websites
+        # Update existing Postgres property — never inject websites
         if explicit_websites and norm_websites is not None:
             prop.websites = norm_websites
             updated_fields["websites"] = norm_websites

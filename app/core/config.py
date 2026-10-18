@@ -104,8 +104,20 @@ class Settings(BaseSettings):
     ANTHROPIC_API_KEY: str = ""
     ANTHROPIC_MODEL: str = "claude-opus-5-5"
     ANTHROPIC_TEMPERATURE: float = 0.0
-    ANTHROPIC_TIMEOUT: float = 90.0  # admin LLM: 90s per attempt (TASK 7)
-    ANTHROPIC_MAX_RETRIES: int = 1  # one retry on timeout / transient errors
+    ANTHROPIC_TIMEOUT: float = 60.0  # default; prefer ADMIN_MAIN_TIMEOUT / ADMIN_HELPER_TIMEOUT
+    ANTHROPIC_MAX_RETRIES: int = 1  # one retry on connection errors only (not timeouts)
+
+    # Admin chatbot performance (speed without losing accuracy)
+    ADMIN_FAST_MODEL: str = "claude-haiku-4-5"  # classifier + guardrail judge
+    ADMIN_MAIN_MODEL: str = ""  # empty → use ANTHROPIC_MODEL; set e.g. claude-sonnet-4-5 via env
+    ADMIN_HELPER_TIMEOUT: float = 30.0
+    ADMIN_MAIN_TIMEOUT: float = 60.0
+    ADMIN_TURN_BUDGET_SEC: float = 75.0
+    ADMIN_DEBUG_TIMING: bool = False
+    ADMIN_TOOL_CACHE_TTL_SEC: float = 60.0
+    ADMIN_MAX_TOOL_ROUNDS: int = 3
+    ADMIN_NORMAL_MAX_TOKENS: int = 700
+    ADMIN_LIST_MAX_TOKENS: int = 2000
 
     # Property catalog / name-index in-memory cache (stale-while-revalidate)
     CATALOG_CACHE_TTL_SEC: float = 900.0  # 15 minutes

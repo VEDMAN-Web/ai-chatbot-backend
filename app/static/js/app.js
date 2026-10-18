@@ -1019,14 +1019,25 @@ async function confirmAction(actionId) {
     const data = await res.json();
     if (res.ok) {
       if (card) {
+        const toolName = data.tool_name || '';
+        const auditId = data.audit_log_id || '';
+        const auditDisabled = !!data.audit_logging_disabled || !auditId || String(auditId).startsWith('audit_ephemeral_');
+        const realAudit = toolName && auditId && !auditDisabled;
+        const auditLine = realAudit
+          ? `Tool: <code>${escapeHtml(toolName)}</code> | Audit Log ID: <code>${escapeHtml(auditId)}</code>`
+          : `Executed (audit logging disabled)${toolName ? ` — <code>${escapeHtml(toolName)}</code>` : ''}`;
+        const verifyLine = data.verification_line
+          ? `<div style="font-size: 12px; color: var(--text-muted); margin-top: 6px;">${escapeHtml(data.verification_line)}</div>`
+          : '';
         card.innerHTML = `
           <div style="color: var(--accent-green); font-weight: 700; font-size: 13px; display: flex; align-items: center; gap: 6px;">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>
             Action Executed Successfully
           </div>
           <div style="font-size: 12px; color: var(--text-muted); margin-top: 6px;">
-            Tool: <code>${escapeHtml(data.tool_name || '')}</code> | Audit Log ID: <code>${escapeHtml(data.audit_log_id || '')}</code>
+            ${auditLine}
           </div>
+          ${verifyLine}
         `;
       }
     } else {

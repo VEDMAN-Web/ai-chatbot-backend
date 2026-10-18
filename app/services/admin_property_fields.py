@@ -502,10 +502,162 @@ def read_firestore_canonical(doc: Dict[str, Any], keys: Sequence[str]) -> Dict[s
 
 
 def format_price_for_display(val: Any) -> str:
+    """Always human thousands-separated ints — never scientific notation (3e+07)."""
     parsed = parse_price_amount(val)
     if parsed is not None:
-        return f"{parsed:,.0f}"
+        try:
+            n = int(round(float(parsed)))
+            return f"{n:,}"
+        except Exception:
+            return f"{parsed:,.0f}" if isinstance(parsed, (int, float)) else str(parsed)
     if val is None or val == UNREADABLE:
         return "—"
     s = localize_name(val) or str(val)
+    # Guard against accidental scientific notation strings
+    if re.match(r"^-?\d+(\.\d+)?e[+-]?\d+$", s.strip(), re.I):
+        try:
+            return f"{int(float(s)):,}"
+        except Exception:
+            pass
     return s if s else "—"
+
+
+def format_price_thb(val: Any) -> str:
+    base = format_price_for_display(val)
+    if base == "—":
+        return base
+    if "THB" in base.upper():
+        return base
+    return f"{base} THB"
+
+
+def coerce_price_storage(val: Any) -> Optional[Any]:
+    """Store price_numeric_min as int (or Decimal) — never float that prints as 3e+07."""
+    parsed = parse_price_amount(val)
+    if parsed is None:
+        return None
+    try:
+        return int(round(float(parsed)))
+    except Exception:
+        try:
+            return Decimal(str(parsed))
+        except (InvalidOperation, ValueError):
+            return parsed
+
+
+def resolve_existing_property(
+    db: Optional[Any],
+    property_id_or_name: Optional[str],
+) -> Tuple[Optional[str], Optional[Any]]:
+    """
+    Resolve a listing from Postgres first, then Firestore projects.
+    Returns (source, record) where source is 'postgres' | 'firestore' | None.
+    Postgres record is the ORM Property; Firestore record is a normalized dict
+    with canonical keys plus '_firestore_doc_id' and '_raw'.
+    """
+    raw = (property_id_or_name or "").strip()
+    if not raw:
+        return None, None
+
+    aliases = {raw, raw.lower(), raw.upper()}
+    # 1) Postgres
+    if db is not None:
+        try:
+            from app.db.models import Property
+
+            prop = (
+                db.query(Property)
+                .filter(Property.property_id.in_(list(aliases)))
+                .first()
+            )
+            if not prop:
+                # Fuzzy name match (exact case-insensitive)
+                prop = (
+                    db.query(Property)
+                    .filter(Property.property_name.ilike(raw))
+                    .first()
+                )
+            if prop:
+                return "postgres", prop
+        except Exception as e:
+            logger.debug(f"resolve_existing_property PG skip: {e}")
+
+    # 2) Firestore (admin client, then user)
+    try:
+        from app.services.firestore_service import (
+            get_firestore_client,
+            get_property_by_id_from_firestore,
+        )
+        from app.services.admin_batch_service import _resolve_firestore_document
+
+        fs_prop = None
+        for target in ("admin", "user"):
+            for alias in aliases:
+                try:
+                    fs_prop = get_property_by_id_from_firestore(alias, target=target)
+                except Exception:
+                    fs_prop = None
+                if fs_prop:
+                    break
+            if fs_prop:
+                break
+
+        doc_id = None
+        doc: Dict[str, Any] = {}
+        if fs_prop:
+            doc_id = (
+                fs_prop.get("property_id")
+                or fs_prop.get("id")
+                or fs_prop.get("doc_id")
+                or raw
+            )
+            raw_fs = fs_prop.get("raw_firestore_data") if isinstance(fs_prop.get("raw_firestore_data"), dict) else {}
+            doc = dict(raw_fs or {})
+            doc.update({k: v for k, v in fs_prop.items() if k != "raw_firestore_data" and v is not None})
+        else:
+            for target in ("admin", "user"):
+                fs = get_firestore_client(target=target) or (
+                    get_firestore_client() if target == "admin" else None
+                )
+                if not fs:
+                    continue
+                try:
+                    doc_id, doc = _resolve_firestore_document(
+                        fs.collection("projects"),
+                        {"property_id": raw, "name": raw},
+                    )
+                except Exception:
+                    doc_id, doc = None, {}
+                if doc_id and doc:
+                    break
+
+        if doc_id and doc:
+            keys = list(CANONICAL_FIELDS) + [
+                "bedrooms_min", "bedrooms_max", "bedrooms_display", "bathrooms",
+                "area_display", "has_pool", "currency",
+            ]
+            canon = read_firestore_canonical(doc, keys)
+            # Ensure property_name is a plain string
+            if canon.get("property_name"):
+                canon["property_name"] = localize_name(canon["property_name"]) or str(
+                    canon["property_name"]
+                )
+            # Coerce price to int for storage/display stability
+            if canon.get("price_numeric_min") is not None:
+                coerced = coerce_price_storage(canon["price_numeric_min"])
+                if coerced is not None:
+                    canon["price_numeric_min"] = coerced
+                    if not canon.get("price_display"):
+                        canon["price_display"] = format_price_thb(coerced)
+            record = {
+                **canon,
+                "property_id": str(doc_id),
+                "_firestore_doc_id": str(doc_id),
+                "_raw": doc,
+                "_source": "firestore",
+            }
+            return "firestore", record
+    except Exception as e:
+        logger.debug(f"resolve_existing_property Firestore skip: {e}")
+
+    return None, None

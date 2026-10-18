@@ -77,19 +77,101 @@ def build_admin_structured_state(
     last_resolved_property_id: Optional[str] = None,
     last_report_file: Optional[str] = None,
     extra: Optional[Dict[str, Any]] = None,
+    open_pending: Optional[Sequence[Any]] = None,
+    recent_finished: Optional[Sequence[Any]] = None,
 ) -> str:
-    """Short structured state block for the model (not full raw history)."""
+    """
+    Short structured state for the model.
+    Prefer DB-backed open_pending / recent_finished so the model never claims
+    an action is still pending when its DB status is executed/rejected.
+    """
     lines = [
         "[SESSION STATE — use these ids; do not invent others]",
-        f"pending_action_id: {pending_action_id or 'none'}",
-        f"last_resolved_property_id: {last_resolved_property_id or 'none'}",
-        f"last_report_file: {last_report_file or 'none'}",
+        "RULE: Never say an action is still pending unless listed under open_pending below.",
     ]
+    open_list = list(open_pending or [])
+    if open_list:
+        lines.append("open_pending:")
+        for pa in open_list[:5]:
+            pid = getattr(pa, "id", None) or (pa.get("id") if isinstance(pa, dict) else None)
+            tool = getattr(pa, "tool_name", None) or (pa.get("tool_name") if isinstance(pa, dict) else "?")
+            lines.append(f"  - id={pid} tool={tool} status=PENDING")
+        lines.append(f"pending_action_id: {getattr(open_list[0], 'id', None) or pending_action_id}")
+    else:
+        lines.append("open_pending: none")
+        lines.append("pending_action_id: none")
+        if pending_action_id:
+            lines.append(
+                f"(note: prefs had pending_action_id={pending_action_id} but DB has no open PENDING — ignore it)"
+            )
+
+    fin = list(recent_finished or [])
+    if fin:
+        lines.append("recent_finished_actions:")
+        for pa in fin[:3]:
+            pid = getattr(pa, "id", None) or (pa.get("id") if isinstance(pa, dict) else None)
+            st = getattr(pa, "status", None) or (pa.get("status") if isinstance(pa, dict) else "?")
+            tool = getattr(pa, "tool_name", None) or (pa.get("tool_name") if isinstance(pa, dict) else "?")
+            one = ""
+            er = getattr(pa, "execution_result", None) or (pa.get("execution_result") if isinstance(pa, dict) else None)
+            if isinstance(er, dict):
+                uf = er.get("updated_fields") or {}
+                if uf:
+                    one = " result=" + ",".join(f"{k}" for k in list(uf.keys())[:3])
+            lines.append(f"  - id={pid} status={st} tool={tool}{one}")
+
+    lines.append(f"last_resolved_property_id: {last_resolved_property_id or 'none'}")
+    lines.append(f"last_report_file: {last_report_file or 'none'}")
     if extra:
         for k, v in extra.items():
             if v is not None and str(v).strip():
                 lines.append(f"{k}: {v}")
     return "\n".join(lines)
+
+
+def load_admin_action_state_from_db(
+    db: Any,
+    conversation_id: Optional[str],
+) -> Dict[str, Any]:
+    """Load open PENDING + last 3 finished actions for SESSION STATE."""
+    out: Dict[str, Any] = {"open_pending": [], "recent_finished": []}
+    if db is None or not conversation_id:
+        return out
+    try:
+        from app.db.models import PendingAction
+        from app.services.action_service import ACTION_STATUS_PENDING
+
+        open_q = (
+            db.query(PendingAction)
+            .filter(
+                PendingAction.conversation_id == str(conversation_id),
+                PendingAction.status == ACTION_STATUS_PENDING,
+            )
+            .order_by(PendingAction.created_at.desc())
+            .limit(5)
+            .all()
+        )
+        out["open_pending"] = list(open_q or [])
+        finished = (
+            db.query(PendingAction)
+            .filter(
+                PendingAction.conversation_id == str(conversation_id),
+                PendingAction.status != ACTION_STATUS_PENDING,
+            )
+            .order_by(PendingAction.created_at.desc())
+            .limit(8)
+            .all()
+        )
+        # Prefer most recently executed/rejected
+        finished_sorted = sorted(
+            finished or [],
+            key=lambda a: getattr(a, "executed_at", None) or getattr(a, "created_at", None) or 0,
+            reverse=True,
+        )
+        out["recent_finished"] = list(finished_sorted[:3])
+    except Exception:
+        pass
+    return out
 
 
 def trim_admin_history_for_llm(
@@ -180,14 +262,14 @@ def contextual_followup_suggestions(
     pl = (language or "en").lower().startswith("pl")
     catalog = {
         "list_buyer_leads": (
-            ["Email the top 5 leads", "Export to Excel", "Filter high-intent only"]
+            ["Export", "Show the next 5", "Email top lead"]
             if not pl
-            else ["Napisz do top 5 leadów", "Eksportuj do Excela", "Pokaż tylko high-intent"]
+            else ["Eksport", "Pokaż kolejne 5", "Napisz do top leada"]
         ),
         "get_buyer_leads": (
-            ["Email the top 5 leads", "Export to Excel", "Show lead details"]
+            ["Export", "Show the next 5", "Email top lead"]
             if not pl
-            else ["Napisz do top 5 leadów", "Eksportuj do Excela", "Pokaż szczegóły leadów"]
+            else ["Eksport", "Pokaż kolejne 5", "Napisz do top leada"]
         ),
         "search_properties_full": (
             ["Update price on one listing", "Export these to Excel", "Generate a PDF report"]
@@ -195,9 +277,9 @@ def contextual_followup_suggestions(
             else ["Zmień cenę jednej oferty", "Eksportuj do Excela", "Wygeneruj raport PDF"]
         ),
         "create_or_update_listing": (
-            ["Confirm the pending change", "Cancel the proposal", "Show the before/after again"]
+            ["Confirm", "Cancel", "Show before-after"]
             if not pl
-            else ["Potwierdź oczekującą zmianę", "Anuluj propozycję", "Pokaż diff ponownie"]
+            else ["Potwierdź", "Anuluj", "Pokaż przed/po"]
         ),
         "execute_batch_property_action": (
             ["Confirm the batch change", "Cancel the proposal", "Preview fewer items"]
@@ -210,9 +292,9 @@ def contextual_followup_suggestions(
             else ["Wyślij raport do klienta", "Eksport w Excelu", "Raport leadów"]
         ),
         "generate_client_offer_dossier": (
-            ["Email the dossier to the client", "Regenerate with template 3", "Pick different properties"]
+            ["Email it", "Regenerate with template 3", "Change branding"]
             if not pl
-            else ["Wyślij dossier do klienta", "Wygeneruj ponownie (szablon 3)", "Wybierz inne oferty"]
+            else ["Wyślij", "Wygeneruj ponownie (szablon 3)", "Zmień branding"]
         ),
         "send_email": (
             ["Check Google Workspace connection", "Draft a calendar invite", "Try a different recipient"]
@@ -220,9 +302,14 @@ def contextual_followup_suggestions(
             else ["Sprawdź połączenie Google Workspace", "Utwórz wydarzenie w kalendarzu", "Inny odbiorca"]
         ),
         "get_property_knowledge": (
-            ["Generate a technical PDF", "Update listing status", "Compare with similar inventory"]
+            ["Generate property PDF report", "Update price", "Show amenities from the record"]
             if not pl
-            else ["Wygeneruj PDF techniczny", "Zmień status oferty", "Porównaj z podobnymi"]
+            else ["Wygeneruj PDF oferty", "Zmień cenę", "Pokaż udogodnienia z rekordu"]
+        ),
+        "generate_property_brochure": (
+            ["Email this PDF", "Create client offer dossier", "Update listing price"]
+            if not pl
+            else ["Wyślij ten PDF", "Utwórz dossier klienta", "Zmień cenę"]
         ),
         "inventory_stats": (
             ["Break down by Phuket vs Samui", "Show incomplete listings", "Export inventory summary"]
@@ -412,16 +499,31 @@ def format_leads_date_window(
     )
 
 
-def is_transient_anthropic_error(exc: BaseException) -> bool:
+def is_anthropic_timeout_error(exc: BaseException) -> bool:
+    """True for request timeouts — do NOT retry these."""
     name = type(exc).__name__.lower()
     msg = str(exc).lower()
-    if any(x in name for x in ("timeout", "connection", "ratelimit", "internalserver", "apiconnection", "overloaded")):
+    if "timeout" in name or "timedout" in name:
+        return True
+    if any(x in msg for x in ("timed out", "timeout", "read timed out", "deadline exceeded")):
+        # Connection errors may also mention timeout in nested messages — prefer connection first
+        if any(x in msg for x in ("connection reset", "connection error", "connection refused", "apiconnection")):
+            return False
+        return True
+    return False
+
+
+def is_anthropic_connection_error(exc: BaseException) -> bool:
+    """True for connection / overload / 5xx — one retry allowed."""
+    if is_anthropic_timeout_error(exc):
+        return False
+    name = type(exc).__name__.lower()
+    msg = str(exc).lower()
+    if any(x in name for x in ("connection", "ratelimit", "internalserver", "apiconnection", "overloaded")):
         return True
     if any(
         x in msg
         for x in (
-            "timeout",
-            "timed out",
             "temporarily",
             "overloaded",
             "rate limit",
@@ -432,7 +534,14 @@ def is_transient_anthropic_error(exc: BaseException) -> bool:
             "529",
             "connection reset",
             "connection error",
+            "connection refused",
+            "apiconnection",
         )
     ):
         return True
     return False
+
+
+def is_transient_anthropic_error(exc: BaseException) -> bool:
+    """Timeouts OR connection errors (used for friendly slow message)."""
+    return is_anthropic_timeout_error(exc) or is_anthropic_connection_error(exc)

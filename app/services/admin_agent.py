@@ -605,10 +605,24 @@ CLAUDE_ADMIN_TOOLS = [
 
 ADMIN_SYSTEM_PROMPT = """You are the Tajlandia Internal AI Property Assistant (Part B), serving authorized agency staff and administrators.
 
+REPLY STYLE (SPEED & CLARITY — MANDATORY):
+- Answer first in 2–4 short lines, then only the details the user asked for.
+- Simple lookups: stay under ~120 words. No restating the question. No repeated suggestions.
+- At most 3 emojis total. Long prose only for reports/analysis when explicitly asked.
+- Lists: max 5 items per message; end with "Show the next 5?" when more remain.
+- Call ALL needed tools in ONE round (parallel tool_use). Do not call search tools unless the user asked to search or compare.
+- For a price/status change use only get_property_knowledge and/or create_or_update_listing (no exploratory search).
+- FEWER QUESTIONS: For "change price to N" stage the proposal immediately (starting price only). Risky % changes still stage with a warning — never ask 3M vs 30M unless unparseable.
+- "give me pdf of this property" → generate_report / brochure for the active property with defaults NOW. Ask dossier questions only if the user said dossier/offer/client. For dossier: ask only missing client name or budget; defaults = Tajlandia branding, template from property-id hash, English, goal=rental income.
+- Never re-ask facts the admin already gave in this chat. Do not re-call a tool whose result is already in this turn's tool results.
+- If a tool returns do_not_retry / the same error twice: stop and report once — never retry AttributeError/TypeError/ValueError.
+- SESSION STATE open_pending is authoritative: never say an action is still waiting if it is not listed there.
+- Facts (pool, beds, ownership, price, area) only from record fields. Quote internal_notes only labelled "from internal notes". If has_pool=false but notes mention a pool, say both facts honestly.
+- Exactly ONE Suggestions block per reply, contextual to the result (Confirm/Cancel after price proposal; Email/Regenerate after dossier; Export/Next 5 after leads).
+
 TONE & COLLABORATIVE PERSONA:
-- Warm, friendly, enthusiastic, and genuinely supportive of our team!
-- Motivating and proactive: when presenting properties, internal specs, or market insights, enthusiastically highlight key advantages (e.g. prime location, private pool, high rental yields, exclusive VIP discounts, or turnkey move-in readiness) to empower staff during investor discussions.
-- Professional, clear, and action-oriented: offer helpful follow-ups (e.g. offering to prepare a PDF report, draft an investor email, or check technical documents).
+- Warm, friendly, and supportive of our team — keep it concise.
+- Professional, clear, and action-oriented.
 
 CAPABILITIES & ACCESS:
 - You have privileged access to private/internal property specifications, structural engineering details (roof materials, foundation, flooring, walls), VIP discount policies, and internal developer notes.
@@ -690,11 +704,17 @@ MANDATORY STRUCTURED PRESENTATION FORMAT (BULLET POINTS ONLY - NO RAW TABLES):
 """
 
 
-def _anthropic_timeout_sec() -> float:
+def _anthropic_timeout_sec(*, helper: bool = False) -> float:
+    """Main-loop default 60s; helper calls 30s."""
     try:
-        return float(getattr(settings, "ANTHROPIC_TIMEOUT", 90.0) or 90.0)
+        if helper:
+            return float(getattr(settings, "ADMIN_HELPER_TIMEOUT", 30.0) or 30.0)
+        main = getattr(settings, "ADMIN_MAIN_TIMEOUT", None)
+        if main is not None:
+            return float(main or 60.0)
+        return float(getattr(settings, "ANTHROPIC_TIMEOUT", 60.0) or 60.0)
     except Exception:
-        return 90.0
+        return 30.0 if helper else 60.0
 
 
 def _anthropic_max_retries() -> int:
@@ -708,10 +728,11 @@ def _safe_anthropic_create(client: Any, **kwargs) -> Any:
     """
     Safely executes client.messages.create.
     1. Strips internal 'thinking' blocks from prior turns.
-    2. Applies ANTHROPIC_TIMEOUT (default 90s); one retry on transient/timeout errors.
-    3. Drops unsupported kwargs (e.g. temperature) and re-invokes when needed.
+    2. Applies timeout (ADMIN_MAIN_TIMEOUT / ADMIN_HELPER_TIMEOUT).
+    3. One retry ONLY for connection errors — never for timeouts.
+    4. Drops unsupported kwargs (e.g. temperature) and re-invokes when needed.
     """
-    from app.services.admin_reply_helpers import is_transient_anthropic_error
+    from app.services.admin_reply_helpers import is_anthropic_connection_error
 
     call_kwargs = dict(kwargs)
     msgs = call_kwargs.get("messages", [])
@@ -728,11 +749,14 @@ def _safe_anthropic_create(client: Any, **kwargs) -> Any:
                 sanitized_msgs.append(m)
         call_kwargs["messages"] = sanitized_msgs
 
-    timeout_sec = _anthropic_timeout_sec()
-    call_kwargs.setdefault("timeout", timeout_sec)
+    timeout_sec = call_kwargs.get("timeout")
+    if timeout_sec is None:
+        timeout_sec = _anthropic_timeout_sec(helper=bool(call_kwargs.pop("_helper", False)))
+        call_kwargs["timeout"] = timeout_sec
+    else:
+        call_kwargs.pop("_helper", None)
     retries = max(0, _anthropic_max_retries())
     attempt = 0
-    last_exc: Optional[Exception] = None
     while attempt <= retries:
         try:
             return client.messages.create(**call_kwargs)
@@ -745,10 +769,9 @@ def _safe_anthropic_create(client: Any, **kwargs) -> Any:
                 except Exception as te2:
                     te = te2
                     err_msg = str(te2)
-            last_exc = te
-            if attempt < retries and is_transient_anthropic_error(te):
+            if attempt < retries and is_anthropic_connection_error(te):
                 logger.warning(
-                    "Anthropic transient error (attempt %s/%s, timeout=%ss): %s — retrying once",
+                    "Anthropic connection error (attempt %s/%s, timeout=%ss): %s — retrying once",
                     attempt + 1,
                     retries + 1,
                     timeout_sec,
@@ -757,8 +780,6 @@ def _safe_anthropic_create(client: Any, **kwargs) -> Any:
                 attempt += 1
                 continue
             raise te
-    if last_exc:
-        raise last_exc
     raise RuntimeError("Anthropic create failed with no exception")
 
 
@@ -991,6 +1012,187 @@ def rewrite_admin_query(client: Optional[Any], history: List[Dict[str, Any]], cu
     return current_message
 
 
+def _attach_timing_debug(res: Dict[str, Any], timer: Any) -> Dict[str, Any]:
+    if not isinstance(res, dict) or timer is None:
+        return res
+    try:
+        timer.log_summary()
+        if getattr(settings, "ADMIN_DEBUG_TIMING", False):
+            res = dict(res)
+            res["debug"] = {"timings": timer.to_debug_dict()}
+    except Exception:
+        pass
+    return res
+
+
+def try_admin_fast_path(
+    db: Session,
+    conv: Any,
+    message: str,
+    staff_user: AuthenticatedStaff,
+    language: str = "en",
+    open_pending: Optional[List[Any]] = None,
+    timer: Optional[Any] = None,
+) -> Optional[Dict[str, Any]]:
+    """
+    Deterministic answers with zero LLM for greetings, inventory counts,
+    leads lists, pending actions, and capabilities.
+    """
+    from app.services.admin_perf import classify_obvious_intent
+    from app.services.admin_claim_verifier import build_deterministic_reply_from_tools
+    from app.services.admin_reply_helpers import is_capabilities_question
+
+    obvious = classify_obvious_intent(message) or {}
+    fast = obvious.get("fast_path")
+    msg_l = (message or "").strip().lower()
+
+    if not fast:
+        if is_capabilities_question(message) or is_greeting_or_chit_chat(message):
+            fast = "capabilities" if is_capabilities_question(message) else "greeting"
+        else:
+            return None
+
+    if fast in ("greeting", "capabilities"):
+        if timer:
+            timer.skipped.append(f"fast_path:{fast}")
+        return _handle_admin_greeting(db, conv, message, language=language)
+
+    if fast == "pending":
+        open_pending = open_pending or []
+        if not open_pending:
+            text = (
+                "No pending actions waiting for confirmation."
+                if language != "pl"
+                else "Brak akcji oczekujących na potwierdzenie."
+            )
+        else:
+            lines = [
+                ("Pending actions:" if language != "pl" else "Akcje oczekujące:")
+            ]
+            for pa in open_pending[:5]:
+                lines.append(f"- `{pa.id}` — `{pa.tool_name}`")
+            if len(open_pending) > 5:
+                lines.append("Show the next 5?")
+            text = "\n".join(lines)
+        append_conversation_turn(db, conv, message, text)
+        if timer:
+            timer.skipped.append("fast_path:pending")
+        return {
+            "type": "text",
+            "text": text,
+            "session_id": conv.session_id,
+            "conversation_id": str(conv.id),
+            "requires_confirmation": bool(open_pending),
+            "pending_action_id": str(open_pending[0].id) if open_pending else None,
+            "action_status": "pending" if open_pending else None,
+            "tools_used": [],
+            "download_link": None,
+            "language": language,
+        }
+
+    if fast == "leads":
+        days = 7
+        if any(w in msg_l for w in ("today", "dzisiaj", "dziś", "dzis")):
+            days = 1
+        elif any(w in msg_l for w in ("this week", "ten tydzień", "ten tydzien", "calendar week")):
+            days = 7
+        args = {"days": days, "limit": 5, "min_score": 0.0}
+        t0 = __import__("time").perf_counter()
+        t_res, _, _ = _execute_admin_tool(db, "get_buyer_leads", args, staff_user, str(conv.id))
+        if timer:
+            timer.record_tool("get_buyer_leads", ( __import__("time").perf_counter() - t0) * 1000.0)
+            timer.skipped.append("fast_path:leads")
+        text = build_deterministic_reply_from_tools(
+            [{"name": "get_buyer_leads", "result": t_res}],
+            language=language,
+            user_message=message,
+        )
+        append_conversation_turn(
+            db, conv, message, text,
+            tool_calls=[{"name": "get_buyer_leads", "args": args}],
+            tool_results=[{"result": t_res}],
+        )
+        return {
+            "type": "text",
+            "text": text,
+            "session_id": conv.session_id,
+            "conversation_id": str(conv.id),
+            "requires_confirmation": False,
+            "pending_action_id": None,
+            "action_status": None,
+            "tools_used": [{"name": "get_buyer_leads", "args": args}],
+            "download_link": None,
+            "language": language,
+        }
+
+    if fast == "inventory":
+        import time as _time
+        t0 = _time.perf_counter()
+        t_res, _, _ = _execute_admin_tool(
+            db, "get_database_inventory_stats", {}, staff_user, str(conv.id)
+        )
+        if timer:
+            timer.record_tool(
+                "get_database_inventory_stats",
+                (_time.perf_counter() - t0) * 1000.0,
+            )
+            timer.skipped.append("fast_path:inventory")
+        stats = t_res if isinstance(t_res, dict) else {}
+        total = stats.get("authoritative_total_properties") or stats.get("firestore_live_projects_count") or 0
+        by_loc = stats.get("location_breakdown") or {}
+        # Location-specific ask
+        loc_hit = None
+        for key in ("phuket", "samui", "bangkok", "pattaya", "hua hin"):
+            if key in msg_l:
+                loc_hit = next((k for k in by_loc if key in str(k).lower()), None)
+                if loc_hit is None and key == "samui":
+                    loc_hit = next((k for k in by_loc if "samui" in str(k).lower()), None)
+                break
+        if loc_hit is not None:
+            n = by_loc.get(loc_hit, 0)
+            text = (
+                f"**{n}** properties in **{loc_hit}** (from live inventory).\n"
+                f"Portfolio total: **{total}**."
+                if language != "pl"
+                else f"**{n}** nieruchomości w **{loc_hit}**.\nŁącznie w bazie: **{total}**."
+            )
+        else:
+            text = build_deterministic_reply_from_tools(
+                [{"name": "get_database_inventory_stats", "result": stats}],
+                language=language,
+                user_message=message,
+            )
+            if not text or len(text) < 20:
+                loc_summary = " · ".join(
+                    f"{k} ({v})" for k, v in sorted(by_loc.items(), key=lambda x: -x[1])[:5]
+                ) or "—"
+                text = (
+                    f"**{total}** properties in the live database.\n"
+                    f"- 📍 Locations: {loc_summary}"
+                    if language != "pl"
+                    else f"**{total}** nieruchomości w bazie.\n- 📍 Lokalizacje: {loc_summary}"
+                )
+        append_conversation_turn(
+            db, conv, message, text,
+            tool_calls=[{"name": "get_database_inventory_stats", "args": {}}],
+            tool_results=[{"result": stats}],
+        )
+        return {
+            "type": "text",
+            "text": text,
+            "session_id": conv.session_id,
+            "conversation_id": str(conv.id),
+            "requires_confirmation": False,
+            "pending_action_id": None,
+            "action_status": None,
+            "tools_used": [{"name": "get_database_inventory_stats", "args": {}}],
+            "download_link": None,
+            "language": language,
+        }
+
+    return None
+
+
 def _handle_admin_greeting(db: Session, conv: Any, message: str, language: str = "en") -> Dict[str, Any]:
     """Warmly greets authorized staff or answers capabilities — no LLM call."""
     from app.services.admin_reply_helpers import is_capabilities_question
@@ -1085,6 +1287,12 @@ def process_admin_chat(
     """
     clean_session_id = session_id.strip() if session_id else "admin-session-default"
     clean_message = (message or "").strip()
+
+    from app.services.admin_perf import TurnTimer, tool_cache_invalidate_all
+    import time as _time
+    timer = TurnTimer(
+        budget_sec=float(getattr(settings, "ADMIN_TURN_BUDGET_SEC", 75.0) or 75.0)
+    )
 
     # 1. Fetch or create conversation
     conv = get_or_create_conversation(
@@ -1443,10 +1651,13 @@ def process_admin_chat(
                 op_mode = (raw_res.get("mode") or payload.get("mode") or payload.get("operation_type") or "update")
                 op_mode = str(op_mode).upper()
                 audit_id = exec_res.get("audit_log_id") if isinstance(exec_res, dict) else None
-                tool_label = target_action.tool_name
-                # Success card data only when we have a real tool name + audit id
-                if not audit_id:
+                audit_disabled = bool(
+                    (isinstance(exec_res, dict) and exec_res.get("audit_logging_disabled"))
+                    or (audit_id and str(audit_id).startswith("audit_ephemeral_"))
+                )
+                if audit_disabled:
                     audit_id = None
+                tool_label = target_action.tool_name
                 status_val = raw_res.get("current_status") or payload.get("fields", {}).get("status", "Active")
                 undo_line = ""
                 if op_id:
@@ -1457,24 +1668,29 @@ def process_admin_chat(
 
                 # Re-read stored record for honest verification line
                 verify_line = ""
-                try:
-                    from app.services.admin_change_diff import read_stored_property_fields
-                    from app.services.admin_property_fields import UNREADABLE, format_price_for_display
-                    live = read_stored_property_fields(db, str(pid), ["price_numeric_min", "price_display"])
-                    pval = live.get("price_numeric_min")
-                    if pval is not None and pval != UNREADABLE:
-                        verify_line = f"\n\n**Verified in database:** price = {format_price_for_display(pval)}"
-                    elif live.get("price_display") not in (None, UNREADABLE, ""):
-                        verify_line = f"\n\n**Verified in database:** price = {live.get('price_display')}"
-                    else:
+                if isinstance(exec_res, dict) and exec_res.get("verification_line"):
+                    verify_line = f"\n\n**{exec_res['verification_line']}**"
+                else:
+                    try:
+                        from app.services.admin_change_diff import read_stored_property_fields
+                        from app.services.admin_property_fields import UNREADABLE, format_price_thb
+                        live = read_stored_property_fields(db, str(pid), ["price_numeric_min", "price_display"])
+                        pval = live.get("price_numeric_min")
+                        if pval is not None and pval != UNREADABLE:
+                            verify_line = f"\n\n**Verified in database:** price = {format_price_thb(pval)}"
+                        elif live.get("price_display") not in (None, UNREADABLE, ""):
+                            verify_line = f"\n\n**Verified in database:** price = {live.get('price_display')}"
+                        else:
+                            verify_line = "\n\n**Verified in database:** could not verify price after write."
+                    except Exception:
                         verify_line = "\n\n**Verified in database:** could not verify price after write."
-                except Exception:
-                    verify_line = "\n\n**Verified in database:** could not verify price after write."
 
-                audit_line = (
-                    f"- **Audit Log**: `audit_logs` (Record ID: `{audit_id}`)\n"
-                    if audit_id else ""
-                )
+                if audit_id:
+                    audit_line = f"- **Audit Log**: `audit_logs` (Record ID: `{audit_id}`)\n"
+                elif audit_disabled:
+                    audit_line = "- **Audit logging is disabled**\n"
+                else:
+                    audit_line = ""
                 if active_lang == "pl":
                     reply_text = (
                         f"✅ **Oferta nieruchomości pomyślnie zaktualizowana w bazie danych!**\n\n"
@@ -1534,7 +1750,13 @@ def process_admin_chat(
                 assistant_message=reply_text,
                 tool_results=[{"tool": target_action.tool_name, "status": "executed", "result": exec_res}]
             )
-            return {
+            try:
+                tool_cache_invalidate_all()
+            except Exception:
+                pass
+            if timer:
+                timer.skipped.append("confirm_write")
+            return _attach_timing_debug({
                 "type": "text",
                 "text": reply_text,
                 "session_id": conv.session_id,
@@ -1546,11 +1768,11 @@ def process_admin_chat(
                 "tools_used": [{"tool": target_action.tool_name, "status": "executed"}],
                 "download_link": None,
                 "language": active_lang
-            }
+            }, timer)
         except Exception as e:
             err_text = f"Failed to execute action: {str(e)}"
             append_conversation_turn(db, conv, clean_message or "Confirm", err_text)
-            return {
+            return _attach_timing_debug({
                 "type": "text",
                 "text": err_text,
                 "session_id": conv.session_id,
@@ -1561,7 +1783,7 @@ def process_admin_chat(
                 "tools_used": [],
                 "download_link": None,
                 "language": active_lang
-            }
+            }, timer)
 
     # B. Execute Rejection / Cancellation
     if target_action and has_reject_intent and not has_confirm_intent:
@@ -1643,13 +1865,12 @@ def process_admin_chat(
                 f"this message is treated as a new request.)_"
             )
 
-    # 3. Greeting / capabilities / pleasantry — skip LLM (undo still uses normal tool flow)
+    # 3. Deterministic fast paths — zero LLM (undo / portfolio follow-up still use normal flow)
     from app.services.admin_reply_helpers import (
         ADMIN_LLM_SLOW_MESSAGE,
         ADMIN_LLM_SLOW_MESSAGE_PL,
         append_followup_suggestions,
         contextual_followup_suggestions,
-        is_capabilities_question,
         is_undo_request,
         remember_admin_session_fact,
     )
@@ -1659,19 +1880,15 @@ def process_admin_chat(
         ("Templates 1 to 7" in last_assistant_turn or "Warianty 1-7" in last_assistant_turn) or
         ("fetch them from the database & make everything myself" in last_assistant_turn or "pobrać je z bazy danych i dobrać resztę" in last_assistant_turn)
     )
-    skip_llm_simple = (
-        not is_undo_request(clean_message)
-        and not is_portfolio_followup_waiting
-        and (
-            is_capabilities_question(clean_message)
-            or is_greeting_or_chit_chat(clean_message)
+    if not is_undo_request(clean_message) and not is_portfolio_followup_waiting:
+        fast_res = try_admin_fast_path(
+            db, conv, clean_message, staff_user,
+            language=active_lang,
+            open_pending=open_pending,
+            timer=timer,
         )
-    )
-    # Plain yes/no on a pending action already handled above (confirm/reject) — never reaches here.
-    if skip_llm_simple:
-        greet_res = _handle_admin_greeting(db, conv, clean_message, language=active_lang)
-        # Greetings are read-only — never attach pending confirmation cards
-        return greet_res
+        if fast_res is not None:
+            return _attach_timing_debug(fast_res, timer)
 
     # 4. AI Model Intent Classification & Safety Evaluation
     client = None
@@ -1686,24 +1903,33 @@ def process_admin_chat(
         except Exception:
             client = None
 
+    _cls_t0 = _time.perf_counter()
     ai_classification = AIIntentClassifier.classify(
         client=client,
         user_message=clean_message,
         conversation_history=conv.message_history or [],
         active_pending_action=target_action
     )
+    timer.classifier_ms = (_time.perf_counter() - _cls_t0) * 1000.0
+    if "rules:" in (getattr(ai_classification, "explanation", None) or ""):
+        timer.skipped.append("classifier_rules")
     logger.info(
         f"AI Intent Classification: intent={ai_classification.primary_intent}, "
         f"doc_requested={ai_classification.document_requested}, "
         f"neg_feedback={ai_classification.negative_feedback}, "
-        f"confidence={ai_classification.confidence:.2f}"
+        f"confidence={ai_classification.confidence:.2f} "
+        f"({timer.classifier_ms:.0f}ms)"
     )
 
-    effective_message = rewrite_admin_query(
-        client=client,
-        history=conv.message_history or [],
-        current_message=clean_message
-    )
+    # Skip expensive rewrite for obvious intents
+    if timer.skipped and any("classifier_rules" in s or "fast_path" in s for s in timer.skipped):
+        effective_message = clean_message
+    else:
+        effective_message = rewrite_admin_query(
+            client=client,
+            history=conv.message_history or [],
+            current_message=clean_message
+        )
 
     # 5. Route to Claude or deterministic engine with AI classification
     if client and settings.ANTHROPIC_API_KEY:
@@ -1713,6 +1939,7 @@ def process_admin_chat(
                 raw_user_message=clean_message, client=client, language=active_lang,
                 classification=ai_classification,
                 open_pending_id=str(open_pending[0].id) if open_pending else None,
+                timer=timer,
             )
         except Exception as e:
             from app.services.admin_reply_helpers import is_transient_anthropic_error
@@ -1720,7 +1947,7 @@ def process_admin_chat(
                 logger.warning(f"Anthropic final failure after retry: {e}")
                 slow = ADMIN_LLM_SLOW_MESSAGE_PL if active_lang == "pl" else ADMIN_LLM_SLOW_MESSAGE
                 append_conversation_turn(db, conv, clean_message, slow)
-                return {
+                return _attach_timing_debug({
                     "type": "text",
                     "text": slow,
                     "session_id": conv.session_id,
@@ -1730,7 +1957,7 @@ def process_admin_chat(
                     "tools_used": [],
                     "language": active_lang,
                     "action_status": "timeout",
-                }
+                }, timer)
             logger.warning(f"Anthropic Claude API error: {e}. Falling back to deterministic orchestrator.")
             res = _run_deterministic_admin(
                 db, conv, effective_message, staff_user,
@@ -1782,7 +2009,7 @@ def process_admin_chat(
         if res.get("pending_action_id") and res.get("requires_confirmation"):
             remember_admin_session_fact(conv, pending_action_id=str(res["pending_action_id"]))
         res["text"] = redact_admin_sensitive_output(res["text"])
-    return res
+    return _attach_timing_debug(res, timer)
 
 
 def _sanitize_tool_result_for_llm(obj: Any) -> Any:
@@ -1812,11 +2039,15 @@ def _call_anthropic_claude(
     language: str = "en",
     classification: Optional[AIIntentClassificationResult] = None,
     open_pending_id: Optional[str] = None,
+    timer: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """Executes multi-turn conversation with Anthropic Claude and native tool use."""
+    import time as _time
     import anthropic
     from app.services.admin_reply_helpers import (
         ADMIN_HISTORY_MESSAGE_LIMIT,
+        ADMIN_LLM_SLOW_MESSAGE,
+        ADMIN_LLM_SLOW_MESSAGE_PL,
         append_followup_suggestions,
         build_admin_structured_state,
         contextual_followup_suggestions,
@@ -1824,6 +2055,13 @@ def _call_anthropic_claude(
         remember_admin_session_fact,
         trim_admin_history_for_llm,
     )
+    from app.services.admin_perf import (
+        admin_main_model,
+        is_list_style_reply,
+        should_run_guardrail_judge,
+        usage_tokens,
+    )
+    from app.services.admin_claim_verifier import build_deterministic_reply_from_tools
 
     if not client:
         client = anthropic.Anthropic(
@@ -1846,10 +2084,17 @@ def _call_anthropic_claude(
             claude_messages.append({"role": role, "content": content})
 
     session_bits = extract_session_state_from_conversation(conv)
+    from app.services.admin_reply_helpers import load_admin_action_state_from_db
+    db_action_state = load_admin_action_state_from_db(db, str(getattr(conv, "id", "") or ""))
+    open_from_db = db_action_state.get("open_pending") or []
+    # Prefer live DB pending over stale prefs id
+    live_pending_id = str(open_from_db[0].id) if open_from_db else None
     state_block = build_admin_structured_state(
-        pending_action_id=open_pending_id or session_bits.get("pending_action_id"),
+        pending_action_id=live_pending_id or (open_pending_id if open_from_db else None),
         last_resolved_property_id=session_bits.get("last_resolved_property_id"),
         last_report_file=session_bits.get("last_report_file"),
+        open_pending=open_from_db,
+        recent_finished=db_action_state.get("recent_finished") or [],
     )
 
     # Sanitize current user message if unusually large (e.g. pasted document or base64 data)
@@ -1868,6 +2113,10 @@ def _call_anthropic_claude(
     pending_action_id = None
     response_text = ""
     last_claude_response = None
+    claim_hard_mismatch = False
+    # Per-tool error tracking: max 1 retry, never for AttributeError/TypeError/ValueError
+    _tool_error_sigs: Dict[str, str] = {}
+    _tool_fatal_errors: Dict[str, str] = {}
 
     staff_name = _get_staff_display_name(staff_user, raw_user_message or message)
     base_prompt = get_admin_system_prompt(language)
@@ -1879,26 +2128,80 @@ def _call_anthropic_claude(
             f"- Document Explicitly Requested: {classification.document_requested} (If False: NEVER generate any PDF, report, or portfolio)\n"
             f"- Verification Question: {classification.requires_verification} (If user asks if they requested a PDF, state NO truthfully)\n"
         )
-    full_system_prompt = (
+    # Static system (cached) + dynamic SESSION STATE (uncached, after cache block)
+    static_system = (
         f"The authenticated staff member you are conversing with is {staff_name} "
         f"({staff_user.email if staff_user else 'Staff'}). Address them by their first name "
         f"({staff_name}) warmly when greeting or consulting with them.\n\n"
-        f"{base_prompt}{intent_guidance}\n\n"
-        f"SESSION STATE (authoritative; prefer these over inventing ids):\n{state_block}"
+        f"{base_prompt}{intent_guidance}"
     )
+    system_blocks = [
+        {
+            "type": "text",
+            "text": static_system,
+            "cache_control": {"type": "ephemeral"},
+        },
+        {
+            "type": "text",
+            "text": f"SESSION STATE (authoritative; prefer these over inventing ids):\n{state_block}",
+        },
+    ]
+    full_system_prompt = static_system + f"\n\nSESSION STATE:\n{state_block}"
+    main_model = admin_main_model()
+    max_rounds = int(getattr(settings, "ADMIN_MAX_TOOL_ROUNDS", 3) or 3)
+    normal_tokens = int(getattr(settings, "ADMIN_NORMAL_MAX_TOKENS", 700) or 700)
+    list_tokens = int(getattr(settings, "ADMIN_LIST_MAX_TOKENS", 2000) or 2000)
+    main_timeout = _anthropic_timeout_sec(helper=False)
 
-    # Execute up to 4 agent iterations for multi-step tool calls
-    # max_tokens >= 4096 for list-heavy admin replies (leads/properties)
-    for iteration in range(4):
-        response = _safe_anthropic_create(
-            client,
-            model=settings.ANTHROPIC_MODEL,
-            max_tokens=4096,
-            temperature=settings.ANTHROPIC_TEMPERATURE,
-            system=full_system_prompt,
-            tools=CLAUDE_ADMIN_TOOLS,
-            messages=claude_messages
-        )
+    # Tools with cache_control on last schema for prompt caching
+    cached_tools = list(CLAUDE_ADMIN_TOOLS)
+    if cached_tools:
+        last = dict(cached_tools[-1])
+        last["cache_control"] = {"type": "ephemeral"}
+        cached_tools = list(cached_tools[:-1]) + [last]
+
+    # Execute up to ADMIN_MAX_TOOL_ROUNDS (default 3); prefer parallel tools in one round
+    for iteration in range(max_rounds):
+        if timer and timer.budget_exceeded():
+            logger.warning("ADMIN turn budget exceeded before LLM round %s", iteration)
+            if tool_results:
+                response_text = build_deterministic_reply_from_tools(
+                    tool_results, language=language, user_message=raw_user_message or message
+                )
+            else:
+                response_text = (
+                    ADMIN_LLM_SLOW_MESSAGE_PL if language == "pl" else ADMIN_LLM_SLOW_MESSAGE
+                )
+            break
+
+        max_tok = list_tokens if is_list_style_reply(tool_calls, tool_results) else normal_tokens
+        _llm_t0 = _time.perf_counter()
+        try:
+            response = _safe_anthropic_create(
+                client,
+                model=main_model,
+                max_tokens=max_tok,
+                temperature=settings.ANTHROPIC_TEMPERATURE,
+                system=system_blocks,
+                tools=cached_tools,
+                messages=claude_messages,
+                timeout=main_timeout,
+            )
+        except Exception as e:
+            from app.services.admin_reply_helpers import is_anthropic_timeout_error
+            if is_anthropic_timeout_error(e):
+                raise
+            raise
+        _llm_ms = (_time.perf_counter() - _llm_t0) * 1000.0
+        inp_t, out_t = usage_tokens(response)
+        if timer:
+            timer.record_llm(
+                label=f"main_round_{iteration}",
+                model=main_model,
+                ms=_llm_ms,
+                input_tokens=inp_t,
+                output_tokens=out_t,
+            )
         last_claude_response = response
 
         curr_tool_calls = []
@@ -1914,14 +2217,79 @@ def _call_anthropic_claude(
                 tool_use_id = block.id
                 curr_tool_calls.append({"id": tool_use_id, "name": tool_name, "args": tool_args})
 
-                # Execute tool locally
-                t_res, need_confirm, act_id = _execute_admin_tool(
-                    db=db,
-                    tool_name=tool_name,
-                    tool_args=tool_args,
-                    staff_user=staff_user,
-                    conversation_id=str(conv.id)
-                )
+                # Skip tools that already failed fatally this turn (same error twice / coding errors)
+                if tool_name in _tool_fatal_errors:
+                    t_res = {
+                        "success": False,
+                        "error": _tool_fatal_errors[tool_name],
+                        "message": (
+                            f"Tool `{tool_name}` already failed this turn with a non-retryable error. "
+                            f"Not retrying: {_tool_fatal_errors[tool_name]}"
+                        ),
+                        "do_not_retry": True,
+                    }
+                    curr_tool_results.append({"tool_use_id": tool_use_id, "result": t_res})
+                    continue
+
+                _tool_t0 = _time.perf_counter()
+                try:
+                    t_res, need_confirm, act_id = _execute_admin_tool(
+                        db=db,
+                        tool_name=tool_name,
+                        tool_args=tool_args,
+                        staff_user=staff_user,
+                        conversation_id=str(conv.id)
+                    )
+                except (AttributeError, TypeError, ValueError) as fatal_exc:
+                    err_s = f"{type(fatal_exc).__name__}: {fatal_exc}"
+                    _tool_fatal_errors[tool_name] = err_s
+                    t_res, need_confirm, act_id = {
+                        "success": False,
+                        "error": err_s,
+                        "message": f"Tool `{tool_name}` failed ({err_s}). Will not retry this error.",
+                        "do_not_retry": True,
+                    }, False, None
+                except Exception as tool_exc:
+                    err_s = f"{type(tool_exc).__name__}: {tool_exc}"
+                    prev = _tool_error_sigs.get(tool_name)
+                    if prev == err_s:
+                        _tool_fatal_errors[tool_name] = err_s
+                        t_res, need_confirm, act_id = {
+                            "success": False,
+                            "error": err_s,
+                            "message": f"Tool `{tool_name}` failed twice with the same error. Stopping retries.",
+                            "do_not_retry": True,
+                        }, False, None
+                    else:
+                        _tool_error_sigs[tool_name] = err_s
+                        t_res, need_confirm, act_id = {
+                            "success": False,
+                            "error": err_s,
+                            "message": f"Tool `{tool_name}` failed: {err_s}",
+                            "transient": True,
+                        }, False, None
+                # Soft errors returned in payload (e.g. dossier AttributeError caught inside)
+                if isinstance(t_res, dict) and t_res.get("success") is False and t_res.get("error"):
+                    err_s = str(t_res.get("error"))
+                    if any(x in err_s for x in ("AttributeError", "TypeError", "ValueError", "has no attribute")):
+                        _tool_fatal_errors[tool_name] = err_s
+                        t_res = dict(t_res)
+                        t_res["do_not_retry"] = True
+                        t_res["message"] = (
+                            t_res.get("message")
+                            or f"Tool `{tool_name}` failed with a non-retryable error. Not calling it again."
+                        )
+                    elif _tool_error_sigs.get(tool_name) == err_s:
+                        _tool_fatal_errors[tool_name] = err_s
+                        t_res = dict(t_res)
+                        t_res["do_not_retry"] = True
+                        t_res["message"] = (
+                            f"Tool `{tool_name}` failed twice with the same error. Stopping retries."
+                        )
+                    else:
+                        _tool_error_sigs[tool_name] = err_s
+                if timer:
+                    timer.record_tool(tool_name, (_time.perf_counter() - _tool_t0) * 1000.0)
                 curr_tool_results.append({"tool_use_id": tool_use_id, "result": t_res})
                 if need_confirm:
                     requires_confirmation = True
@@ -2027,7 +2395,7 @@ def _call_anthropic_claude(
         reply_ends_mid_word,
     )
     last_stop = getattr(last_claude_response, "stop_reason", None) if last_claude_response else None
-    if last_stop == "max_tokens" and response_text:
+    if last_stop == "max_tokens" and response_text and not (timer and timer.budget_exceeded()):
         try:
             cont_messages = list(claude_messages)
             cont_messages.append({"role": "assistant", "content": response_text})
@@ -2035,14 +2403,25 @@ def _call_anthropic_claude(
                 "role": "user",
                 "content": "Continue from where you stopped. Do not restart the answer.",
             })
+            _c0 = _time.perf_counter()
             cont_resp = _safe_anthropic_create(
                 client,
-                model=settings.ANTHROPIC_MODEL,
-                max_tokens=4096,
+                model=main_model,
+                max_tokens=list_tokens,
                 temperature=0.0,
-                system=full_system_prompt,
+                system=system_blocks,
                 messages=cont_messages,
+                timeout=main_timeout,
             )
+            if timer:
+                cin, cout = usage_tokens(cont_resp)
+                timer.record_llm(
+                    label="continuation",
+                    model=main_model,
+                    ms=(_time.perf_counter() - _c0) * 1000.0,
+                    input_tokens=cin,
+                    output_tokens=cout,
+                )
             cont_text = extract_anthropic_text(cont_resp)
             if cont_text:
                 response_text = (response_text or "").rstrip() + "\n" + cont_text.lstrip()
@@ -2072,67 +2451,14 @@ def _call_anthropic_claude(
         )
 
     # -------------------------------------------------------------------------
-    # Post-Response Confidence & Truthfulness Guardrail (with Re-Query Loop)
-    # -------------------------------------------------------------------------
-    if classification:
-        guard_eval = ResponseConfidenceGuardrail.evaluate(
-            client=client,
-            user_message=raw_user_message or message,
-            classification=classification,
-            response_text=response_text,
-            tool_calls=tool_calls,
-            download_link=download_link,
-            language=language,
-            tool_results=tool_results,
-        )
-        if guard_eval.needs_requery:
-            logger.warning(
-                f"ResponseConfidenceGuardrail flagged response ({guard_eval.violation_type}): "
-                f"{guard_eval.critique}. Triggering corrective re-query."
-            )
-            # If an unsolicited document was produced, purge download link immediately
-            if guard_eval.violation_type == "unsolicited_document_generation" or not classification.document_requested:
-                download_link = None
-
-            re_query_prompt = (
-                f"GUARDRAIL CORRECTION DIRECTIVE: Your previous output had an issue: {guard_eval.critique}.\n"
-                f"User original query: \"{raw_user_message or message}\".\n"
-                f"Required correction: {guard_eval.suggested_correction}\n"
-                f"RULES:\n"
-                f"- If the factual answer is NO, say NO clearly and truthfully.\n"
-                f"- Do NOT generate, link, or attach any PDF, report, or portfolio unless explicitly commanded.\n"
-                f"- Provide a grounded, truthful, and helpful response directly answering the user."
-            )
-            claude_messages.append({"role": "user", "content": re_query_prompt})
-            try:
-                rq_resp = _safe_anthropic_create(
-                    client,
-                    model=settings.ANTHROPIC_MODEL,
-                    max_tokens=2048,
-                    temperature=0.0,
-                    system=full_system_prompt,
-                    tools=CLAUDE_ADMIN_TOOLS,
-                    messages=claude_messages
-                )
-                corrected_text = extract_anthropic_text(rq_resp)
-                if corrected_text:
-                    response_text = corrected_text
-            except Exception as e:
-                logger.warning(f"Re-query execution fallback: {e}")
-                if classification.requires_verification:
-                    response_text = (
-                        "Nie, nie prosiłeś mnie o wygenerowanie pliku PDF! Przepraszam za nieporozumienie. W czym mogę pomóc w naszej bazie nieruchomości?"
-                        if language == "pl" else
-                        "No, you did not ask me to create any PDF! I apologize for any misunderstanding. How can I assist you with our property inventory instead?"
-                    )
-
-    # -------------------------------------------------------------------------
-    # Claim verifier: numbers / success claims must match this turn's tool results
+    # Claim verifier FIRST (deterministic) — then optional LLM judge
     # -------------------------------------------------------------------------
     if tool_results and response_text:
         from app.services.admin_claim_verifier import verify_and_correct_admin_reply
 
         def _regen_claims(instruction: str) -> Optional[str]:
+            if timer and timer.budget_exceeded():
+                return None
             try:
                 tool_summary = []
                 for tr in tool_results:
@@ -2147,21 +2473,33 @@ def _call_anthropic_claude(
                     f"Tool results (source of truth):\n"
                     + "\n---\n".join(tool_summary)
                     + f"\n\nUser query: \"{raw_user_message or message}\"\n"
-                    "Write the corrected admin reply now."
+                    "Write the corrected admin reply now. Keep it under 120 words."
                 )
+                _r0 = _time.perf_counter()
                 rq = _safe_anthropic_create(
                     client,
-                    model=settings.ANTHROPIC_MODEL,
-                    max_tokens=2048,
+                    model=main_model,
+                    max_tokens=normal_tokens,
                     temperature=0.0,
-                    system=full_system_prompt,
+                    system=system_blocks,
                     messages=claude_messages + [{"role": "user", "content": prompt}],
+                    timeout=main_timeout,
                 )
+                if timer:
+                    rin, rout = usage_tokens(rq)
+                    timer.record_llm(
+                        label="claim_regen",
+                        model=main_model,
+                        ms=(_time.perf_counter() - _r0) * 1000.0,
+                        input_tokens=rin,
+                        output_tokens=rout,
+                    )
                 return extract_anthropic_text(rq)
             except Exception as e:
                 logger.warning(f"Claim-verifier regeneration failed: {e}")
                 return None
 
+        _v0 = _time.perf_counter()
         claim_res = verify_and_correct_admin_reply(
             response_text,
             tool_results,
@@ -2172,8 +2510,90 @@ def _call_anthropic_claude(
             regenerate_fn=_regen_claims,
             user_message=raw_user_message or message,
         )
+        if timer:
+            timer.verifier_ms = (_time.perf_counter() - _v0) * 1000.0
         if claim_res.final_text:
             response_text = claim_res.final_text
+        claim_hard_mismatch = bool(getattr(claim_res, "hard_mismatches", None))
+
+    # -------------------------------------------------------------------------
+    # LLM Confidence Judge — ONLY for writes / docs / hard claim mismatches
+    # -------------------------------------------------------------------------
+    run_judge = should_run_guardrail_judge(
+        requires_confirmation=requires_confirmation,
+        action_status="awaiting_confirmation" if requires_confirmation else None,
+        download_link=download_link,
+        tool_calls=tool_calls,
+        claim_hard_mismatch=claim_hard_mismatch,
+        document_requested=bool(classification and classification.document_requested),
+    )
+    if classification and run_judge:
+        _g0 = _time.perf_counter()
+        guard_eval = ResponseConfidenceGuardrail.evaluate(
+            client=client,
+            user_message=raw_user_message or message,
+            classification=classification,
+            response_text=response_text,
+            tool_calls=tool_calls,
+            download_link=download_link,
+            language=language,
+            tool_results=tool_results,
+            run_llm_judge=True,
+        )
+        if timer:
+            timer.guardrail_ms = (_time.perf_counter() - _g0) * 1000.0
+        if guard_eval.needs_requery and not (timer and timer.budget_exceeded()):
+            logger.warning(
+                f"ResponseConfidenceGuardrail flagged response ({guard_eval.violation_type}): "
+                f"{guard_eval.critique}. Triggering corrective re-query."
+            )
+            if guard_eval.violation_type == "unsolicited_document_generation" or not classification.document_requested:
+                download_link = None
+
+            re_query_prompt = (
+                f"GUARDRAIL CORRECTION DIRECTIVE: Your previous output had an issue: {guard_eval.critique}.\n"
+                f"User original query: \"{raw_user_message or message}\".\n"
+                f"Required correction: {guard_eval.suggested_correction}\n"
+                f"RULES:\n"
+                f"- If the factual answer is NO, say NO clearly and truthfully.\n"
+                f"- Do NOT generate, link, or attach any PDF, report, or portfolio unless explicitly commanded.\n"
+                f"- Provide a grounded, truthful, and helpful response directly answering the user. Keep it short."
+            )
+            claude_messages.append({"role": "user", "content": re_query_prompt})
+            try:
+                _rq0 = _time.perf_counter()
+                rq_resp = _safe_anthropic_create(
+                    client,
+                    model=main_model,
+                    max_tokens=normal_tokens,
+                    temperature=0.0,
+                    system=system_blocks,
+                    tools=cached_tools,
+                    messages=claude_messages,
+                    timeout=main_timeout,
+                )
+                if timer:
+                    rin, rout = usage_tokens(rq_resp)
+                    timer.record_llm(
+                        label="guardrail_requery",
+                        model=main_model,
+                        ms=(_time.perf_counter() - _rq0) * 1000.0,
+                        input_tokens=rin,
+                        output_tokens=rout,
+                    )
+                corrected_text = extract_anthropic_text(rq_resp)
+                if corrected_text:
+                    response_text = corrected_text
+            except Exception as e:
+                logger.warning(f"Re-query execution fallback: {e}")
+                if classification.requires_verification:
+                    response_text = (
+                        "Nie, nie prosiłeś mnie o wygenerowanie pliku PDF! Przepraszam za nieporozumienie. W czym mogę pomóc w naszej bazie nieruchomości?"
+                        if language == "pl" else
+                        "No, you did not ask me to create any PDF! I apologize for any misunderstanding. How can I assist you with our property inventory instead?"
+                    )
+    elif timer:
+        timer.skipped.append("guardrail_judge")
 
     # Apply structured bullet-points guardrail (guarantees NO raw markdown tables or speculation)
     response_text = ensure_structured_admin_response(response_text, language=language)
@@ -3876,12 +4296,45 @@ def _execute_admin_tool(
     Executes an admin tool.
     Read tools execute immediately and record an audit log.
     Write tools strictly create a PendingAction and require explicit two-step confirmation.
+    Cacheable read tools are memoized ~60s (invalidated on confirmed writes).
     """
+    from app.services.admin_perf import (
+        CACHEABLE_TOOLS,
+        tool_cache_get,
+        tool_cache_set,
+    )
+
     staff_email = (
         getattr(staff_user, "email", None)
         or (staff_user.get("email") if isinstance(staff_user, dict) else None)
         or getattr(settings, "ADMIN_EMAIL", "admin@varsoviaestate.com")
     )
+    ttl = float(getattr(settings, "ADMIN_TOOL_CACHE_TTL_SEC", 60.0) or 60.0)
+    args_key = tool_args if isinstance(tool_args, dict) else {}
+    if tool_name in CACHEABLE_TOOLS and ttl > 0:
+        hit = tool_cache_get(tool_name, args_key, ttl)
+        if hit is not None:
+            return hit
+
+    result_tuple = _execute_admin_tool_uncached(
+        db, tool_name, tool_args or {}, staff_user, conversation_id, staff_email
+    )
+    if tool_name in CACHEABLE_TOOLS and ttl > 0:
+        # Only cache successful read results (no pending confirmation)
+        if isinstance(result_tuple, tuple) and len(result_tuple) >= 2 and not result_tuple[1]:
+            tool_cache_set(tool_name, args_key, result_tuple)
+    return result_tuple
+
+
+def _execute_admin_tool_uncached(
+    db: Session,
+    tool_name: str,
+    tool_args: Dict[str, Any],
+    staff_user: AuthenticatedStaff,
+    conversation_id: str,
+    staff_email: str,
+):
+    """Inner tool executor (no cache)."""
 
     # 1. Read Tool: search_properties_full
     if tool_name == "search_properties_full":
@@ -4339,37 +4792,51 @@ def _execute_admin_tool(
         return proposal_res, True, str(action.id)
 
     elif tool_name in ["create_or_update_listing", "propose_listing_update"]:
-        from app.db.models import Property
         from app.services.property_search import property_belongs_to_websites
+        from app.services.admin_property_fields import (
+            expand_proposed_fields,
+            resolve_existing_property,
+            coerce_price_storage,
+            format_price_thb,
+        )
+        from app.services.admin_change_diff import (
+            build_single_listing_change_diff,
+            substitute_real_pending_id,
+            read_stored_property_fields,
+        )
+
         target_pid = tool_args.get("property_id")
         selected_websites = getattr(staff_user, "selected_websites", None)
-        prop = db.query(Property).filter(Property.property_id == target_pid).first() if target_pid else None
+        resolve_source, resolved = resolve_existing_property(db, str(target_pid or ""))
+        prop = resolved if resolve_source == "postgres" else None
         if prop and selected_websites and not property_belongs_to_websites(prop, selected_websites):
             return {
                 "status": "FORBIDDEN",
                 "message": f"Access denied: Property '{target_pid}' does not belong to your currently selected website(s): {selected_websites}."
             }, False, None
 
-        # Do NOT inject websites into update proposals — only if admin explicitly passed them
+        # Canonical id from resolver (Firestore doc id)
+        if resolve_source == "firestore" and isinstance(resolved, dict):
+            target_pid = resolved.get("property_id") or resolved.get("_firestore_doc_id") or target_pid
+            tool_args["property_id"] = target_pid
+        elif prop is not None:
+            target_pid = getattr(prop, "property_id", target_pid)
+
         raw_fields = dict(tool_args.get("fields_to_update") or tool_args.get("fields") or {})
         explicit_websites = "websites" in raw_fields or "selected_websites" in raw_fields
         if not explicit_websites:
             raw_fields.pop("websites", None)
             raw_fields.pop("selected_websites", None)
 
-        mode = tool_args.get("mode") or ("create" if not prop else "update")
-        # Force update mode when the listing already exists — never demand create-required fields
-        if prop:
+        # Exists in PG or Firestore → always update (never create-required fields)
+        if resolve_source:
             mode = "update"
             tool_args["mode"] = "update"
             tool_args["is_update_only"] = True
-
-        from app.services.admin_property_fields import expand_proposed_fields
-        from app.services.admin_change_diff import (
-            build_single_listing_change_diff,
-            substitute_real_pending_id,
-            read_stored_property_fields,
-        )
+            tool_args["resolve_source"] = resolve_source
+        else:
+            mode = tool_args.get("mode") or "create"
+            tool_args["mode"] = mode
 
         stored = read_stored_property_fields(db, str(target_pid or ""), list(raw_fields.keys()))
         canonical, expand_errs = expand_proposed_fields(
@@ -4386,17 +4853,28 @@ def _execute_admin_tool(
                 "message": " ".join(unclear),
             }, False, None
 
+        # Coerce price ints
+        for pk in ("price_numeric_min", "price_numeric_max"):
+            if canonical and canonical.get(pk) is not None:
+                c = coerce_price_storage(canonical[pk])
+                if c is not None:
+                    canonical[pk] = c
+                    if pk == "price_numeric_min":
+                        canonical.setdefault("price_display", format_price_thb(c))
+
         tool_args["fields_to_update"] = canonical or raw_fields
         tool_args["fields"] = tool_args["fields_to_update"]
 
-        is_valid, missing, err_msg = validate_property_data(tool_args, existing_property=prop)
+        # Pass resolved record (ORM or dict) so update path skips create validation
+        is_valid, missing, err_msg = validate_property_data(
+            tool_args, existing_property=resolved if resolve_source else prop
+        )
         if not is_valid:
-            proposal_res = {
+            return {
                 "status": "VALIDATION_FAILED",
                 "missing_fields": missing,
-                "message": err_msg
-            }
-            return proposal_res, False, None
+                "message": err_msg,
+            }, False, None
 
         fields = tool_args.get("fields_to_update") or {}
         change_diff = build_single_listing_change_diff(
@@ -4406,7 +4884,14 @@ def _execute_admin_tool(
             mode=mode,
             user_message=str(tool_args.get("_user_message") or ""),
         )
-        # Prefer canonical expansion from diff
+        if change_diff.get("no_change"):
+            return {
+                "status": "NO_CHANGE",
+                "message": change_diff.get("no_change_message") or "No change.",
+                "change_diff": change_diff,
+                "requires_confirmation": False,
+            }, False, None
+
         if change_diff.get("canonical_fields"):
             fields = change_diff["canonical_fields"]
             tool_args["fields_to_update"] = fields
@@ -4417,7 +4902,9 @@ def _execute_admin_tool(
         payload["change_diff"] = change_diff
         payload["diff_markdown"] = change_diff.get("diff_markdown")
         payload["risk_warnings"] = change_diff.get("risk_warnings") or []
-        payload["mode"] = mode
+        payload["mode"] = change_diff.get("operation_type") or mode
+        payload["resolve_source"] = resolve_source or change_diff.get("resolve_source")
+        payload["is_update_only"] = True if resolve_source else payload.get("is_update_only")
 
         action = create_pending_action(
             db=db,

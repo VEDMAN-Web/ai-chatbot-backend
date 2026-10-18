@@ -42,26 +42,44 @@ def staff():
     )
 
 
-def test_anthropic_timeout_is_90_seconds():
-    assert float(getattr(config_mod.settings, "ANTHROPIC_TIMEOUT", 0)) == 90.0
-    assert _anthropic_timeout_sec() == 90.0
+def test_anthropic_timeout_is_60_seconds_main():
+    assert float(getattr(config_mod.settings, "ANTHROPIC_TIMEOUT", 0)) == 60.0
+    assert _anthropic_timeout_sec() == 60.0
+    assert _anthropic_timeout_sec(helper=True) == 30.0
 
 
-def test_safe_anthropic_retries_once_then_raises():
+def test_safe_anthropic_retries_connection_not_timeout():
     calls = {"n": 0}
 
     class _Messages:
         def create(self, **kwargs):
             calls["n"] += 1
-            raise TimeoutError("request timed out")
+            raise ConnectionError("connection reset")
 
     class FakeClient:
         def __init__(self):
             self.messages = _Messages()
 
-    with pytest.raises(TimeoutError):
+    with pytest.raises(ConnectionError):
         _safe_anthropic_create(FakeClient(), model="m", messages=[{"role": "user", "content": "hi"}])
-    assert calls["n"] == 2  # initial + one retry
+    assert calls["n"] == 2  # initial + one retry on connection error
+
+    calls["n"] = 0
+
+    class _TimeoutMessages:
+        def create(self, **kwargs):
+            calls["n"] += 1
+            raise TimeoutError("request timed out")
+
+    class FakeTimeoutClient:
+        def __init__(self):
+            self.messages = _TimeoutMessages()
+
+    with pytest.raises(TimeoutError):
+        _safe_anthropic_create(
+            FakeTimeoutClient(), model="m", messages=[{"role": "user", "content": "hi"}]
+        )
+    assert calls["n"] == 1  # no retry on timeout
 
 
 def test_dossier_template_stable_for_same_property():
@@ -96,14 +114,21 @@ def test_history_trim_keeps_last_12():
 
 
 def test_structured_state_block():
+    pending = SimpleNamespace(id="pa-1", tool_name="create_or_update_listing", status="PENDING")
     block = build_admin_structured_state(
         pending_action_id="pa-1",
         last_resolved_property_id="pirak-villa",
         last_report_file="report.pdf",
+        open_pending=[pending],
     )
     assert "pending_action_id: pa-1" in block
+    assert "open_pending:" in block
     assert "pirak-villa" in block
     assert "report.pdf" in block
+    # Stale prefs id with no DB pending must not claim still waiting
+    stale = build_admin_structured_state(pending_action_id="pa-stale", open_pending=[])
+    assert "open_pending: none" in stale
+    assert "pending_action_id: none" in stale
 
 
 def test_capabilities_skips_llm(staff, monkeypatch):
@@ -182,6 +207,7 @@ def test_timeout_returns_slow_message(staff, monkeypatch):
             negative_feedback=False,
             requires_verification=False,
             confidence=0.9,
+            explanation="mock",
         ),
     )
     monkeypatch.setattr(
@@ -202,7 +228,7 @@ def test_timeout_returns_slow_message(staff, monkeypatch):
         res = process_admin_chat(
             db=MagicMock(),
             session_id="s1",
-            message="show me a detailed inventory analysis of everything",
+            message="draft a nuanced comparison of pirak villa vs anava for an investor brief",
             staff_user=staff,
         )
     assert res.get("text") == ADMIN_LLM_SLOW_MESSAGE
