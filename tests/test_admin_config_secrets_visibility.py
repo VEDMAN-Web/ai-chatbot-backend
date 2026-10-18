@@ -79,12 +79,14 @@ def test_config_status_no_secrets_and_shape():
         "firestore_project_shared",
         "google_redirect_host",
         "database_configured",
+        "report_storage",
     }
     assert isinstance(status["audit_logging"], bool)
     assert isinstance(status["lead_saving"], bool)
     assert isinstance(status["firestore_project_shared"], bool)
     assert isinstance(status["database_configured"], bool)
     assert isinstance(status["google_redirect_host"], str)
+    assert status["report_storage"] in ("ephemeral", "s3", "persistent")
     blob = str(status).lower()
     assert "password" not in blob
     assert "://postgres" not in blob

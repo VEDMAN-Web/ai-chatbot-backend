@@ -314,6 +314,147 @@ function adminAuthHeaders(extra = {}) {
   return headers;
 }
 
+function isProtectedAdminDownloadUrl(url) {
+  if (!url || typeof url !== 'string') return false;
+  try {
+    const path = url.startsWith('http') ? new URL(url).pathname : url;
+    return /\/api\/v1\/admin\//i.test(path);
+  } catch (_) {
+    return /\/api\/v1\/admin\//i.test(url);
+  }
+}
+
+function triggerBlobDownload(blob, filename) {
+  const objectUrl = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = objectUrl;
+  a.download = filename || 'download';
+  a.style.display = 'none';
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => {
+    try { URL.revokeObjectURL(objectUrl); } catch (_) {}
+    try { a.remove(); } catch (_) {}
+  }, 1500);
+}
+
+const LARGE_REPORT_BLOB_BYTES = 20 * 1024 * 1024;
+
+/**
+ * Authenticated admin file download (Bearer via fetch). Never opens a blank tab.
+ * For large files, requests a short-lived signed URL instead of buffering a huge blob.
+ */
+async function downloadAdminProtectedFile(url, filename, buttonEl) {
+  const originalLabel = buttonEl ? buttonEl.innerHTML : '';
+  const setBusy = (busy, label) => {
+    if (!buttonEl) return;
+    buttonEl.disabled = !!busy;
+    if (label != null) buttonEl.innerHTML = label;
+  };
+  const showErr = (msg) => {
+    if (buttonEl) {
+      buttonEl.innerHTML = msg;
+      buttonEl.disabled = false;
+      setTimeout(() => { buttonEl.innerHTML = originalLabel; }, 4000);
+    } else {
+      alert(msg);
+    }
+  };
+
+  setBusy(true, 'Preparing download...');
+  try {
+    const path = (() => {
+      try {
+        return url.startsWith('http') ? new URL(url).pathname + new URL(url).search : url;
+      } catch (_) {
+        return url;
+      }
+    })();
+
+    // Large-file path: signed link (no Authorization header needed on GET)
+    const fname = filename || (path.split('/').pop() || 'report.pdf');
+    const reportsMatch = path.match(/\/api\/v1\/admin\/reports\/([^/?#]+)/i);
+    if (reportsMatch && reportsMatch[1] && reportsMatch[1].toLowerCase() !== 'download') {
+      // Probe with HEAD/GET; if Content-Length is huge, use signed link
+      const probe = await fetch(path, { method: 'GET', headers: adminAuthHeaders(), credentials: 'same-origin' });
+      if (probe.status === 401 || probe.status === 403) {
+        showErr('Please sign in again');
+        return;
+      }
+      if (probe.status === 404 || probe.status === 410) {
+        showErr('This report is no longer available - regenerate it');
+        try { await probe.body?.cancel?.(); } catch (_) {}
+        return;
+      }
+      if (!probe.ok) {
+        showErr('Download failed — please try again');
+        try { await probe.body?.cancel?.(); } catch (_) {}
+        return;
+      }
+      const len = parseInt(probe.headers.get('Content-Length') || '0', 10);
+      if (len > LARGE_REPORT_BLOB_BYTES) {
+        try { await probe.body?.cancel?.(); } catch (_) {}
+        const linkRes = await fetch(`/api/v1/admin/reports/${encodeURIComponent(reportsMatch[1])}/link`, {
+          method: 'POST',
+          headers: adminAuthHeaders({ 'Content-Type': 'application/json' }),
+          credentials: 'same-origin',
+        });
+        if (linkRes.status === 401 || linkRes.status === 403) {
+          showErr('Please sign in again');
+          return;
+        }
+        if (linkRes.status === 404 || linkRes.status === 410) {
+          showErr('This report is no longer available - regenerate it');
+          return;
+        }
+        if (!linkRes.ok) {
+          showErr('Download failed — please try again');
+          return;
+        }
+        const linkData = await linkRes.json();
+        if (!linkData.url) {
+          showErr('Download failed — please try again');
+          return;
+        }
+        // Same-window navigation to signed URL (no blank tab)
+        const a = document.createElement('a');
+        a.href = linkData.url;
+        a.download = fname;
+        a.style.display = 'none';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setBusy(false, originalLabel);
+        return;
+      }
+      const blob = await probe.blob();
+      triggerBlobDownload(blob, fname);
+      setBusy(false, originalLabel);
+      return;
+    }
+
+    const res = await fetch(path, { method: 'GET', headers: adminAuthHeaders(), credentials: 'same-origin' });
+    if (res.status === 401 || res.status === 403) {
+      showErr('Please sign in again');
+      return;
+    }
+    if (res.status === 404 || res.status === 410) {
+      showErr('This report is no longer available - regenerate it');
+      return;
+    }
+    if (!res.ok) {
+      showErr('Download failed — please try again');
+      return;
+    }
+    const blob = await res.blob();
+    triggerBlobDownload(blob, fname);
+    setBusy(false, originalLabel);
+  } catch (err) {
+    console.error('Admin download failed', err);
+    showErr('Download failed — please try again');
+  }
+}
+
 function updateAdminLoginUI() {
   const btn = document.getElementById('btnAdminLoginTop');
   const label = document.getElementById('btnAdminLoginTopLabel');
@@ -807,10 +948,14 @@ async function appendAssistantResponse(data, animate = false) {
   // Detect if a report was generated and render prominent download card
   const directLink = data.download_link || null;
   const reportMatch = text.match(/\/api\/v1\/admin\/reports\/([a-zA-Z0-9_\-\.]+)/i) || 
-                      text.match(/(tajlandia_report_[a-zA-Z0-9_]+\.(pdf|xlsx|docx|csv))/i);
+                      text.match(/(tajlandia_(?:lead_)?report_[a-zA-Z0-9_]+\.(pdf|xlsx|docx|csv))/i);
   if (directLink || reportMatch) {
-    const downloadUrl = directLink || (reportMatch[0].startsWith('/') ? reportMatch[0] : `/api/v1/admin/reports/${reportMatch[1]}`);
-    const filename = downloadUrl.split('/').pop();
+    let downloadUrl = directLink || (reportMatch[0].startsWith('/') ? reportMatch[0] : `/api/v1/admin/reports/${reportMatch[1]}`);
+    // Strip signed-download tokens from display filename
+    if (/\/reports\/download\//i.test(downloadUrl)) {
+      downloadUrl = directLink;
+    }
+    const filename = (downloadUrl || '').split('/').pop().split('?')[0] || 'report.pdf';
     const isExcel = filename.endsWith('.xlsx');
     const isWord = filename.endsWith('.docx');
     const isCsv = filename.endsWith('.csv');
@@ -819,6 +964,11 @@ async function appendAssistantResponse(data, animate = false) {
 
     const reportCard = document.createElement('div');
     reportCard.className = 'report-download-card';
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'btn-download-report';
+    btn.innerHTML = `⬇ Download ${fileLabel}`;
+    btn.addEventListener('click', () => downloadAdminProtectedFile(downloadUrl, filename, btn));
     reportCard.innerHTML = `
       <div class="report-download-left">
         <div class="report-file-icon">${fileIcon}</div>
@@ -827,20 +977,19 @@ async function appendAssistantResponse(data, animate = false) {
           <div class="report-file-desc">${escapeHtml(filename)} (${fileLabel})</div>
         </div>
       </div>
-      <a href="${downloadUrl}" target="_blank" download="${filename}" class="btn-download-report">
-        ⬇ Download ${fileLabel}
-      </a>
     `;
+    reportCard.appendChild(btn);
     bubble.appendChild(reportCard);
   }
 
-  // Detect if a luxury brochure link was provided and render prominent action card
+  // Detect if a luxury brochure / dossier link was provided and render prominent action card
   const brochureLink = data.pdf_url || data.download_url || null;
   if (brochureLink && !directLink && !reportMatch) {
     const brochureCard = document.createElement('div');
     brochureCard.className = 'report-download-card';
     brochureCard.style.marginTop = '10px';
     const bTitle = data.property_name || (activeTenantBrand ? `${activeTenantBrand} Official Brochure` : 'Official Luxury Brochure');
+    const bFilename = (brochureLink.split('/').pop() || 'brochure.pdf').split('?')[0];
     brochureCard.innerHTML = `
       <div class="report-download-left">
         <div class="report-file-icon">📄</div>
@@ -849,10 +998,25 @@ async function appendAssistantResponse(data, animate = false) {
           <div class="report-file-desc">Official 8-Page Presentation Brochure (PDF)</div>
         </div>
       </div>
-      <a href="${brochureLink}" target="_blank" class="btn-download-report" style="background:#0284C7; color:#ffffff; font-weight:600;">
-        🔗 Open / Download PDF
-      </a>
     `;
+    if (isProtectedAdminDownloadUrl(brochureLink)) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'btn-download-report';
+      btn.style.cssText = 'background:#0284C7; color:#ffffff; font-weight:600;';
+      btn.innerHTML = '⬇ Download PDF';
+      btn.addEventListener('click', () => downloadAdminProtectedFile(brochureLink, bFilename, btn));
+      brochureCard.appendChild(btn);
+    } else {
+      const a = document.createElement('a');
+      a.href = brochureLink;
+      a.target = '_blank';
+      a.rel = 'noopener noreferrer';
+      a.className = 'btn-download-report';
+      a.style.cssText = 'background:#0284C7; color:#ffffff; font-weight:600;';
+      a.innerHTML = '🔗 Open / Download PDF';
+      brochureCard.appendChild(a);
+    }
     bubble.appendChild(brochureCard);
   }
 

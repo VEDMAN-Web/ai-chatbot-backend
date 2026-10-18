@@ -395,9 +395,136 @@ def _is_soft_number(num: str, reply_text: str) -> bool:
     return False
 
 
+_RETRACT_PHRASE_RE = re.compile(
+    r"(?:not\s+verified|unverified|demo\s+(?:data|lead)|fake\s+lead|unreal|"
+    r"not\s+a\s+real\s+lead|probably\s+demo|likely\s+demo|sample\s+data|"
+    r"was\s+(?:probably\s+)?demo|is\s+(?:probably\s+)?demo)",
+    re.I,
+)
+_DEMO_FROM_EMAIL_RE = re.compile(
+    r"(?:demo|fake|unreal|not\s+real|not\s+verified).{0,60}example\.com|"
+    r"example\.com.{0,60}(?:demo|fake|unreal|not\s+real)",
+    re.I | re.S,
+)
+_PLACEHOLDER_EMAIL_OK_RE = re.compile(
+    r"email\s+domain\s+looks\s+like\s+a\s+placeholder|verify\s+before\s+contacting",
+    re.I,
+)
+
+
+def extract_prior_verified_lead_names(
+    conversation_history: Optional[Sequence[Any]] = None,
+    prior_tool_results: Optional[Sequence[Any]] = None,
+) -> Set[str]:
+    """Names previously returned as leads in this conversation (case-insensitive)."""
+    names: Set[str] = set()
+
+    def _add_from_payload(p: Any) -> None:
+        if isinstance(p, dict):
+            leads = p.get("leads")
+            if isinstance(leads, list):
+                for ld in leads:
+                    if isinstance(ld, dict):
+                        n = (ld.get("contact_name") or ld.get("name") or "").strip()
+                        if n:
+                            names.add(n.lower())
+            for key in ("contact_name", "name"):
+                n = (p.get(key) or "").strip()
+                if n and ("@" not in n):
+                    names.add(n.lower())
+        elif isinstance(p, list):
+            for it in p:
+                _add_from_payload(it)
+
+    for p in _normalize_tool_payloads(prior_tool_results):
+        _add_from_payload(p)
+
+    for turn in conversation_history or []:
+        if not isinstance(turn, dict):
+            continue
+        # Prefer structured tool_results stored on the turn
+        tr = turn.get("tool_results")
+        if tr:
+            for p in _normalize_tool_payloads(tr):
+                _add_from_payload(p)
+        content = turn.get("content") or ""
+        if turn.get("role") == "assistant" and content:
+            for m in re.finditer(
+                r"\*\*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\*\*",
+                content,
+            ):
+                names.add(m.group(1).lower())
+    return names
+
+
+def current_turn_directly_covers_lead(
+    tool_results: Optional[Sequence[Any]],
+    lead_name: str,
+) -> bool:
+    """True only if this turn's tools returned that lead by id/name/email (not merely 0 from a filter)."""
+    target = (lead_name or "").strip().lower()
+    if not target:
+        return False
+    for p in _normalize_tool_payloads(tool_results):
+        if not isinstance(p, dict):
+            continue
+        # Empty filtered result never "covers" a prior lead
+        leads = p.get("leads")
+        if isinstance(leads, list):
+            if int(p.get("total") or len(leads) or 0) == 0:
+                continue
+            for ld in leads:
+                if not isinstance(ld, dict):
+                    continue
+                blob = " ".join(
+                    str(ld.get(k) or "").lower()
+                    for k in ("contact_name", "name", "contact_email", "email", "lead_id", "id")
+                )
+                if target in blob:
+                    return True
+        # Single-lead lookup payload
+        for k in ("contact_name", "name", "contact_email", "email", "lead_id"):
+            if target in str(p.get(k) or "").lower():
+                return True
+    return False
+
+
+def detect_unfair_lead_retraction(
+    reply_text: Optional[str],
+    tool_results: Optional[Sequence[Any]],
+    *,
+    prior_verified_leads: Optional[Set[str]] = None,
+) -> List[str]:
+    """
+    Hard violations: retracting a previously verified lead using only a narrower
+    empty/partial search, or calling real-looking data 'demo' solely from example.com.
+    """
+    text = reply_text or ""
+    text_l = text.lower()
+    violations: List[str] = []
+    prior = {n.lower().strip() for n in (prior_verified_leads or set()) if n}
+
+    if _RETRACT_PHRASE_RE.search(text):
+        for name in prior:
+            if not name or name not in text_l:
+                continue
+            if not current_turn_directly_covers_lead(tool_results, name):
+                # Preserve original casing for the message when possible
+                display = name.title()
+                violations.append(f"unfair_retract:{display}")
+
+    if _DEMO_FROM_EMAIL_RE.search(text) and not _PLACEHOLDER_EMAIL_OK_RE.search(text):
+        # Calling example.com data "demo/fake" without the placeholder phrasing
+        violations.append("demo_label_from_example_email")
+
+    return violations
+
+
 def verify_admin_claims(
     reply_text: Optional[str],
     tool_results: Optional[Sequence[Any]],
+    *,
+    prior_verified_leads: Optional[Set[str]] = None,
 ) -> ClaimVerifyResult:
     text = reply_text or ""
     payloads = _normalize_tool_payloads(tool_results)
@@ -464,8 +591,17 @@ def verify_admin_claims(
             success_violations.append("success_claimed_without_success_true_and_is_mock_false")
             hard_mismatches.append("success_on_mock_or_failure")
 
+    for v in detect_unfair_lead_retraction(
+        text, tool_results, prior_verified_leads=prior_verified_leads
+    ):
+        hard_mismatches.append(v)
+
     has_hard = bool(success_violations) or any(
-        h.startswith("wrong_count") or h.startswith("wrong_change") or h.startswith("success_")
+        h.startswith("wrong_count")
+        or h.startswith("wrong_change")
+        or h.startswith("success_")
+        or h.startswith("unfair_retract")
+        or h.startswith("demo_label")
         for h in hard_mismatches
     )
     ok = not has_hard
@@ -570,14 +706,17 @@ def format_lead_line(item: Dict[str, Any], language: str = "en", *, compact: boo
     else:
         budget_s = str(budget).strip()
     email = _fmt_val(item.get("contact_email") or item.get("email"), language)
+    test_tag = ""
+    if item.get("possible_test_entry") or item.get("test_entry_tag"):
+        test_tag = " | possible test entry"
     if compact:
-        return f"- **{name}** | score {score_s} | {loc} | budget {budget_s} | {email}"
+        return f"- **{name}** | score {score_s} | {loc} | budget {budget_s} | {email}{test_tag}"
     phone = _fmt_val(item.get("contact_phone") or item.get("phone"), language)
     lid = _fmt_val(item.get("lead_id") or item.get("id"), language)
     created = _fmt_val(item.get("created_at") or item.get("created"), language)
     return (
         f"- `{lid}` **{name}** | score {score_s} | {loc} | budget {budget_s} | "
-        f"{email} | {phone} | created {created}"
+        f"{email} | {phone} | created {created}{test_tag}"
     )
 
 
@@ -729,23 +868,37 @@ def build_deterministic_reply_from_tools(
         leads = p.get("leads")
         if isinstance(leads, list):
             total = p.get("total", len(leads))
-            window = p.get("window_label") or p.get("date_window")
-            if window:
-                lines.append(str(window))
-            elif p.get("window_start") and p.get("window_end"):
+            if p.get("summary"):
+                lines.append(str(p["summary"]))
+            else:
+                window = p.get("window_label") or p.get("date_window")
+                if window:
+                    lines.append(str(window))
+                elif p.get("all_time") or p.get("days") in (0, None):
+                    lines.append(
+                        f"Wszystkie leady (**{total}** łącznie), od najnowszych:"
+                        if pl
+                        else f"Showing all leads (**{total}** total), newest first:"
+                    )
+                elif p.get("window_start") and p.get("window_end"):
+                    lines.append(
+                        f"Ostatnie {p.get('days', '?')} dni ({p.get('window_start')} – {p.get('window_end')}): **{total}** leadów"
+                        if pl
+                        else f"Last {p.get('days', '?')} days ({p.get('window_start')} to {p.get('window_end')}): **{total}** leads"
+                    )
+            if p.get("message") and int(total or 0) == 0:
+                lines.append(str(p["message"]))
+            elif int(total or 0) > 0:
                 lines.append(
-                    f"Ostatnie {p.get('days', 7)} dni ({p.get('window_start')} – {p.get('window_end')})"
+                    f"Łącznie leadów: **{total}** (pokazuję {min(5, len(leads))}):"
                     if pl
-                    else f"Last {p.get('days', 7)} days ({p.get('window_start')} to {p.get('window_end')})"
+                    else f"Total leads: **{total}** (showing {min(5, len(leads))}):"
                 )
-            lines.append(
-                f"Łącznie leadów: **{total}** (pokazuję {min(5, len(leads))}):"
-                if pl
-                else f"Total leads: **{total}** (showing {min(5, len(leads))}):"
-            )
-            lines.extend(_format_list_items(leads[:5], language, compact_leads=True))
-            if int(total or 0) > 5 or len(leads) > 5:
-                lines.append("Pokaż kolejne 5?" if pl else "Show the next 5?")
+                lines.extend(_format_list_items(leads[:5], language, compact_leads=True))
+                if int(total or 0) > 5 or len(leads) > 5:
+                    lines.append("Pokaż kolejne 5?" if pl else "Show the next 5?")
+            if p.get("lead_saving_note"):
+                lines.append(str(p["lead_saving_note"]))
             continue
 
         # Property knowledge (single rich property dict)
@@ -894,13 +1047,19 @@ def verify_and_correct_admin_reply(
     conversation_id: Optional[str] = None,
     regenerate_fn: Optional[Callable[[str], Optional[str]]] = None,
     user_message: Optional[str] = None,
+    conversation_history: Optional[Sequence[Any]] = None,
+    prior_verified_leads: Optional[Set[str]] = None,
 ) -> ClaimVerifyResult:
     """
     HARD → regenerate once → template.
     SOFT-only → keep model reply, audit log.
     """
-    first = verify_admin_claims(reply_text, tool_results)
-
+    prior = set(prior_verified_leads or set())
+    if conversation_history and not prior:
+        prior = extract_prior_verified_lead_names(conversation_history)
+    first = verify_admin_claims(
+        reply_text, tool_results, prior_verified_leads=prior
+    )
     # Soft-only: keep reply
     if first.ok and first.soft_mismatches:
         first.final_text = reply_text
@@ -927,6 +1086,9 @@ def verify_and_correct_admin_reply(
             "GUARDRAIL: use only values from the tool results. "
             "Do not invent counts, prices, percentages, or ids. "
             "Do not claim an action succeeded unless the tool result has success=true and is_mock=false. "
+            "Do NOT retract a previously returned lead as demo/unreal/not verified unless this turn's "
+            "tools looked up that same lead by id/name/email. A narrower empty window must not erase prior facts. "
+            "For example.com emails say 'email domain looks like a placeholder — verify before contacting' — never 'demo'. "
             f"Previous issue: {first.reason}"
         )
         try:
@@ -936,7 +1098,9 @@ def verify_and_correct_admin_reply(
             regenerated = None
 
     if regenerated and str(regenerated).strip():
-        second = verify_admin_claims(regenerated, tool_results)
+        second = verify_admin_claims(
+            regenerated, tool_results, prior_verified_leads=prior
+        )
         if second.ok or (second.soft_mismatches and not second.hard_mismatches and not second.success_violations):
             second.final_text = regenerated
             second.intervention = "regenerated"

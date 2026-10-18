@@ -11,7 +11,13 @@ from app.core.auth import AuthenticatedStaff
 from app.services.property_search import search_properties_safe, PropertyFilterParams
 from app.services.admin_knowledge_service import get_property_knowledge
 from app.services.drive_service import fetch_drive_file
-from app.services.report_service import generate_report
+from app.services.report_service import (
+    generate_report,
+    report_exists,
+    strip_admin_report_urls_from_text,
+    format_report_ready_message,
+    validate_report_filename,
+)
 from app.services.property_extractor import extract_property_from_document, generate_property_diff_table
 from app.services.action_service import create_pending_action, validate_property_data
 from app.services.audit_service import record_audit_log
@@ -434,6 +440,10 @@ CLAUDE_ADMIN_TOOLS = [
                 "report_type": {"type": "string", "enum": ["properties", "leads"], "description": "Type of report: 'properties' for property listings, or 'leads' for buyer leads dossier"},
                 "property_ids": {"type": "array", "items": {"type": "string"}, "description": "Property IDs to include (for property reports)"},
                 "lead_ids": {"type": "array", "items": {"type": "string"}, "description": "Lead IDs or client contact names to include (e.g. ['Alexander Smith'])"},
+                "days": {
+                    "type": "integer",
+                    "description": "For leads reports: lookback days. Omit or 0 = all stored leads. Never invent a hidden 7-day default."
+                },
                 "title": {"type": "string", "description": "Title of report"}
             },
             "required": ["format"]
@@ -496,13 +506,16 @@ CLAUDE_ADMIN_TOOLS = [
     },
     {
         "name": "get_buyer_leads",
-        "description": "Retrieves high-intent buyer leads, customer inquiries, and contact submissions. Use this whenever asked about leads, buyer inquiries, or interested clients.",
+        "description": "Retrieves buyer leads and inquiries. Omit days (or set days=0) for ALL TIME when the admin gives no period. Only set days when they say this week / last 7 days / today / this month / etc. Do NOT default to 7.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "min_score": {"type": "number", "description": "Minimum lead score (e.g. 70 for high-intent, 0-100)"},
+                "min_score": {"type": "number", "description": "Optional minimum lead score (0-100). Omit for no score filter."},
                 "status": {"type": "string", "description": "Lead status (e.g. 'new', 'contacted', 'qualified')"},
-                "days": {"type": "integer", "description": "Lookback period in days (e.g. 7 for 'this week' / last 7 days)"},
+                "days": {
+                    "type": "integer",
+                    "description": "Lookback in days. Use 0 or omit for all-time. Use 7 only when user said this week / last 7 days; 1 for today; 30 for this month."
+                },
                 "limit": {"type": "integer", "description": "Maximum number of leads to fetch (default 10; UI shows 5 per message)"},
                 "calendar_week": {
                     "type": "boolean",
@@ -673,6 +686,13 @@ NEGATIVE INTENT & INVENTORY CLARIFICATION:
 - If the user asks whether they requested a PDF/report (e.g., 'Did I ask you to create any pdf'), or tells you not to generate a document, apologize politely and DO NOT call generate_report or generate_client_offer_dossier.
 - NEVER call `generate_report`, `generate_client_offer_dossier`, or `generate_property_brochure` unless the user explicitly requested a PDF, report, dossier, export, or download in their message.
 - If the user asks for buyer leads (e.g. 'give me latest lead', 'show leads'), call ONLY `get_buyer_leads` and present the lead information directly in the text chat. DO NOT call `generate_report` or create a file unless the user explicitly asks for a PDF/report.
+- LEADS TIME WINDOW (CRITICAL):
+  * If the admin names a period ("this week", "last 7 days", "today", "this month"), pass that exact window via `days` / `calendar_week`.
+  * If they give NO period ("show leads", "generate a leads report", "all leads"), call `get_buyer_leads` with `days=0` (all-time). NEVER invent a hidden 7-day default.
+  * Always state the window and total count in your reply (e.g. "all leads (N total), newest first" or "last 7 days (YYYY-MM-DD to YYYY-MM-DD): 0 leads").
+  * If the requested window has 0 leads but a wider window has leads, say so and offer the wider window — do NOT claim leads do not exist.
+- LEADS REPORT: `generate_report(report_type="leads")` with no lead_ids includes ALL stored leads (cap 200). Never refuse a leads report because the last 7 days were empty.
+- FACT STABILITY: A narrower search (shorter period / smaller limit / 0 results) must NEVER be used to call a previously returned lead "demo", "unreal", or "not verified". Only a direct lookup by that lead's id/name/email may revise that record. Do not call real-looking data "demo" just because the email is example.com — say "email domain looks like a placeholder — verify before contacting".
 - If the user asks to export or download a lead or information in PDF (e.g. 'give me this in pdf', 'export this lead to pdf'):
   * You CAN and SHOULD call `generate_report(format="pdf", report_type="leads", lead_ids=[...], title="...")` or `generate_client_offer_dossier`!
   * Never claim that you cannot create a PDF for leads or clients. You have full capability to generate downloadable PDF reports and client offer dossiers.
@@ -1091,12 +1111,14 @@ def try_admin_fast_path(
         }
 
     if fast == "leads":
-        days = 7
-        if any(w in msg_l for w in ("today", "dzisiaj", "dziś", "dzis")):
-            days = 1
-        elif any(w in msg_l for w in ("this week", "ten tydzień", "ten tydzien", "calendar week")):
-            days = 7
-        args = {"days": days, "limit": 5, "min_score": 0.0}
+        from app.services.admin_reply_helpers import parse_admin_leads_period
+        period = parse_admin_leads_period(message)
+        args: Dict[str, Any] = {"limit": 5}
+        if period.calendar_week:
+            args["calendar_week"] = True
+        else:
+            args["days"] = 0 if period.days in (None, 0) else int(period.days)
+        # No hidden min_score filter
         t0 = __import__("time").perf_counter()
         t_res, _, _ = _execute_admin_tool(db, "get_buyer_leads", args, staff_user, str(conv.id))
         if timer:
@@ -2380,11 +2402,9 @@ def _call_anthropic_claude(
     download_link = None
     for tr in tool_results:
         if isinstance(tr, dict):
-            if tr.get("file_url"):
-                download_link = tr.get("file_url")
-                break
-            elif isinstance(tr.get("result"), dict) and tr["result"].get("file_url"):
-                download_link = tr["result"]["file_url"]
+            payload = tr["result"] if isinstance(tr.get("result"), dict) else tr
+            if payload.get("file_url") and payload.get("storage_ok", True) is not False:
+                download_link = payload.get("file_url")
                 break
 
     # -------------------------------------------------------------------------
@@ -2509,6 +2529,7 @@ def _call_anthropic_claude(
             conversation_id=str(conv.id),
             regenerate_fn=_regen_claims,
             user_message=raw_user_message or message,
+            conversation_history=getattr(conv, "message_history", None) or [],
         )
         if timer:
             timer.verifier_ms = (_time.perf_counter() - _v0) * 1000.0
@@ -2622,7 +2643,7 @@ def _call_anthropic_claude(
         if pid:
             remember_admin_session_fact(conv, property_id=str(pid))
         fname = payload.get("filename") or payload.get("file_name")
-        if fname or payload.get("file_url"):
+        if (fname or payload.get("file_url")) and payload.get("storage_ok", True) is not False:
             remember_admin_session_fact(conv, report_file=str(fname or payload.get("file_url")))
         if payload.get("pending_action_id"):
             remember_admin_session_fact(conv, pending_action_id=str(payload["pending_action_id"]))
@@ -2630,6 +2651,9 @@ def _call_anthropic_claude(
     tips = contextual_followup_suggestions(tool_calls, tool_results, language=language)
     if tips:
         response_text = append_followup_suggestions(response_text, tips, language=language)
+
+    # Download card carries the link — never print raw /api/v1/admin/reports/... in chat text
+    response_text = strip_admin_report_urls_from_text(response_text or "")
 
     append_conversation_turn(
         db=db,
@@ -2746,8 +2770,26 @@ def _run_deterministic_admin(
             "tools_used": [], "language": language
         }
 
+    # Report follow-ups are always on-topic for admin (must not be blocked by public off-topic rules)
+    _is_report_followup = any(
+        p in msg_lower
+        for p in (
+            "that report again",
+            "same report",
+            "previous report",
+            "the report again",
+            "download that report",
+            "send that report again",
+            "generate report",
+            "download report",
+            "ten raport",
+            "poprzedni raport",
+            "ten sam raport",
+        )
+    ) or ("report" in msg_lower and any(w in msg_lower for w in ("again", "download", "generate", "export", "pdf")))
+
     # Off-topic inquiry handling for internal admin agent
-    if is_off_topic_query(message):
+    if is_off_topic_query(message) and not _is_report_followup:
         if language == "pl":
             reply = (
                 "Jako wewnętrzny asystent AI Tajlandia specjalizuję się wyłącznie w zarządzaniu i analizie bazy nieruchomości w Tajlandii (Phuket, Koh Samui, Koh Phangan, Bangkok). "
@@ -3558,6 +3600,68 @@ def _run_deterministic_admin(
                     f"The bespoke presentation has been rendered with high-res photos and clean typography, ready for client delivery or private viewing discussions!"
                 )
 
+    # F0. "That report again" — re-link if still stored, otherwise regenerate
+    elif not is_negative_report_inquiry and any(
+        p in msg_lower
+        for p in (
+            "that report again",
+            "same report",
+            "previous report",
+            "the report again",
+            "download that report",
+            "send that report again",
+            "ten raport",
+            "poprzedni raport",
+            "ten sam raport",
+            "jeszcze raz raport",
+        )
+    ):
+        from app.services.admin_reply_helpers import extract_session_state_from_conversation, remember_admin_session_fact
+        session_bits = extract_session_state_from_conversation(conv)
+        last_file = session_bits.get("last_report_file")
+        safe_last = None
+        if last_file:
+            try:
+                # May be a bare filename or a full /api/... path
+                candidate = str(last_file).split("/")[-1].split("?")[0]
+                safe_last = validate_report_filename(candidate)
+            except ValueError:
+                safe_last = None
+        if safe_last and report_exists(safe_last):
+            download_link = f"/api/v1/admin/reports/{safe_last}"
+            if language == "pl":
+                response_text = (
+                    f"Twój poprzedni raport **{safe_last}** jest nadal dostępny. "
+                    "Użyj karty pobierania poniżej."
+                )
+            else:
+                response_text = (
+                    f"Your previous report **{safe_last}** is still available. "
+                    "Use the download card below."
+                )
+            tool_results.append({
+                "filename": safe_last,
+                "file_url": download_link,
+                "storage_ok": True,
+            })
+        else:
+            # File gone — regenerate instead of linking the old name
+            fmt = "pdf"
+            args = {"format": fmt, "title": "Tajlandia Property Report (regenerated)"}
+            t_res, _, _ = _execute_admin_tool(db, "generate_report", args, staff_user, str(conv.id))
+            tool_calls.append({"name": "generate_report", "args": args})
+            tool_results.append(t_res)
+            fname = t_res.get("filename") or "report"
+            storage_ok = bool(t_res.get("storage_ok", True)) and bool(t_res.get("file_url"))
+            response_text = t_res.get("message") or format_report_ready_message(
+                filename=str(fname),
+                format_type=fmt,
+                language=language,
+                storage_ok=storage_ok,
+            )
+            if storage_ok and fname:
+                remember_admin_session_fact(conv, report_file=str(fname))
+
     # F. Generate Report (PDF / Excel / DOCX / CSV)
     elif not is_negative_report_inquiry and not is_inventory_inquiry and (
         any(k in msg_lower for k in [
@@ -3584,29 +3688,35 @@ def _run_deterministic_admin(
         ) or any(w in msg_lower for w in ["lead", "leads", "leadu", "leadów", "leadow"])
 
         if is_lead_context:
+            from app.services.admin_reply_helpers import parse_admin_leads_period
+            period = parse_admin_leads_period(message)
             target_lead_id = None
-            if "alexander" in msg_lower or "alexander" in last_assistant_turn.lower():
+            # Only pin a named lead when the user explicitly names them in THIS message
+            if "alexander" in msg_lower:
                 target_lead_id = "Alexander Smith"
-            elif "elena" in msg_lower or "elena" in last_assistant_turn.lower():
+            elif "elena" in msg_lower:
                 target_lead_id = "Elena Rostova"
-            elif "michael" in msg_lower or "michael" in last_assistant_turn.lower():
+            elif "michael" in msg_lower:
                 target_lead_id = "Michael Chang"
 
             args = {
                 "format": fmt,
                 "lead_ids": [target_lead_id] if target_lead_id else None,
                 "report_type": "leads",
-                "title": f"Buyer Lead Intelligence Dossier - {target_lead_id or 'Latest Leads'}"
+                "days": 0 if (period.days in (None, 0) and not period.calendar_week) else (period.days or 0),
+                "title": f"Buyer Lead Intelligence Dossier - {target_lead_id or 'All Leads'}",
             }
             t_res, _, _ = _execute_admin_tool(db, "generate_report", args, staff_user, str(conv.id))
             tool_calls.append({"name": "generate_report", "args": args})
             tool_results.append(t_res)
-            fname = t_res.get('filename')
-            furl = t_res.get('file_url')
-            if language == "pl":
-                response_text = f"✅ **Wygenerowano raport {fmt.upper()} dla leada '{fname}'!**\n\n👉 **[🔗 Kliknij tutaj, aby pobrać Raport Leadu]({furl})**"
-            else:
-                response_text = f"✅ **Generated {fmt.upper()} buyer lead dossier '{fname}'!**\n\n👉 **[🔗 Click here to Download Lead Report PDF]({furl})**"
+            fname = t_res.get("filename") or "report"
+            storage_ok = bool(t_res.get("storage_ok", True)) and bool(t_res.get("file_url"))
+            response_text = t_res.get("message") or format_report_ready_message(
+                filename=str(fname),
+                format_type=fmt,
+                language=language,
+                storage_ok=storage_ok,
+            )
         else:
             # Build filter params for report if location/filters mentioned
             report_prop_ids = [prop_id] if prop_id else None
@@ -3614,12 +3724,14 @@ def _run_deterministic_admin(
             t_res, _, _ = _execute_admin_tool(db, "generate_report", args, staff_user, str(conv.id))
             tool_calls.append({"name": "generate_report", "args": args})
             tool_results.append(t_res)
-            fname = t_res.get('filename')
-            furl = t_res.get('file_url')
-            if language == "pl":
-                response_text = f"✅ **Wygenerowano raport {fmt.upper()} '{fname}'!**\n\nPobierz pod adresem: {furl}."
-            else:
-                response_text = f"✅ **Generated {fmt.upper()} report '{fname}'!**\n\nDownload it from: {furl}."
+            fname = t_res.get("filename") or "report"
+            storage_ok = bool(t_res.get("storage_ok", True)) and bool(t_res.get("file_url"))
+            response_text = t_res.get("message") or format_report_ready_message(
+                filename=str(fname),
+                format_type=fmt,
+                language=language,
+                storage_ok=storage_ok,
+            )
 
     # E. Ingest Property from Google Drive (PDF / DOCX / TXT)
     elif (
@@ -3934,23 +4046,27 @@ def _run_deterministic_admin(
     # G. Buyer Leads / High-Intent Client Inquiries
     elif any(k in msg_lower for k in ["lead", "leads", "buyer", "inquir", "high-intent",
                                        "prospect", "client list", "klienci", "konwersacja", "conversation info"]):
-        args = {"days": 7, "min_score": 70, "limit": 10}
+        from app.services.admin_reply_helpers import parse_admin_leads_period
+        from app.services.admin_claim_verifier import build_deterministic_reply_from_tools
+
+        period = parse_admin_leads_period(message)
+        args: Dict[str, Any] = {"limit": 10}
+        if period.calendar_week:
+            args["calendar_week"] = True
+        else:
+            args["days"] = 0 if period.days in (None, 0) else int(period.days)
+        # No hidden min_score=70 — only filter when the user asks for high-intent
+        if any(w in msg_lower for w in ("high-intent", "high intent", "high score", "score above", "min score")):
+            args["min_score"] = 70
+
         t_res, _, _ = _execute_admin_tool(db, "get_buyer_leads", args, staff_user, str(conv.id))
         tool_calls.append({"name": "get_buyer_leads", "args": args})
         tool_results.append(t_res)
-
-        response_lines = ["Here are the top high-intent buyer leads from this week (sorted by lead score):\n"]
-        for idx, ld in enumerate(t_res, 1):
-            response_lines.append(
-                f"**Lead #{idx}: {ld['contact_name']}** (Score: **{ld['lead_score']}/100**)\n"
-                f"- Preferred Location: {ld['preferred_location']}\n"
-                f"- Budget: {ld['budget']}\n"
-                f"- Email: {ld['contact_email']} | Phone: {ld['contact_phone']}\n"
-                f"- Notes: {ld['notes']}\n"
-                f"- Status: `{ld['status'].upper()}`\n"
-            )
-        response_lines.append("Would you like a full dossier on any lead or to draft an introductory email?")
-        response_text = "\n".join(response_lines)
+        response_text = build_deterministic_reply_from_tools(
+            [{"name": "get_buyer_leads", "result": t_res}],
+            language=language,
+            user_message=message,
+        )
 
     # FIX 14 — Inventory Summary
     elif is_inventory_inquiry:
@@ -4181,12 +4297,12 @@ def _run_deterministic_admin(
     download_link = None
     for tr in tool_results:
         if isinstance(tr, dict):
-            if tr.get("file_url"):
-                download_link = tr.get("file_url")
+            payload = tr["result"] if isinstance(tr.get("result"), dict) else tr
+            if payload.get("file_url") and payload.get("storage_ok", True) is not False:
+                download_link = payload.get("file_url")
                 break
-            elif isinstance(tr.get("result"), dict) and tr["result"].get("file_url"):
-                download_link = tr["result"]["file_url"]
-                break
+
+    response_text = strip_admin_report_urls_from_text(response_text or "")
 
     if classification:
         guard_eval = ResponseConfidenceGuardrail.evaluate(
@@ -4515,13 +4631,37 @@ def _execute_admin_tool_uncached(
         rtype = tool_args.get("report_type")
         title = tool_args.get("title")
         selected_websites = getattr(staff_user, "selected_websites", None)
-        res = generate_report(db, fmt, property_ids=pids, lead_ids=lids, report_type=rtype, title=title, websites=selected_websites)
+        lead_days = tool_args.get("days")
+        if rtype == "leads" and lead_days is None and not lids:
+            lead_days = 0  # all stored leads — never a hidden 7-day chat window
+        res = generate_report(
+            db,
+            fmt,
+            property_ids=pids,
+            lead_ids=lids,
+            report_type=rtype,
+            title=title,
+            websites=selected_websites,
+            created_by=staff_email,
+            days=lead_days,
+        )
+        # Verify file exists in the provider before claiming ready
+        fname = res.get("filename")
+        if res.get("storage_ok") and fname and not report_exists(str(fname)):
+            res = {
+                **res,
+                "storage_ok": False,
+                "file_url": None,
+                "message": "Report generated but could not be stored permanently",
+            }
+        if not res.get("storage_ok"):
+            res["file_url"] = None
         record_audit_log(
             db=db,
             staff_user_id=staff_email,
             tool_name="generate_report",
             tool_arguments=tool_args,
-            status="SUCCESS",
+            status="SUCCESS" if res.get("storage_ok") else "PARTIAL",
             conversation_id=conversation_id
         )
         return res, False, None
@@ -4530,109 +4670,160 @@ def _execute_admin_tool_uncached(
     elif tool_name == "get_buyer_leads":
         from datetime import datetime, timezone, timedelta
         from app.db.models import Lead
-        from app.services.admin_reply_helpers import format_leads_date_window
-        min_sc = float(tool_args.get("min_score") or 0.0)
+        from app.services.admin_reply_helpers import (
+            format_leads_date_window,
+            format_leads_zero_with_offer,
+            format_leads_lead_saving_note,
+        )
+        from app.services.report_service import serialize_lead_row, ALL_TIME_LEADS_SOFT_CAP_DAYS
+
+        # min_score optional — no hidden default of 70
+        raw_min = tool_args.get("min_score")
+        min_sc = float(raw_min) if raw_min is not None and raw_min != "" else 0.0
         st = tool_args.get("status")
-        days = int(tool_args.get("days") or 7)
-        # Fetch a bit more than the 5-per-message display limit so "show next 5" works
+        # days=0 / None / omitted → all-time (NOT a hidden 7)
+        if "days" not in tool_args or tool_args.get("days") is None:
+            days: Optional[int] = 0
+        else:
+            try:
+                days = int(tool_args.get("days"))
+            except (TypeError, ValueError):
+                days = 0
         limit = int(tool_args.get("limit") or 10)
         calendar_week = bool(tool_args.get("calendar_week"))
+        all_time = (not calendar_week) and (days is None or days <= 0)
 
         now = datetime.now(timezone.utc)
+        window_start = None
+        window_end = now
         if calendar_week:
-            # Monday 00:00 UTC → now
             window_start = (now - timedelta(days=now.weekday())).replace(
                 hour=0, minute=0, second=0, microsecond=0
             )
-            window_end = now
             days = max(1, (window_end.date() - window_start.date()).days + 1)
+            all_time = False
+        elif all_time:
+            # Soft cap when table is large: last 180 days still labeled as all-time store scan
+            try:
+                total_rows = int(db.query(Lead).count() or 0)
+            except (TypeError, ValueError):
+                total_rows = 0
+            if total_rows > 500:
+                window_start = now - timedelta(days=ALL_TIME_LEADS_SOFT_CAP_DAYS)
+                all_time = False
+                days = ALL_TIME_LEADS_SOFT_CAP_DAYS
+            else:
+                window_start = None
+                days = 0
         else:
-            window_end = now
-            window_start = now - timedelta(days=days)
+            window_start = now - timedelta(days=max(1, int(days)))
 
         query = db.query(Lead)
         if min_sc:
             query = query.filter(Lead.lead_score >= min_sc)
         if st:
             query = query.filter(Lead.status == st)
-        try:
-            query = query.filter(Lead.created_at >= window_start.replace(tzinfo=None))
-        except Exception:
-            pass
+        if window_start is not None:
+            try:
+                query = query.filter(Lead.created_at >= window_start.replace(tzinfo=None))
+            except Exception:
+                try:
+                    query = query.filter(Lead.created_at >= window_start)
+                except Exception:
+                    pass
 
-        leads = query.order_by(Lead.lead_score.desc(), Lead.created_at.desc()).limit(limit).all()
+        # Newest first for all-time; score then date when filtered
+        if all_time or days == 0:
+            leads = query.order_by(Lead.created_at.desc(), Lead.lead_score.desc()).limit(limit).all()
+        else:
+            leads = query.order_by(Lead.lead_score.desc(), Lead.created_at.desc()).limit(limit).all()
+
+        # Total matching the window (not just the page limit)
+        try:
+            total_matching = int(query.count() or 0)
+        except (TypeError, ValueError):
+            total_matching = len(leads)
+
         window_label = format_leads_date_window(
             days=days,
-            window_start=window_start,
+            window_start=window_start or now,
             window_end=window_end,
             calendar_week=calendar_week,
+            language="en",
+            all_time=all_time or days == 0,
+        )
+
+        lead_saving_on = bool(getattr(settings, "ENABLE_LEAD_SAVING", False))
+        # Most recent lead overall (for empty-window offer + lead-saving note)
+        most_recent = db.query(Lead).order_by(Lead.created_at.desc()).first()
+        most_recent_date = None
+        most_recent_days_ago = None
+        if most_recent and getattr(most_recent, "created_at", None):
+            try:
+                ca = most_recent.created_at
+                if ca.tzinfo is None:
+                    ca = ca.replace(tzinfo=timezone.utc)
+                most_recent_date = ca.strftime("%Y-%m-%d")
+                most_recent_days_ago = max(0, (now - ca).days)
+            except Exception:
+                most_recent_date = str(most_recent.created_at)[:10]
+
+        saving_note = format_leads_lead_saving_note(
+            lead_saving_on=lead_saving_on,
+            last_lead_date=most_recent_date,
             language="en",
         )
 
         if not leads:
-            # Never invent sample leads — production only. Lead persistence may be OFF.
-            return {
+            wider_days = 30 if (not all_time and days and days < 30) else (90 if (days and days < 90) else 180)
+            wider_count = 0
+            if not all_time:
+                try:
+                    w_start = now - timedelta(days=wider_days)
+                    wq = db.query(Lead)
+                    if min_sc:
+                        wq = wq.filter(Lead.lead_score >= min_sc)
+                    if st:
+                        wq = wq.filter(Lead.status == st)
+                    wq = wq.filter(Lead.created_at >= w_start.replace(tzinfo=None))
+                    wider_count = wq.count()
+                except Exception:
+                    wider_count = 0
+            msg = format_leads_zero_with_offer(
+                window_label=window_label,
+                most_recent_date=most_recent_date,
+                most_recent_days_ago=most_recent_days_ago,
+                wider_days=wider_days,
+                wider_count=wider_count,
+                language="en",
+            )
+            out = {
                 "total": 0,
                 "leads": [],
                 "shown": 0,
                 "has_more": False,
                 "days": days,
-                "window_start": window_start.strftime("%Y-%m-%d"),
+                "all_time": bool(all_time or days == 0),
+                "window_start": (window_start or now).strftime("%Y-%m-%d") if window_start else None,
                 "window_end": window_end.strftime("%Y-%m-%d"),
                 "window_label": window_label,
-                "message": (
-                    "No verified production leads found. "
-                    "Permanent lead saving is currently OFF (ENABLE_LEAD_SAVING=false); "
-                    "no placeholder or demo leads are returned."
-                ),
-            }, False, None
-        else:
-            res = []
-            for l in leads:
-                notes_val = "Web chat inquiry"
-                if l.buying_signals and isinstance(l.buying_signals, list):
-                    for sig in l.buying_signals:
-                        if isinstance(sig, str) and sig.startswith("Note: "):
-                            notes_val = sig.replace("Note: ", "")
-                            break
-                    else:
-                        if len(l.buying_signals) > 0 and isinstance(l.buying_signals[0], str):
-                            notes_val = l.buying_signals[0]
+                "message": msg,
+                "most_recent_lead_date": most_recent_date,
+                "wider_offer": {"days": wider_days, "count": wider_count} if wider_count else None,
+                "lead_saving": lead_saving_on,
+                "lead_saving_note": saving_note,
+            }
+            record_audit_log(
+                db=db,
+                staff_user_id=staff_email,
+                tool_name="get_buyer_leads",
+                tool_arguments=tool_args,
+                status="SUCCESS",
+                conversation_id=conversation_id,
+            )
+            return out, False, None
 
-                # Budget: "Flexible" only if the record really says so; else Not specified
-                budget_s = "Not specified"
-                if l.budget_max is not None:
-                    budget_s = f"{float(l.budget_max):,} THB"
-                elif l.budget_min is not None:
-                    budget_s = f"from {float(l.budget_min):,} THB"
-                else:
-                    signals = l.buying_signals or []
-                    if any(
-                        isinstance(s, str) and "flexible" in s.lower()
-                        for s in signals
-                    ):
-                        budget_s = "Flexible"
-
-                created_s = ""
-                if getattr(l, "created_at", None):
-                    try:
-                        created_s = l.created_at.strftime("%Y-%m-%d")
-                    except Exception:
-                        created_s = str(l.created_at)[:10]
-
-                res.append({
-                    "lead_id": str(l.id),
-                    "contact_name": l.contact_name or "Inquiring Visitor",
-                    "contact_email": l.contact_email or "Not specified",
-                    "contact_phone": l.contact_phone or "Not specified",
-                    "preferred_location": l.preferred_location or "Not specified",
-                    "budget": budget_s,
-                    "lead_score": l.lead_score or 0.0,
-                    "status": l.status or "new",
-                    "notes": notes_val,
-                    "buying_signals": l.buying_signals or [],
-                    "created_at": created_s or "Not specified",
-                })
+        res = [serialize_lead_row(l) for l in leads]
 
         record_audit_log(
             db=db,
@@ -4643,16 +4834,26 @@ def _execute_admin_tool_uncached(
             conversation_id=conversation_id
         )
         shown = min(5, len(res))
+        summary = (
+            f"Showing all leads ({total_matching} total), newest first"
+            if (all_time or days == 0)
+            else f"{window_label}: {total_matching} leads"
+        )
         return {
-            "total": len(res),
+            "total": total_matching,
             "leads": res[:5],
             "shown": shown,
-            "has_more": len(res) > 5,
+            "has_more": total_matching > 5 or len(res) > 5,
             "days": days,
-            "window_start": window_start.strftime("%Y-%m-%d"),
+            "all_time": bool(all_time or days == 0),
+            "window_start": (window_start.strftime("%Y-%m-%d") if window_start else None),
             "window_end": window_end.strftime("%Y-%m-%d"),
             "window_label": window_label,
+            "summary": summary,
             "all_lead_ids": [x["lead_id"] for x in res],
+            "lead_saving": lead_saving_on,
+            "lead_saving_note": saving_note,
+            "most_recent_lead_date": most_recent_date,
         }, False, None
 
     # 6. Read Tool: check_google_workspace_status

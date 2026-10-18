@@ -113,14 +113,27 @@ def _run_purge_expired_snapshots_safe() -> int:
         return 0
 
 
+def _run_purge_old_reports_safe() -> int:
+    """Never raise — purge reports older than retention (default 7 days)."""
+    try:
+        from app.services.report_service import purge_old_reports
+        return int(purge_old_reports() or 0)
+    except Exception as e:
+        logger.warning("purge_old_reports wrapper error: %s", e)
+        return 0
+
+
 async def _snapshot_purge_loop() -> None:
-    """Background asyncio loop: purge expired admin snapshots every 6 hours."""
+    """Background asyncio loop: purge expired admin snapshots + old reports every 6 hours."""
     while True:
         try:
             await asyncio.sleep(_SNAPSHOT_PURGE_INTERVAL_SEC)
             deleted = await asyncio.to_thread(_run_purge_expired_snapshots_safe)
             if deleted:
                 logger.info("Background snapshot purge deleted %s document(s)", deleted)
+            reports_deleted = await asyncio.to_thread(_run_purge_old_reports_safe)
+            if reports_deleted:
+                logger.info("Background report purge deleted %s file(s)", reports_deleted)
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -141,6 +154,12 @@ async def startup_snapshot_purge():
         logger.info("Startup snapshot purge deleted %s expired document(s)", deleted)
     except Exception as e:
         logger.warning("Startup snapshot purge failed (non-fatal): %s", e)
+    try:
+        reports_deleted = await asyncio.to_thread(_run_purge_old_reports_safe)
+        if reports_deleted:
+            logger.info("Startup report purge deleted %s old report(s)", reports_deleted)
+    except Exception as e:
+        logger.warning("Startup report purge failed (non-fatal): %s", e)
     try:
         _snapshot_purge_task = asyncio.create_task(
             _snapshot_purge_loop(),

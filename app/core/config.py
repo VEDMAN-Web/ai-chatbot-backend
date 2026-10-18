@@ -171,6 +171,10 @@ class Settings(BaseSettings):
 
     # Report Generation Storage
     REPORT_STORAGE_DIR: str = "data/reports"
+    # True when REPORT_STORAGE_DIR is a mounted persistent volume (not ephemeral container disk)
+    REPORT_PERSISTENT_VOLUME: bool = False
+    REPORT_RETENTION_DAYS: int = 7
+    REPORT_SIGNED_LINK_TTL_SEC: int = 600
 
     # Universal / Fallback Cloud Firestore & Firebase Settings
     FIRESTORE_PROJECT_ID: str = "varsovia-8c135"
@@ -361,6 +365,16 @@ def log_config_warnings() -> None:
     if not secret and not jwt_or_key:
         logger.warning("JWT/secret key is a default or weak value")
 
+    try:
+        from app.services.report_service import get_report_storage_mode, is_s3_configured, is_persistent_volume_configured
+        mode = get_report_storage_mode()
+        if mode == "ephemeral" and not is_s3_configured() and not is_persistent_volume_configured():
+            logger.warning(
+                "Reports are stored on ephemeral disk and will disappear on redeploy"
+            )
+    except Exception as e:
+        logger.debug("Could not evaluate report storage mode at startup: %s", e)
+
 
 def get_admin_config_status() -> Dict[str, Any]:
     """
@@ -375,10 +389,24 @@ def get_admin_config_status() -> Dict[str, Any]:
             redirect_host = ""
 
     admin_fs = (getattr(settings, "ADMIN_FIRESTORE_PROJECT_ID", None) or "").strip()
+    try:
+        from app.services.report_service import get_report_storage_mode
+        report_storage = get_report_storage_mode()
+    except Exception:
+        report_storage = "ephemeral"
+    # Normalize for API contract: ephemeral | s3 (persistent volumes report as ephemeral=false via label)
+    if report_storage == "persistent":
+        report_storage_label = "persistent"
+    elif report_storage == "s3":
+        report_storage_label = "s3"
+    else:
+        report_storage_label = "ephemeral"
+
     return {
         "audit_logging": bool(getattr(settings, "ENABLE_AUDIT_LOGGING", False)),
         "lead_saving": bool(getattr(settings, "ENABLE_LEAD_SAVING", False)),
         "firestore_project_shared": not bool(admin_fs),
         "google_redirect_host": redirect_host,
         "database_configured": _database_url_is_configured(settings.DATABASE_URL),
+        "report_storage": report_storage_label,
     }

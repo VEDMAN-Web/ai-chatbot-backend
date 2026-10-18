@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence
 
 
@@ -470,20 +471,100 @@ def append_truncated_continuation_note(
     return body.rstrip() + note
 
 
+@dataclass
+class LeadsPeriodSpec:
+    """Resolved lead lookback. days=0/None means all-time (no date filter)."""
+
+    days: Optional[int] = 0
+    calendar_week: bool = False
+    explicit: bool = False
+    label: str = "all_time"
+
+
+def parse_admin_leads_period(message: Optional[str]) -> LeadsPeriodSpec:
+    """
+    Map admin phrasing to an explicit window.
+    No period words → all-time (days=0), not a hidden 7-day default.
+    """
+    raw = (message or "").strip().lower()
+    if not raw:
+        return LeadsPeriodSpec(days=0, explicit=False, label="all_time")
+
+    if any(w in raw for w in ("calendar week", "tydzień kalendarzowy", "tydzien kalendarzowy")):
+        return LeadsPeriodSpec(days=None, calendar_week=True, explicit=True, label="calendar_week")
+    if any(w in raw for w in ("today", "dzisiaj", "dziś", "dzis")):
+        return LeadsPeriodSpec(days=1, explicit=True, label="today")
+    if any(
+        w in raw
+        for w in (
+            "this month",
+            "last 30 days",
+            "past 30 days",
+            "ostatnie 30",
+            "ten miesiąc",
+            "ten miesiac",
+        )
+    ):
+        return LeadsPeriodSpec(days=30, explicit=True, label="last_30_days")
+    if any(w in raw for w in ("last 90 days", "past 90 days", "ostatnie 90")):
+        return LeadsPeriodSpec(days=90, explicit=True, label="last_90_days")
+    if any(
+        w in raw
+        for w in (
+            "this week",
+            "last 7 days",
+            "past 7 days",
+            "ostatnie 7",
+            "ten tydzień",
+            "ten tydzien",
+            "w tym tygodniu",
+        )
+    ):
+        return LeadsPeriodSpec(days=7, explicit=True, label="last_7_days")
+    if any(
+        w in raw
+        for w in (
+            "all time",
+            "all-time",
+            "all leads",
+            "every lead",
+            "wszystkie leady",
+            "cała historia",
+            "cala historia",
+        )
+    ):
+        return LeadsPeriodSpec(days=0, explicit=True, label="all_time")
+
+    # Numeric "last N days"
+    m = re.search(r"(?:last|past|ostatnie)\s+(\d+)\s*days?", raw)
+    if m:
+        n = max(1, int(m.group(1)))
+        return LeadsPeriodSpec(days=n, explicit=True, label=f"last_{n}_days")
+
+    # No period stated → all-time
+    return LeadsPeriodSpec(days=0, explicit=False, label="all_time")
+
+
 def format_leads_date_window(
     *,
-    days: int,
-    window_start: Any,
-    window_end: Any,
+    days: Optional[int],
+    window_start: Any = None,
+    window_end: Any = None,
     calendar_week: bool = False,
     language: str = "en",
+    all_time: bool = False,
 ) -> str:
     pl = (language or "en").lower().startswith("pl")
 
     def _d(v: Any) -> str:
+        if v is None:
+            return ""
         if hasattr(v, "strftime"):
             return v.strftime("%Y-%m-%d")
         return str(v)[:10]
+
+    if all_time or days in (0, None) and not calendar_week:
+        return "wszystkie leady (bez limitu dat)" if pl else "all leads (no date limit)"
 
     start_s, end_s = _d(window_start), _d(window_end)
     if calendar_week:
@@ -492,10 +573,62 @@ def format_leads_date_window(
             if pl
             else f"this calendar week ({start_s} to {end_s})"
         )
+    d = int(days or 0)
     return (
-        f"ostatnie {days} dni ({start_s} – {end_s})"
+        f"ostatnie {d} dni ({start_s} – {end_s})"
         if pl
-        else f"last {days} days ({start_s} to {end_s})"
+        else f"last {d} days ({start_s} to {end_s})"
+    )
+
+
+def format_leads_zero_with_offer(
+    *,
+    window_label: str,
+    most_recent_date: Optional[str],
+    most_recent_days_ago: Optional[int],
+    wider_days: int,
+    wider_count: int,
+    language: str = "en",
+) -> str:
+    pl = (language or "en").lower().startswith("pl")
+    if pl:
+        base = f"Brak leadów w oknie: {window_label} (0 leadów)."
+        if most_recent_date:
+            ago = (
+                f" ({most_recent_days_ago} dni temu)"
+                if most_recent_days_ago is not None
+                else ""
+            )
+            base += f" Najnowszy lead: {most_recent_date}{ago}."
+        if wider_count > 0:
+            base += f" Ostatnie {wider_days} dni: {wider_count} leadów. Pokazać szersze okno?"
+        return base
+    base = f"No leads in {window_label}: 0 leads."
+    if most_recent_date:
+        ago = f" ({most_recent_days_ago} days ago)" if most_recent_days_ago is not None else ""
+        base += f" The most recent lead was on {most_recent_date}{ago}."
+    if wider_count > 0:
+        base += f" Last {wider_days} days: {wider_count} leads. Want the last {wider_days} days?"
+    return base
+
+
+def format_leads_lead_saving_note(
+    *,
+    lead_saving_on: bool,
+    last_lead_date: Optional[str],
+    language: str = "en",
+) -> Optional[str]:
+    if lead_saving_on:
+        return None
+    pl = (language or "en").lower().startswith("pl")
+    when = last_lead_date or ("nieznana data" if pl else "unknown date")
+    if pl:
+        return (
+            f"Uwaga: zapisywanie leadów jest WYŁĄCZONE, więc nowe zapytania "
+            f"po {when} nie są przechowywane."
+        )
+    return (
+        f"Note: lead saving is OFF, so new inquiries after {when} are not being stored."
     )
 
 
