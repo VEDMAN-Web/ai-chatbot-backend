@@ -72,13 +72,25 @@ def validate_property_data(
             missing.append("status")
 
     else:
-        # Update mode: must provide non-empty fields to update and no null/empty values among updated fields
-        if not fields or not isinstance(fields, dict):
-            missing.append("fields_to_update")
+        # Update mode for an EXISTING property: only the fields being changed are required.
+        # Never demand property_name/type/location/bedrooms/status for a partial update.
+        if existing_property is not None:
+            if not fields or not isinstance(fields, dict):
+                missing.append("fields_to_update")
+            else:
+                for k, v in fields.items():
+                    if k in ("websites", "selected_websites", "mode", "property_id"):
+                        continue
+                    if v is None or (isinstance(v, str) and (not v.strip() or v.strip().lower() in ["none", "null"])):
+                        missing.append(f"{k}")
         else:
-            for k, v in fields.items():
-                if v is None or (isinstance(v, str) and (not v.strip() or v.strip().lower() in ["none", "null"])):
-                    missing.append(f"{k}")
+            # Update claimed but no existing record → treat like create completeness
+            if not fields or not isinstance(fields, dict):
+                missing.append("fields_to_update")
+            else:
+                for k, v in fields.items():
+                    if v is None or (isinstance(v, str) and (not v.strip() or v.strip().lower() in ["none", "null"])):
+                        missing.append(f"{k}")
 
     if missing:
         msg = (
@@ -280,9 +292,10 @@ def confirm_and_execute_action(
 
         ok, stale_list = verify_diff_still_current(db, change_diff)
         if not ok:
-            action.status = ACTION_STATUS_REJECTED
+            # Supersede old pending (not a silent loop of REJECTED twins)
+            action.status = ACTION_STATUS_SUPERSEDED
             action.error_message = (
-                "Stale values detected; refused apply. Re-proposed with fresh store reads. "
+                "Stale values detected; refused apply. Superseded with one fresh proposal. "
                 + "; ".join(stale_list[:8])
             )
             db.commit()
@@ -292,17 +305,30 @@ def confirm_and_execute_action(
                 tool_name=action.tool_name,
                 proposed_payload=payload,
                 confirmed_by_staff=True,
-                status="REJECTED",
+                status="SUPERSEDED",
                 error_message=action.error_message,
                 conversation_id=action.conversation_id,
                 pending_action_id=str(action.id),
             )
-            # Re-propose from live store so staff sees an updated Field|Current|New table
+            # Re-propose exactly ONE fresh pending action from live store
             fresh_diff: Dict[str, Any] = {}
             new_payload = dict(payload)
             try:
                 if action.tool_name in ("create_or_update_listing", "ingest_property_from_drive"):
-                    fields = payload.get("fields_to_update") or payload.get("fields") or {}
+                    fields = (
+                        (change_diff.get("canonical_fields") if isinstance(change_diff, dict) else None)
+                        or payload.get("fields_to_update")
+                        or payload.get("fields")
+                        or {}
+                    )
+                    # Drop injected websites on re-propose unless originally explicit
+                    if "websites" in fields and "websites" not in (
+                        (payload.get("explicit_fields") or [])
+                    ):
+                        # Keep websites only if admin put it in original fields_to_update keys intentionally
+                        orig = payload.get("fields_to_update") or payload.get("fields") or {}
+                        if "websites" not in orig and "selected_websites" not in orig:
+                            fields = {k: v for k, v in fields.items() if k != "websites"}
                     mode = payload.get("mode") or "update"
                     fresh_diff = build_single_listing_change_diff(
                         db=db,
@@ -310,6 +336,8 @@ def confirm_and_execute_action(
                         proposed_fields=fields,
                         mode=mode,
                     )
+                    if fresh_diff.get("canonical_fields"):
+                        new_payload["fields_to_update"] = fresh_diff["canonical_fields"]
                 elif action.tool_name == "execute_batch_property_action":
                     fresh_diff = build_batch_change_diff(
                         db=db,
@@ -339,18 +367,24 @@ def confirm_and_execute_action(
                     conversation_id=action.conversation_id,
                 )
 
+            real_new_id = str(new_action.id) if new_action else None
+            msg = (
+                "Values changed since this proposal. Nothing was applied. "
+                "A fresh proposal was staged — review the new Current values and confirm again."
+            )
+            if real_new_id:
+                msg += f" New pending action ID: `{real_new_id}`."
+
             return {
                 "status": "STALE_REFUSED",
                 "stale_fields": stale_list,
-                "pending_action_id": str(new_action.id) if new_action else None,
+                "pending_action_id": real_new_id,
                 "confirmation_token": new_action.confirmation_token if new_action else None,
                 "change_diff": fresh_diff or None,
                 "diff_table": (fresh_diff or {}).get("diff_markdown"),
-                "message": (
-                    "Values changed since this proposal. Nothing was applied. "
-                    "A fresh proposal was staged — review the new Current values and confirm again."
-                ),
+                "message": msg,
                 "previous_pending_action_id": str(action.id),
+                "action_status": "awaiting_confirmation" if new_action else "superseded",
             }
 
     # 4. Mark confirmed
@@ -610,12 +644,21 @@ def _execute_update_listing(
     if not property_id:
         raise ValueError("Missing required property_id in payload.")
 
-    # Confirm applies only fields that appeared in the staged Field|Current|New preview
+    # Prefer canonical_fields from staged diff when present
     change_diff = payload.get("change_diff") or {}
+    if isinstance(change_diff, dict) and change_diff.get("canonical_fields"):
+        fields = dict(change_diff["canonical_fields"])
+
+    # Confirm applies only fields that appeared in the staged Field|Current|New preview
     preview_rows = change_diff.get("rows") or []
     if preview_rows:
         allowed = {r.get("field") for r in preview_rows if r.get("field")}
         fields = {k: v for k, v in fields.items() if k in allowed}
+
+    # Never apply websites on update unless explicitly present in original payload keys
+    orig_fields = payload.get("fields_to_update") or payload.get("fields") or {}
+    if "websites" not in orig_fields and "selected_websites" not in orig_fields and "websites" not in payload:
+        fields.pop("websites", None)
 
     prop = db.query(Property).filter(Property.property_id == property_id).first()
     # Validation uses original payload shape; inject trimmed fields
@@ -666,7 +709,15 @@ def _execute_update_listing(
 
     from app.core.tenant import normalize_website_list, get_current_env_domain
 
-    target_websites = payload.get("websites") or fields.get("websites") or payload.get("selected_websites")
+    # Websites only when explicitly requested
+    explicit_websites = (
+        "websites" in orig_fields
+        or "selected_websites" in orig_fields
+        or "websites" in payload
+    )
+    target_websites = fields.get("websites") if explicit_websites else None
+    if explicit_websites and target_websites is None:
+        target_websites = payload.get("websites") or payload.get("selected_websites")
     norm_websites = normalize_website_list(target_websites) if target_websites else None
 
     if not prop:
@@ -696,8 +747,8 @@ def _execute_update_listing(
         db.commit()
         db.refresh(prop)
     else:
-        # Update existing property
-        if norm_websites is not None:
+        # Update existing property — never inject websites
+        if explicit_websites and norm_websites is not None:
             prop.websites = norm_websites
             updated_fields["websites"] = norm_websites
 

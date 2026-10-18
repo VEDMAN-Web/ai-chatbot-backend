@@ -260,8 +260,17 @@ def append_followup_suggestions(text: str, suggestions: Sequence[str], language:
         return text or ""
     pl = (language or "en").lower().startswith("pl")
     header = "**Sugestie (nie uruchamiają akcji):**" if pl else "**Suggestions (do not run an action by themselves):**"
-    lines = [header] + [f"{i}) {s}" for i, s in enumerate(suggestions[:3], start=1)]
     body = (text or "").rstrip()
+    # Merge duplicated Suggestions blocks into one per reply
+    if "Suggestions (do not run" in body or "Sugestie (nie uruchamiają" in body:
+        # Strip previous suggestion sections
+        body = re.sub(
+            r"\n\n\*\*(?:Suggestions \(do not run an action by themselves\)|Sugestie \(nie uruchamiają akcji\)):\*\*(?:\n\d+\).*)+",
+            "",
+            body,
+            flags=re.I,
+        ).rstrip()
+    lines = [header] + [f"{i}) {s}" for i, s in enumerate(suggestions[:3], start=1)]
     return body + "\n\n" + "\n".join(lines)
 
 

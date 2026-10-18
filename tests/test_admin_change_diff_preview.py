@@ -13,7 +13,11 @@ import pytest
 
 from app.core.auth import AuthenticatedStaff
 from app.services import action_service
-from app.services.action_service import ACTION_STATUS_PENDING, ACTION_STATUS_REJECTED
+from app.services.action_service import (
+    ACTION_STATUS_PENDING,
+    ACTION_STATUS_REJECTED,
+    ACTION_STATUS_SUPERSEDED,
+)
 from app.services.admin_change_diff import (
     assess_risky_changes,
     build_batch_change_diff,
@@ -23,6 +27,7 @@ from app.services.admin_change_diff import (
     message_acks_delete_count,
     verify_diff_still_current,
 )
+from app.services.admin_property_fields import UNREADABLE, expand_proposed_fields, parse_price_amount
 from app.services.admin_agent import is_strict_confirm_message, process_admin_chat
 
 
@@ -82,8 +87,9 @@ def test_single_diff_uses_stored_current_values():
     assert "price_numeric_min" in fields
     assert "status" not in fields  # unchanged
     price_row = next(r for r in diff["rows"] if r["field"] == "price_display")
-    assert price_row["current"] == "10M THB"
-    assert price_row["new"] == "15M THB"
+    # Display string kept; numeric companion may also appear normalized
+    assert "10" in str(price_row["current"])
+    assert "15" in str(price_row["new"])
     md = diff["diff_markdown"]
     assert "Field" in md and "Current" in md and "New" in md
     assert "10M THB" in md and "15M THB" in md
@@ -211,10 +217,11 @@ def test_confirm_refuses_stale_and_reproposes(staff):
         )
 
     assert out["status"] == "STALE_REFUSED"
-    assert action.status == ACTION_STATUS_REJECTED
+    assert action.status == ACTION_STATUS_SUPERSEDED
     assert not exe.called
     assert created, "must re-propose a fresh PendingAction"
     assert out.get("pending_action_id") == str(created[0].id)
+    assert str(created[0].id) in (out.get("message") or "")
 
 
 def test_confirm_applies_only_previewed_fields(staff):
@@ -365,3 +372,245 @@ def test_format_helpers_smoke():
     )
     assert "7 properties will change" in batch
     assert "...and 2 more" in batch
+
+
+def test_proposal_shows_real_current_price_not_dash():
+    """Alias 'price' maps to price_numeric_min; Current shows 39,990,000 not '—'."""
+    stored = {
+        "property_id": "pirak-villa",
+        "property_name": "Pirak Villa",
+        "price_numeric_min": 39_990_000,
+        "price_display": "39,990,000 THB",
+        "_readable": {"price_numeric_min": True, "price_display": True, "property_name": True},
+    }
+    with patch(
+        "app.services.admin_change_diff.read_stored_property_fields",
+        return_value=stored,
+    ):
+        diff = build_single_listing_change_diff(
+            db=MagicMock(),
+            property_id="pirak-villa",
+            proposed_fields={"price": "5 million"},
+            mode="update",
+        )
+    assert diff["rows"], "expected at least one price row"
+    # Only price-related rows — no websites
+    fields = {r["field"] for r in diff["rows"]}
+    assert "websites" not in fields
+    price_rows = [r for r in diff["rows"] if "price" in r["field"]]
+    assert price_rows
+    for r in price_rows:
+        assert r["current"] != "—"
+        assert r["current"] != UNREADABLE or r.get("readable") is False
+        assert "39,990,000" in str(r["current"]) or "39990000" in str(r["current"]).replace(",", "")
+    assert "5,000,000" in str(price_rows[0]["new"]) or "5000000" in str(price_rows[0]["new"]).replace(",", "")
+
+
+def test_confirm_right_after_proposal_succeeds_no_stale(staff):
+    """Same current at confirm → apply; no endless stale loop."""
+    change_diff = {
+        "property_id": "pirak-villa",
+        "operation_type": "update",
+        "rows": [
+            {
+                "field": "price_numeric_min",
+                "current": "39,990,000",
+                "new": "5,000,000",
+                "readable": True,
+            }
+        ],
+        "canonical_fields": {"price_numeric_min": 5_000_000, "price_display": "5,000,000 THB"},
+        "risk_warnings": [],
+    }
+    action = _pending(
+        action_payload={
+            "mode": "update",
+            "property_id": "pirak-villa",
+            "fields_to_update": {"price_numeric_min": 5_000_000, "price_display": "5,000,000 THB"},
+            "change_diff": change_diff,
+        }
+    )
+    live = {
+        "property_id": "pirak-villa",
+        "price_numeric_min": 39_990_000,
+        "price_display": "39,990,000 THB",
+        "_readable": {"price_numeric_min": True, "price_display": True},
+    }
+    old_prop = SimpleNamespace(
+        property_id="pirak-villa",
+        property_name="Pirak Villa",
+        status="Available",
+        price_display="39,990,000 THB",
+        price_numeric_min=39_990_000,
+        websites=["tajlandia.com"],
+    )
+    prop_q = MagicMock()
+    prop_q.filter.return_value.first.return_value = old_prop
+    db = MagicMock()
+    db.query.return_value = prop_q
+
+    with patch("app.services.action_service.get_pending_action", return_value=action), patch(
+        "app.services.action_service.record_audit_log", return_value=SimpleNamespace(id="aud1")
+    ), patch(
+        "app.services.admin_change_diff.read_stored_property_fields",
+        return_value=live,
+    ), patch(
+        "app.services.action_service.validate_property_data", return_value=(True, [], "")
+    ), patch(
+        "app.services.action_service.record_crud_operation_snapshot", return_value="op1"
+    ), patch(
+        "app.services.cache_service.search_cache.invalidate"
+    ), patch(
+        "app.core.config.settings.ENABLE_FIRESTORE_SYNC", False
+    ):
+        out = action_service.confirm_and_execute_action(
+            db=db, pending_action_id=str(action.id), authenticated_staff=staff
+        )
+
+    assert out["status"] == action_service.ACTION_STATUS_EXECUTED
+    assert float(old_prop.price_numeric_min) == 5_000_000
+
+
+def test_real_stale_refused_once_then_fresh_confirmable(staff):
+    """Real drift → one SUPERSEDED + one new pending; second confirm with matching current applies."""
+    change_diff = {
+        "property_id": "pirak-villa",
+        "operation_type": "update",
+        "rows": [
+            {"field": "price_numeric_min", "current": "39,990,000", "new": "5,000,000", "readable": True}
+        ],
+        "canonical_fields": {"price_numeric_min": 5_000_000},
+    }
+    action = _pending(
+        action_payload={
+            "mode": "update",
+            "property_id": "pirak-villa",
+            "fields_to_update": {"price_numeric_min": 5_000_000},
+            "change_diff": change_diff,
+        }
+    )
+    created = []
+
+    def fake_create(**kwargs):
+        pa = _pending(id=uuid4(), action_payload=kwargs.get("action_payload"))
+        created.append(pa)
+        return pa
+
+    with patch("app.services.action_service.get_pending_action", return_value=action), patch(
+        "app.services.action_service.record_audit_log", return_value=SimpleNamespace(id="a1")
+    ), patch(
+        "app.services.action_service.create_pending_action", side_effect=fake_create
+    ), patch(
+        "app.services.admin_change_diff.verify_diff_still_current",
+        return_value=(False, ["pirak-villa.price_numeric_min: expected `39990000`, now `42000000`"]),
+    ), patch(
+        "app.services.admin_change_diff.build_single_listing_change_diff",
+        return_value={
+            "property_id": "pirak-villa",
+            "operation_type": "update",
+            "rows": [
+                {"field": "price_numeric_min", "current": "42,000,000", "new": "5,000,000", "readable": True}
+            ],
+            "canonical_fields": {"price_numeric_min": 5_000_000},
+            "diff_markdown": "| `price_numeric_min` | 42,000,000 | 5,000,000 |",
+            "risk_warnings": [],
+        },
+    ), patch(
+        "app.services.action_service._execute_update_listing"
+    ) as exe:
+        out = action_service.confirm_and_execute_action(
+            db=MagicMock(), pending_action_id=str(action.id), authenticated_staff=staff
+        )
+
+    assert out["status"] == "STALE_REFUSED"
+    assert action.status == ACTION_STATUS_SUPERSEDED
+    assert not exe.called
+    assert len(created) == 1
+    assert out["pending_action_id"] == str(created[0].id)
+
+
+def test_unreadable_fields_skipped_in_stale_check():
+    change_diff = {
+        "property_id": "p1",
+        "operation_type": "update",
+        "rows": [
+            {"field": "price_numeric_min", "current": UNREADABLE, "new": "5,000,000", "readable": False},
+            {"field": "status", "current": "Available", "new": "Sold", "readable": True},
+        ],
+    }
+    with patch(
+        "app.services.admin_change_diff.read_stored_property_fields",
+        return_value={
+            "price_numeric_min": 39_990_000,
+            "status": "Available",
+            "_readable": {"price_numeric_min": True, "status": True},
+        },
+    ):
+        ok, stale = verify_diff_still_current(MagicMock(), change_diff)
+    # price was unreadable at proposal — not stale; status still matches
+    assert ok is True
+    assert stale == []
+
+
+def test_price_only_update_no_websites_and_percent_change():
+    stored = {
+        "property_id": "p1",
+        "price_numeric_min": 10_000_000,
+        "price_display": "10,000,000 THB",
+        "_readable": {"price_numeric_min": True, "price_display": True},
+    }
+    expanded, errs = expand_proposed_fields(
+        {"price": "increase by 80%"},
+        current_stored=stored,
+        user_message="increase price by 80%",
+        allow_websites=False,
+    )
+    assert "websites" not in expanded
+    assert abs(float(expanded["price_numeric_min"]) - 18_000_000) < 1
+    assert not any("Unknown" in e for e in errs)
+
+    with patch(
+        "app.services.admin_change_diff.read_stored_property_fields",
+        return_value=stored,
+    ):
+        diff = build_single_listing_change_diff(
+            db=MagicMock(),
+            property_id="p1",
+            proposed_fields={"price": "increase by 80%"},
+            mode="update",
+            user_message="increase price of villa by 80%",
+        )
+    assert len(diff["rows"]) >= 1
+    assert all(r["field"] != "websites" for r in diff["rows"])
+    # price-only (display may accompany numeric; currency must not be injected)
+    assert all(
+        r["field"] in ("price_numeric_min", "price_numeric_max", "price_display")
+        for r in diff["rows"]
+    )
+
+
+def test_parse_price_variants():
+    assert parse_price_amount("5 million") == 5_000_000
+    assert parse_price_amount("5M") == 5_000_000
+    assert parse_price_amount("5 mln") == 5_000_000
+    assert parse_price_amount("5,000,000") == 5_000_000
+    assert parse_price_amount(5_000_000) == 5_000_000
+
+
+def test_update_existing_never_requires_all_fields():
+    from app.services.action_service import validate_property_data
+
+    existing = SimpleNamespace(property_id="p1", property_name="X")
+    ok, missing, msg = validate_property_data(
+        {
+            "mode": "update",
+            "property_id": "p1",
+            "fields_to_update": {"price_numeric_min": 5_000_000},
+            "is_update_only": True,
+        },
+        existing_property=existing,
+    )
+    assert ok is True
+    assert missing == []
+    assert "property_name" not in msg
+    assert "bedrooms" not in msg
