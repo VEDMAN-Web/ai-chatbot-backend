@@ -23,6 +23,7 @@ ACTION_STATUS_EXECUTED = "EXECUTED"
 ACTION_STATUS_REJECTED = "REJECTED"
 ACTION_STATUS_EXPIRED = "EXPIRED"
 ACTION_STATUS_FAILED = "FAILED"
+ACTION_STATUS_SUPERSEDED = "SUPERSEDED"
 
 
 def validate_property_data(
@@ -111,10 +112,39 @@ def create_pending_action(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=err_msg
             )
-    minutes = expires_in_minutes or settings.ACTION_EXPIRATION_MINUTES
+    minutes = (
+        expires_in_minutes
+        if expires_in_minutes is not None
+        else getattr(settings, "ADMIN_PENDING_ACTION_TTL_MIN", None)
+        or settings.ACTION_EXPIRATION_MINUTES
+    )
     now = datetime.now(timezone.utc)
     expires_at = now + timedelta(minutes=minutes)
     confirmation_token = f"act_{secrets.token_hex(16)}"
+
+    # Supersede older PENDING actions for the same property (same conversation preferred)
+    prop_id = (
+        (action_payload or {}).get("property_id")
+        or (action_payload or {}).get("target_property_id")
+        or ((action_payload or {}).get("change_diff") or {}).get("property_id")
+    )
+    if prop_id:
+        try:
+            q = db.query(PendingAction).filter(PendingAction.status == ACTION_STATUS_PENDING)
+            if conversation_id:
+                q = q.filter(PendingAction.conversation_id == str(conversation_id))
+            for old in q.all():
+                old_payload = old.action_payload or {}
+                old_pid = (
+                    old_payload.get("property_id")
+                    or old_payload.get("target_property_id")
+                    or ((old_payload.get("change_diff") or {}).get("property_id") if isinstance(old_payload.get("change_diff"), dict) else None)
+                )
+                if old_pid and str(old_pid).strip().lower() == str(prop_id).strip().lower():
+                    old.status = ACTION_STATUS_SUPERSEDED
+                    old.error_message = f"Superseded by newer proposal for property {prop_id}"
+        except Exception as e:
+            logger.warning(f"Could not supersede older pending actions: {e}")
 
     action = PendingAction(
         confirmation_token=confirmation_token,

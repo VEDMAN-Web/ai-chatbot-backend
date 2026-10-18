@@ -265,6 +265,144 @@ def append_followup_suggestions(text: str, suggestions: Sequence[str], language:
     return body + "\n\n" + "\n".join(lines)
 
 
+def is_read_only_admin_query(message: Optional[str]) -> bool:
+    """True for inventory/lead/knowledge questions that should not surface pending-action cards."""
+    raw = (message or "").strip().lower()
+    if not raw:
+        return True
+    write_markers = (
+        "confirm", "reject", "cancel", "approve", "zatwierdź", "zatwierdz", "anuluj",
+        "update", "change", "delete", "create", "add listing", "set price", "modify",
+        "propose", "apply", "undo", "rollback", "wykonaj", "usuń", "usun", "zmień", "zmien",
+        "pending action", "akcja oczekująca",
+    )
+    if any(w in raw for w in write_markers):
+        return False
+    read_markers = (
+        "tell me", "show me", "how many", "what is", "what's", "list ", "find ",
+        "about ", "leads", "lead", "knowledge", "dossier info", "pokaż", "pokaz",
+        "ile ", "opowiedz", "opowiedz", "powiedz", "szczegóły", "szczegoly",
+    )
+    return any(w in raw for w in read_markers) or len(raw.split()) <= 12
+
+
+def message_references_pending_action(message: Optional[str]) -> bool:
+    raw = (message or "").strip().lower()
+    if not raw:
+        return False
+    return bool(
+        re.search(
+            r"\b(confirm|reject|cancel|approve|pending\s+action|zatwierd|anuluj|odrzuć|odrzuc)\b",
+            raw,
+        )
+        or re.search(r"\bact_[a-f0-9]{8,}\b", raw)
+        or re.search(
+            r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b",
+            raw,
+        )
+    )
+
+
+def should_surface_pending_action_ui(
+    message: Optional[str],
+    *,
+    has_confirm_intent: bool = False,
+    has_reject_intent: bool = False,
+    action: Optional[str] = None,
+    this_turn_proposed_write: bool = False,
+) -> bool:
+    """
+    Confirmation card / waiting note only when the message is about that action
+    or this turn proposes another write. Pure read-only questions never surface it.
+    """
+    if has_confirm_intent or has_reject_intent or action in ("confirm", "reject"):
+        return True
+    if this_turn_proposed_write:
+        return True
+    if message_references_pending_action(message):
+        return True
+    if is_read_only_admin_query(message):
+        return False
+    return False
+
+
+def reply_ends_mid_word(text: Optional[str]) -> bool:
+    """
+    Detect likely mid-word truncation. Complete sentences ending in a number/name
+    are NOT treated as truncated.
+    """
+    t = (text or "").rstrip()
+    if not t:
+        return False
+    if re.search(r"[.!?…:\"')\]]\s*$", t) or t.endswith("?"):
+        return False
+    last = t.split()[-1] if t.split() else ""
+    # Trailing hyphen / ellipsis fragment
+    if last.endswith("-") or last.endswith("…") or last.endswith("..."):
+        return True
+    # Markdown bold/italic left open
+    if last.count("*") % 2 == 1 or last.count("`") % 2 == 1:
+        return True
+    # Very short alphabetic fragment (1–2 letters) suggests cut mid-word
+    if re.fullmatch(r"[A-Za-z]{1,2}", last):
+        return True
+    return False
+
+
+def append_truncated_continuation_note(
+    text: str,
+    *,
+    remaining: int = 0,
+    language: str = "en",
+) -> str:
+    pl = (language or "en").lower().startswith("pl")
+    body = (text or "").rstrip()
+    # Trim trailing partial word
+    body = re.sub(r"\s+\S{1,20}$", "", body) if reply_ends_mid_word(body) else body
+    if remaining > 0:
+        note = (
+            f"\n\n…i jeszcze **{remaining}**. Napisz „pokaż więcej”, aby kontynuować."
+            if pl
+            else f"\n\n…and **{remaining}** more. Say 'show more' to continue."
+        )
+    else:
+        note = (
+            "\n\n…(odpowiedź ucięta — napisz „kontynuuj”, aby dokończyć)."
+            if pl
+            else "\n\n…(reply truncated — say 'continue' to finish)."
+        )
+    return body.rstrip() + note
+
+
+def format_leads_date_window(
+    *,
+    days: int,
+    window_start: Any,
+    window_end: Any,
+    calendar_week: bool = False,
+    language: str = "en",
+) -> str:
+    pl = (language or "en").lower().startswith("pl")
+
+    def _d(v: Any) -> str:
+        if hasattr(v, "strftime"):
+            return v.strftime("%Y-%m-%d")
+        return str(v)[:10]
+
+    start_s, end_s = _d(window_start), _d(window_end)
+    if calendar_week:
+        return (
+            f"ten tydzień kalendarzowy ({start_s} – {end_s})"
+            if pl
+            else f"this calendar week ({start_s} to {end_s})"
+        )
+    return (
+        f"ostatnie {days} dni ({start_s} – {end_s})"
+        if pl
+        else f"last {days} days ({start_s} to {end_s})"
+    )
+
+
 def is_transient_anthropic_error(exc: BaseException) -> bool:
     name = type(exc).__name__.lower()
     msg = str(exc).lower()

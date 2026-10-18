@@ -134,7 +134,9 @@ class Settings(BaseSettings):
     ENABLE_AUDIT_LOGGING: bool = False
 
     # Action Confirmation & Security
-    ACTION_EXPIRATION_MINUTES: int = 15
+    ACTION_EXPIRATION_MINUTES: int = 30
+    # Preferred alias for pending-action TTL (Task E); falls back to ACTION_EXPIRATION_MINUTES
+    ADMIN_PENDING_ACTION_TTL_MIN: int = 30
     INTERNAL_API_SECRET: str = "tajlandia-internal-secret-token"
     ADMIN_EMAIL: Optional[str] = None
     ADMIN_PASSWORD: Optional[str] = None

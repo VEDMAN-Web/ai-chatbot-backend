@@ -502,8 +502,12 @@ CLAUDE_ADMIN_TOOLS = [
             "properties": {
                 "min_score": {"type": "number", "description": "Minimum lead score (e.g. 70 for high-intent, 0-100)"},
                 "status": {"type": "string", "description": "Lead status (e.g. 'new', 'contacted', 'qualified')"},
-                "days": {"type": "integer", "description": "Lookback period in days (e.g. 7 for this week)"},
-                "limit": {"type": "integer", "description": "Maximum number of leads to return (default 10)"}
+                "days": {"type": "integer", "description": "Lookback period in days (e.g. 7 for 'this week' / last 7 days)"},
+                "limit": {"type": "integer", "description": "Maximum number of leads to fetch (default 10; UI shows 5 per message)"},
+                "calendar_week": {
+                    "type": "boolean",
+                    "description": "If true, use this calendar week (Mon–now) instead of a rolling N-day window. Set when the user says 'this calendar week'."
+                }
             }
         }
     },
@@ -1243,11 +1247,25 @@ def process_admin_chat(
                 .order_by(PendingAction.created_at.desc())
                 .all()
             ) or []
+            # Lazy-expire any stale PENDING so they never appear in notes/cards
+            refreshed = []
+            for pa in open_pending:
+                try:
+                    refreshed.append(get_pending_action(db, str(pa.id)))
+                except Exception:
+                    refreshed.append(pa)
+            open_pending = [
+                pa for pa in refreshed
+                if getattr(pa, "status", None) == ACTION_STATUS_PENDING
+            ]
         except Exception:
             open_pending = []
 
     if not target_action and open_pending:
         target_action = open_pending[0]
+    # Never treat expired/superseded as the active target
+    if target_action and getattr(target_action, "status", None) != ACTION_STATUS_PENDING:
+        target_action = open_pending[0] if open_pending else None
 
     # Explicit UI button/parameter OR short free-text only — never substring matches in long messages
     has_confirm_intent = (action == "confirm") or (
@@ -1567,9 +1585,24 @@ def process_admin_chat(
                 "language": active_lang
             }
 
-    # Pending action still open but this turn is a new request — keep it pending and note that
+    # Pending waiting note/card ONLY when message is about that action (or a new write).
+    # Pure read-only questions must never carry the note or confirmation card.
+    from app.services.admin_reply_helpers import should_surface_pending_action_ui
     pending_waiting_note = ""
-    if open_pending and not has_confirm_intent and not has_reject_intent and action not in ("confirm", "reject"):
+    _surface_pending = should_surface_pending_action_ui(
+        clean_message,
+        has_confirm_intent=has_confirm_intent,
+        has_reject_intent=has_reject_intent,
+        action=action,
+        this_turn_proposed_write=False,
+    )
+    if (
+        open_pending
+        and _surface_pending
+        and not has_confirm_intent
+        and not has_reject_intent
+        and action not in ("confirm", "reject")
+    ):
         ids = ", ".join(f"`{pa.id}`" for pa in open_pending[:5])
         if active_lang == "pl":
             pending_waiting_note = (
@@ -1609,11 +1642,7 @@ def process_admin_chat(
     # Plain yes/no on a pending action already handled above (confirm/reject) — never reaches here.
     if skip_llm_simple:
         greet_res = _handle_admin_greeting(db, conv, clean_message, language=active_lang)
-        if pending_waiting_note and isinstance(greet_res, dict) and greet_res.get("text"):
-            greet_res["text"] = greet_res["text"] + pending_waiting_note
-            greet_res["requires_confirmation"] = True
-            greet_res["pending_action_id"] = str(open_pending[0].id)
-            greet_res["action_status"] = "pending"
+        # Greetings are read-only — never attach pending confirmation cards
         return greet_res
 
     # 4. AI Model Intent Classification & Safety Evaluation
@@ -1697,13 +1726,32 @@ def process_admin_chat(
         if tips and "Suggestions" not in (res.get("text") or "") and "Sugestie" not in (res.get("text") or ""):
             res["text"] = append_followup_suggestions(res["text"], tips, language=active_lang)
             res["suggestions"] = tips
-        if pending_waiting_note and not res.get("action_status"):
+        # Attach waiting note/card only when this turn proposed a write or message was about pending
+        this_turn_write = bool(
+            res.get("requires_confirmation")
+            or res.get("action_status") in ("proposed", "pending")
+            or (res.get("type") == "action_proposal")
+        )
+        attach_pending = bool(pending_waiting_note) or (
+            open_pending
+            and should_surface_pending_action_ui(
+                clean_message,
+                has_confirm_intent=False,
+                has_reject_intent=False,
+                action=action,
+                this_turn_proposed_write=this_turn_write,
+            )
+            and this_turn_write
+        )
+        if attach_pending and pending_waiting_note and not res.get("action_status"):
             res["text"] = res["text"] + pending_waiting_note
-            res["requires_confirmation"] = True
-            if open_pending:
-                res["pending_action_id"] = str(open_pending[0].id)
-                res["action_status"] = "pending"
-        if res.get("pending_action_id"):
+            # Do NOT force confirmation card on read-only; only when write was proposed
+            if this_turn_write:
+                res["requires_confirmation"] = True
+                if open_pending:
+                    res["pending_action_id"] = str(open_pending[0].id)
+                    res["action_status"] = "pending"
+        if res.get("pending_action_id") and res.get("requires_confirmation"):
             remember_admin_session_fact(conv, pending_action_id=str(res["pending_action_id"]))
         res["text"] = redact_admin_sensitive_output(res["text"])
     return res
@@ -1791,6 +1839,7 @@ def _call_anthropic_claude(
     requires_confirmation = False
     pending_action_id = None
     response_text = ""
+    last_claude_response = None
 
     staff_name = _get_staff_display_name(staff_user, raw_user_message or message)
     base_prompt = get_admin_system_prompt(language)
@@ -1811,6 +1860,7 @@ def _call_anthropic_claude(
     )
 
     # Execute up to 4 agent iterations for multi-step tool calls
+    # max_tokens >= 4096 for list-heavy admin replies (leads/properties)
     for iteration in range(4):
         response = _safe_anthropic_create(
             client,
@@ -1821,6 +1871,7 @@ def _call_anthropic_claude(
             tools=CLAUDE_ADMIN_TOOLS,
             messages=claude_messages
         )
+        last_claude_response = response
 
         curr_tool_calls = []
         curr_tool_results = []
@@ -1923,6 +1974,58 @@ def _call_anthropic_claude(
                 break
 
     # -------------------------------------------------------------------------
+    # Truncation recovery (Task C): continue once on stop_reason==max_tokens
+    # -------------------------------------------------------------------------
+    from app.services.admin_reply_helpers import (
+        append_truncated_continuation_note,
+        reply_ends_mid_word,
+    )
+    last_stop = getattr(last_claude_response, "stop_reason", None) if last_claude_response else None
+    if last_stop == "max_tokens" and response_text:
+        try:
+            cont_messages = list(claude_messages)
+            cont_messages.append({"role": "assistant", "content": response_text})
+            cont_messages.append({
+                "role": "user",
+                "content": "Continue from where you stopped. Do not restart the answer.",
+            })
+            cont_resp = _safe_anthropic_create(
+                client,
+                model=settings.ANTHROPIC_MODEL,
+                max_tokens=4096,
+                temperature=0.0,
+                system=full_system_prompt,
+                messages=cont_messages,
+            )
+            cont_text = extract_anthropic_text(cont_resp)
+            if cont_text:
+                response_text = (response_text or "").rstrip() + "\n" + cont_text.lstrip()
+            if getattr(cont_resp, "stop_reason", None) == "max_tokens" or reply_ends_mid_word(response_text):
+                # Count leftover leads/properties if present in tool results
+                remaining = 0
+                for tr in tool_results:
+                    payload = tr.get("result") if isinstance(tr, dict) else tr
+                    if isinstance(payload, dict):
+                        total = payload.get("total")
+                        shown = payload.get("shown") or (
+                            len(payload.get("leads") or []) if payload.get("leads") is not None else None
+                        )
+                        if isinstance(total, int) and isinstance(shown, int) and total > shown:
+                            remaining = total - shown
+                response_text = append_truncated_continuation_note(
+                    response_text, remaining=remaining, language=language
+                )
+        except Exception as e:
+            logger.warning(f"max_tokens continuation failed: {e}")
+            response_text = append_truncated_continuation_note(
+                response_text, remaining=0, language=language
+            )
+    elif response_text and reply_ends_mid_word(response_text):
+        response_text = append_truncated_continuation_note(
+            response_text, remaining=0, language=language
+        )
+
+    # -------------------------------------------------------------------------
     # Post-Response Confidence & Truthfulness Guardrail (with Re-Query Loop)
     # -------------------------------------------------------------------------
     if classification:
@@ -1933,7 +2036,8 @@ def _call_anthropic_claude(
             response_text=response_text,
             tool_calls=tool_calls,
             download_link=download_link,
-            language=language
+            language=language,
+            tool_results=tool_results,
         )
         if guard_eval.needs_requery:
             logger.warning(
@@ -2020,6 +2124,7 @@ def _call_anthropic_claude(
             staff_user_id=getattr(staff_user, "email", None),
             conversation_id=str(conv.id),
             regenerate_fn=_regen_claims,
+            user_message=raw_user_message or message,
         )
         if claim_res.final_text:
             response_text = claim_res.final_text
@@ -3891,30 +3996,56 @@ def _execute_admin_tool(
     elif tool_name == "get_buyer_leads":
         from datetime import datetime, timezone, timedelta
         from app.db.models import Lead
+        from app.services.admin_reply_helpers import format_leads_date_window
         min_sc = float(tool_args.get("min_score") or 0.0)
         st = tool_args.get("status")
-        days = tool_args.get("days") or 7
-        limit = tool_args.get("limit") or 10
+        days = int(tool_args.get("days") or 7)
+        # Fetch a bit more than the 5-per-message display limit so "show next 5" works
+        limit = int(tool_args.get("limit") or 10)
+        calendar_week = bool(tool_args.get("calendar_week"))
+
+        now = datetime.now(timezone.utc)
+        if calendar_week:
+            # Monday 00:00 UTC → now
+            window_start = (now - timedelta(days=now.weekday())).replace(
+                hour=0, minute=0, second=0, microsecond=0
+            )
+            window_end = now
+            days = max(1, (window_end.date() - window_start.date()).days + 1)
+        else:
+            window_end = now
+            window_start = now - timedelta(days=days)
 
         query = db.query(Lead)
         if min_sc:
             query = query.filter(Lead.lead_score >= min_sc)
         if st:
             query = query.filter(Lead.status == st)
-        if days:
-            cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-            try:
-                query = query.filter(Lead.created_at >= cutoff.replace(tzinfo=None))
-            except Exception:
-                pass
+        try:
+            query = query.filter(Lead.created_at >= window_start.replace(tzinfo=None))
+        except Exception:
+            pass
 
         leads = query.order_by(Lead.lead_score.desc(), Lead.created_at.desc()).limit(limit).all()
+        window_label = format_leads_date_window(
+            days=days,
+            window_start=window_start,
+            window_end=window_end,
+            calendar_week=calendar_week,
+            language="en",
+        )
 
         if not leads:
             # Never invent sample leads — production only. Lead persistence may be OFF.
             return {
                 "total": 0,
                 "leads": [],
+                "shown": 0,
+                "has_more": False,
+                "days": days,
+                "window_start": window_start.strftime("%Y-%m-%d"),
+                "window_end": window_end.strftime("%Y-%m-%d"),
+                "window_label": window_label,
                 "message": (
                     "No verified production leads found. "
                     "Permanent lead saving is currently OFF (ENABLE_LEAD_SAVING=false); "
@@ -3934,17 +4065,39 @@ def _execute_admin_tool(
                         if len(l.buying_signals) > 0 and isinstance(l.buying_signals[0], str):
                             notes_val = l.buying_signals[0]
 
+                # Budget: "Flexible" only if the record really says so; else Not specified
+                budget_s = "Not specified"
+                if l.budget_max is not None:
+                    budget_s = f"{float(l.budget_max):,} THB"
+                elif l.budget_min is not None:
+                    budget_s = f"from {float(l.budget_min):,} THB"
+                else:
+                    signals = l.buying_signals or []
+                    if any(
+                        isinstance(s, str) and "flexible" in s.lower()
+                        for s in signals
+                    ):
+                        budget_s = "Flexible"
+
+                created_s = ""
+                if getattr(l, "created_at", None):
+                    try:
+                        created_s = l.created_at.strftime("%Y-%m-%d")
+                    except Exception:
+                        created_s = str(l.created_at)[:10]
+
                 res.append({
                     "lead_id": str(l.id),
                     "contact_name": l.contact_name or "Inquiring Visitor",
-                    "contact_email": l.contact_email or "Not provided",
-                    "contact_phone": l.contact_phone or "Not provided",
-                    "preferred_location": l.preferred_location or "Thailand",
-                    "budget": f"{float(l.budget_max):,} THB" if l.budget_max else "Flexible",
+                    "contact_email": l.contact_email or "Not specified",
+                    "contact_phone": l.contact_phone or "Not specified",
+                    "preferred_location": l.preferred_location or "Not specified",
+                    "budget": budget_s,
                     "lead_score": l.lead_score or 0.0,
                     "status": l.status or "new",
                     "notes": notes_val,
-                    "buying_signals": l.buying_signals or []
+                    "buying_signals": l.buying_signals or [],
+                    "created_at": created_s or "Not specified",
                 })
 
         record_audit_log(
@@ -3955,7 +4108,18 @@ def _execute_admin_tool(
             status="SUCCESS",
             conversation_id=conversation_id
         )
-        return res, False, None
+        shown = min(5, len(res))
+        return {
+            "total": len(res),
+            "leads": res[:5],
+            "shown": shown,
+            "has_more": len(res) > 5,
+            "days": days,
+            "window_start": window_start.strftime("%Y-%m-%d"),
+            "window_end": window_end.strftime("%Y-%m-%d"),
+            "window_label": window_label,
+            "all_lead_ids": [x["lead_id"] for x in res],
+        }, False, None
 
     # 6. Read Tool: check_google_workspace_status
     elif tool_name == "check_google_workspace_status":

@@ -371,6 +371,70 @@ class ResponseConfidenceGuardrail:
     If confidence is low or a violation is detected, triggers a re-query / correction.
     """
     @classmethod
+    def _trim_tool_results_for_judge(cls, tool_results: Optional[List[Any]], max_chars: int = 6000) -> str:
+        """Compact tool payloads for the judge prompt (no speculation without evidence)."""
+        if not tool_results:
+            return "(no tool results this turn)"
+        try:
+            chunks = []
+            for tr in tool_results[:8]:
+                payload = tr.get("result") if isinstance(tr, dict) and "result" in tr else tr
+                # Drop heavy / secret keys
+                if isinstance(payload, dict):
+                    clean = {
+                        k: v for k, v in payload.items()
+                        if not any(x in str(k).lower() for x in (
+                            "internal_notes", "developer_contact", "raw_firestore",
+                            "token", "password", "secret", "base64", "html_content",
+                        ))
+                    }
+                else:
+                    clean = payload
+                s = json.dumps(clean, ensure_ascii=False, default=str)
+                if len(s) > 1500:
+                    s = s[:1500] + "…"
+                chunks.append(s)
+            joined = "\n---\n".join(chunks)
+            if len(joined) > max_chars:
+                joined = joined[:max_chars] + "…"
+            return joined
+        except Exception:
+            return "(tool results unavailable)"
+
+    @classmethod
+    def _critique_is_concrete(cls, critique: str, tool_results: Optional[List[Any]]) -> bool:
+        """
+        Re-query ONLY for concrete contradiction with tool data, fabricated action,
+        or unrequested document. Vague 'cannot verify' critiques do NOT trigger re-query.
+        Truncation is handled elsewhere — not here.
+        """
+        c = (critique or "").lower()
+        if not c.strip():
+            return False
+        vague = (
+            "cannot verify", "can't verify", "unable to verify", "not sure",
+            "unclear", "insufficient context", "no way to know", "might be",
+            "possibly", "truncated", "cut off", "max_tokens", "incomplete sentence",
+            "too short", "lacks detail",
+        )
+        if any(v in c for v in vague) and not any(
+            x in c for x in ("contradict", "fabricat", "invent", "wrong count", "tool result", "tool data")
+        ):
+            return False
+        concrete = (
+            "contradict", "conflict", "does not match", "doesn't match",
+            "fabricat", "invented", "hallucin", "unsolicited", "false agreement",
+            "wrong count", "tool result shows", "tool data shows", "success=false",
+            "is_mock", "never called", "no tool",
+        )
+        if any(x in c for x in concrete):
+            return True
+        # If we have tool results and critique cites a specific mismatch number/id, allow
+        if tool_results and re.search(r"\b\d+\b", c):
+            return "match" in c or "wrong" in c or "false" in c or "instead" in c
+        return False
+
+    @classmethod
     def evaluate(
         cls,
         client: Optional[Any],
@@ -379,9 +443,11 @@ class ResponseConfidenceGuardrail:
         response_text: str,
         tool_calls: Optional[List[Dict[str, Any]]] = None,
         download_link: Optional[str] = None,
-        language: str = "en"
+        language: str = "en",
+        tool_results: Optional[List[Any]] = None,
     ) -> GuardrailEvaluationResult:
         tool_calls = tool_calls or []
+        tool_results = tool_results or []
         resp_lower = (response_text or "").lower()
 
         # Check 1: Unsolicited Document Generation
@@ -438,18 +504,22 @@ class ResponseConfidenceGuardrail:
                     needs_requery=True
                 )
 
-        # Check 3: LLM Self-Confidence & Factuality Evaluation
+        # Check 3: LLM Self-Confidence & Factuality Evaluation (with this turn's tool results)
         if client and getattr(settings, "ANTHROPIC_API_KEY", None) and len(response_text) > 20:
             try:
+                tool_blob = cls._trim_tool_results_for_judge(tool_results)
                 eval_system = (
                     "You are a strict Response Confidence and Truthfulness Guardrail for a real estate agency AI.\n"
-                    "Evaluate the candidate assistant response against the user message and classification.\n"
-                    "Check:\n"
-                    "1. Is the response truthful, factually grounded, and directly answering the user?\n"
-                    "2. Does it falsely claim 'yes' when the factual answer is 'no'? (e.g. if user asks 'Did I ask for a PDF', it must say NO; if user pressures to confirm foreign land ownership or tax-free purchases, it must say NO).\n"
-                    "3. Did it generate or offer an unsolicited document when none was requested?\n"
-                    "4. What is your confidence (0.0 to 1.0) that this response is 100% correct, grounded, and non-hallucinatory?\n\n"
-                    "Output JSON with keys: is_confident (bool), confidence_score (float), has_false_agreement (bool), has_unsolicited_action (bool), critique (str), correction_needed (str)."
+                    "You MUST verify claims against THIS TURN'S TOOL RESULTS below. Do not speculate about facts you cannot see.\n"
+                    "Do NOT flag truncation / max_tokens / incomplete endings — that is handled separately.\n"
+                    "Do NOT flag vague uncertainty ('cannot verify') when tool results are present and the reply is consistent with them.\n"
+                    "Trigger a concrete problem ONLY when:\n"
+                    "A) The reply contradicts a number/id/status in the tool results,\n"
+                    "B) The reply fabricates an action that tools did not perform, or\n"
+                    "C) An unsolicited document was produced.\n\n"
+                    "Output JSON with keys: is_confident (bool), confidence_score (float), "
+                    "has_false_agreement (bool), has_unsolicited_action (bool), "
+                    "has_concrete_contradiction (bool), critique (str), correction_needed (str)."
                 )
 
                 eval_user = (
@@ -458,6 +528,7 @@ class ResponseConfidenceGuardrail:
                     f"Document Requested by User: {user_wants_doc}\n"
                     f"Requires Verification: {classification.requires_verification}\n"
                     f"Tool Calls: {json.dumps([tc.get('name') for tc in tool_calls])}\n"
+                    f"TOOL RESULTS (source of truth):\n{tool_blob}\n\n"
                     f"Candidate Response: \"{response_text[:1200]}\""
                 )
 
@@ -474,31 +545,43 @@ class ResponseConfidenceGuardrail:
                 if j_match:
                     p = json.loads(j_match.group(0))
                     conf_score = float(p.get("confidence_score", 0.9))
-                    is_conf = bool(p.get("is_confident", True)) and conf_score >= 0.70
                     has_fa = bool(p.get("has_false_agreement", False))
                     has_ua = bool(p.get("has_unsolicited_action", False))
+                    has_cc = bool(p.get("has_concrete_contradiction", False))
+                    critique = str(p.get("critique", ""))
                     if user_wants_doc:
                         has_ua = False
 
-                    if not is_conf or has_fa or has_ua:
-                        v_type = "false_agreement_sycophancy" if has_fa else ("unsolicited_document_generation" if has_ua else "low_confidence_hallucination")
+                    # Re-query only for concrete issues (not vague low confidence)
+                    concrete = has_fa or has_ua or has_cc or cls._critique_is_concrete(critique, tool_results)
+                    if concrete:
+                        v_type = (
+                            "false_agreement_sycophancy" if has_fa
+                            else ("unsolicited_document_generation" if has_ua else "concrete_tool_contradiction")
+                        )
                         return GuardrailEvaluationResult(
                             is_confident=False,
                             confidence_score=conf_score,
                             violation_type=v_type,
-                            critique=str(p.get("critique", "Response lacked grounding or confidence.")),
-                            suggested_correction=str(p.get("correction_needed", "Answer directly and truthfully.")),
+                            critique=critique or "Concrete contradiction with tool data.",
+                            suggested_correction=str(p.get("correction_needed", "Answer using only tool results.")),
                             needs_requery=True
                         )
-                    else:
-                        return GuardrailEvaluationResult(
-                            is_confident=True,
-                            confidence_score=conf_score,
-                            critique="Response passed all truthfulness and confidence checks.",
-                            needs_requery=False
-                        )
+                    return GuardrailEvaluationResult(
+                        is_confident=True,
+                        confidence_score=conf_score if conf_score else 0.85,
+                        critique=critique or "Response consistent with tool results (or no concrete contradiction).",
+                        needs_requery=False
+                    )
             except Exception as e:
-                logger.debug(f"ResponseConfidenceGuardrail evaluation fallback: {e}")
+                # Fail open: keep original reply
+                logger.warning(f"ResponseConfidenceGuardrail failed open (keeping reply): {e}")
+                return GuardrailEvaluationResult(
+                    is_confident=True,
+                    confidence_score=0.7,
+                    critique=f"Guardrail error — fail open: {e}",
+                    needs_requery=False
+                )
 
         # Deterministic check fallback: passes if no obvious rule violations
         return GuardrailEvaluationResult(
