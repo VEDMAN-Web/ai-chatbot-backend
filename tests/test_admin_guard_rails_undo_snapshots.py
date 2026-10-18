@@ -146,6 +146,7 @@ def test_undo_restores_old_values_second_undo_refused(staff):
         "action_type": "update",
         "status": "APPLIED",
         "created_at": datetime.now(timezone.utc).isoformat(),
+        "expire_at": (datetime.now(timezone.utc) + timedelta(days=6)).isoformat(),
         "expires_at": (datetime.now(timezone.utc) + timedelta(days=6)).isoformat(),
         "previous_snapshot": {"prop-1": original},
         "created_ids": [],
@@ -204,6 +205,7 @@ def test_undo_after_6_days_refused(staff):
         "action_type": "update",
         "status": "APPLIED",
         "created_at": (datetime.now(timezone.utc) - timedelta(days=7)).isoformat(),
+        "expire_at": (datetime.now(timezone.utc) - timedelta(days=1)).isoformat(),
         "expires_at": (datetime.now(timezone.utc) - timedelta(days=1)).isoformat(),
         "previous_snapshot": {"p": {"name": "x"}},
     }
@@ -369,6 +371,7 @@ def test_audit_chain_propose_confirm_execute_undo(staff):
         "operation_id": "crud_chain01",
         "action_type": "update",
         "status": "APPLIED",
+        "expire_at": (datetime.now(timezone.utc) + timedelta(days=5)).isoformat(),
         "expires_at": (datetime.now(timezone.utc) + timedelta(days=5)).isoformat(),
         "previous_snapshot": {"prop-1": {"property_name": "Old"}},
         "created_ids": [],

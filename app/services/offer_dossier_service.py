@@ -1,6 +1,5 @@
 import os
 import io
-import random
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
@@ -347,8 +346,13 @@ def generate_offer_dossier_pdf(
     completely from scratch using the template structure, high-resolution property
     photos, Unicode fonts, and verified financial models with ZERO placeholder artifacts.
     """
-    # 1. Select Theme Variant (1 to 7)
-    variant_id = template_variant if (template_variant and 1 <= template_variant <= 7) else random.randint(1, 7)
+    # 1. Select Theme Variant (1 to 7) — explicit request, else stable hash of property id(s)
+    from app.services.admin_reply_helpers import choose_dossier_template_variant
+
+    variant_id = choose_dossier_template_variant(
+        property_ids=property_ids,
+        explicit=template_variant,
+    )
     theme = TEMPLATE_THEMES[variant_id]
     template_name = f"Szablon {variant_id} - {theme['name']}"
 

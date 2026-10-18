@@ -1,7 +1,6 @@
 import os
 import re
 import json
-import random
 import logging
 from typing import Dict, Any, List, Optional
 from datetime import datetime, timezone
@@ -63,7 +62,7 @@ def is_strict_confirm_message(message: Optional[str]) -> bool:
     if not cleaned:
         return False
     words = cleaned.split()
-    if len(words) > 4:
+    if len(words) > 5:
         return False
     if cleaned in _STRICT_CONFIRM_EXACT:
         return True
@@ -72,9 +71,11 @@ def is_strict_confirm_message(message: Optional[str]) -> bool:
         return True
     if words[0] not in ("yes", "y", "ok", "okay", "confirm", "approve", "proceed", "tak", "zatwierdzam", "potwierdzam", "zgoda", "wykonaj"):
         return False
-    if any(w in _CONFIRM_FORBIDDEN_EXTRA for w in words):
+    # Allow delete-count ack: "yes 12" / "tak 3" (digits are not forbidden extras)
+    rest = [w for w in words[1:] if not w.isdigit()]
+    if any(w in _CONFIRM_FORBIDDEN_EXTRA for w in rest):
         return False
-    if any(w in _STRICT_REJECT_EXACT for w in words if w not in ("yes", "tak")):
+    if any(w in _STRICT_REJECT_EXACT for w in rest if w not in ("yes", "tak")):
         return False
     return True
 
@@ -165,8 +166,14 @@ def refuse_secret_or_prompt_reveal(message: Optional[str]) -> bool:
     return False
 
 
+_DB_URL_WITH_CREDS_RE = re.compile(
+    r"(?i)\b(?:postgres(?:ql)?(?:\+\w+)?|mysql|mongodb(?:\+srv)?|redis|amqp)://"
+    r"[^\s\"']+:[^\s\"'@]+@[^\s\"']+"
+)
+
+
 def redact_admin_sensitive_output(text: Optional[str]) -> str:
-    """Replace leaked key patterns and long verbatim system-prompt excerpts in replies."""
+    """Replace leaked key patterns, DB URLs with credentials, and system-prompt excerpts."""
     if not text or not isinstance(text, str):
         return text or ""
     out = _API_KEY_LEAK_RE.sub("[REDACTED]", text)
@@ -175,6 +182,13 @@ def redact_admin_sensitive_output(text: Optional[str]) -> str:
         "[REDACTED]",
         out,
         flags=re.IGNORECASE | re.DOTALL,
+    )
+    # Mask database URLs that embed user:password@host
+    out = _DB_URL_WITH_CREDS_RE.sub("[REDACTED_DATABASE_URL]", out)
+    out = re.sub(
+        r"(?i)(postgres(?:ql)?(?:\+\w+)?://)([^:@/\s]+):([^@/\s]+)@",
+        r"\1\2:[REDACTED]@",
+        out,
     )
     # Scrub long verbatim copies of distinctive admin system-prompt anchors
     for anchor in (
@@ -239,67 +253,132 @@ def _resolve_batch_targets(
     property_ids: Optional[List[str]],
     update_fields: Optional[Dict[str, Any]] = None,
     operation_type: str = "delete",
-) -> List[Dict[str, Any]]:
+) -> Dict[str, Any]:
     """
     Resolve names/ids against the catalog for a proposal preview. Read-only — no mutations.
-    Each item: property_id, name, current values, proposed change.
+    Uses property_name_index for fuzzy name resolution (never invents ids).
+
+    Returns dict:
+      items: [{property_id, name, current, change}, ...]
+      needs_clarification: optional message when a name is ambiguous / not found
+      unresolved: list of raw queries that did not resolve
     """
+    from app.services.admin_property_resolver import resolve_admin_property_name
+
     items: List[Dict[str, Any]] = []
+    unresolved: List[str] = []
+    clarification: Optional[str] = None
     up = dict(update_fields or {})
     for raw in property_ids or []:
         q = str(raw or "").strip()
         if not q:
             continue
-        resolved_id = q
-        name = q
+        resolved_id = None
+        name = None
         current: Dict[str, Any] = {}
-        try:
-            from app.services.firestore_service import get_firestore_client
-            fs = get_firestore_client(target="admin") or get_firestore_client()
-            if fs:
-                from app.services.admin_batch_service import _resolve_firestore_document
-                doc_id, doc = _resolve_firestore_document(fs.collection("projects"), {"property_id": q, "name": q})
-                if doc_id and doc:
-                    resolved_id = doc_id
-                    name = doc.get("name") or doc.get("title") or doc.get("property_name") or doc_id
-                    current = {
-                        "status": doc.get("status") or doc.get("saleStatus") or doc.get("isActive"),
-                        "price": doc.get("priceFrom") or doc.get("price") or doc.get("price_display"),
-                        "location": doc.get("location") or doc.get("area") or doc.get("province"),
-                    }
-        except Exception as e:
-            logger.debug(f"Batch target resolve (firestore) skipped for '{q}': {e}")
-        if not current and db is not None:
+
+        # Prefer name-index resolution (exact / high-threshold fuzzy)
+        res = resolve_admin_property_name(q, already_extracted=True, ensure_index=True)
+        if res.kind == "resolved" and res.property_id:
+            resolved_id = res.property_id
+            name = res.official_name or res.property_id
+        elif res.kind == "ambiguous":
+            clarification = res.message
+            unresolved.append(q)
+            continue
+        elif res.kind in ("not_found", "filler"):
+            clarification = res.message
+            unresolved.append(q)
+            continue
+
+        # Direct id / Firestore / SQL fallback when index missed an explicit doc id
+        if not resolved_id:
+            try:
+                from app.services.firestore_service import get_firestore_client
+                fs = get_firestore_client(target="admin") or get_firestore_client()
+                if fs:
+                    from app.services.admin_batch_service import _resolve_firestore_document
+                    doc_id, doc = _resolve_firestore_document(
+                        fs.collection("projects"), {"property_id": q, "name": q}
+                    )
+                    if doc_id and doc:
+                        resolved_id = doc_id
+                        name = (
+                            doc.get("name")
+                            or doc.get("title")
+                            or doc.get("property_name")
+                            or doc_id
+                        )
+                        current = {
+                            "status": doc.get("status") or doc.get("saleStatus") or doc.get("isActive"),
+                            "price": doc.get("priceFrom") or doc.get("price") or doc.get("price_display"),
+                            "location": doc.get("location") or doc.get("area") or doc.get("province"),
+                        }
+            except Exception as e:
+                logger.debug(f"Batch target resolve (firestore) skipped for '{q}': {e}")
+        if not resolved_id and db is not None:
             try:
                 from app.db.models import Property
                 prop = (
                     db.query(Property)
-                    .filter(
-                        (Property.property_id == q)
-                        | (Property.title.ilike(f"%{q}%"))
-                    )
+                    .filter(Property.property_id == q)
                     .first()
                 )
                 if prop:
                     resolved_id = prop.property_id
-                    name = getattr(prop, "title", None) or resolved_id
+                    name = (
+                        getattr(prop, "property_name", None)
+                        or getattr(prop, "title", None)
+                        or resolved_id
+                    )
                     current = {
                         "status": getattr(prop, "status", None),
-                        "price": getattr(prop, "price_display", None) or getattr(prop, "price_numeric_min", None),
+                        "price": getattr(prop, "price_display", None)
+                        or getattr(prop, "price_numeric_min", None),
                         "location": getattr(prop, "location", None),
                     }
             except Exception as e:
                 logger.debug(f"Batch target resolve (sql) skipped for '{q}': {e}")
+
+        if not resolved_id:
+            unresolved.append(q)
+            if not clarification:
+                clarification = (
+                    f'I couldn\'t find a property named **{q}**. '
+                    f"I will not invent an id or propose a change."
+                )
+            continue
+
+        # Enrich current from store when name-index resolved without snapshot
+        if not current and db is not None:
+            try:
+                from app.db.models import Property
+                prop = db.query(Property).filter(Property.property_id == resolved_id).first()
+                if prop:
+                    name = name or getattr(prop, "property_name", None) or resolved_id
+                    current = {
+                        "status": getattr(prop, "status", None),
+                        "price": getattr(prop, "price_display", None)
+                        or getattr(prop, "price_numeric_min", None),
+                        "location": getattr(prop, "location", None),
+                    }
+            except Exception:
+                pass
+
         change: Dict[str, Any] = {"operation": operation_type}
         if operation_type == "update" and up:
             change["fields"] = up
         items.append({
             "property_id": resolved_id,
-            "name": name,
+            "name": name or resolved_id,
             "current": current,
             "change": change,
         })
-    return items
+    return {
+        "items": items,
+        "needs_clarification": clarification,
+        "unresolved": unresolved,
+    }
 
 
 # Native Claude Tool Definitions (Anthropic Tool Use Format)
@@ -605,14 +684,29 @@ MANDATORY STRUCTURED PRESENTATION FORMAT (BULLET POINTS ONLY - NO RAW TABLES):
 """
 
 
+def _anthropic_timeout_sec() -> float:
+    try:
+        return float(getattr(settings, "ANTHROPIC_TIMEOUT", 90.0) or 90.0)
+    except Exception:
+        return 90.0
+
+
+def _anthropic_max_retries() -> int:
+    try:
+        return int(getattr(settings, "ANTHROPIC_MAX_RETRIES", 1) or 0)
+    except Exception:
+        return 1
+
+
 def _safe_anthropic_create(client: Any, **kwargs) -> Any:
     """
     Safely executes client.messages.create.
-    1. Automatically strips internal 'thinking' blocks from prior turns to prevent
-       cryptographic signature mismatch errors when tool sets or prompts differ.
-    2. Catches TypeError if an older or customized Anthropic SDK version does not support 'temperature'
-       or other specific keyword arguments, strips them, and re-invokes.
+    1. Strips internal 'thinking' blocks from prior turns.
+    2. Applies ANTHROPIC_TIMEOUT (default 90s); one retry on transient/timeout errors.
+    3. Drops unsupported kwargs (e.g. temperature) and re-invokes when needed.
     """
+    from app.services.admin_reply_helpers import is_transient_anthropic_error
+
     call_kwargs = dict(kwargs)
     msgs = call_kwargs.get("messages", [])
     if isinstance(msgs, list):
@@ -628,14 +722,38 @@ def _safe_anthropic_create(client: Any, **kwargs) -> Any:
                 sanitized_msgs.append(m)
         call_kwargs["messages"] = sanitized_msgs
 
-    try:
-        return client.messages.create(**call_kwargs)
-    except Exception as te:
-        err_msg = str(te)
-        if "temperature" in err_msg.lower():
-            call_kwargs.pop("temperature", None)
+    timeout_sec = _anthropic_timeout_sec()
+    call_kwargs.setdefault("timeout", timeout_sec)
+    retries = max(0, _anthropic_max_retries())
+    attempt = 0
+    last_exc: Optional[Exception] = None
+    while attempt <= retries:
+        try:
             return client.messages.create(**call_kwargs)
-        raise te
+        except Exception as te:
+            err_msg = str(te)
+            if "temperature" in err_msg.lower() and "temperature" in call_kwargs:
+                call_kwargs.pop("temperature", None)
+                try:
+                    return client.messages.create(**call_kwargs)
+                except Exception as te2:
+                    te = te2
+                    err_msg = str(te2)
+            last_exc = te
+            if attempt < retries and is_transient_anthropic_error(te):
+                logger.warning(
+                    "Anthropic transient error (attempt %s/%s, timeout=%ss): %s — retrying once",
+                    attempt + 1,
+                    retries + 1,
+                    timeout_sec,
+                    te,
+                )
+                attempt += 1
+                continue
+            raise te
+    if last_exc:
+        raise last_exc
+    raise RuntimeError("Anthropic create failed with no exception")
 
 
 def extract_anthropic_text(response: Any) -> str:
@@ -868,12 +986,28 @@ def rewrite_admin_query(client: Optional[Any], history: List[Dict[str, Any]], cu
 
 
 def _handle_admin_greeting(db: Session, conv: Any, message: str, language: str = "en") -> Dict[str, Any]:
-    """Warmly greets authorized staff or acknowledges team pleasantries."""
+    """Warmly greets authorized staff or answers capabilities — no LLM call."""
+    from app.services.admin_reply_helpers import is_capabilities_question
+
     msg_l = message.lower()
-    is_thanks = any(w in msg_l for w in ["thank", "thx", "ok", "okay", "cool", "great", "awesome", "perfect", "dzięki", "dzieki", "dziękuję", "dziekuje", "super", "świetnie", "swietnie"])
-    
+    is_thanks = any(w in msg_l for w in ["thank", "thx", "cool", "great", "awesome", "perfect", "dzięki", "dzieki", "dziękuję", "dziekuje", "super", "świetnie", "swietnie"])
+    # Note: bare "ok"/"okay" with a pending action is handled earlier as confirm — not here.
+    is_caps = is_capabilities_question(message) or any(
+        p in msg_l for p in ("what can you do", "co potrafisz", "how can you help", "jak możesz pomóc", "jak mozesz pomoc")
+    )
+
     if language == "pl":
-        if is_thanks:
+        if is_caps:
+            text = (
+                "Mogę pomóc zespołowi (bez LLM na to pytanie) w:\n"
+                "• Leadach kupujących i kontaktach\n"
+                "• Specyfikacjach technicznych i dossier\n"
+                "• Raportach PDF/Excel\n"
+                "• Propozycjach zmian cen/statusu (wymagają potwierdzenia)\n"
+                "• Cofaniu operacji (undo) przez normalny przepływ narzędzi\n\n"
+                "Napisz konkretne zadanie, np. „pokaż leady” lub „zmień cenę Pirak Villa”."
+            )
+        elif is_thanks:
             text = "Nie ma za co! Daj mi znać, jeśli chcesz, abym pobrał specyfikacje techniczne, przygotował dane leadów lub wygenerował oficjalny raport."
         else:
             text = (
@@ -886,7 +1020,17 @@ def _handle_admin_greeting(db: Session, conv: Any, message: str, language: str =
                 "Co chciałbyś dzisiaj sprawdzić lub przygotować?"
             )
     else:
-        if is_thanks:
+        if is_caps:
+            text = (
+                "I can help authorized staff with (answered without calling the LLM):\n"
+                "• Buyer leads and contacts\n"
+                "• Technical specs and dossiers\n"
+                "• PDF/Excel reports\n"
+                "• Staged price/status updates (explicit confirm required)\n"
+                "• Undo of recent operations via the normal tool flow\n\n"
+                "Ask for a concrete task, e.g. “show leads” or “change price of Pirak Villa”."
+            )
+        elif is_thanks:
             text = "You're very welcome! Let me know if you would like me to retrieve specific technical specs, buyer lead dossiers, or generate branded reports."
         else:
             text = (
@@ -1153,12 +1297,82 @@ def process_admin_chat(
 
     # A. Execute Confirmation
     if target_action and has_confirm_intent and not has_reject_intent:
+        # Deletes require typing the count (or item-by-item via separate proposals)
+        _del_payload = target_action.action_payload or {}
+        _del_diff = _del_payload.get("change_diff") or {}
+        needs_delete_ack = bool(
+            _del_payload.get("requires_explicit_delete_ack")
+            or _del_diff.get("requires_explicit_delete_ack")
+        )
+        delete_n = int(
+            _del_payload.get("delete_count")
+            or _del_diff.get("delete_count")
+            or 0
+        )
+        if needs_delete_ack and delete_n > 0:
+            from app.services.admin_change_diff import message_acks_delete_count
+
+            if not message_acks_delete_count(clean_message, delete_n):
+                if active_lang == "pl":
+                    ack_text = (
+                        f"⚠️ Usunięcie **{delete_n}** ofert wymaga jawnego potwierdzenia liczby. "
+                        f"Wpisz np. `yes {delete_n}` lub `tak {delete_n}` (sama zgoda bez liczby nie wystarczy)."
+                    )
+                else:
+                    ack_text = (
+                        f"⚠️ DELETE of **{delete_n}** listing(s) requires typing the count. "
+                        f"Reply e.g. `yes {delete_n}` (a bare `yes` is not enough)."
+                    )
+                append_conversation_turn(db, conv, clean_message or "yes", ack_text)
+                return {
+                    "type": "text",
+                    "text": ack_text,
+                    "session_id": conv.session_id,
+                    "conversation_id": str(conv.id),
+                    "requires_confirmation": True,
+                    "pending_action_id": str(target_action.id),
+                    "action_status": "pending",
+                    "tools_used": [],
+                    "download_link": None,
+                    "language": active_lang,
+                }
+
         try:
             exec_res = confirm_and_execute_action(
                 db=db,
                 pending_action_id=str(target_action.id),
                 authenticated_staff=staff_user
             )
+            # Stale Current values: refuse apply, show fresh proposal
+            if isinstance(exec_res, dict) and exec_res.get("status") == "STALE_REFUSED":
+                stale_text = exec_res.get("message") or (
+                    "Stored values changed since this proposal. Nothing was applied."
+                )
+                fresh_table = exec_res.get("diff_table") or ""
+                new_pid = exec_res.get("pending_action_id")
+                if fresh_table:
+                    stale_text = f"{stale_text}\n\n{fresh_table}"
+                if new_pid:
+                    stale_text += (
+                        f"\n\nFresh proposal ID: `{new_pid}`. Confirm again after reviewing Current values."
+                    )
+                stale_text = redact_admin_sensitive_output(stale_text)
+                append_conversation_turn(
+                    db, conv, clean_message or "Confirm", stale_text
+                )
+                return {
+                    "type": "text",
+                    "text": stale_text,
+                    "session_id": conv.session_id,
+                    "conversation_id": str(conv.id),
+                    "requires_confirmation": True,
+                    "pending_action_id": new_pid,
+                    "action_status": "stale_refused",
+                    "execution_result": exec_res,
+                    "tools_used": [{"tool": target_action.tool_name, "status": "stale_refused"}],
+                    "download_link": None,
+                    "language": active_lang,
+                }
             raw_exec = exec_res.get("execution_result", {}) if isinstance(exec_res, dict) else {}
             if _execution_did_not_complete(exec_res) or _execution_did_not_complete(raw_exec):
                 err_detail = ""
@@ -1368,14 +1582,32 @@ def process_admin_chat(
                 f"this message is treated as a new request.)_"
             )
 
-    # 3. Greeting / pleasantry fast handler (bypassed if user is answering a portfolio consultation inquiry)
+    # 3. Greeting / capabilities / pleasantry — skip LLM (undo still uses normal tool flow)
+    from app.services.admin_reply_helpers import (
+        ADMIN_LLM_SLOW_MESSAGE,
+        ADMIN_LLM_SLOW_MESSAGE_PL,
+        append_followup_suggestions,
+        contextual_followup_suggestions,
+        is_capabilities_question,
+        is_undo_request,
+        remember_admin_session_fact,
+    )
     last_assistant_turn = next((t.get("content", "") for t in reversed(conv.message_history or []) if t.get("role") == "assistant"), "")
     is_portfolio_followup_waiting = (
         ("1. **Client Name**" in last_assistant_turn or "1. **Imię i nazwisko klienta**" in last_assistant_turn) or
         ("Templates 1 to 7" in last_assistant_turn or "Warianty 1-7" in last_assistant_turn) or
         ("fetch them from the database & make everything myself" in last_assistant_turn or "pobrać je z bazy danych i dobrać resztę" in last_assistant_turn)
     )
-    if is_greeting_or_chit_chat(clean_message) and not is_portfolio_followup_waiting:
+    skip_llm_simple = (
+        not is_undo_request(clean_message)
+        and not is_portfolio_followup_waiting
+        and (
+            is_capabilities_question(clean_message)
+            or is_greeting_or_chit_chat(clean_message)
+        )
+    )
+    # Plain yes/no on a pending action already handled above (confirm/reject) — never reaches here.
+    if skip_llm_simple:
         greet_res = _handle_admin_greeting(db, conv, clean_message, language=active_lang)
         if pending_waiting_note and isinstance(greet_res, dict) and greet_res.get("text"):
             greet_res["text"] = greet_res["text"] + pending_waiting_note
@@ -1384,13 +1616,16 @@ def process_admin_chat(
             greet_res["action_status"] = "pending"
         return greet_res
 
-    # 4. Contextual query rewriting using previous 2 turns
     # 4. AI Model Intent Classification & Safety Evaluation
     client = None
     if settings.ANTHROPIC_API_KEY:
         try:
             import anthropic
-            client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY, timeout=getattr(settings, "ANTHROPIC_TIMEOUT", getattr(settings, "OPENAI_TIMEOUT", 600.0)))
+            client = anthropic.Anthropic(
+                api_key=settings.ANTHROPIC_API_KEY,
+                timeout=_anthropic_timeout_sec(),
+                max_retries=0,  # we retry once ourselves in _safe_anthropic_create
+            )
         except Exception:
             client = None
 
@@ -1419,9 +1654,26 @@ def process_admin_chat(
             res = _call_anthropic_claude(
                 db, conv, effective_message, staff_user,
                 raw_user_message=clean_message, client=client, language=active_lang,
-                classification=ai_classification
+                classification=ai_classification,
+                open_pending_id=str(open_pending[0].id) if open_pending else None,
             )
         except Exception as e:
+            from app.services.admin_reply_helpers import is_transient_anthropic_error
+            if is_transient_anthropic_error(e):
+                logger.warning(f"Anthropic final failure after retry: {e}")
+                slow = ADMIN_LLM_SLOW_MESSAGE_PL if active_lang == "pl" else ADMIN_LLM_SLOW_MESSAGE
+                append_conversation_turn(db, conv, clean_message, slow)
+                return {
+                    "type": "text",
+                    "text": slow,
+                    "session_id": conv.session_id,
+                    "conversation_id": str(conv.id),
+                    "requires_confirmation": False,
+                    "pending_action_id": None,
+                    "tools_used": [],
+                    "language": active_lang,
+                    "action_status": "timeout",
+                }
             logger.warning(f"Anthropic Claude API error: {e}. Falling back to deterministic orchestrator.")
             res = _run_deterministic_admin(
                 db, conv, effective_message, staff_user,
@@ -1438,12 +1690,21 @@ def process_admin_chat(
     # Top-level guarantee: enforce bullet points and strip raw markdown tables & speculation
     if isinstance(res, dict) and res.get("text"):
         res["text"] = ensure_structured_admin_response(res["text"], language=active_lang)
+        tips = contextual_followup_suggestions(
+            res.get("tools_used") or [],
+            language=active_lang,
+        )
+        if tips and "Suggestions" not in (res.get("text") or "") and "Sugestie" not in (res.get("text") or ""):
+            res["text"] = append_followup_suggestions(res["text"], tips, language=active_lang)
+            res["suggestions"] = tips
         if pending_waiting_note and not res.get("action_status"):
             res["text"] = res["text"] + pending_waiting_note
             res["requires_confirmation"] = True
             if open_pending:
                 res["pending_action_id"] = str(open_pending[0].id)
                 res["action_status"] = "pending"
+        if res.get("pending_action_id"):
+            remember_admin_session_fact(conv, pending_action_id=str(res["pending_action_id"]))
         res["text"] = redact_admin_sensitive_output(res["text"])
     return res
 
@@ -1473,32 +1734,57 @@ def _call_anthropic_claude(
     raw_user_message: Optional[str] = None,
     client: Optional[Any] = None,
     language: str = "en",
-    classification: Optional[AIIntentClassificationResult] = None
+    classification: Optional[AIIntentClassificationResult] = None,
+    open_pending_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Executes multi-turn conversation with Anthropic Claude and native tool use."""
     import anthropic
+    from app.services.admin_reply_helpers import (
+        ADMIN_HISTORY_MESSAGE_LIMIT,
+        append_followup_suggestions,
+        build_admin_structured_state,
+        contextual_followup_suggestions,
+        extract_session_state_from_conversation,
+        remember_admin_session_fact,
+        trim_admin_history_for_llm,
+    )
 
     if not client:
-        client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY, timeout=getattr(settings, "ANTHROPIC_TIMEOUT", getattr(settings, "OPENAI_TIMEOUT", 600.0)))
+        client = anthropic.Anthropic(
+            api_key=settings.ANTHROPIC_API_KEY,
+            timeout=_anthropic_timeout_sec(),
+            max_retries=0,
+        )
 
-    # Build message history for Claude with a safe sliding window and per-turn truncation
+    # Last ~12 messages + short structured state (not full raw history)
     claude_messages = []
-    # Retain up to 100 turns for comprehensive session memory across back-to-back questions
-    recent_history = (conv.message_history or [])[-100:]
+    recent_history = trim_admin_history_for_llm(
+        conv.message_history or [], limit=ADMIN_HISTORY_MESSAGE_LIMIT
+    )
     for turn in recent_history:
         role = "user" if turn.get("role") == "user" else "assistant"
         content = str(turn.get("content") or "")
         if content:
-            if len(content) > 6000:
-                content = content[:6000] + "... [History truncated for context limit]"
+            if len(content) > 4000:
+                content = content[:4000] + "... [History truncated for context limit]"
             claude_messages.append({"role": role, "content": content})
+
+    session_bits = extract_session_state_from_conversation(conv)
+    state_block = build_admin_structured_state(
+        pending_action_id=open_pending_id or session_bits.get("pending_action_id"),
+        last_resolved_property_id=session_bits.get("last_resolved_property_id"),
+        last_report_file=session_bits.get("last_report_file"),
+    )
 
     # Sanitize current user message if unusually large (e.g. pasted document or base64 data)
     user_content = message
     if len(user_content) > 30000:
         user_content = user_content[:30000] + "\n... [User message truncated to fit model context limit]"
 
-    claude_messages.append({"role": "user", "content": user_content})
+    claude_messages.append({
+        "role": "user",
+        "content": f"{state_block}\n\n{user_content}",
+    })
 
     tool_calls = []
     tool_results = []
@@ -1516,7 +1802,13 @@ def _call_anthropic_claude(
             f"- Document Explicitly Requested: {classification.document_requested} (If False: NEVER generate any PDF, report, or portfolio)\n"
             f"- Verification Question: {classification.requires_verification} (If user asks if they requested a PDF, state NO truthfully)\n"
         )
-    full_system_prompt = f"The authenticated staff member you are conversing with is {staff_name} ({staff_user.email if staff_user else 'Staff'}). Address them by their first name ({staff_name}) warmly when greeting or consulting with them.\n\n" + base_prompt + intent_guidance
+    full_system_prompt = (
+        f"The authenticated staff member you are conversing with is {staff_name} "
+        f"({staff_user.email if staff_user else 'Staff'}). Address them by their first name "
+        f"({staff_name}) warmly when greeting or consulting with them.\n\n"
+        f"{base_prompt}{intent_guidance}\n\n"
+        f"SESSION STATE (authoritative; prefer these over inventing ids):\n{state_block}"
+    )
 
     # Execute up to 4 agent iterations for multi-step tool calls
     for iteration in range(4):
@@ -1684,6 +1976,54 @@ def _call_anthropic_claude(
                         "No, you did not ask me to create any PDF! I apologize for any misunderstanding. How can I assist you with our property inventory instead?"
                     )
 
+    # -------------------------------------------------------------------------
+    # Claim verifier: numbers / success claims must match this turn's tool results
+    # -------------------------------------------------------------------------
+    if tool_results and response_text:
+        from app.services.admin_claim_verifier import verify_and_correct_admin_reply
+
+        def _regen_claims(instruction: str) -> Optional[str]:
+            try:
+                tool_summary = []
+                for tr in tool_results:
+                    payload = tr.get("result") if isinstance(tr, dict) else tr
+                    clean = _sanitize_tool_result_for_llm(payload)
+                    serialized = json.dumps(clean, ensure_ascii=False)
+                    if len(serialized) > 8000:
+                        serialized = serialized[:8000] + "…"
+                    tool_summary.append(serialized)
+                prompt = (
+                    f"{instruction}\n\n"
+                    f"Tool results (source of truth):\n"
+                    + "\n---\n".join(tool_summary)
+                    + f"\n\nUser query: \"{raw_user_message or message}\"\n"
+                    "Write the corrected admin reply now."
+                )
+                rq = _safe_anthropic_create(
+                    client,
+                    model=settings.ANTHROPIC_MODEL,
+                    max_tokens=2048,
+                    temperature=0.0,
+                    system=full_system_prompt,
+                    messages=claude_messages + [{"role": "user", "content": prompt}],
+                )
+                return extract_anthropic_text(rq)
+            except Exception as e:
+                logger.warning(f"Claim-verifier regeneration failed: {e}")
+                return None
+
+        claim_res = verify_and_correct_admin_reply(
+            response_text,
+            tool_results,
+            language=language,
+            db=db,
+            staff_user_id=getattr(staff_user, "email", None),
+            conversation_id=str(conv.id),
+            regenerate_fn=_regen_claims,
+        )
+        if claim_res.final_text:
+            response_text = claim_res.final_text
+
     # Apply structured bullet-points guardrail (guarantees NO raw markdown tables or speculation)
     response_text = ensure_structured_admin_response(response_text, language=language)
 
@@ -1701,6 +2041,24 @@ def _call_anthropic_claude(
             if tool_calls and not det_res.get("tools_used"):
                 det_res["tools_used"] = tool_calls
             return det_res
+
+    # Remember last property / report from this turn's tools for next-turn structured state
+    for tr in tool_results:
+        payload = tr.get("result") if isinstance(tr, dict) else tr
+        if not isinstance(payload, dict):
+            continue
+        pid = payload.get("property_id") or payload.get("target_property_id")
+        if pid:
+            remember_admin_session_fact(conv, property_id=str(pid))
+        fname = payload.get("filename") or payload.get("file_name")
+        if fname or payload.get("file_url"):
+            remember_admin_session_fact(conv, report_file=str(fname or payload.get("file_url")))
+        if payload.get("pending_action_id"):
+            remember_admin_session_fact(conv, pending_action_id=str(payload["pending_action_id"]))
+
+    tips = contextual_followup_suggestions(tool_calls, tool_results, language=language)
+    if tips:
+        response_text = append_followup_suggestions(response_text, tips, language=language)
 
     append_conversation_turn(
         db=db,
@@ -1720,6 +2078,7 @@ def _call_anthropic_claude(
         "pending_action_id": None,
         "tools_used": tool_calls,
         "download_link": download_link,
+        "suggestions": tips or [],
         "language": language
     }
 
@@ -1896,6 +2255,74 @@ def _run_deterministic_admin(
             "tools_used": [], "language": language
         }
 
+    # A0. Resume after "Which one?" name disambiguation
+    from app.services.admin_property_resolver import (
+        clear_admin_pending_resolution,
+        get_admin_pending_write_intent,
+        resolve_admin_property_name,
+        store_admin_pending_resolution,
+        try_resolve_admin_pending_choice,
+    )
+    prefs_now = dict(getattr(conv, "preferences", None) or {})
+    if prefs_now.get("admin_pending_name_candidates"):
+        pick = try_resolve_admin_pending_choice(message, prefs_now)
+        if pick.kind == "resolved" and pick.property_id:
+            intent = get_admin_pending_write_intent(prefs_now) or {}
+            fields = dict(intent.get("fields") or {})
+            found_images = list(intent.get("images") or [])
+            mode = intent.get("mode") or "update"
+            conv.preferences = clear_admin_pending_resolution(prefs_now)
+            try:
+                if db is not None:
+                    db.add(conv)
+                    db.commit()
+            except Exception:
+                pass
+            echo = f"Using **{pick.official_name}** (`{pick.property_id}`)."
+            args = {
+                "property_id": pick.property_id,
+                "fields_to_update": fields,
+                "images": found_images,
+                "mode": mode,
+            }
+            t_res, requires_confirmation, pending_action_id = _execute_admin_tool(
+                db, "create_or_update_listing", args, staff_user, str(conv.id)
+            )
+            tool_calls.append({"name": "create_or_update_listing", "args": args})
+            tool_results.append(t_res)
+            diff_md = ""
+            if isinstance(t_res, dict):
+                diff_md = t_res.get("diff_table") or t_res.get("message") or ""
+            response_text = (
+                f"{echo}\n\n{diff_md}\n\n"
+                f"**IMPORTANT:** Pending proposal (ID: `{pending_action_id}`). "
+                f"Confirm to apply exactly the previewed changes, or cancel."
+            )
+            append_conversation_turn(db, conv, message, response_text, tool_calls=tool_calls, tool_results=tool_results)
+            return {
+                "type": "text",
+                "text": response_text,
+                "session_id": conv.session_id,
+                "conversation_id": str(conv.id),
+                "requires_confirmation": bool(requires_confirmation),
+                "pending_action_id": pending_action_id,
+                "tools_used": tool_calls,
+                "language": language,
+            }
+        if pick.kind == "ambiguous" and pick.message:
+            append_conversation_turn(db, conv, message, pick.message)
+            return {
+                "type": "text",
+                "text": pick.message,
+                "session_id": conv.session_id,
+                "conversation_id": str(conv.id),
+                "requires_confirmation": False,
+                "pending_action_id": None,
+                "action_status": "needs_clarification",
+                "tools_used": [],
+                "language": language,
+            }
+
     # A. Propose Listing Creation or Update (Property info & Images)
     is_prop_write = (
         ("update" in msg_lower or "change" in msg_lower or "zmien" in msg_lower or "aktualizuj" in msg_lower or
@@ -1907,10 +2334,14 @@ def _run_deterministic_admin(
     )
     if is_prop_write:
         is_create = any(k in msg_lower for k in ["add property", "create property", "dodaj nieruchomosc", "nowa nieruchomosc"])
-        target_id = prop_id or ("PROP-NEW-001" if is_create else "")
 
         # Extract exact price if mentioned
-        price_num_match = re.search(r'(\d+(?:\.\d+)?)\s*(?:million|mln|m\b)\s*thb', msg_lower)
+        price_num_match = re.search(
+            r'(\d+(?:\.\d+)?)\s*(?:million|mln|m\b)(?:\s*thb)?',
+            msg_lower,
+        )
+        if not price_num_match:
+            price_num_match = re.search(r'(\d+(?:\.\d+)?)\s*(?:million|mln|m\b)\s*thb', msg_lower)
         if price_num_match:
             p_val = float(price_num_match.group(1))
             price_masked = f"{p_val:,.0f} million THB"
@@ -1920,7 +2351,11 @@ def _run_deterministic_admin(
             price_num = None
 
         new_status = "Ready to move in" if "ready to move in" in msg_lower else "Under construction"
-        fields = {"status": new_status}
+        fields = {}
+        if "ready to move in" in msg_lower or "under construction" in msg_lower or (
+            "status" in msg_lower and "price" not in msg_lower and "cena" not in msg_lower
+        ):
+            fields["status"] = new_status
         if any(w in msg_lower for w in ["million", "thb", "mln", "price", "cena"]):
             fields["price_display"] = price_masked
             if price_num:
@@ -1928,10 +2363,7 @@ def _run_deterministic_admin(
 
         if "pool" in msg_lower or "basen" in msg_lower:
             fields["has_pool"] = True
-        if "villa" in msg_lower or "willa" in msg_lower:
-            fields["property_type"] = "Villa"
-        elif "condo" in msg_lower or "apart" in msg_lower:
-            fields["property_type"] = "Condominium"
+        # Do NOT set property_type from the word "villa" in the name ("Pirak Villa")
 
         bed_m = re.search(r'(\d+)\s*(?:bed|bedroom|sypialni)', msg_lower)
         if bed_m:
@@ -1941,6 +2373,113 @@ def _run_deterministic_admin(
         # Extract image URLs
         found_images = re.findall(r'https?://[^\s,\'\"]+', message)
         found_images = [img for img in found_images if not any(x in img for x in ["varsoviaestate.com/pl", "varsoviaestate.com/en", "tajlandia.com/chat"])]
+
+        # Resolve real listing before proposing (never invent ids)
+        target_id = prop_id
+        official_name = None
+        if is_create:
+            # Creates still need a real id path elsewhere; do not invent PROP-NEW-001
+            if not target_id:
+                reply = (
+                    "To create a listing I need a real property id (Firestore document id / slug). "
+                    "I will not invent one."
+                    if language != "pl"
+                    else "Aby utworzyć ofertę, podaj prawdziwe ID nieruchomości. Nie wymyślam identyfikatorów."
+                )
+                append_conversation_turn(db, conv, message, reply)
+                return {
+                    "type": "text",
+                    "text": reply,
+                    "session_id": conv.session_id,
+                    "conversation_id": str(conv.id),
+                    "requires_confirmation": False,
+                    "pending_action_id": None,
+                    "tools_used": [],
+                    "language": language,
+                }
+        elif not target_id:
+            resolved = resolve_admin_property_name(message, language=language)
+            if resolved.kind == "resolved" and resolved.property_id:
+                target_id = resolved.property_id
+                official_name = resolved.official_name
+            elif resolved.kind == "ambiguous":
+                write_intent = {
+                    "fields": fields,
+                    "images": found_images,
+                    "mode": "update",
+                }
+                conv.preferences = store_admin_pending_resolution(
+                    prefs_now,
+                    query=resolved.query,
+                    candidates=resolved.candidates,
+                    write_intent=write_intent,
+                )
+                try:
+                    if db is not None:
+                        db.add(conv)
+                        db.commit()
+                except Exception:
+                    pass
+                ask = resolved.message or "Which one?"
+                append_conversation_turn(db, conv, message, ask)
+                return {
+                    "type": "text",
+                    "text": ask,
+                    "session_id": conv.session_id,
+                    "conversation_id": str(conv.id),
+                    "requires_confirmation": False,
+                    "pending_action_id": None,
+                    "action_status": "needs_clarification",
+                    "candidates": resolved.candidates,
+                    "tools_used": [],
+                    "language": language,
+                }
+            else:
+                # not_found / filler / empty
+                reply = resolved.message or (
+                    "I couldn't find that property. Name a real listing before I propose a change."
+                )
+                append_conversation_turn(db, conv, message, reply)
+                return {
+                    "type": "text",
+                    "text": reply,
+                    "session_id": conv.session_id,
+                    "conversation_id": str(conv.id),
+                    "requires_confirmation": False,
+                    "pending_action_id": None,
+                    "action_status": "not_found" if resolved.kind == "not_found" else resolved.kind,
+                    "suggestions": resolved.suggestions,
+                    "tools_used": [],
+                    "language": language,
+                }
+
+        if not target_id:
+            reply = "I need a real property name or id before proposing any change. I will not invent an id."
+            append_conversation_turn(db, conv, message, reply)
+            return {
+                "type": "text",
+                "text": reply,
+                "session_id": conv.session_id,
+                "conversation_id": str(conv.id),
+                "requires_confirmation": False,
+                "pending_action_id": None,
+                "tools_used": [],
+                "language": language,
+            }
+
+        if not fields and not found_images:
+            reply = "What should I change on that listing? (e.g. price or status)."
+            append_conversation_turn(db, conv, message, reply)
+            return {
+                "type": "text",
+                "text": reply,
+                "session_id": conv.session_id,
+                "conversation_id": str(conv.id),
+                "requires_confirmation": False,
+                "pending_action_id": None,
+                "tools_used": [],
+                "language": language,
+            }
 
         args = {
             "property_id": target_id,
@@ -1953,27 +2492,43 @@ def _run_deterministic_admin(
         )
         tool_calls.append({"name": "create_or_update_listing", "args": args})
         tool_results.append(t_res)
-        fields_summary = ", ".join(f"{k}={v}" for k, v in fields.items())
         img_summary = f" with {len(found_images)} image(s) attached" if found_images else ""
-        action_verb = "utworzenia nowej nieruchomości" if is_create else "aktualizacji"
-        action_verb_en = "creation of a new listing" if is_create else "update"
-
+        echo = ""
+        if official_name:
+            echo = f"Matched **{official_name}** (`{target_id}`).\n\n"
+        diff_md = ""
+        if isinstance(t_res, dict):
+            diff_md = t_res.get("diff_table") or t_res.get("message") or ""
         if language == "pl":
             response_text = (
-                f"Przygotowałem propozycję {action_verb} dla **{target_id}**: {fields_summary}{img_summary}.\n\n"
-                f"**WAŻNE:** Ta akcja zapisu została zarejestrowana jako propozycja oczekująca (ID: `{pending_action_id}`). "
-                f"Wymagane jest jawne potwierdzenie przez pracownika przed naniesieniem zmian w bazie danych."
+                f"{echo}{diff_md}\n\n{img_summary}\n\n"
+                f"**WAŻNE:** Propozycja oczekująca (ID: `{pending_action_id}`). "
+                f"Potwierdź, aby zapisać dokładnie te zmiany, lub anuluj."
             )
         else:
             response_text = (
-                f"I have staged a proposed {action_verb_en} for **{target_id}**: {fields_summary}{img_summary}.\n\n"
-                f"**IMPORTANT:** This write action is stored as a pending proposal (ID: `{pending_action_id}`). "
-                f"Explicit staff confirmation is required before any database change is applied."
+                f"{echo}{diff_md}\n\n{img_summary}\n\n"
+                f"**IMPORTANT:** Pending proposal (ID: `{pending_action_id}`). "
+                f"Confirm to apply exactly the previewed changes, or cancel."
             )
+        append_conversation_turn(
+            db, conv, message, response_text,
+            tool_calls=tool_calls, tool_results=tool_results,
+        )
+        return {
+            "type": "text",
+            "text": response_text,
+            "session_id": conv.session_id,
+            "conversation_id": str(conv.id),
+            "requires_confirmation": bool(requires_confirmation),
+            "pending_action_id": pending_action_id,
+            "tools_used": tool_calls,
+            "language": language,
+        }
 
     # B. Propose Send Email / Draft email (must NEVER auto-send)
     # Skip when the turn is clearly a document summarise / Drive read (filename may contain "email")
-    elif (
+    if (
         not any(k in msg_lower for k in ("summarize", "summarise", "from drive", "drive file", "document content"))
         and (("send" in msg_lower or "draft" in msg_lower or "email" in msg_lower or "wiadomosc" in msg_lower)
              and ("email" in msg_lower or "mail" in msg_lower or "@" in msg_lower))
@@ -2270,28 +2825,7 @@ def _run_deterministic_admin(
                     budget_str = "28 000 000 THB"
                     budget_provided = False
 
-            # 3. Template Variant (1-7)
-            tmpl_provided = False
-            t_match = re.search(r'(?:szablon|szablonu|template|wariant|variant)\s*#?\s*([1-7])', message, re.IGNORECASE)
-            if t_match:
-                try:
-                    tmpl_variant = int(t_match.group(1))
-                    tmpl_provided = True
-                except Exception:
-                    tmpl_variant = random.randint(1, 7)
-            else:
-                t_prev = re.search(r'(?:szablon|szablonu|template|wariant|variant)\s*#?\s*([1-7])', prev_user_turn, re.IGNORECASE)
-                if t_prev:
-                    try:
-                        tmpl_variant = int(t_prev.group(1))
-                        tmpl_provided = True
-                    except Exception:
-                        tmpl_variant = random.randint(1, 7)
-                else:
-                    tmpl_variant = random.randint(1, 7)
-                    tmpl_provided = False
-
-            # 4. Brand / Logo
+            # 3. Brand / Logo
             brand_provided = False
             if "varsovia" in msg_lower:
                 brand_val = "varsovia"
@@ -2312,7 +2846,7 @@ def _run_deterministic_admin(
                 brand_val = "varsovia" if "varsovia" in (staff_user.email or "").lower() else "tajlandia"
                 brand_provided = False
 
-            # 5. Properties Selection
+            # 4. Properties Selection (needed before stable template hash)
             props_provided = False
             explicit_pids = re.findall(r'(PROP-[A-Z0-9]+-[0-9]+)', combined_text, re.IGNORECASE)
             if explicit_pids:
@@ -2321,6 +2855,30 @@ def _run_deterministic_admin(
             else:
                 property_ids = None
                 props_provided = False
+
+            # 5. Template Variant (1-7) — explicit number, else stable hash of property id(s)
+            from app.services.admin_reply_helpers import choose_dossier_template_variant
+            tmpl_provided = False
+            explicit_tmpl = None
+            t_match = re.search(r'(?:szablon|szablonu|template|wariant|variant)\s*#?\s*([1-7])', message, re.IGNORECASE)
+            if t_match:
+                try:
+                    explicit_tmpl = int(t_match.group(1))
+                    tmpl_provided = True
+                except Exception:
+                    explicit_tmpl = None
+            else:
+                t_prev = re.search(r'(?:szablon|szablonu|template|wariant|variant)\s*#?\s*([1-7])', prev_user_turn, re.IGNORECASE)
+                if t_prev:
+                    try:
+                        explicit_tmpl = int(t_prev.group(1))
+                        tmpl_provided = True
+                    except Exception:
+                        explicit_tmpl = None
+            tmpl_variant = choose_dossier_template_variant(
+                property_ids=property_ids,
+                explicit=explicit_tmpl,
+            )
 
             # 6. Investment Goal
             goal_provided = False
@@ -2973,7 +3531,43 @@ def _run_deterministic_admin(
                 )
             response_text = "\n".join(prop_lines)
 
+    # Claim verifier against this turn's tool results (deterministic path: template only)
+    if tool_results and response_text:
+        from app.services.admin_claim_verifier import verify_and_correct_admin_reply
+
+        claim_res = verify_and_correct_admin_reply(
+            response_text,
+            tool_results,
+            language=language,
+            db=db,
+            staff_user_id=getattr(staff_user, "email", None),
+            conversation_id=str(getattr(conv, "id", "")),
+            regenerate_fn=None,
+        )
+        if claim_res.final_text:
+            response_text = claim_res.final_text
+
     response_text = ensure_structured_admin_response(response_text, language=language)
+
+    from app.services.admin_reply_helpers import (
+        append_followup_suggestions,
+        contextual_followup_suggestions,
+        remember_admin_session_fact,
+    )
+    for tr in tool_results:
+        payload = tr if isinstance(tr, dict) else {}
+        if payload.get("property_id"):
+            remember_admin_session_fact(conv, property_id=str(payload["property_id"]))
+        if payload.get("filename") or payload.get("file_url"):
+            remember_admin_session_fact(
+                conv, report_file=str(payload.get("filename") or payload.get("file_url"))
+            )
+        if pending_action_id:
+            remember_admin_session_fact(conv, pending_action_id=str(pending_action_id))
+
+    tips = contextual_followup_suggestions(tool_calls, tool_results, language=language)
+    if tips and "Suggestions" not in response_text and "Sugestie" not in response_text:
+        response_text = append_followup_suggestions(response_text, tips, language=language)
 
     append_conversation_turn(
         db=db,
@@ -3017,6 +3611,7 @@ def _run_deterministic_admin(
         "action_status": "proposed" if requires_confirmation else None,
         "tools_used": tool_calls,
         "download_link": download_link,
+        "suggestions": tips or [],
         "language": language
     }
 
@@ -3453,12 +4048,24 @@ def _execute_admin_tool(
             source_filename=drive_res.get("file_name", file_id)
         )
 
+        from app.services.admin_change_diff import build_single_listing_change_diff
+        change_diff = build_single_listing_change_diff(
+            db=db,
+            property_id=str(target_id or ""),
+            proposed_fields={k: v for k, v in (extracted or {}).items() if k != "property_id"},
+            mode=mode,
+        )
+        # Prefer live-store markdown; keep legacy generate_property_diff_table as fallback
+        live_md = change_diff.get("diff_markdown") or diff_table
         action_payload = {
             "mode": mode,
             "property_id": target_id,
             "fields": extracted,
             "source_file": drive_res.get("file_name", file_id),
-            "diff_preview": diff_table
+            "diff_preview": live_md,
+            "change_diff": change_diff,
+            "diff_markdown": live_md,
+            "risk_warnings": change_diff.get("risk_warnings") or [],
         }
 
         action = create_pending_action(
@@ -3475,8 +4082,14 @@ def _execute_admin_tool(
             "confirmation_token": action.confirmation_token,
             "mode": mode,
             "target_property_id": target_id,
-            "diff_table": diff_table,
-            "message": f"Property data from '{drive_res.get('file_name')}' extracted and staged as {mode.upper()}. Explicit confirmation required."
+            "diff_table": live_md,
+            "change_diff": change_diff,
+            "risk_warnings": action_payload["risk_warnings"],
+            "message": (
+                f"{live_md}\n\n"
+                f"Property data from '{drive_res.get('file_name')}' extracted and staged as {mode.upper()}. "
+                f"Explicit confirmation required."
+            ),
         }
         return proposal_res, True, str(action.id)
 
@@ -3505,18 +4118,39 @@ def _execute_admin_tool(
             }
             return proposal_res, False, None
 
+        from app.services.admin_change_diff import build_single_listing_change_diff
+        fields = tool_args.get("fields_to_update") or tool_args.get("fields") or {}
+        mode = tool_args.get("mode") or ("create" if not prop else "update")
+        change_diff = build_single_listing_change_diff(
+            db=db,
+            property_id=str(target_pid or ""),
+            proposed_fields=fields,
+            mode=mode,
+        )
+        payload = dict(tool_args)
+        payload["change_diff"] = change_diff
+        payload["diff_markdown"] = change_diff.get("diff_markdown")
+        payload["risk_warnings"] = change_diff.get("risk_warnings") or []
+
         action = create_pending_action(
             db=db,
             staff_user_id=staff_email,
             tool_name="create_or_update_listing",
-            action_payload=tool_args,
+            action_payload=payload,
             conversation_id=conversation_id
         )
         proposal_res = {
             "status": "PROPOSED",
             "pending_action_id": str(action.id),
             "confirmation_token": action.confirmation_token,
-            "message": "Action staged in pending_actions. Explicit confirmation required."
+            "diff_table": change_diff.get("diff_markdown"),
+            "change_diff": change_diff,
+            "risk_warnings": payload["risk_warnings"],
+            "requires_confirmation": True,
+            "message": (
+                f"{change_diff.get('diff_markdown')}\n\n"
+                "Action staged in pending_actions. Explicit confirmation required before any write."
+            ),
         }
         return proposal_res, True, str(action.id)
 
@@ -3609,7 +4243,34 @@ def _execute_admin_tool(
                 row.update({k: v for k, v in rec.items() if k not in ("property_id", "id")})
                 records.append(row)
         else:
-            items = _resolve_batch_targets(db, p_ids, update_fields=up_fields, operation_type=op_type)
+            resolved = _resolve_batch_targets(
+                db, p_ids, update_fields=up_fields, operation_type=op_type
+            )
+            if isinstance(resolved, dict):
+                items = resolved.get("items") or []
+                clarify = resolved.get("needs_clarification")
+                if clarify and not items:
+                    return {
+                        "status": "NEEDS_CLARIFICATION",
+                        "success": False,
+                        "error": clarify,
+                        "message": clarify,
+                        "unresolved": resolved.get("unresolved") or [],
+                        "requires_confirmation": False,
+                    }, False, None
+                if clarify and items:
+                    # Partial resolve with leftover ambiguous names — refuse whole batch
+                    return {
+                        "status": "NEEDS_CLARIFICATION",
+                        "success": False,
+                        "error": clarify,
+                        "message": clarify,
+                        "unresolved": resolved.get("unresolved") or [],
+                        "requires_confirmation": False,
+                    }, False, None
+            else:
+                # Backward compat if tests still stub a list
+                items = list(resolved or [])
             records = []
             for it in items:
                 row = {"property_id": it["property_id"], "name": it.get("name") or it["property_id"]}
@@ -3624,11 +4285,13 @@ def _execute_admin_tool(
                 "requires_confirmation": False,
             }, False, None
 
-        if len(items) > 1 and op_type == "delete" and len(p_ids) == 1:
-            # Ambiguous single name resolving to multiple catalog hits — ask, do not stage
-            # (when resolver returns one row per input id; multi-match handled below if flagged)
-            pass
-
+        from app.services.admin_change_diff import build_batch_change_diff
+        change_diff = build_batch_change_diff(
+            db=db,
+            operation_type=op_type,
+            items=items,
+            update_fields=up_fields,
+        )
         action_payload = {
             "operation_type": op_type,
             "items": items,
@@ -3636,6 +4299,11 @@ def _execute_admin_tool(
             "update_fields": up_fields,
             "source_filename": source_name,
             "notes": notes,
+            "change_diff": change_diff,
+            "diff_markdown": change_diff.get("diff_markdown"),
+            "risk_warnings": change_diff.get("risk_warnings") or [],
+            "requires_explicit_delete_ack": bool(change_diff.get("requires_explicit_delete_ack")),
+            "delete_count": change_diff.get("delete_count") or 0,
         }
         action = create_pending_action(
             db=db,
@@ -3644,11 +4312,12 @@ def _execute_admin_tool(
             action_payload=action_payload,
             conversation_id=conversation_id,
         )
-        preview_lines = []
-        for it in items:
-            preview_lines.append(
-                f"- id=`{it.get('property_id')}` name=**{it.get('name')}** "
-                f"current={it.get('current')} change={it.get('change')}"
+        ack_hint = ""
+        if action_payload["requires_explicit_delete_ack"]:
+            n = action_payload["delete_count"]
+            ack_hint = (
+                f"\n\nTo confirm this DELETE of **{n}** listing(s), type the count "
+                f"(e.g. `yes {n}`). A bare `yes` is not enough."
             )
         proposal_res = {
             "status": "PROPOSED",
@@ -3657,12 +4326,15 @@ def _execute_admin_tool(
             "operation_type": op_type,
             "items": items,
             "item_count": len(items),
+            "change_diff": change_diff,
+            "diff_table": change_diff.get("diff_markdown"),
+            "risk_warnings": action_payload["risk_warnings"],
             "requires_confirmation": True,
             "message": (
-                f"Batch {op_type} proposed for {len(items)} item(s). "
-                f"Nothing has been written. Confirm to apply exactly these listed items "
-                f"(item-by-item approval via pending action), or cancel.\n"
-                + "\n".join(preview_lines)
+                f"{change_diff.get('diff_markdown')}\n\n"
+                f"Batch `{op_type}` proposed for {len(items)} item(s). "
+                f"Nothing has been written. Confirm to apply exactly the previewed items, or cancel."
+                f"{ack_hint}"
             ),
         }
         return proposal_res, True, str(action.id)

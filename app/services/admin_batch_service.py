@@ -16,12 +16,68 @@ logger = logging.getLogger(__name__)
 
 # Batch operations collection name in Firestore
 BATCH_OPERATIONS_COLLECTION = "admin_batch_operations"
-SNAPSHOT_RETENTION_DAYS = 6
+# Default / fallback; prefer get_snapshot_retention_days() which reads config
+SNAPSHOT_RETENTION_DAYS = int(getattr(settings, "ADMIN_SNAPSHOT_RETENTION_DAYS", 6) or 6)
+
+# Exact user-facing copy when a snapshot is past retention (tests assert this phrase)
+EXPIRED_UNDO_MESSAGE = (
+    "This operation expired after 6 days and can no longer be undone"
+)
 
 
 class BatchOperationError(Exception):
     """Raised when batch operation or undo fails."""
     pass
+
+
+def get_snapshot_retention_days() -> int:
+    """Configurable retention window (UTC days) for admin undo snapshots."""
+    try:
+        return max(1, int(getattr(settings, "ADMIN_SNAPSHOT_RETENTION_DAYS", 6) or 6))
+    except Exception:
+        return 6
+
+
+def _compute_expire_at(created_at: Optional[datetime] = None) -> datetime:
+    """expire_at = created_at + retention (timezone-aware UTC)."""
+    base = created_at or datetime.now(timezone.utc)
+    if base.tzinfo is None:
+        base = base.replace(tzinfo=timezone.utc)
+    return base + timedelta(days=get_snapshot_retention_days())
+
+
+def _parse_expire_at(data: Dict[str, Any]) -> Optional[datetime]:
+    """Read expire_at (preferred) or legacy expires_at from a snapshot doc."""
+    raw = data.get("expire_at") or data.get("expires_at")
+    if raw is None:
+        return None
+    if isinstance(raw, datetime):
+        return raw if raw.tzinfo else raw.replace(tzinfo=timezone.utc)
+    try:
+        s = str(raw).replace("Z", "+00:00")
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except Exception:
+        return None
+
+
+def _is_snapshot_expired(data: Dict[str, Any], now: Optional[datetime] = None) -> bool:
+    now = now or datetime.now(timezone.utc)
+    if data.get("status") == "EXPIRED":
+        return True
+    exp = _parse_expire_at(data)
+    if exp is None:
+        return False
+    return now >= exp
+
+
+def _expired_undo_message() -> str:
+    days = get_snapshot_retention_days()
+    if days == 6:
+        return EXPIRED_UNDO_MESSAGE
+    return f"This operation expired after {days} days and can no longer be undone"
 
 
 # ==============================================================================
@@ -222,7 +278,8 @@ def execute_batch_property_operation(
 
     operation_id = f"batch_{uuid.uuid4().hex[:12]}"
     now = datetime.now(timezone.utc)
-    expires_at = now + timedelta(days=SNAPSHOT_RETENTION_DAYS)
+    expire_at = _compute_expire_at(now)
+    retention_days = get_snapshot_retention_days()
 
     affected_ids: List[str] = []
     previous_snapshot: Dict[str, Any] = {}
@@ -332,8 +389,11 @@ def execute_batch_property_operation(
         raise BatchOperationError(f"None of the {len(records)} records in '{source_filename}' could be matched in the portfolio.")
 
     # --------------------------------------------------------------------------
-    # Save the 6-Day Snapshot Record in Firestore
+    # Save the retention Snapshot Record in Firestore
+    # Infra should also enable a Firestore TTL policy on field `expire_at` as a
+    # second safety net (auto-delete after expire_at) in addition to purge_expired_snapshots.
     # --------------------------------------------------------------------------
+    expire_at_iso = expire_at.isoformat()
     snapshot_doc = {
         "operation_id": operation_id,
         "action_type": action_clean,
@@ -346,13 +406,15 @@ def execute_batch_property_operation(
         "previous_snapshot": previous_snapshot,
         "created_ids": created_ids,
         "created_at": now.isoformat(),
-        "expires_at": expires_at.isoformat(),
+        "expire_at": expire_at_iso,
+        # Legacy alias kept for older clients / history readers
+        "expires_at": expire_at_iso,
         "details": executed_details
     }
 
     try:
         fs_client.collection(BATCH_OPERATIONS_COLLECTION).document(operation_id).set(snapshot_doc)
-        logger.info(f"Saved 6-day snapshot for operation {operation_id} (expires {expires_at.isoformat()})")
+        logger.info(f"Saved snapshot for operation {operation_id} (expire_at {expire_at_iso})")
     except Exception as e:
         logger.error(f"Failed to persist batch operation snapshot to Firestore: {e}")
 
@@ -364,7 +426,7 @@ def execute_batch_property_operation(
                 staff_user_id=staff_user.user_id,
                 tool_name=f"batch_property_{action_clean}",
                 tool_arguments={"filename": source_filename, "count": len(affected_ids)},
-                proposed_payload={"operation_id": operation_id, "expires_at": expires_at.isoformat()},
+                proposed_payload={"operation_id": operation_id, "expire_at": expire_at_iso},
                 confirmed_by_staff=bool(confirmed_by_staff),
                 status="SUCCESS",
                 execution_result=f"Executed {action_clean} on {len(affected_ids)} properties from {source_filename}."
@@ -380,10 +442,14 @@ def execute_batch_property_operation(
         "affected_count": len(affected_ids),
         "affected_ids": affected_ids,
         "created_at": now.isoformat(),
-        "expires_at": expires_at.isoformat(),
-        "undo_window_days": SNAPSHOT_RETENTION_DAYS,
+        "expire_at": expire_at_iso,
+        "expires_at": expire_at_iso,
+        "undo_window_days": retention_days,
         "status": "APPLIED",
-        "message": f"Successfully and instantly executed {action_clean} on {len(affected_ids)} properties. Previous state stored for {SNAPSHOT_RETENTION_DAYS} days with full Undo available."
+        "message": (
+            f"Successfully executed {action_clean} on {len(affected_ids)} properties. "
+            f"Previous state stored for {retention_days} days with full Undo available."
+        ),
     }
 
 
@@ -414,7 +480,8 @@ def record_crud_operation_snapshot(
 
     operation_id = f"crud_{uuid.uuid4().hex[:12]}"
     now = datetime.now(timezone.utc)
-    expires_at = now + timedelta(days=SNAPSHOT_RETENTION_DAYS)
+    expire_at = _compute_expire_at(now)
+    expire_at_iso = expire_at.isoformat()
 
     previous_snapshot = {}
     if previous_state:
@@ -423,6 +490,7 @@ def record_crud_operation_snapshot(
     created_ids = [created_id] if created_id else []
     affected_ids = [property_id]
 
+    # Infra should also enable a Firestore TTL policy on field `expire_at` as a second safety net.
     snapshot_doc = {
         "operation_id": operation_id,
         "action_type": action_clean,
@@ -435,7 +503,8 @@ def record_crud_operation_snapshot(
         "previous_snapshot": previous_snapshot,
         "created_ids": created_ids,
         "created_at": now.isoformat(),
-        "expires_at": expires_at.isoformat(),
+        "expire_at": expire_at_iso,
+        "expires_at": expire_at_iso,
         "details": [{
             "property_id": property_id,
             "action": action_clean
@@ -444,7 +513,10 @@ def record_crud_operation_snapshot(
 
     try:
         fs_client.collection(BATCH_OPERATIONS_COLLECTION).document(operation_id).set(snapshot_doc)
-        logger.info(f"Saved 6-day CRUD snapshot for {action_clean} on {property_id} (op: {operation_id}, expires: {expires_at.isoformat()})")
+        logger.info(
+            f"Saved CRUD snapshot for {action_clean} on {property_id} "
+            f"(op: {operation_id}, expire_at: {expire_at_iso})"
+        )
     except Exception as e:
         logger.warning(f"Failed to persist CRUD snapshot to Firestore: {e}")
         return None
@@ -457,7 +529,7 @@ def record_crud_operation_snapshot(
                 staff_user_id=staff_user.user_id,
                 tool_name=f"admin_crud_{action_clean}",
                 tool_arguments={"property_id": property_id, "source": source},
-                proposed_payload={"operation_id": operation_id, "expires_at": expires_at.isoformat()},
+                proposed_payload={"operation_id": operation_id, "expire_at": expire_at_iso},
                 confirmed_by_staff=bool(confirmed_by_staff),
                 execution_result=f"Executed {action_clean} on property {property_id}."
             )
@@ -548,21 +620,14 @@ def undo_batch_property_operation(
     if status == "REVERTED":
         raise BatchOperationError(f"Operation '{operation_id}' has already been undone.")
 
-    # Validate 6-Day Expiration Window
+    # Expired snapshots count as nonexistent for undo
     now = datetime.now(timezone.utc)
-    expires_at_str = data.get("expires_at")
-    if expires_at_str:
+    if _is_snapshot_expired(data, now=now):
         try:
-            expires_at = datetime.fromisoformat(expires_at_str.replace("Z", "+00:00"))
-            if now > expires_at:
-                # Mark expired
-                op_ref.update({"status": "EXPIRED"})
-                raise BatchOperationError(
-                    f"The 6-day undo window for operation '{operation_id}' expired on {expires_at_str}. "
-                    "Modifications older than 6 days cannot be automatically undone."
-                )
-        except (ValueError, TypeError) as e:
-            logger.warning(f"Error parsing expires_at timestamp: {e}")
+            op_ref.update({"status": "EXPIRED"})
+        except Exception:
+            pass
+        raise BatchOperationError(_expired_undo_message())
 
     action_type = data.get("action_type")
     previous_snapshot: Dict[str, Any] = data.get("previous_snapshot") or {}
@@ -647,35 +712,40 @@ def undo_batch_property_operation(
 
 def get_batch_operations_history(limit: int = 50) -> List[Dict[str, Any]]:
     """
-    Retrieves history of all past batch property operations with remaining undo time.
+    Retrieves history of past batch property operations with remaining undo time.
+    Expired snapshots are hidden (treated as nonexistent).
     """
     fs_client = get_firestore_client()
     if not fs_client:
         return []
 
     try:
+        # Fetch a wider window then filter expired so limit is of visible ops
         col = fs_client.collection(BATCH_OPERATIONS_COLLECTION)
-        docs = list(col.limit(limit).stream())
+        docs = list(col.limit(max(limit * 3, limit)).stream())
         results = []
         now = datetime.now(timezone.utc)
 
         for doc in docs:
             data = doc.to_dict() or {}
-            expires_at_str = data.get("expires_at")
-            can_undo = False
-            remaining_text = "Expired"
+            # Hide expired / purged-equivalent ops from history
+            if _is_snapshot_expired(data, now=now):
+                continue
 
-            if expires_at_str and data.get("status") == "APPLIED":
+            expire_at_str = data.get("expire_at") or data.get("expires_at")
+            can_undo = False
+            remaining_text = "N/A"
+
+            if expire_at_str and data.get("status") == "APPLIED":
                 try:
-                    expires_at = datetime.fromisoformat(expires_at_str.replace("Z", "+00:00"))
-                    diff = expires_at - now
-                    if diff.total_seconds() > 0:
-                        can_undo = True
-                        days = diff.days
-                        hours = int((diff.seconds) / 3600)
-                        remaining_text = f"{days}d {hours}h remaining"
-                    else:
-                        remaining_text = "Expired (over 6 days)"
+                    expire_at = _parse_expire_at(data)
+                    if expire_at:
+                        diff = expire_at - now
+                        if diff.total_seconds() > 0:
+                            can_undo = True
+                            days = diff.days
+                            hours = int(diff.seconds / 3600)
+                            remaining_text = f"{days}d {hours}h remaining"
                 except Exception:
                     remaining_text = "N/A"
             elif data.get("status") == "REVERTED":
@@ -691,7 +761,8 @@ def get_batch_operations_history(limit: int = 50) -> List[Dict[str, Any]]:
                 "affected_count": data.get("affected_count", 0),
                 "affected_ids": data.get("affected_ids", []),
                 "created_at": data.get("created_at"),
-                "expires_at": expires_at_str,
+                "expire_at": expire_at_str,
+                "expires_at": expire_at_str,
                 "can_undo": can_undo,
                 "remaining_undo_time": remaining_text,
                 "reverted_at": data.get("reverted_at"),
@@ -700,8 +771,67 @@ def get_batch_operations_history(limit: int = 50) -> List[Dict[str, Any]]:
 
         # Sort descending by created_at
         results.sort(key=lambda x: x.get("created_at") or "", reverse=True)
-        return results
+        return results[:limit]
 
     except Exception as e:
         logger.error(f"Error fetching batch operations history: {e}")
         return []
+
+
+def purge_expired_snapshots(
+    now: Optional[datetime] = None,
+    batch_size: int = 100,
+) -> int:
+    """
+    Delete all admin_batch_operations documents whose expire_at < now.
+    Safe to call repeatedly. Never raises — logs and returns 0 on error.
+
+    Infra should also enable a Firestore TTL policy on field `expire_at` as a
+    second safety net so documents are removed even if this job is down.
+    """
+    try:
+        if now is None:
+            now = datetime.now(timezone.utc)
+        elif now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+
+        fs_client = get_firestore_client(target="admin") or get_firestore_client()
+        if not fs_client:
+            logger.warning("purge_expired_snapshots: Firestore client unavailable; deleted=0")
+            return 0
+
+        col = fs_client.collection(BATCH_OPERATIONS_COLLECTION)
+        deleted = 0
+        now_iso = now.isoformat()
+
+        # Prefer indexed inequality on expire_at; fall back to full scan + filter
+        candidates: List[Any] = []
+        try:
+            q = col.where("expire_at", "<", now_iso).limit(batch_size)
+            candidates = list(q.stream())
+        except Exception as qe:
+            logger.debug(f"purge_expired_snapshots expire_at query unavailable ({qe}); scanning")
+            try:
+                candidates = list(col.limit(batch_size * 5).stream())
+            except Exception as se:
+                logger.warning(f"purge_expired_snapshots scan failed: {se}")
+                return 0
+
+        for doc in candidates:
+            if deleted >= batch_size:
+                break
+            try:
+                data = doc.to_dict() or {}
+                if not _is_snapshot_expired(data, now=now):
+                    continue
+                doc.reference.delete()
+                deleted += 1
+            except Exception as de:
+                logger.warning(f"purge_expired_snapshots failed deleting {getattr(doc, 'id', '?')}: {de}")
+
+        if deleted:
+            logger.info(f"purge_expired_snapshots: deleted {deleted} expired snapshot(s)")
+        return deleted
+    except Exception as e:
+        logger.warning(f"purge_expired_snapshots error (returning 0): {e}")
+        return 0

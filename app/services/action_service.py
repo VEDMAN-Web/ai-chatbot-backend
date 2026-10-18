@@ -236,35 +236,122 @@ def confirm_and_execute_action(
             detail="Invalid confirmation token."
         )
 
+    # 3b. Stale-value guard: re-check stored "Current" vs live record before any write
+    payload = dict(action.action_payload or {})
+    change_diff = payload.get("change_diff")
+    if isinstance(change_diff, dict) and (
+        change_diff.get("rows") or change_diff.get("items")
+    ):
+        from app.services.admin_change_diff import (
+            verify_diff_still_current,
+            build_single_listing_change_diff,
+            build_batch_change_diff,
+        )
+
+        ok, stale_list = verify_diff_still_current(db, change_diff)
+        if not ok:
+            action.status = ACTION_STATUS_REJECTED
+            action.error_message = (
+                "Stale values detected; refused apply. Re-proposed with fresh store reads. "
+                + "; ".join(stale_list[:8])
+            )
+            db.commit()
+            record_audit_log(
+                db=db,
+                staff_user_id=authenticated_staff.email,
+                tool_name=action.tool_name,
+                proposed_payload=payload,
+                confirmed_by_staff=True,
+                status="REJECTED",
+                error_message=action.error_message,
+                conversation_id=action.conversation_id,
+                pending_action_id=str(action.id),
+            )
+            # Re-propose from live store so staff sees an updated Field|Current|New table
+            fresh_diff: Dict[str, Any] = {}
+            new_payload = dict(payload)
+            try:
+                if action.tool_name in ("create_or_update_listing", "ingest_property_from_drive"):
+                    fields = payload.get("fields_to_update") or payload.get("fields") or {}
+                    mode = payload.get("mode") or "update"
+                    fresh_diff = build_single_listing_change_diff(
+                        db=db,
+                        property_id=str(payload.get("property_id") or ""),
+                        proposed_fields=fields,
+                        mode=mode,
+                    )
+                elif action.tool_name == "execute_batch_property_action":
+                    fresh_diff = build_batch_change_diff(
+                        db=db,
+                        operation_type=payload.get("operation_type") or "update",
+                        items=payload.get("items") or [],
+                        update_fields=payload.get("update_fields"),
+                    )
+            except Exception as rebuild_exc:
+                logger.warning(f"Failed to rebuild change_diff after stale refuse: {rebuild_exc}")
+                fresh_diff = {}
+
+            new_action = None
+            if fresh_diff:
+                new_payload["change_diff"] = fresh_diff
+                new_payload["diff_markdown"] = fresh_diff.get("diff_markdown")
+                new_payload["risk_warnings"] = fresh_diff.get("risk_warnings") or []
+                if fresh_diff.get("requires_explicit_delete_ack") is not None:
+                    new_payload["requires_explicit_delete_ack"] = fresh_diff[
+                        "requires_explicit_delete_ack"
+                    ]
+                    new_payload["delete_count"] = fresh_diff.get("delete_count") or 0
+                new_action = create_pending_action(
+                    db=db,
+                    staff_user_id=authenticated_staff.email,
+                    tool_name=action.tool_name,
+                    action_payload=new_payload,
+                    conversation_id=action.conversation_id,
+                )
+
+            return {
+                "status": "STALE_REFUSED",
+                "stale_fields": stale_list,
+                "pending_action_id": str(new_action.id) if new_action else None,
+                "confirmation_token": new_action.confirmation_token if new_action else None,
+                "change_diff": fresh_diff or None,
+                "diff_table": (fresh_diff or {}).get("diff_markdown"),
+                "message": (
+                    "Values changed since this proposal. Nothing was applied. "
+                    "A fresh proposal was staged — review the new Current values and confirm again."
+                ),
+                "previous_pending_action_id": str(action.id),
+            }
+
     # 4. Mark confirmed
     action.status = ACTION_STATUS_CONFIRMED
     action.confirmed_at = datetime.now(timezone.utc)
     db.commit()
 
-    # 5. Execute action payload based on tool_name
+    # 5. Execute action payload based on tool_name (only previewed fields/items)
     result_data: Dict[str, Any] = {}
     try:
         if action.tool_name in ["create_or_update_listing", "ingest_property_from_drive"]:
             result_data = _execute_update_listing(
-                db, action.action_payload, authenticated_staff=authenticated_staff
+                db, payload, authenticated_staff=authenticated_staff
             )
         elif action.tool_name == "send_email":
             result_data = _execute_send_email(
-                action.action_payload,
+                payload,
                 staff_user_email=authenticated_staff.email if authenticated_staff else None,
                 db=db
             )
             result_data["undoable"] = False
         elif action.tool_name == "create_calendar_event":
             result_data = _execute_create_calendar_event(
-                action.action_payload,
+                payload,
                 staff_user_email=authenticated_staff.email if authenticated_staff else None,
                 db=db
             )
             result_data["undoable"] = False
         elif action.tool_name == "execute_batch_property_action":
             result_data = _execute_batch_property_action(
-                db, action.action_payload, authenticated_staff
+                db, payload, authenticated_staff
             )
         else:
             raise ValueError(f"Unsupported tool action: {action.tool_name}")
@@ -413,6 +500,32 @@ def _execute_batch_property_action(
             fields = (it.get("change") or {}).get("fields") or payload.get("update_fields") or {}
             row.update(fields)
             records.append(row)
+    # Confirm applies only what was previewed in change_diff
+    change_diff = payload.get("change_diff") or {}
+    preview_items = change_diff.get("items") or []
+    if preview_items:
+        allowed_ids = {str(it.get("property_id")) for it in preview_items if it.get("property_id")}
+        records = [r for r in records if str(r.get("property_id")) in allowed_ids]
+        # For non-delete, restrict fields to those shown in each item's rows
+        if op_type != "delete":
+            field_map = {
+                str(it.get("property_id")): {r["field"] for r in (it.get("rows") or [])}
+                for it in preview_items
+            }
+            trimmed = []
+            for r in records:
+                pid = str(r.get("property_id"))
+                allowed_fields = field_map.get(pid)
+                if not allowed_fields:
+                    trimmed.append(r)
+                    continue
+                keep = {
+                    k: v
+                    for k, v in r.items()
+                    if k in ("property_id", "name") or k in allowed_fields
+                }
+                trimmed.append(keep)
+            records = trimmed
     if not records:
         raise ValueError("Batch pending action has no listed records/items to apply.")
 
@@ -462,13 +575,26 @@ def _execute_update_listing(
     Saves a 6-day undo snapshot BEFORE writing when staff_user is provided (chat confirm path).
     """
     property_id = payload.get("property_id")
-    fields = payload.get("fields_to_update", {}) or payload.get("fields", {})
+    fields = dict(payload.get("fields_to_update", {}) or payload.get("fields", {}) or {})
     mode = payload.get("mode", "update")
     if not property_id:
         raise ValueError("Missing required property_id in payload.")
 
+    # Confirm applies only fields that appeared in the staged Field|Current|New preview
+    change_diff = payload.get("change_diff") or {}
+    preview_rows = change_diff.get("rows") or []
+    if preview_rows:
+        allowed = {r.get("field") for r in preview_rows if r.get("field")}
+        fields = {k: v for k, v in fields.items() if k in allowed}
+
     prop = db.query(Property).filter(Property.property_id == property_id).first()
-    is_valid, missing, err_msg = validate_property_data(payload, existing_property=prop)
+    # Validation uses original payload shape; inject trimmed fields
+    validation_payload = dict(payload)
+    if "fields_to_update" in validation_payload or "fields_to_update" in payload:
+        validation_payload["fields_to_update"] = fields
+    else:
+        validation_payload["fields"] = fields
+    is_valid, missing, err_msg = validate_property_data(validation_payload, existing_property=prop)
     if not is_valid:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

@@ -335,6 +335,39 @@ def get_batch_operations_history_endpoint(
     }
 
 
+@router.post("/maintenance/purge-expired", tags=["Admin Maintenance"])
+def purge_expired_snapshots_endpoint(
+    staff: AuthenticatedStaff = Depends(require_admin_or_super_admin),
+):
+    """
+    Admin-only: delete expired undo snapshots from Firestore admin_batch_operations
+    (expire_at < now). Safe for Cloud Scheduler. Never raises from the purge itself.
+
+    Infra should also enable a Firestore TTL policy on field `expire_at` as a second safety net.
+    """
+    from app.services.admin_batch_service import purge_expired_snapshots
+
+    deleted = purge_expired_snapshots()
+    return {
+        "success": True,
+        "deleted": deleted,
+        "message": f"Purged {deleted} expired snapshot(s).",
+    }
+
+
+@router.get("/system/config-status", tags=["Admin Maintenance"])
+def admin_config_status_endpoint(
+    staff: AuthenticatedStaff = Depends(require_admin_or_super_admin),
+):
+    """
+    Admin-only: feature-flag / wiring status as labels and booleans only.
+    Never returns secrets, passwords, tokens, or credentialed URLs.
+    """
+    from app.core.config import get_admin_config_status
+
+    return get_admin_config_status()
+
+
 # ==============================================================================
 # 8. Direct Property CRUD Endpoints (REST API for Frontend Developers)
 # ==============================================================================

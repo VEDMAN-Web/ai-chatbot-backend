@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 import threading
@@ -6,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
-from typing import List, Optional
+from typing import List, Optional, Any
 from app.core.config import settings
 from app.db.session import get_db, get_admin_db, get_user_db
 from app.services.property_search import PropertyFilterParams, search_properties_safe, get_property_by_id, property_belongs_to_websites
@@ -17,6 +18,10 @@ from app.api.v1.admin import router as admin_router
 from app.api.v1.auth import router as auth_router
 
 logger = logging.getLogger(__name__)
+
+# Background purge of expired admin undo snapshots (every 6 hours)
+_snapshot_purge_task: Optional[Any] = None
+_SNAPSHOT_PURGE_INTERVAL_SEC = 6 * 60 * 60
 
 app = FastAPI(
     title="Tajlandia AI Property Intelligence Platform API",
@@ -49,6 +54,16 @@ def _prewarm_caches_background() -> None:
 @app.on_event("startup")
 def startup_db_init():
     """Ensure all PostgreSQL tables and extensions exist on boot for both admin and user databases."""
+    # Fail fast if DATABASE_URL is missing outside tests; then emit config flag warnings (no secrets)
+    try:
+        from app.core.config import assert_database_configured_or_exit, log_config_warnings
+        assert_database_configured_or_exit()
+        log_config_warnings()
+    except RuntimeError:
+        raise
+    except Exception as e:
+        logger.warning("Startup config checks failed (non-fatal if already asserted): %s", e)
+
     try:
         import sqlalchemy as sa
         from app.db.session import admin_engine, user_engine, Base
@@ -86,6 +101,73 @@ def startup_db_init():
         ).start()
     except Exception as e:
         logger.warning("Could not start cache pre-warm thread: %s", e)
+
+
+def _run_purge_expired_snapshots_safe() -> int:
+    """Never raise — used by startup, loop, and maintenance endpoint internals."""
+    try:
+        from app.services.admin_batch_service import purge_expired_snapshots
+        return int(purge_expired_snapshots() or 0)
+    except Exception as e:
+        logger.warning("purge_expired_snapshots wrapper error: %s", e)
+        return 0
+
+
+async def _snapshot_purge_loop() -> None:
+    """Background asyncio loop: purge expired admin snapshots every 6 hours."""
+    while True:
+        try:
+            await asyncio.sleep(_SNAPSHOT_PURGE_INTERVAL_SEC)
+            deleted = await asyncio.to_thread(_run_purge_expired_snapshots_safe)
+            if deleted:
+                logger.info("Background snapshot purge deleted %s document(s)", deleted)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            # Must never crash the app
+            logger.warning("Background snapshot purge loop error (continuing): %s", e)
+
+
+@app.on_event("startup")
+async def startup_snapshot_purge():
+    """
+    (a) Purge expired admin undo snapshots once at boot.
+    (b) Start a 6-hour background asyncio purge loop.
+    Infra should also enable a Firestore TTL policy on field `expire_at` as a second safety net.
+    """
+    global _snapshot_purge_task
+    try:
+        deleted = await asyncio.to_thread(_run_purge_expired_snapshots_safe)
+        logger.info("Startup snapshot purge deleted %s expired document(s)", deleted)
+    except Exception as e:
+        logger.warning("Startup snapshot purge failed (non-fatal): %s", e)
+    try:
+        _snapshot_purge_task = asyncio.create_task(
+            _snapshot_purge_loop(),
+            name="admin-snapshot-purge-loop",
+        )
+    except Exception as e:
+        logger.warning("Could not start snapshot purge loop (non-fatal): %s", e)
+
+
+@app.on_event("shutdown")
+async def shutdown_snapshot_purge():
+    """Cancel the background snapshot purge loop on app shutdown."""
+    global _snapshot_purge_task
+    task = _snapshot_purge_task
+    _snapshot_purge_task = None
+    if task is not None:
+        try:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                logger.debug("Snapshot purge task shutdown: %s", e)
+        except Exception as e:
+            logger.warning("Error cancelling snapshot purge task: %s", e)
+
 
 @app.get("/", include_in_schema=False)
 def serve_frontend():
