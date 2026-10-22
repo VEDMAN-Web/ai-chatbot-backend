@@ -205,6 +205,10 @@ def handle_public_chat(
             if getattr(settings, "ENABLE_LEAD_SAVING", False):
                 try:
                     from app.services.lead_service import enqueue_lead_save
+                    _lead_notes = (
+                        (f"[Listing: {req.property_id}] " if req.property_id else "")
+                        + (req.notes or "")
+                    ) or None
                     lead = record_or_update_lead(
                         db=None,
                         conversation=conversation,
@@ -214,7 +218,7 @@ def handle_public_chat(
                         preferred_location=req.preferred_location,
                         budget_max=budget_dec,
                         buying_signal=f"Direct contact submission: {req.contact_email or req.contact_phone or req.contact_name}",
-                        notes=(f"[Listing: {req.property_id}] " if req.property_id else "") + (req.notes or "") or None,
+                        notes=_lead_notes,
                     )
                     recorded_lead_id = str(getattr(lead, "id", "") or "")
                     enqueue_lead_save(
@@ -226,7 +230,7 @@ def handle_public_chat(
                         preferred_location=req.preferred_location,
                         budget_max=budget_dec,
                         buying_signal=f"Direct contact submission: {req.contact_email or req.contact_phone or req.contact_name}",
-                        notes=(f"[Listing: {req.property_id}] " if req.property_id else "") + (req.notes or "") or None,
+                        notes=_lead_notes,
                     )
                 except Exception as lead_err:
                     logger.warning("Lead save failed (chat reply unaffected): %s", lead_err)

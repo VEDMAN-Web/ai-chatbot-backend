@@ -569,75 +569,90 @@ def _clarification(language: str, reason: str, candidates: Optional[List[str]] =
 def update_rolling_summary(
     ctx: PropertyContext,
     user_message: str,
-    assistant_message: str,
+    assistant_message: str = "",
     resolved_property_id: Optional[str] = None,
+    *,
+    structured: Optional[Dict[str, Any]] = None,
 ) -> PropertyContext:
     """
-    Compact rolling summary for long chats. Never drops active_property_id.
-    Keeps last ~8 decision bullets + unresolved questions.
+    Compact rolling summary from STRUCTURED data only (filters, shown ids, active id,
+    questions asked). Never stores assistant prose or listing description text.
+    `assistant_message` is kept for call-site compatibility and ignored as prose.
     """
     ctx.turn_count = int(ctx.turn_count or 0) + 1
-    bits = []
+    bits: List[str] = []
+    st = structured if isinstance(structured, dict) else {}
+    active = st.get("active_id") or resolved_property_id or ctx.active_property_id
+    if active:
+        bits.append(f"active={active}")
+    shown = st.get("shown_ids") or st.get("last_result_ids")
+    if shown:
+        bits.append("shown=" + ",".join(str(x) for x in list(shown)[:8] if x))
+    filters = st.get("filters") or st.get("active_filters")
+    if isinstance(filters, dict) and filters:
+        fb = ",".join(f"{k}:{v}" for k, v in filters.items() if v is not None)
+        if fb:
+            bits.append(f"filters={fb[:160]}")
+    um = (user_message or "").strip().replace("\n", " ")
+    q = st.get("question") or (um[:120] if um else "")
+    if q:
+        # Store question text only (user), never assistant wording
+        bits.append(f"Q:{str(q)[:120]}")
     if resolved_property_id:
         bits.append(f"discussed:{resolved_property_id}")
-    um = (user_message or "").strip().replace("\n", " ")
-    if um:
-        bits.append(f"U:{um[:120]}")
-    # Keep prior summary truncated
+
     prev = (ctx.rolling_summary or "").strip()
     line = " | ".join(bits)
     combined = (prev + " || " + line).strip(" |") if prev else line
-    # Bound size
     max_chars = int(getattr(settings, "PROPERTY_CONTEXT_SUMMARY_CHARS", 4000) or 4000)
     if len(combined) > max_chars:
         combined = combined[-max_chars:]
     ctx.rolling_summary = combined
 
-    # Capture unresolved-looking user questions
     if "?" in um and not resolved_property_id:
-        q = um[:180]
-        if q and q not in ctx.unresolved_questions:
-            ctx.unresolved_questions.append(q)
+        qq = um[:180]
+        if qq and qq not in ctx.unresolved_questions:
+            ctx.unresolved_questions.append(qq)
             ctx.unresolved_questions = ctx.unresolved_questions[-10:]
     elif resolved_property_id and ctx.unresolved_questions:
-        # Clear oldest unresolved when we successfully answered about a property
         ctx.unresolved_questions = ctx.unresolved_questions[1:]
 
-    # decisions_summary: stable one-liner
-    active = ctx.active_property_id or "none"
+    active_s = ctx.active_property_id or "none"
     ctx.decisions_summary = (
-        f"active={active}; recent={','.join(ctx.recently_discussed_ids[:5])}; "
+        f"active={active_s}; recent={','.join(ctx.recently_discussed_ids[:5])}; "
         f"compare={','.join(ctx.comparison_set)}; turns={ctx.turn_count}"
     )
     return ctx
 
 
-def assemble_llm_context_block(ctx: PropertyContext, recent_messages: List[Dict[str, Any]]) -> str:
+def assemble_llm_context_block(
+    ctx: PropertyContext,
+    recent_messages: Optional[List[Dict[str, Any]]] = None,
+) -> str:
     """
-    Compact context for LLM requests — IDs + summary + recent window.
-    Facts must still be fetched live; this block is for reference resolution only.
+    Structured reference memory only — IDs, filters summary, ordinals.
+    Does NOT include recent assistant/user prose (callers pass user turns separately).
+    `recent_messages` is accepted for API compatibility and ignored as prose.
     """
-    window = int(getattr(settings, "PROPERTY_CONTEXT_RECENT_MESSAGES", 20) or 20)
-    recent = recent_messages[-window:] if recent_messages else []
+    _ = recent_messages  # intentionally unused — never feed prior chat prose
+    ref_bits = []
+    for label, pid in list((ctx.reference_map or {}).items())[:12]:
+        if pid:
+            ref_bits.append(f"{label}→{pid}")
     lines = [
-        "=== PERSISTENT PROPERTY CONTEXT (reference memory only — not factual source) ===",
+        "=== STRUCTURED STATE (reference memory only — not factual source) ===",
         f"active_property_id: {ctx.active_property_id or 'none'}",
         f"active_property_reference: {ctx.active_property_reference or 'none'}",
         f"recently_discussed_ids: {', '.join(ctx.recently_discussed_ids[:10]) or 'none'}",
         f"comparison_set: {', '.join(ctx.comparison_set) or 'none'}",
+        f"ordinal_map: {', '.join(ref_bits) or 'none'}",
         f"decisions_summary: {ctx.decisions_summary or 'none'}",
         f"unresolved_questions: {'; '.join(ctx.unresolved_questions) or 'none'}",
         f"rolling_summary: {(ctx.rolling_summary or '')[:800]}",
-        "=== RECENT MESSAGES ===",
+        "RULE: Resolve 'it' / 'the first one' using IDs and ordinal_map above. "
+        "For prices/amenities/ownership/availability use only the FACTS block or tool results — "
+        "never prior assistant text.",
     ]
-    for t in recent:
-        role = t.get("role", "?")
-        content = str(t.get("content") or "")[:240]
-        lines.append(f"{role}: {content}")
-    lines.append(
-        "RULE: Resolve references using IDs above. For prices/amenities/availability, "
-        "use only freshly retrieved authorized property records — never prior assistant text."
-    )
     return "\n".join(lines)
 
 

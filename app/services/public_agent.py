@@ -39,6 +39,13 @@ from app.services.i18n_service import (
 from app.services.reply_validator import validate_reply
 from app.core.tenant import resolve_tenant as _resolve_tenant_for_validation
 from app.services.guardrails import ThaiPropertyLegalGuardrail
+from app.services.grounding import (
+    build_facts_block,
+    build_grounded_llm_messages,
+    factual_temperature,
+    is_factual_listing_query,
+    log_grounding_metrics,
+)
 from app.services.property_context_service import (
     _FACT_HINTS,
     load_property_context,
@@ -136,7 +143,15 @@ PUBLIC_TOOLS = [
                     },
                     "bedrooms": {
                         "type": "integer",
-                        "description": "Number of bedrooms (e.g. 1, 2, 3, 4, 5)"
+                        "description": "Exact bedroom count (e.g. 3). Prefer min_bedrooms/max_bedrooms for ranges."
+                    },
+                    "min_bedrooms": {
+                        "type": "integer",
+                        "description": "Minimum bedrooms inclusive (e.g. 4 for '4 or more' / '4+ bedrooms')"
+                    },
+                    "max_bedrooms": {
+                        "type": "integer",
+                        "description": "Maximum bedrooms inclusive (e.g. 3 for 'up to 3' / '3 or fewer')"
                     },
                     "bathrooms": {
                         "type": "integer",
@@ -885,22 +900,26 @@ def extract_explicit_property_token(
     Pull an explicit slug or property name from the user message / tool args.
     Used so 'View details for <slug>' never falls back to the active property.
     """
+    from app.services.intent_router import is_valid_property_name_candidate
+
     args = args or {}
     if args.get("explicit_property_token"):
         tok = str(args.get("explicit_property_token") or "").strip(" .,?!")
-        if tok and tok.lower() not in _ORDINAL_DETAIL_TOKENS:
+        if tok and tok.lower() not in _ORDINAL_DETAIL_TOKENS and is_valid_property_name_candidate(tok):
             return tok
 
     msg = (message or "").strip()
     m = _EXPLICIT_DETAIL_TOKEN_RE.search(msg)
     if m:
         tok = m.group(1).strip(" .,?!")
-        if tok and tok.lower() not in _ORDINAL_DETAIL_TOKENS:
+        if tok and tok.lower() not in _ORDINAL_DETAIL_TOKENS and is_valid_property_name_candidate(tok):
             return tok
 
     for key in ("property_id", "property_name"):
         val = str(args.get(key) or "").strip(" .,?!")
         if not val or val.lower() in _ORDINAL_DETAIL_TOKENS:
+            continue
+        if not is_valid_property_name_candidate(val):
             continue
         if val.upper().startswith("PROP-") or _SLUG_LIKE_RE.match(val):
             return val
@@ -1034,6 +1053,8 @@ def search_properties_unified(
                 min_price=float(params.min_price) if params.min_price else None,
                 max_price=float(params.max_price) if params.max_price else None,
                 bedrooms=int(params.bedrooms) if params.bedrooms and str(params.bedrooms).isdigit() else None,
+                min_bedrooms=int(params.min_bedrooms) if getattr(params, "min_bedrooms", None) is not None else None,
+                max_bedrooms=int(params.max_bedrooms) if getattr(params, "max_bedrooms", None) is not None else None,
                 has_pool=has_pool_flag,
                 beach_access=beach_flag,
                 required_amenities=req_am or None,
@@ -1194,17 +1215,37 @@ def extract_user_preferences(
         prefs["property_type"] = str(tool_args["property_type"]).title()
 
     # 3. Bedrooms (New preference cleanly replaces old one)
-    bed_match = re.search(r"(\d+)\s*(?:bed|bedroom|br|sypialn|pokoj)", u_lower)
-    if bed_match:
-        b_num = int(bed_match.group(1))
-        prefs["bedrooms"] = f"{b_num} Bedrooms"
-        prefs["bedrooms_num"] = b_num
-    elif "studio" in u_lower:
-        prefs["bedrooms"] = "Studio"
-        prefs["bedrooms_num"] = 0
-    elif tool_args.get("bedrooms"):
-        prefs["bedrooms"] = f"{tool_args['bedrooms']} Bedrooms"
-        prefs["bedrooms_num"] = tool_args['bedrooms']
+    if tool_args.get("min_bedrooms") is not None and tool_args.get("max_bedrooms") is not None:
+        prefs["bedrooms"] = f"{tool_args['min_bedrooms']}-{tool_args['max_bedrooms']} bedrooms"
+        prefs["min_bedrooms"] = int(tool_args["min_bedrooms"])
+        prefs["max_bedrooms"] = int(tool_args["max_bedrooms"])
+        prefs.pop("bedrooms_num", None)
+    elif tool_args.get("min_bedrooms") is not None:
+        prefs["bedrooms"] = f"{tool_args['min_bedrooms']}+ bedrooms"
+        prefs["min_bedrooms"] = int(tool_args["min_bedrooms"])
+        prefs.pop("bedrooms_num", None)
+        prefs.pop("max_bedrooms", None)
+    elif tool_args.get("max_bedrooms") is not None:
+        prefs["bedrooms"] = f"up to {tool_args['max_bedrooms']} bedrooms"
+        prefs["max_bedrooms"] = int(tool_args["max_bedrooms"])
+        prefs.pop("bedrooms_num", None)
+        prefs.pop("min_bedrooms", None)
+    else:
+        bed_match = re.search(r"(\d+)\s*(?:bed|bedroom|br|sypialn|pokoj)", u_lower)
+        if bed_match:
+            b_num = int(bed_match.group(1))
+            prefs["bedrooms"] = f"{b_num} Bedrooms"
+            prefs["bedrooms_num"] = b_num
+            prefs.pop("min_bedrooms", None)
+            prefs.pop("max_bedrooms", None)
+        elif "studio" in u_lower:
+            prefs["bedrooms"] = "Studio"
+            prefs["bedrooms_num"] = 0
+        elif tool_args.get("bedrooms"):
+            prefs["bedrooms"] = f"{tool_args['bedrooms']} Bedrooms"
+            prefs["bedrooms_num"] = tool_args['bedrooms']
+            prefs.pop("min_bedrooms", None)
+            prefs.pop("max_bedrooms", None)
 
     # 4. Budget / Price Range (New preference cleanly replaces old one)
     m_match = re.search(r"(?:under|below|max|budget|up to|around|poniżej|do)?\s*(\d+(?:\.\d+)?)\s*(?:m|million|mln|milionów|milionow)\s*(?:thb|baht)?", u_lower)
@@ -2107,13 +2148,24 @@ class PublicAgentService:
         applied_filters: Optional[Dict[str, Any]] = None,
         tool_results: Optional[List[Any]] = None,
         criteria_summary: Optional[str] = None,
+        facts_text: str = "",
+        regenerate_fn: Optional[Any] = None,
+        session_id: Optional[str] = None,
     ) -> Tuple[str, List[Dict[str, Any]]]:
-        """Drop unsafe replies; return honest no-match text and empty cards on failure."""
+        """Drop unsafe replies; regen once, then deterministic FACTS template on failure."""
         from app.services.reply_validator import sanitize_listing_line_text
         from app.services.listing_presentation import apply_presentation_to_card
 
         cards = list(cards or [])
         tenant = _resolve_tenant_for_validation(site_origin)
+        _orig_reply = reply_text or ""
+        # Capture original ids/names before presentation mutates display fields
+        allowed_ids = {str(c.get("property_id") or "").lower() for c in cards if isinstance(c, dict) and c.get("property_id")}
+        allowed_names = {
+            str(c.get("name") or c.get("property_name") or "").lower()
+            for c in cards
+            if isinstance(c, dict) and (c.get("name") or c.get("property_name"))
+        }
         # Presentation clean-up on cards (name/location/highlights/marketing)
         cleaned_cards = []
         for c in cards:
@@ -2123,9 +2175,13 @@ class PublicAgentService:
                 except Exception:
                     pass
                 cleaned_cards.append(c)
+                # Keep post-presentation names allowed too
+                for k in ("name", "property_name"):
+                    if c.get(k):
+                        allowed_names.add(str(c.get(k)).lower())
         cards = cleaned_cards
         # Never repeat guaranteed-return / marketing claims as bot facts
-        reply_text = sanitize_listing_line_text(reply_text or "")
+        reply_text = sanitize_listing_line_text(_orig_reply)
         # Drop null-price cards from budget searches before validation when possible
         filters = dict(applied_filters or {})
         if filters.get("max_price") is not None or filters.get("min_price") is not None:
@@ -2138,20 +2194,53 @@ class PublicAgentService:
                 kept.append(c)
             cards = kept
 
-        ok, reasons = validate_reply(
-            reply_text=reply_text,
-            cards=cards,
-            tool_results=tool_results,
-            applied_filters=filters,
-            language=language,
-            tenant_advisor_email=getattr(tenant, "advisor_email", None),
-        )
+        facts_pack = facts_text or (build_facts_block(cards, language=language) if cards else "")
+
+        def _run_validate(txt: str) -> Tuple[bool, List[str]]:
+            return validate_reply(
+                reply_text=txt,
+                cards=cards,
+                tool_results=tool_results,
+                applied_filters=filters,
+                language=language,
+                tenant_advisor_email=getattr(tenant, "advisor_email", None),
+                facts_text=facts_pack,
+                allowed_property_ids=allowed_ids,
+                allowed_property_names=allowed_names,
+            )
+
+        ok, reasons = _run_validate(reply_text)
+        regeneration_used = False
+        if not ok and regenerate_fn and callable(regenerate_fn):
+            try:
+                stricter = (
+                    "Remove ALL unsupported claims. The previous reply failed verification for: "
+                    + "; ".join(str(r) for r in reasons[:12])
+                    + ". Answer ONLY from the FACTS block. Do not invent amenities, yields, "
+                    "ownership, dates, distances, or property names."
+                )
+                regenerated = regenerate_fn(stricter, reasons)
+                if regenerated:
+                    reply_text = sanitize_listing_line_text(regenerated)
+                    ok, reasons = _run_validate(reply_text)
+                    regeneration_used = True
+            except Exception as e:
+                logger.warning("claim_regen_failed: %s", e)
+
         if ok:
+            log_grounding_metrics(
+                verifier_failed=False,
+                claim_types=[],
+                regeneration_used=regeneration_used,
+                deterministic_fallback=False,
+                session_id=session_id,
+            )
             return reply_text, cards
         logger.warning("reply_validation_failed reasons=%s", reasons)
-        # The cards came from the database; the model's WORDING is what failed (e.g. it rewrote a price).
-        # Retry with the deterministic card text before throwing away valid, verified results.
-        if cards and not any(str(r).startswith("named_property_missing") for r in reasons):
+        claim_types = sorted({str(r).split(":")[0] for r in reasons if r})
+        # Prefer deterministic FACTS/card template (strips invented amenities/yields/names).
+        _no_recover = ("named_property_missing",)
+        if cards and not any(str(r).startswith(_no_recover) for r in reasons):
             try:
                 det_text = build_rich_property_recommendation_text(
                     cards=cards,
@@ -2164,16 +2253,16 @@ class PublicAgentService:
                     site_origin=site_origin,
                 )
                 det_text = sanitize_listing_line_text(det_text or "")
-                det_ok, det_reasons = validate_reply(
-                    reply_text=det_text,
-                    cards=cards,
-                    tool_results=tool_results,
-                    applied_filters=filters,
-                    language=language,
-                    tenant_advisor_email=getattr(tenant, "advisor_email", None),
-                )
+                det_ok, det_reasons = _run_validate(det_text)
                 if det_ok and det_text:
                     logger.info("reply_validation_recovered_with_deterministic_text")
+                    log_grounding_metrics(
+                        verifier_failed=True,
+                        claim_types=claim_types,
+                        regeneration_used=regeneration_used,
+                        deterministic_fallback=True,
+                        session_id=session_id,
+                    )
                     return det_text, cards
                 logger.warning("deterministic_text_validation_failed reasons=%s", det_reasons)
             except Exception as e:  # never let recovery break the reply path
@@ -2187,7 +2276,6 @@ class PublicAgentService:
         name_miss = any(str(r).startswith("named_property_missing:") for r in reasons)
         if name_miss or (asked and any(str(r).startswith("named_property_missing") for r in reasons)):
             from app.services.property_name_index import get_last_name_search_suggestions
-            # Prefer suggestions carried on tool results (survives thread/context switches)
             tips: List[str] = []
             for tr in tool_results or []:
                 res = tr.get("result") if isinstance(tr, dict) else None
@@ -2205,8 +2293,6 @@ class PublicAgentService:
                 asked_name=str(asked) if asked else None,
                 suggestions=tips,
             )
-            # Pending candidates are stored by the caller when conversation is available
-            # (execute_tool / _sync_pending_name_candidates_from_last_search).
         else:
             fallback = build_no_match_reply(
                 language=language,
@@ -2217,6 +2303,13 @@ class PublicAgentService:
             fallback = (
                 f"I could not verify that information. Our advisor can help: {tenant.advisor_email}"
             )
+        log_grounding_metrics(
+            verifier_failed=True,
+            claim_types=claim_types,
+            regeneration_used=regeneration_used,
+            deterministic_fallback=True,
+            session_id=session_id,
+        )
         return fallback, []
 
     def execute_tool(
@@ -3323,7 +3416,7 @@ class PublicAgentService:
             budget_max=budget_dec,
             buying_signal=f"{'Private viewing request' if is_viewing else 'Contact details submitted'}: {c_email or c_phone or c_name}"
             + (f" [{target_label}]" if target_label else ""),
-            notes=f"Client requested viewing/contact: {user_message}"
+            notes=f"Client requested viewing/contact: {user_message}",
         )
 
         if target_label or not pref_loc:
@@ -3593,8 +3686,8 @@ class PublicAgentService:
                 from app.services.intent_router import extract_search_filters_deterministic
                 extracted = extract_search_filters_deterministic(user_message)
                 for k in (
-                    "location", "property_type", "bedrooms", "max_price",
-                    "min_price", "has_pool", "required_amenities", "beach_access",
+                    "location", "property_type", "bedrooms", "min_bedrooms", "max_bedrooms",
+                    "max_price", "min_price", "has_pool", "required_amenities", "beach_access",
                 ):
                     if k in extracted and extracted[k] is not None:
                         overrides[k] = extracted[k]
@@ -3607,6 +3700,12 @@ class PublicAgentService:
         loc = active_filters.get("location") or stored_prefs.get("location")
         p_type = active_filters.get("property_type") or stored_prefs.get("property_type")
         bedrooms = active_filters.get("bedrooms") or stored_prefs.get("bedrooms_num")
+        min_bedrooms = active_filters.get("min_bedrooms")
+        if min_bedrooms is None:
+            min_bedrooms = stored_prefs.get("min_bedrooms")
+        max_bedrooms = active_filters.get("max_bedrooms")
+        if max_bedrooms is None:
+            max_bedrooms = stored_prefs.get("max_bedrooms")
         max_p = Decimal(str(active_filters["max_price"])) if active_filters.get("max_price") else (Decimal(str(stored_prefs["budget_max"])) if stored_prefs.get("budget_max") else None)
         has_pool = active_filters.get("has_pool", stored_prefs.get("has_pool"))
         req_amenities = list(active_filters.get("required_amenities") or [])
@@ -3616,6 +3715,8 @@ class PublicAgentService:
             "location": loc,
             "property_type": p_type,
             "bedrooms": bedrooms,
+            "min_bedrooms": min_bedrooms,
+            "max_bedrooms": max_bedrooms,
             "max_price": float(max_p) if max_p is not None else None,
             "has_pool": has_pool,
             "required_amenities": req_amenities or None,
@@ -3626,6 +3727,10 @@ class PublicAgentService:
             stored_prefs["property_type"] = p_type
         if bedrooms is not None:
             stored_prefs["bedrooms_num"] = bedrooms
+        if min_bedrooms is not None:
+            stored_prefs["min_bedrooms"] = min_bedrooms
+        if max_bedrooms is not None:
+            stored_prefs["max_bedrooms"] = max_bedrooms
         if max_p is not None:
             stored_prefs["budget_max"] = float(max_p)
             stored_prefs["max_price"] = float(max_p)
@@ -3641,6 +3746,8 @@ class PublicAgentService:
             location=loc,
             property_type=p_type,
             bedrooms=bedrooms,
+            min_bedrooms=min_bedrooms,
+            max_bedrooms=max_bedrooms,
             max_price=max_p,
             has_pool=has_pool,
             required_amenities=req_amenities or None,
@@ -3658,6 +3765,8 @@ class PublicAgentService:
                 location="Phuket",
                 property_type=p_type,
                 bedrooms=bedrooms,
+                min_bedrooms=min_bedrooms,
+                max_bedrooms=max_bedrooms,
                 max_price=max_p,
                 has_pool=has_pool,
                 limit=3
@@ -3671,13 +3780,25 @@ class PublicAgentService:
                 )
         # Never run empty-filter or Thailand-wide unfiltered searches as fallback
 
+        def _beds_label_show() -> Optional[str]:
+            if min_bedrooms is not None and max_bedrooms is not None:
+                return f"{min_bedrooms}-{max_bedrooms} bedrooms"
+            if min_bedrooms is not None:
+                return f"{min_bedrooms}+ bedrooms"
+            if max_bedrooms is not None:
+                return f"up to {max_bedrooms} bedrooms"
+            if bedrooms:
+                return f"{bedrooms} bed"
+            return None
+
         criteria_bits = []
         if loc:
             criteria_bits.append(str(loc))
         if p_type:
             criteria_bits.append(str(p_type))
-        if bedrooms:
-            criteria_bits.append(f"{bedrooms} bed")
+        _bl = _beds_label_show()
+        if _bl:
+            criteria_bits.append(_bl)
         if max_p is not None:
             criteria_bits.append(f"budget <= {max_p}")
         criteria_summary = ", ".join(criteria_bits) if criteria_bits else None
@@ -3803,6 +3924,25 @@ class PublicAgentService:
         language: str = "en"
     ) -> Dict[str, Any]:
         """Resolve property reference, then fetch CURRENT authorized facts (never chat memory)."""
+        from app.services.intent_router import (
+            is_valid_property_name_candidate,
+            message_looks_like_filter_search,
+            extract_search_filters_deterministic,
+        )
+
+        # Never name-not-found on stop words ("you", "there anything") — re-route to search
+        _cand = str(args.get("property_name") or args.get("property_id") or "").strip()
+        if _cand and not is_valid_property_name_candidate(_cand):
+            _f = extract_search_filters_deterministic(user_message) or {}
+            if message_looks_like_filter_search(user_message) or any(
+                _f.get(k) is not None
+                for k in ("bedrooms", "min_bedrooms", "max_bedrooms", "property_type",
+                          "max_price", "has_pool", "required_amenities", "location")
+            ):
+                return self._handle_property_search(
+                    db, conversation, user_message, start_time, language=language
+                )
+
         pctx = load_property_context(conversation)
 
         # Prefer explicit args, else resolve from persistent context
@@ -4280,20 +4420,8 @@ class PublicAgentService:
                     f"มี{label}ในข้อมูลที่ตรวจสอบแล้วครับ",
                     f"ในฐานข้อมูลที่ตรวจสอบแล้วยังไม่มีข้อมูลเกี่ยวกับ {label}",
                 )
-            elif (_fact_reply := _listing_fact_reply(focus_q, card, language, conversation, p_owner)) is not None:
-                reply_text = _fact_reply
-            elif any(k in focus_q for k in ["price", "cost", "how much", "cena", "koszt", "ราคา"]) and not any(
-                k in focus_q for k in ["bedroom", "ownership", "status", "sypialn", "własno", "wlasno", "กรรมสิทธิ์"]
-            ):
-                price_out = p_price if p_price not in (None, "", "N/A") else "Not documented in verified database"
-                if language == "th":
-                    reply_text = f"**{p_name}** ราคา: **{price_out}**\n\n• **ทำเล:** {p_loc or 'ไม่ระบุในฐานข้อมูล'}" + (f"\n• **ห้องนอน / พื้นที่:** {_ba}" if _ba else "")
-                elif language == "pl":
-                    reply_text = f"**{p_name}** cena: **{price_out}**\n\n• **Lokalizacja:** {p_loc or 'Brak w bazie'}" + (f"\n• **Sypialnie / Powierzchnia:** {_ba}" if _ba else "")
-                else:
-                    reply_text = f"**{p_name}** verified price: **{price_out}**\n\n• **Location:** {p_loc or 'Not documented in verified database'}" + (f"\n• **Bedrooms / Area:** {_ba}" if _ba else "")
             elif sum(1 for k in ("price", "bedroom", "ownership", "cena", "sypialn", "własno", "wlasno", "ราคา", "ห้องนอน", "กรรมสิทธิ์") if k in focus_q) >= 2:
-                # Multi-fact ask: only emit fields that exist; say not available when missing
+                # Multi-fact ask before single-topic listing_facts (ownership alone would steal the reply)
                 def _field(label_en, label_pl, label_th, value):
                     missing = value in (None, "", "N/A")
                     if language == "th":
@@ -4315,6 +4443,18 @@ class PublicAgentService:
                 if "location" in focus_q or "ทำเล" in focus_q:
                     lines.append(_field("Location", "Lokalizacja", "ทำเล", p_loc))
                 reply_text = "\n".join(lines)
+            elif (_fact_reply := _listing_fact_reply(focus_q, card, language, conversation, p_owner)) is not None:
+                reply_text = _fact_reply
+            elif any(k in focus_q for k in ["price", "cost", "how much", "cena", "koszt", "ราคา"]) and not any(
+                k in focus_q for k in ["bedroom", "ownership", "status", "sypialn", "własno", "wlasno", "กรรมสิทธิ์"]
+            ):
+                price_out = p_price if p_price not in (None, "", "N/A") else "Not documented in verified database"
+                if language == "th":
+                    reply_text = f"**{p_name}** ราคา: **{price_out}**\n\n• **ทำเล:** {p_loc or 'ไม่ระบุในฐานข้อมูล'}\n• **ห้องนอน / พื้นที่:** {p_beds or 'ไม่ระบุในฐานข้อมูล'} | {p_area or 'ไม่ระบุในฐานข้อมูล'}"
+                elif language == "pl":
+                    reply_text = f"**{p_name}** cena: **{price_out}**\n\n• **Lokalizacja:** {p_loc or 'Brak w bazie'}\n• **Sypialnie / Powierzchnia:** {p_beds or 'Brak w bazie'} | {p_area or 'Brak w bazie'}"
+                else:
+                    reply_text = f"**{p_name}** verified price: **{price_out}**\n\n• **Location:** {p_loc or 'Not documented in verified database'}\n• **Bedrooms / Area:** {p_beds or 'Not documented in verified database'} | {p_area or 'Not documented in verified database'}"
             elif language == "th":
                 lines_th = [
                     f"ข้อมูลจำเพาะที่ผ่านการตรวจสอบสำหรับ **{p_name}** ({p_id}):",
@@ -5194,6 +5334,8 @@ class PublicAgentService:
         loc = None
         p_type = None
         bedrooms = None
+        min_bedrooms = None
+        max_bedrooms = None
         max_p = None
         has_pool = None
         beach_access = None
@@ -5236,7 +5378,24 @@ class PublicAgentService:
             else:
                 p_type = extracted.get("property_type") or stored_prefs.get("property_type")
 
-            bedrooms = extracted.get("bedrooms") or stored_prefs.get("bedrooms_num")
+            bedrooms = extracted.get("bedrooms") if "bedrooms" in extracted else stored_prefs.get("bedrooms_num")
+            if extracted.get("min_bedrooms") is not None or extracted.get("max_bedrooms") is not None:
+                # New range replaces prior exact count
+                bedrooms = extracted.get("bedrooms")
+            min_bedrooms = (
+                extracted.get("min_bedrooms")
+                if "min_bedrooms" in extracted
+                else (stored_prefs.get("min_bedrooms") or (stored_prefs.get("active_filters") or {}).get("min_bedrooms"))
+            )
+            max_bedrooms = (
+                extracted.get("max_bedrooms")
+                if "max_bedrooms" in extracted
+                else (stored_prefs.get("max_bedrooms") or (stored_prefs.get("active_filters") or {}).get("max_bedrooms"))
+            )
+            if extracted.get("bedrooms") is not None and "min_bedrooms" not in extracted and "max_bedrooms" not in extracted:
+                # Exact bedroom ask replaces prior min/max
+                min_bedrooms = None
+                max_bedrooms = None
             max_p = Decimal(str(extracted["max_price"])) if extracted.get("max_price") else (Decimal(str(stored_prefs["budget_max"])) if stored_prefs.get("budget_max") else None)
             has_pool = extracted.get("has_pool", stored_prefs.get("has_pool"))
             beach_access = extracted.get("beach_access", stored_prefs.get("beach_access"))
@@ -5250,17 +5409,27 @@ class PublicAgentService:
                 "location": loc,
                 "property_type": p_type,
                 "bedrooms": bedrooms,
+                "min_bedrooms": min_bedrooms,
+                "max_bedrooms": max_bedrooms,
                 "max_price": float(max_p) if max_p else None,
                 "has_pool": has_pool,
                 "beach_access": beach_access,
                 "required_amenities": required_amenities or None,
             }
             stored_prefs["active_filters"] = search_filters
+            if min_bedrooms is not None:
+                stored_prefs["min_bedrooms"] = min_bedrooms
+            if max_bedrooms is not None:
+                stored_prefs["max_bedrooms"] = max_bedrooms
+            if bedrooms is not None:
+                stored_prefs["bedrooms_num"] = bedrooms
             seen_ids = get_session_seen_property_ids(conversation)
             params = PropertyFilterParams(
                 location=loc,
                 property_type=p_type,
                 bedrooms=bedrooms,
+                min_bedrooms=min_bedrooms,
+                max_bedrooms=max_bedrooms,
                 max_price=max_p,
                 has_pool=has_pool,
                 beach_access=beach_access,
@@ -5279,6 +5448,8 @@ class PublicAgentService:
                 extracted.get("location")
                 or extracted.get("property_type")
                 or extracted.get("bedrooms")
+                or extracted.get("min_bedrooms")
+                or extracted.get("max_bedrooms")
                 or extracted.get("max_price")
                 or extracted.get("has_pool")
                 or extracted.get("required_amenities")
@@ -5287,6 +5458,8 @@ class PublicAgentService:
                 fresh_loc = extracted.get("location")
                 fresh_type = extracted.get("property_type")
                 fresh_bed = extracted.get("bedrooms")
+                fresh_min_bed = extracted.get("min_bedrooms")
+                fresh_max_bed = extracted.get("max_bedrooms")
                 fresh_max_p = Decimal(str(extracted["max_price"])) if extracted.get("max_price") else None
                 fresh_pool = extracted.get("has_pool")
                 fresh_am = list(extracted.get("required_amenities") or [])
@@ -5295,6 +5468,8 @@ class PublicAgentService:
                     location=fresh_loc,
                     property_type=fresh_type,
                     bedrooms=fresh_bed,
+                    min_bedrooms=fresh_min_bed,
+                    max_bedrooms=fresh_max_bed,
                     max_price=fresh_max_p,
                     has_pool=fresh_pool,
                     beach_access=extracted.get("beach_access"),
@@ -5307,16 +5482,23 @@ class PublicAgentService:
                 if matched_fresh:
                     cards = matched_fresh
                     loc, p_type, bedrooms, max_p, has_pool = fresh_loc, fresh_type, fresh_bed, fresh_max_p, fresh_pool
+                    min_bedrooms, max_bedrooms = fresh_min_bed, fresh_max_bed
                     required_amenities = fresh_am
                     search_filters = {
                         "location": loc,
                         "property_type": p_type,
                         "bedrooms": bedrooms,
+                        "min_bedrooms": min_bedrooms,
+                        "max_bedrooms": max_bedrooms,
                         "max_price": float(max_p) if max_p else None,
                         "has_pool": has_pool,
                         "required_amenities": required_amenities or None,
                     }
                     stored_prefs["active_filters"] = search_filters
+                    if min_bedrooms is not None:
+                        stored_prefs["min_bedrooms"] = min_bedrooms
+                    if max_bedrooms is not None:
+                        stored_prefs["max_bedrooms"] = max_bedrooms
 
             # Amenity none-match: honest message + labelled alternatives (never fake a gym match)
             if not cards and required_amenities:
@@ -5437,6 +5619,8 @@ class PublicAgentService:
             if len(stored_prefs["last_result_ids"]) == 1:
                 only_id = stored_prefs["last_result_ids"][0]
                 _pctx = set_active_property(_pctx, only_id, reference=names.get(only_id))
+            # Persist filters before context write (save_property_context reads conversation.preferences)
+            conversation.preferences = stored_prefs
             stored_prefs.update(save_property_context(conversation, _pctx))
 
             # Text list must mirror cards (same count + order) — deterministic from card payload
@@ -5517,7 +5701,13 @@ class PublicAgentService:
                     criteria_bits.append(str(loc))
                 if p_type:
                     criteria_bits.append(str(p_type))
-                if bedrooms:
+                if min_bedrooms is not None and max_bedrooms is not None:
+                    criteria_bits.append(f"{min_bedrooms}-{max_bedrooms} bedrooms")
+                elif min_bedrooms is not None:
+                    criteria_bits.append(f"{min_bedrooms}+ bedrooms")
+                elif max_bedrooms is not None:
+                    criteria_bits.append(f"up to {max_bedrooms} bedrooms")
+                elif bedrooms:
                     criteria_bits.append(f"{bedrooms} bed")
                 if max_p is not None:
                     criteria_bits.append(f"budget <= {max_p}")
@@ -5536,7 +5726,13 @@ class PublicAgentService:
                     criteria_bits.append(str(loc))
                 if p_type:
                     criteria_bits.append(str(p_type))
-                if bedrooms:
+                if min_bedrooms is not None and max_bedrooms is not None:
+                    criteria_bits.append(f"{min_bedrooms}-{max_bedrooms} bedrooms")
+                elif min_bedrooms is not None:
+                    criteria_bits.append(f"{min_bedrooms}+ bedrooms")
+                elif max_bedrooms is not None:
+                    criteria_bits.append(f"up to {max_bedrooms} bedrooms")
+                elif bedrooms:
                     criteria_bits.append(f"{bedrooms} bed")
                 if max_p is not None:
                     criteria_bits.append(f"budget <= {max_p}")
@@ -5553,6 +5749,18 @@ class PublicAgentService:
             stored_preferences=stored_prefs,
             tool_args=search_filters
         )
+        # Keep active bedroom range filters in sync for show-more / follow-ups
+        if isinstance(search_filters, dict):
+            af = dict(updated_prefs.get("active_filters") or search_filters)
+            for k in ("min_bedrooms", "max_bedrooms", "bedrooms", "location", "property_type",
+                      "max_price", "has_pool", "beach_access", "required_amenities"):
+                if search_filters.get(k) is not None:
+                    af[k] = search_filters[k]
+            updated_prefs["active_filters"] = af
+            if search_filters.get("min_bedrooms") is not None:
+                updated_prefs["min_bedrooms"] = search_filters["min_bedrooms"]
+            if search_filters.get("max_bedrooms") is not None:
+                updated_prefs["max_bedrooms"] = search_filters["max_bedrooms"]
 
         reply_text = ensure_structured_response(reply_text, cards=cards, user_message=user_message, language=language)
         reply_text = ThaiPropertyLegalGuardrail.sanitize_response(
@@ -5565,7 +5773,13 @@ class PublicAgentService:
             criteria_bits.append(str(loc))
         if p_type:
             criteria_bits.append(str(p_type))
-        if bedrooms:
+        if min_bedrooms is not None and max_bedrooms is not None:
+            criteria_bits.append(f"{min_bedrooms}-{max_bedrooms} bedrooms")
+        elif min_bedrooms is not None:
+            criteria_bits.append(f"{min_bedrooms}+ bedrooms")
+        elif max_bedrooms is not None:
+            criteria_bits.append(f"up to {max_bedrooms} bedrooms")
+        elif bedrooms:
             criteria_bits.append(f"{bedrooms} bed")
         if max_p is not None:
             criteria_bits.append(f"budget <= {max_p}")
@@ -5584,6 +5798,7 @@ class PublicAgentService:
             updated_prefs = dict(updated_prefs or {})
             updated_prefs.update(conversation.preferences or {})
 
+        conversation.preferences = updated_prefs
         append_conversation_turn(
             db=db,
             conversation=conversation,
@@ -5906,30 +6121,41 @@ class PublicAgentService:
         language: str = "en"
     ) -> Dict[str, Any]:
         """Calls OpenAI with structured tools and persists multi-turn context."""
-        messages = [{"role": "system", "content": get_public_system_prompt(language, site_origin=conversation.site_origin)}]
-
-        # Compact long-conversation packing: persistent property IDs + rolling summary + recent window
-        history = conversation.message_history or []
+        # Prefetch active listing FACTS when we already have an active property in session
         pctx = load_property_context(conversation)
-        messages.append({
-            "role": "system",
-            "content": assemble_llm_context_block(pctx, history),
-        })
-        recent_n = int(getattr(settings, "PROPERTY_CONTEXT_RECENT_MESSAGES", 20) or 20)
-        for h in history[-(recent_n * 2):]:
-            messages.append({"role": h["role"], "content": h["content"]})
+        active_card = None
+        if pctx.active_property_id:
+            try:
+                _obj, active_card, _src = fetch_authorized_property(db, pctx.active_property_id)
+            except Exception:
+                active_card = None
+        facts_block = build_facts_block(
+            cards=None,
+            active_card=active_card if isinstance(active_card, dict) else None,
+            language=language,
+        )
+        messages = build_grounded_llm_messages(
+            system_prompt=get_public_system_prompt(language, site_origin=conversation.site_origin),
+            conversation=conversation,
+            user_message=user_message,
+            language=language,
+            facts_block=facts_block,
+        )
 
-        messages.append({"role": "user", "content": user_message})
+        force_tools = is_factual_listing_query(raw_user_message or user_message)
+        call_temp = factual_temperature() if force_tools else min(float(self.temperature or 0.2), 0.2)
 
         try:
-            response = _safe_openai_create(
-                self.client,
-                model=self.model,
-                messages=messages,
-                tools=PUBLIC_TOOLS,
-                temperature=self.temperature,
-                max_tokens=800
-            )
+            create_kwargs: Dict[str, Any] = {
+                "model": self.model,
+                "messages": messages,
+                "tools": PUBLIC_TOOLS,
+                "temperature": call_temp,
+                "max_tokens": 800,
+            }
+            if force_tools:
+                create_kwargs["tool_choice"] = "required"
+            response = _safe_openai_create(self.client, **create_kwargs)
 
             resp_msg = response.choices[0].message
             tool_calls = resp_msg.tool_calls
@@ -6041,12 +6267,25 @@ class PublicAgentService:
                             )
                         messages_for_second = None
                 if messages_for_second is not None:
+                    # Refresh FACTS from this-turn tool cards before the final answer
+                    turn_facts = build_facts_block(
+                        all_cards,
+                        active_card=all_cards[0] if len(all_cards) == 1 else (
+                            active_card if isinstance(active_card, dict) else None
+                        ),
+                        language=language,
+                    )
+                    messages_for_second = list(messages_for_second)
+                    messages_for_second.insert(
+                        1,
+                        {"role": "system", "content": turn_facts},
+                    )
                     second_resp = _safe_openai_create(
                         self.client,
                         model=self.model,
                         messages=messages_for_second,
-                        temperature=self.temperature,
-                        max_tokens=800
+                        temperature=factual_temperature(),
+                        max_tokens=800,
                     )
                     final_text = second_resp.choices[0].message.content or ""
                     if not final_text and all_cards:
@@ -6112,6 +6351,34 @@ class PublicAgentService:
                 updated_prefs.update(save_property_context(conversation, _pctx))
 
             final_text = _professionalize_chat_text(final_text)
+            turn_facts_final = build_facts_block(
+                all_cards,
+                active_card=all_cards[0] if len(all_cards) == 1 else None,
+                language=language,
+            )
+
+            def _regen_once(strict_instruction: str, _reasons: List[str]) -> str:
+                if not self.client:
+                    return ""
+                regen_msgs = build_grounded_llm_messages(
+                    system_prompt=get_public_system_prompt(
+                        language, site_origin=conversation.site_origin
+                    ),
+                    conversation=conversation,
+                    user_message=raw_user_message or user_message,
+                    language=language,
+                    facts_block=turn_facts_final,
+                )
+                regen_msgs.append({"role": "user", "content": strict_instruction})
+                regen_resp = _safe_openai_create(
+                    self.client,
+                    model=self.model,
+                    messages=regen_msgs,
+                    temperature=0.0,
+                    max_tokens=800,
+                )
+                return (regen_resp.choices[0].message.content or "") if regen_resp else ""
+
             final_text, all_cards = self._validate_or_fallback(
                 final_text,
                 all_cards,
@@ -6120,6 +6387,9 @@ class PublicAgentService:
                 applied_filters=search_args if isinstance(search_args, dict) else {},
                 tool_results=logged_tool_results,
                 criteria_summary=(raw_user_message or user_message or "")[:120] or None,
+                facts_text=turn_facts_final,
+                regenerate_fn=_regen_once,
+                session_id=getattr(conversation, "session_id", None),
             )
             if not all_cards:
                 resp_type = "text"
