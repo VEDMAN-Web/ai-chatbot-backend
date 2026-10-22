@@ -3,6 +3,7 @@ import uuid
 import re
 import json
 import logging
+from datetime import datetime
 from decimal import Decimal
 from typing import Dict, Any, List, Optional, Tuple
 from sqlalchemy.orm import Session
@@ -13,14 +14,13 @@ from app.services.property_search import (
     PropertyFilterParams, search_properties_safe, get_property_by_id, get_property_by_name,
     to_compact_projection, get_properties_by_ids
 )
-from app.services.lead_service import record_or_update_lead
+from app.services.lead_service import record_or_update_lead, enqueue_lead_save
 from app.services.conversation_service import append_conversation_turn
 from app.services.maps_service import (
     build_google_maps_url,
     build_google_maps_embed_url,
     get_property_proximity_landmarks
 )
-from app.services.google_services import google_manager
 from app.services.intent_router import (
     IntentType, detect_deterministic_intent, extract_search_filters_deterministic, detect_price_sort
 )
@@ -29,10 +29,12 @@ from app.services.token_tracker import token_tracker, TurnTokenMetrics
 from app.services.i18n_service import (
     resolve_language, get_compact_system_prompt, get_public_system_prompt,
     get_language_switch_confirmation, get_greeting_text, get_off_topic_text,
+    get_thailand_only_foreign_reply,
     get_zero_match_text, get_quick_replies, get_data_unavailable_fallback,
     build_no_match_reply, build_name_not_found_reply, build_seen_all_reply, build_amenity_none_match_reply, get_brochure_unavailable_text,
     build_consultative_followup_questions, build_encouraging_alternative_intro,
-    build_rich_property_recommendation_text
+    build_rich_property_recommendation_text,
+    get_cannot_email_or_calendar_text,
 )
 from app.services.reply_validator import validate_reply
 from app.core.tenant import resolve_tenant as _resolve_tenant_for_validation
@@ -89,7 +91,7 @@ CORE INSTRUCTIONS & TONE:
 4. MISSING DATA: If production data does not contain the answer, use the official EN/PL/TH fallback — NEVER guess or invent listings.
 5. ROI & LEGAL DISCLAIMERS: Rental yields vary and cannot be legally guaranteed; only quote verified developer projections if documented. Always advise consulting a qualified Thai attorney for formal legal due diligence.
 6. BROCHURE & PDF DOWNLOADS: When a visitor asks for a brochure, PDF, factsheet, floor plan, or project document, call the `generate_property_brochure` tool with the property ID. The system will automatically render the luxury brochure PDF and initiate the download for the visitor.
-7. LEAD CAPTURE & VIEWING APPOINTMENTS: When a visitor provides contact details (email, phone, name), asks for a callback, or wants to schedule a viewing or consultation, call `capture_lead` or `schedule_viewing` immediately.
+7. LEAD CAPTURE & VIEWING REQUESTS: When a visitor provides contact details (email, phone, name) or asks for a callback, call `capture_lead`. When they ask to schedule a viewing or tour, call `schedule_viewing` (request only - it records the request for the advisory team; it does NOT book a calendar or send email). If a visitor asks for a brochure by email, explain that we cannot send emails from the chat, point them to the PDF brochure download button / link on the property card, and offer to record their email via `capture_lead` so the advisory team can send it. Never claim that an email was sent or a calendar event was created.
 8. DOMAIN REFUSAL: For off-topic or foreign real estate queries (outside Thailand), politely state that you specialize exclusively in Thailand luxury property and invite inquiries on Thailand listings.
 9. CLEAN PROFESSIONAL FORMATTING: Do NOT use ChatGPT-style long em-dashes ("—" or "–"). Use clean standard punctuation: colons, bullet points ("•"), standard hyphens ("-"), or separate sentences. Make information point-to-point and easy to read.
 """
@@ -228,7 +230,7 @@ PUBLIC_TOOLS = [
         "type": "function",
         "function": {
             "name": "schedule_viewing",
-            "description": "Schedules a property viewing appointment or consultation tour on Google Calendar, records lead info, and returns a 1-click Google Calendar add link.",
+            "description": "Records a property viewing REQUEST for the advisory team (property, preferred date/time, name, email, phone, notes). Does NOT create a calendar event or send email. Use when the visitor asks to visit or tour a property.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -247,22 +249,6 @@ PUBLIC_TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "send_property_brochure",
-            "description": "Sends verified property specifications, floor plans, and investment summary to the customer's email address via Gmail.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "property_id": {"type": "string", "description": "Property ID or slug (e.g. '15-sukhumvit-residences')"},
-                    "recipient_email": {"type": "string", "description": "Customer's destination email address"},
-                    "customer_name": {"type": "string", "description": "Customer's name"}
-                },
-                "required": ["property_id", "recipient_email"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "get_property_location",
             "description": "Retrieves exact GPS coordinates, Google Maps navigation links, embed preview, and proximity distances to beaches, airports, and marinas.",
             "parameters": {
@@ -275,6 +261,28 @@ PUBLIC_TOOLS = [
         }
     }
 ]
+
+def _build_add_to_calendar_url(
+    *,
+    title: str,
+    description: str = "",
+    location: str = "",
+) -> str:
+    """Client-side 'Add to Google Calendar' link only — no Gmail/Calendar/Drive API."""
+    import urllib.parse
+    from datetime import datetime, timedelta, timezone
+
+    start = datetime.now(timezone.utc) + timedelta(days=1)
+    end = start + timedelta(hours=1)
+    params = {
+        "action": "TEMPLATE",
+        "text": title,
+        "dates": f"{start.strftime('%Y%m%dT%H%M%SZ')}/{end.strftime('%Y%m%dT%H%M%SZ')}",
+        "details": description or "Property viewing",
+        "location": location or "Thailand",
+    }
+    return f"https://calendar.google.com/calendar/render?{urllib.parse.urlencode(params)}"
+
 
 def format_property_card(p: Property) -> Dict[str, Any]:
     """Formats a Property ORM object into the frontend-expected card structure with Maps and Calendar integration."""
@@ -327,12 +335,14 @@ def format_property_card(p: Property) -> Dict[str, Any]:
     elif ".xx" in str(clean_price):
         clean_price = "Price on request"
 
-    # Google Calendar 1-Click Link
-    cal_url = google_manager.generate_google_calendar_url(
+    # Client-side "Add to Calendar" link only (no Google Workspace API)
+    cal_url = _build_add_to_calendar_url(
         title=f"Viewing: {p.property_name} ({p.property_id})",
-        start_time="",
-        description=f"Property viewing appointment for {p.property_name} in {loc_display}. Ref: {p.property_id}. Price: {clean_price}.",
-        location=f"{p.property_name}, {loc_display}, Thailand"
+        description=(
+            f"Property viewing appointment for {p.property_name} in {loc_display}. "
+            f"Ref: {p.property_id}. Price: {clean_price}."
+        ),
+        location=f"{p.property_name}, {loc_display}, Thailand",
     )
 
     card = {
@@ -358,13 +368,34 @@ def format_property_card(p: Property) -> Dict[str, Any]:
         "beach_access": bool(p.beach_access),
         "images": img_urls,
         "detail_page_url": p.detail_page_url or settings.get_property_detail_url(p.property_id, country=p.province, city=p.district),
-        "highlights": list(p.highlights or [])[:3],
+        "highlights": list(p.highlights or [])[:8],
         "amenities": list(getattr(p, "amenities", None) or []),
         "description": getattr(p, "description", None) or "",
     }
+    # Completion / handover date from ORM or metadata
+    _meta = getattr(p, "raw_metadata", None)
+    completion_raw = (
+        getattr(p, "completion_date", None)
+        or getattr(p, "completion", None)
+        or (_meta.get("completionDate") if isinstance(_meta, dict) else None)
+        or (_meta.get("completion_date") if isinstance(_meta, dict) else None)
+    )
+    if completion_raw:
+        card["completion_date"] = str(completion_raw)
+        stale = format_stale_completion_note(str(completion_raw), language="en")
+        if stale:
+            card["completion_note"] = stale
+            card["status_note"] = stale
     try:
         from app.services.amenity_service import enrich_card_amenity_flags
+        from app.services.listing_presentation import apply_presentation_to_card, clean_highlights_for_display
         enrich_card_amenity_flags(card)
+        apply_presentation_to_card(card, language="en")
+        # Single amenity helper path + chip dedupe
+        card["highlights"] = clean_highlights_for_display(
+            card.get("highlights") or [], prop=card, language="en", max_items=5
+        )
+        card["amenity_chips"] = list(card["highlights"])
     except Exception:
         pass
     return card
@@ -876,6 +907,9 @@ def extract_explicit_property_token(
         # Exact name passed as property_name when message also names it
         if key == "property_name" and len(val) >= 3 and val.lower() in msg.lower():
             return val
+        # Named-fact questions pass the human name as property_id too
+        if args.get("named_fact") and len(val) >= 3 and val.lower() in msg.lower():
+            return val
     return None
 
 
@@ -1270,6 +1304,189 @@ def extract_user_preferences(
     return prefs
 
 
+def message_asks_email_or_calendar_action(message: str) -> bool:
+    """
+    True when the visitor asks the bot to email them something or add an event
+    to their calendar (actions the public chat cannot perform).
+    """
+    msg = (message or "").strip().lower()
+    if not msg:
+        return False
+    email_ask = bool(re.search(
+        r"(?:\bemail\s+me\b|\bsend\s+(?:me\s+)?(?:the\s+)?(?:brochure|pdf|details|info|information|documents?)\b.{0,40}\b(?:email|e-?mail)\b|"
+        r"\bsend\s+(?:me\s+)?(?:an?\s+)?(?:email|e-?mail)\b|\be-?mail\s+(?:me\s+)?(?:the\s+)?(?:brochure|pdf)\b|"
+        r"\bwyślij\s+(?:mi\s+)?(?:broszur|pdf|e-?mail)|"
+        r"\bprześlij\s+(?:mi\s+)?(?:broszur|pdf)|"
+        r"ส่ง.{0,30}(?:อีเมล|อีเมล์|email)|"
+        r"(?:โบรชัวร์|เอกสาร).{0,30}(?:อีเมล|อีเมล์|email))",
+        msg,
+        re.IGNORECASE,
+    ))
+    calendar_ask = bool(re.search(
+        r"(?:\badd\s+(?:this|it|the)?\s*(?:viewing|event|appointment)?\s*(?:to\s+)?(?:my\s+)?calendar\b|"
+        r"\bput\s+(?:this|it|the\s+viewing)?\s+on\s+(?:my\s+)?calendar\b|"
+        r"\bcreate\s+(?:a\s+)?calendar\s+event\b|"
+        r"\bdodaj\s+(?:do\s+)?(?:mojego\s+)?kalendarz|"
+        r"เพิ่ม.{0,20}ปฏิทิน|ใส่.{0,20}ปฏิทิน)",
+        msg,
+        re.IGNORECASE,
+    ))
+    return email_ask or calendar_ask
+
+
+def looks_like_prompt_injection(message: str) -> bool:
+    """True when the message tries to override system behaviour (not a visitor contact share)."""
+    m = (message or "").strip().lower()
+    if not m:
+        return False
+    # Legitimate property Q&A must not be blocked
+    if re.search(
+        r"\b(?:instructions?\s+for\s+(?:how\s+to\s+)?buy|how\s+to\s+buy|buying\s+process|"
+        r"instrukcj\w*\s+(?:zakupu|kupna)|วิธีซื้อ)\b",
+        m,
+    ):
+        return False
+    markers = (
+        "ignore all previous",
+        "ignore previous instructions",
+        "disregard all previous",
+        "disregard previous instructions",
+        "disregard the above",
+        "forget all previous",
+        "email all clients",
+        "send all clients",
+        "override the system",
+        "you are now dan",
+        "jailbreak",
+        "repeat the text above",
+        "zignoruj poprzednie",
+        "zignoruj wszystkie poprzednie",
+        "pokaż swój prompt",
+        "pokaz swoj prompt",
+        "prompt systemowy",
+        "เพิกเฉยคำสั่งก่อนหน้า",
+        "เพิกเฉยคำสั่งทั้งหมด",
+    )
+    if any(x in m for x in markers):
+        return True
+    # Reveal / print / show / repeat system prompt, hidden rules, secrets
+    if re.search(
+        r"(?:show\s+me|reveal|print|repeat|dump|give\s+me|output|display|"
+        r"pokaż|pokaz|พิมพ์|แสดง|เปิดเผย)\s+"
+        r"(?:your\s+|the\s+|swo(?:j|ój|ich)\s+|ของคุณ\s*)?"
+        r"(?:system\s+)?(?:prompt|instructions?|hidden\s+rules?|text\s+above|"
+        r"api\s*key|secret|token|password|credentials?)",
+        m,
+    ):
+        return True
+    if re.search(
+        r"(?:api\s*key|secret\s+key|access\s+token|password)\b.{0,20}\b(?:print|show|reveal|dump)\b|"
+        r"\b(?:print|show|reveal|dump)\b.{0,30}\b(?:api\s*key|secret|token|password)\b",
+        m,
+    ):
+        return True
+    if "system prompt" in m and re.search(r"\b(?:your|my|the|show|print|reveal|พิมพ์)\b", m):
+        return True
+    return False
+
+
+_API_KEY_LEAK_RE = re.compile(
+    r"(?:sk-[A-Za-z0-9]{10,}|AIza[0-9A-Za-z\-_]{20,}|"
+    r"-----BEGIN\s+(?:RSA\s+)?PRIVATE\s+KEY-----|"
+    r"-----BEGIN\s+OPENSSH\s+PRIVATE\s+KEY-----)",
+    re.IGNORECASE,
+)
+
+
+def redact_sensitive_output(text: str) -> str:
+    """Replace leaked API keys / private-key blocks in assistant text."""
+    if not text or not isinstance(text, str):
+        return text
+    out = _API_KEY_LEAK_RE.sub("[redacted]", text)
+    # Collapse multi-line private key remnants
+    out = re.sub(
+        r"-----BEGIN[^-]+-----.*?-----END[^-]+-----",
+        "[redacted]",
+        out,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    return out
+
+
+def format_stale_completion_note(
+    completion_raw: Optional[str],
+    *,
+    language: str = "en",
+    now: Optional[datetime] = None,
+) -> Optional[str]:
+    """
+    If a planned completion date (e.g. 'Q4 2025') is in the past, return an honest note.
+    """
+    from datetime import datetime as _dt, timezone as _tz
+
+    raw = (completion_raw or "").strip()
+    if not raw:
+        return None
+    ref = now or _dt.now(_tz.utc)
+    end: Optional[_dt] = None
+    qm = re.search(r"\bQ([1-4])\s*[/\-]?\s*(20\d{2})\b", raw, re.I)
+    if qm:
+        q, year = int(qm.group(1)), int(qm.group(2))
+        month = q * 3
+        # End of quarter
+        day = 28 if month == 2 else 30 if month in (4, 6, 9, 11) else 31
+        try:
+            end = _dt(year, month, min(day, 28 if month == 2 else day), tzinfo=_tz.utc)
+        except ValueError:
+            end = _dt(year, month, 28, tzinfo=_tz.utc)
+    else:
+        ym = re.search(r"\b(20\d{2})\b", raw)
+        if ym and re.search(r"(?:complet|ready|handover|planned|q[1-4])", raw, re.I):
+            try:
+                end = _dt(int(ym.group(1)), 12, 31, tzinfo=_tz.utc)
+            except ValueError:
+                end = None
+    if end is None or end >= ref:
+        return None
+    if language == "th":
+        return (
+            f"วันที่แล้วเสร็จที่ระบุ ({raw}) ผ่านมาแล้ว — "
+            "โปรดยืนยันสถานะล่าสุดกับทีมที่ปรึกษา"
+        )
+    if language == "pl":
+        return (
+            f"Podana data ukończenia ({raw}) już minęła — "
+            "potwierdź aktualny status z zespołem doradców"
+        )
+    return (
+        f"The stated completion date ({raw}) has passed — "
+        "please confirm the current status with our advisory team"
+    )
+
+
+def _bedroom_configs_from_description(description: Optional[str]) -> Optional[str]:
+    """Pull bedroom configuration phrases from verified description text."""
+    if not description:
+        return None
+    m = re.search(
+        r"(\d+\s*[–\-]\s*\d+\s*bedrooms?|\d+\s*,\s*\d+(?:\s*,\s*\d+)*\s*(?:and\s+)?\d*\s*bedroom\s+configurations?|"
+        r"(?:available|offered|units?)\s+in\s+\d+[^\n.]{0,40}bedroom)",
+        description,
+        re.I,
+    )
+    if m:
+        return m.group(0).strip(" .,")
+    m2 = re.search(r"\b(\d+\s*[–\-to]+\s*\d+)\s*bedrooms?\b", description, re.I)
+    return m2.group(0).strip() if m2 else None
+
+
+def extract_contact_email_from_message(message: str) -> Optional[str]:
+    if looks_like_prompt_injection(message):
+        return None
+    m = re.search(r"[\w.+-]+@[\w.-]+\.\w+", message or "")
+    return m.group(0) if m else None
+
+
 def is_greeting_or_chit_chat(message: str) -> bool:
     """
     Detects whether a user's message is a greeting, polite pleasantry, or conversational remark
@@ -1295,7 +1512,8 @@ def is_greeting_or_chit_chat(message: str) -> bool:
         "co tam", "co słychać", "co slychac", "thank you very much", "many thanks", "hello there",
         "good day", "morning", "evening", "nice to meet you",
         "สวัสดี", "สวัสดีครับ", "สวัสดีค่ะ", "ดีครับ", "ดีค่ะ", "หวัดดี", "ขอบคุณ", "ขอบคุณครับ",
-        "ขอบคุณค่ะ", "แต๊งกิ้ว", "คุณคือใคร", "ทำอะไรได้บ้าง", "ช่วยอะไรได้บ้าง", "ช่วยด้วย", "ช่วยหน่อย"
+        "ขอบคุณค่ะ", "แต๊งกิ้ว", "คุณคือใคร", "ทำอะไรได้บ้าง", "ช่วยอะไรได้บ้าง", "ช่วยด้วย", "ช่วยหน่อย",
+        "สบายดีไหม", "เป็นไงบ้าง", "อย่างไรบ้าง",
     }
     if clean in standalone_greetings:
         return True
@@ -1840,6 +2058,14 @@ def _listing_fact_reply(focus_q: str, card: Any, language: str, conversation: An
     try:
         if not isinstance(card, dict):
             return None
+        # A question that asks for several basic facts at once ("price, bedrooms and ownership") needs the
+        # full fact block, not a single-topic answer that silently drops the other parts.
+        _multi = sum(bool(re.search(pat, focus_q or "", re.I)) for pat in (
+            r"\bprice|\bcost|\bcena", r"\bbed(?:room)?s?\b|sypial", r"\bownership|free-?hold|własno",
+            r"\barea\b|\bsize\b|\bsqm\b", r"\blocation\b|lokalizac",
+        ))
+        if _multi >= 3:
+            return None
         from app.core.tenant import resolve_tenant
         from app.services.listing_facts import answer_listing_fact
         advisor = resolve_tenant(getattr(conversation, "site_origin", None)).advisor_email
@@ -2113,7 +2339,7 @@ class PublicAgentService:
                 stored = dict(conversation.preferences or {})
                 stored.update(new_prefs)
                 conversation.preferences = stored
-                record_or_update_lead(
+                enqueue_lead_save(
                     db=db,
                     conversation=conversation,
                     preferred_location=new_prefs.get("location"),
@@ -2221,7 +2447,7 @@ class PublicAgentService:
             if prop:
                 card = format_property_card(prop)
                 matched_cards = [card]
-                record_or_update_lead(
+                enqueue_lead_save(
                     db=db,
                     conversation=conversation,
                     buying_signal=f"Requested details for {prop.property_id} ({prop.property_name})"
@@ -2311,7 +2537,7 @@ class PublicAgentService:
                 from app.core.tenant import resolve_tenant
                 tenant = resolve_tenant(conversation.site_origin)
                 card = format_property_card(prop)
-                record_or_update_lead(
+                enqueue_lead_save(
                     db=db,
                     conversation=conversation,
                     preferred_location=f"{prop.district}, {prop.province}" if prop.district else prop.province,
@@ -2367,7 +2593,7 @@ class PublicAgentService:
             name = args.get("name")
             email = args.get("email")
             phone = args.get("phone")
-            record_or_update_lead(
+            enqueue_lead_save(
                 db=db,
                 conversation=conversation,
                 contact_name=name,
@@ -2389,88 +2615,66 @@ class PublicAgentService:
             }, [], True
 
         elif tool_name == "schedule_viewing":
+            # Public path: record viewing REQUEST as a lead only.
+            # Never create calendar events or send confirmation emails.
+            from app.services.i18n_service import get_viewing_request_recorded_text
+
             pid = args.get("property_id")
             prop = get_property_by_id(db, pid) if pid else None
             p_name = prop.property_name if prop else (pid or "Thailand Property")
-            
-            p_date = args.get("preferred_date", "2026-10-01")
-            p_time = args.get("preferred_time", "14:00")
-            start_iso = f"{p_date}T{p_time}:00Z"
-            
-            cal_res = google_manager.create_calendar_event(
-                title=f"Viewing: {p_name}",
-                start_time=start_iso,
-                attendees=[args.get("customer_email")] if args.get("customer_email") else [],
-                description=f"Property viewing appointment for {p_name} ({pid}). Notes: {args.get('notes', 'None')}",
-                related_property=p_name,
-                location=prop.district if prop else "Thailand"
+            p_date = args.get("preferred_date") or "the requested date"
+            p_time = args.get("preferred_time") or "the requested time"
+            visitor_notes = (args.get("notes") or "").strip()
+            lead_notes = (
+                f"Viewing request for {p_name} ({pid}) on {p_date} at {p_time}."
+                + (f" Notes: {visitor_notes}" if visitor_notes else "")
             )
-            
-            record_or_update_lead(
+            enqueue_lead_save(
                 db=db,
                 conversation=conversation,
                 contact_name=args.get("customer_name"),
                 contact_email=args.get("customer_email"),
                 contact_phone=args.get("customer_phone"),
-                notes=f"Viewing scheduled for {p_name} on {p_date} at {p_time}. {args.get('notes', '')}",
-                buying_signal=f"Booked viewing for {pid} on {p_date}"
+                notes=lead_notes,
+                buying_signal=f"Viewing request for {pid} on {p_date} at {p_time}",
             )
-            
-            if args.get("customer_email"):
-                google_manager.send_email(
-                    to=args["customer_email"],
-                    subject=f"Tajlandia.com Viewing Confirmation: {p_name}",
-                    body=f"Dear {args.get('customer_name') or 'Valued Client'},\n\nYour viewing appointment for {p_name} has been confirmed for {p_date} at {p_time}.\n\nAdd to your Google Calendar: {cal_res.get('google_calendar_url')}\n\nOur local property consultant will greet you.\n\nWarm regards,\nTajlandia.com Luxury Real Estate Team"
-                )
-            
+            lang = "en"
+            try:
+                lang = (conversation.preferences or {}).get("language") or "en"
+            except Exception:
+                lang = "en"
+            reply = get_viewing_request_recorded_text(
+                language=lang,
+                property_label=p_name,
+                preferred_date=str(p_date),
+                preferred_time=str(p_time),
+            )
             matched_cards = [format_property_card(prop)] if prop else []
             return {
                 "status": "success",
-                "appointment_confirmed": True,
+                "appointment_confirmed": False,
+                "viewing_request_recorded": True,
                 "property": p_name,
                 "date": p_date,
                 "time": p_time,
-                "google_calendar_url": cal_res.get("google_calendar_url"),
-                "event_id": cal_res.get("event_id"),
-                "message": f"Viewing confirmed for {p_name} on {p_date} at {p_time}! You can add it to your Google Calendar with one click."
+                "message": reply,
             }, matched_cards, True
 
         elif tool_name == "send_property_brochure":
-            pid = args.get("property_id")
-            prop = get_property_by_id(db, pid) if pid else None
-            p_name = prop.property_name if prop else (pid or "Thailand Property")
-            to_email = args.get("recipient_email")
-            
-            email_body = (
-                f"Hello {args.get('customer_name') or 'Valued Client'},\n\n"
-                f"Thank you for your interest in {p_name} ({pid}).\n\n"
-                f"Location: {prop.district or ''}, {prop.province or 'Thailand' if prop else 'Thailand'}\n"
-                f"Price: {prop.price_display if prop else 'On Request'}\n"
-                f"Bedrooms: {prop.bedrooms_display if prop else 'N/A'}\n"
-                f"Area: {prop.area_display if prop else 'N/A'}\n\n"
-                f"View verified listing & photos online: {prop.detail_page_url if prop else settings.BASE_WEBSITE_URL}\n\n"
-                f"Warm regards,\n{settings.BRAND_NAME} Client Advisory Team"
-            )
-            email_res = google_manager.send_email(
-                to=to_email,
-                subject=f"{settings.BRAND_NAME} Property Brochure: {p_name}",
-                body=email_body
-            )
-            record_or_update_lead(
-                db=db,
-                conversation=conversation,
-                contact_name=args.get("customer_name"),
-                contact_email=to_email,
-                buying_signal=f"Requested brochure for {pid}"
-            )
-            matched_cards = [format_property_card(prop)] if prop else []
+            # Tool removed from PUBLIC_TOOLS; refuse silently if a stale model still emits it.
+            from app.services.i18n_service import get_brochure_email_not_available_text
+            lang = "en"
+            try:
+                lang = (conversation.preferences or {}).get("language") or "en"
+            except Exception:
+                lang = "en"
             return {
-                "status": "success",
-                "sent_to": to_email,
-                "property": p_name,
-                "message_id": email_res.get("message_id"),
-                "message": f"Property brochure and investment specifications for {p_name} have been emailed to {to_email} via Gmail."
-            }, matched_cards, True
+                "status": "unavailable",
+                "message": get_brochure_email_not_available_text(
+                    language=lang,
+                    site_origin=getattr(conversation, "site_origin", None),
+                ),
+            }, [], False
 
         elif tool_name == "get_property_location":
             pid = args.get("property_id")
@@ -2510,7 +2714,11 @@ class PublicAgentService:
                     response_text=resp["text"],
                     language=lang
                 )
-            resp["text"] = _professionalize_chat_text(clean_response_text(resp["text"]))
+            resp["text"] = redact_sensitive_output(
+                _professionalize_chat_text(clean_response_text(resp["text"]))
+            )
+            # Never leave literal None in visitor-facing text
+            resp["text"] = re.sub(r"\bNone\b", "not listed in our verified data", resp["text"])
         if "preferences" in resp and isinstance(resp["preferences"], dict):
             focus = resp["preferences"].get("focus_summary")
             if focus and isinstance(focus, str):
@@ -2646,6 +2854,52 @@ class PublicAgentService:
                 db=db
             )
             return res
+
+        # 1a. Prompt-injection / jailbreak: refuse, send nothing, do not capture attack emails
+        if looks_like_prompt_injection(user_message):
+            reply_text = get_off_topic_text(
+                active_lang,
+                site_origin=conversation.site_origin,
+                user_message=user_message,
+            )
+            append_conversation_turn(
+                db=db,
+                conversation=conversation,
+                user_message=user_message,
+                assistant_message=reply_text,
+            )
+            token_tracker.log_turn(
+                TurnTokenMetrics(
+                    request_id=f"req_{uuid.uuid4().hex[:8]}",
+                    session_id=conversation.session_id,
+                    conversation_id=str(conversation.id),
+                    intent="prompt_injection_refused",
+                    model="deterministic",
+                    latency_sec=round(time.time() - start_time, 3),
+                ),
+                db=db,
+            )
+            return {
+                "type": "text",
+                "text": reply_text,
+                "properties": [],
+                "quick_replies": self._generate_quick_replies(user_message, [], language=active_lang),
+                "lead_captured": False,
+                "preferences": conversation.preferences or {},
+                "session_id": conversation.session_id,
+                "conversation_id": str(conversation.id),
+                "language": active_lang,
+            }
+
+        # 1b. Visitor asks bot to email / add calendar — honest refusal (no Gmail / no Calendar)
+        if message_asks_email_or_calendar_action(user_message):
+            return self._handle_cannot_email_or_calendar(
+                db=db,
+                conversation=conversation,
+                user_message=user_message,
+                start_time=start_time,
+                language=active_lang,
+            )
 
         # 2. Load persistent property context (DB-backed via preferences)
         pctx = load_property_context(conversation)
@@ -3043,7 +3297,23 @@ class PublicAgentService:
         wants_specs = bool(args.get("wants_specs"))
         target_label = self._resolve_lead_target_label(args.get("target_ref"))
 
-        lead = record_or_update_lead(
+        # Fast in-session upsert for lead_id in the reply; durable SQL is backgrounded.
+        try:
+            lead = record_or_update_lead(
+                db=None,
+                conversation=conversation,
+                contact_name=c_name,
+                contact_email=c_email,
+                contact_phone=c_phone,
+                preferred_location=pref_loc,
+                budget_max=budget_dec,
+                buying_signal=f"{'Private viewing request' if is_viewing else 'Contact details submitted'}: {c_email or c_phone or c_name}",
+                notes=f"Client requested viewing/contact: {user_message}",
+            )
+        except Exception as le:
+            logger.warning("Lead capture in-session save failed: %s", le)
+            lead = type("TmpLead", (), {"id": "lead_pending"})()
+        enqueue_lead_save(
             db=db,
             conversation=conversation,
             contact_name=c_name,
@@ -3314,23 +3584,58 @@ class PublicAgentService:
                     seen_ids.append(pid)
 
         active_filters = dict(stored_prefs.get("active_filters", {}))
+        # Merge NEW values from this message over stored filters; keep stored
+        # only for fields the message does not mention.
+        overrides = dict(args.get("filter_overrides") or {})
+        if not overrides and user_message:
+            # Belt-and-suspenders if intent args omitted overrides
+            try:
+                from app.services.intent_router import extract_search_filters_deterministic
+                extracted = extract_search_filters_deterministic(user_message)
+                for k in (
+                    "location", "property_type", "bedrooms", "max_price",
+                    "min_price", "has_pool", "required_amenities", "beach_access",
+                ):
+                    if k in extracted and extracted[k] is not None:
+                        overrides[k] = extracted[k]
+            except Exception:
+                pass
+        filters_changed = bool(args.get("filters_changed")) or bool(overrides)
+        for k, v in overrides.items():
+            active_filters[k] = v
+
         loc = active_filters.get("location") or stored_prefs.get("location")
         p_type = active_filters.get("property_type") or stored_prefs.get("property_type")
         bedrooms = active_filters.get("bedrooms") or stored_prefs.get("bedrooms_num")
         max_p = Decimal(str(active_filters["max_price"])) if active_filters.get("max_price") else (Decimal(str(stored_prefs["budget_max"])) if stored_prefs.get("budget_max") else None)
         has_pool = active_filters.get("has_pool", stored_prefs.get("has_pool"))
+        req_amenities = list(active_filters.get("required_amenities") or [])
 
-        # Persist last search filters so follow-ups keep reusing them
+        # Persist merged filters so later follow-ups use the new budget/location
         stored_prefs["active_filters"] = {
             "location": loc,
             "property_type": p_type,
             "bedrooms": bedrooms,
             "max_price": float(max_p) if max_p is not None else None,
             "has_pool": has_pool,
+            "required_amenities": req_amenities or None,
         }
         if loc:
             stored_prefs["location"] = loc
+        if p_type:
+            stored_prefs["property_type"] = p_type
+        if bedrooms is not None:
+            stored_prefs["bedrooms_num"] = bedrooms
+        if max_p is not None:
+            stored_prefs["budget_max"] = float(max_p)
+            stored_prefs["max_price"] = float(max_p)
+        if filters_changed:
+            stored_prefs["pagination_offset"] = 0
         conversation.preferences = stored_prefs
+
+        # Exclude already-shown only when filters did not change (pure "show more").
+        # A new budget/location starts a fresh result list for those filters.
+        exclude_ids = [] if filters_changed else seen_ids
 
         params = PropertyFilterParams(
             location=loc,
@@ -3338,9 +3643,11 @@ class PublicAgentService:
             bedrooms=bedrooms,
             max_price=max_p,
             has_pool=has_pool,
-            limit=4
+            required_amenities=req_amenities or None,
+            limit=4,
+            offset=0 if filters_changed else int(args.get("offset") or 0),
         )
-        cards = search_properties_unified(db, params, limit=4, exclude_property_ids=seen_ids)
+        cards = search_properties_unified(db, params, limit=4, exclude_property_ids=exclude_ids)
         relaxed_filter_label = None
         used_relaxed_alternatives = False
         empty_reason = None
@@ -3355,7 +3662,7 @@ class PublicAgentService:
                 has_pool=has_pool,
                 limit=3
             )
-            relaxed = search_properties_unified(db, broad_params, limit=3, exclude_property_ids=seen_ids)
+            relaxed = search_properties_unified(db, broad_params, limit=3, exclude_property_ids=exclude_ids)
             if relaxed:
                 cards = relaxed
                 used_relaxed_alternatives = True
@@ -3406,7 +3713,7 @@ class PublicAgentService:
             reply_text, recovered, empty_reason = resolve_empty_search_after_seen_exclusion(
                 db,
                 params,
-                seen_ids,
+                exclude_ids,
                 language=language,
                 site_origin=conversation.site_origin,
                 criteria_summary=criteria_summary,
@@ -3812,6 +4119,7 @@ class PublicAgentService:
                 return property_has_amenity(card if isinstance(card, dict) else {}, canon)
 
             def _amenity_reply(canon: str, yes_en: str, no_en: str, yes_pl: str, no_pl: str, yes_th: str, no_th: str) -> str:
+                """Short fact answer only — never dump the full spec block."""
                 ok = _amenity_yes_no(canon)
                 if language == "th":
                     body = yes_th if ok else no_th
@@ -3834,9 +4142,93 @@ class PublicAgentService:
                     )
                 )
 
-            # Focused amenity/price answers from unified amenity helper — never invent
+            def _display_fact(val: Any, *, missing_en: str = "not listed in our verified data") -> str:
+                if val is None:
+                    return missing_en
+                s = str(val).strip()
+                if not s or s.lower() in {"none", "n/a", "null", "unknown"}:
+                    return missing_en
+                return s
+
+            p_beds_out = _display_fact(p_beds)
+            p_loc_out = _display_fact(p_loc, missing_en="not listed in our verified data")
+            p_area_out = _display_fact(p_area)
+            p_price_out = _display_fact(p_price, missing_en="Price on request")
+            # Prefer display helpers so specs never print literal None
+            p_beds = p_beds_out
+            p_loc = p_loc_out
+            p_area = p_area_out
+            if p_price_out:
+                p_price = p_price_out
+
+            reply_text = ""
             asked_amenities = extract_requested_amenities(focus_q)
-            if any(k in focus_q for k in ["pool", "swimming", "basen", "สระ"]) or "pool" in asked_amenities or "pool_private" in asked_amenities:
+
+            # Direct single-fact answers for the active property (short; no full spec dump)
+            desc_txt = ""
+            if isinstance(card, dict):
+                desc_txt = str(card.get("description") or p_desc or "")
+            else:
+                desc_txt = str(p_desc or "")
+            cfg_phrase = _bedroom_configs_from_description(desc_txt)
+
+            if any(k in focus_q for k in [
+                "how many bedroom", "bedrooms in this", "bedrooms in it", "bedroom in this",
+                "ile sypialn", "กี่ห้องนอน", "how many beds",
+            ]) or (
+                "bedroom" in focus_q
+                and any(k in focus_q for k in ["how many", "how much", "number of", "ile", "กี่"])
+            ):
+                if p_beds_out != "not listed in our verified data":
+                    if language == "th":
+                        reply_text = f"**{p_name}** มี **{p_beds_out}** ห้องนอนครับ"
+                    elif language == "pl":
+                        reply_text = f"**{p_name}** ma **{p_beds_out}** sypialni."
+                    else:
+                        reply_text = f"**{p_name}** has **{p_beds_out}** bedrooms."
+                elif cfg_phrase:
+                    if language == "th":
+                        reply_text = (
+                            f"**{p_name}**: จำนวนห้องนอนไม่ได้ระบุเป็นตัวเลขเดียวในฐานข้อมูลที่ตรวจสอบแล้ว "
+                            f"— ตามคำอธิบายโครงการมีรูปแบบ {cfg_phrase}"
+                        )
+                    elif language == "pl":
+                        reply_text = (
+                            f"**{p_name}**: liczba sypialni nie jest podana jako jedna wartość w zweryfikowanych danych "
+                            f"— w opisie projektu: {cfg_phrase}."
+                        )
+                    else:
+                        reply_text = (
+                            f"**{p_name}**: bedrooms are not listed as a single count in our verified data. "
+                            f"The description mentions {cfg_phrase}."
+                        )
+                else:
+                    if language == "th":
+                        reply_text = f"**{p_name}**: ห้องนอนไม่ระบุในฐานข้อมูลที่ตรวจสอบแล้ว"
+                    elif language == "pl":
+                        reply_text = f"**{p_name}**: liczba sypialni nie figuruje w zweryfikowanych danych."
+                    else:
+                        reply_text = f"**{p_name}**: bedrooms are not listed in our verified data."
+            elif any(k in focus_q for k in [
+                "where is it", "where is this", "located", "location of", "where is the",
+                "gdzie jest", "ทำเล", "อยู่ที่ไหน",
+            ]) and not any(k in focus_q for k in ["pool", "bedroom", "price", "parking"]):
+                map_url = ""
+                if isinstance(card, dict):
+                    map_url = str(card.get("maps_url") or "")
+                    lat, lng = card.get("latitude"), card.get("longitude")
+                    if not map_url and lat is not None and lng is not None:
+                        map_url = f"https://www.google.com/maps?q={lat},{lng}"
+                if language == "th":
+                    reply_text = f"**{p_name}** ตั้งอยู่ที่ **{p_loc_out}**"
+                elif language == "pl":
+                    reply_text = f"**{p_name}** znajduje się w **{p_loc_out}**."
+                else:
+                    reply_text = f"**{p_name}** is located in **{p_loc_out}**."
+                if map_url:
+                    reply_text += f" [Map]({map_url})"
+            # Focused amenity/price answers from unified amenity helper — never invent
+            elif any(k in focus_q for k in ["pool", "swimming", "basen", "สระ"]) or "pool" in asked_amenities or "pool_private" in asked_amenities:
                 reply_text = _amenity_reply(
                     "pool_private" if "private" in focus_q or "pool_private" in asked_amenities else "pool",
                     "Yes — verified data confirms a pool.",
@@ -3978,10 +4370,17 @@ class PublicAgentService:
                     lines_en.append(f"• **Ownership:** {p_owner}")
                 if p_high:
                     lines_en.append(f"• **Key Highlights:** {', '.join(p_high)}")
+                _comp = None
+                if isinstance(card, dict):
+                    _comp = card.get("completion_note") or format_stale_completion_note(
+                        card.get("completion_date") or card.get("completion"), language=language
+                    )
+                if _comp:
+                    lines_en.append(f"• **Completion:** {_comp}")
                 lines_en.extend(["", short_summary(p_desc), "", "Would you like the brochure, a viewing, or to ask me anything about this property (completion date, unit sizes, payment terms)?"])
                 reply_text = "\n".join(lines_en)
             cards = [card]
-            record_or_update_lead(
+            enqueue_lead_save(
                 db=db,
                 conversation=conversation,
                 buying_signal=f"Requested details for {p_id} ({p_name})"
@@ -4459,7 +4858,7 @@ class PublicAgentService:
                 property_label=p_name,
             )
             try:
-                record_or_update_lead(
+                enqueue_lead_save(
                     db=db,
                     conversation=conversation,
                     preferred_location=pref_loc,
@@ -4492,7 +4891,7 @@ class PublicAgentService:
             }
 
         # Success: record lead + mark brochure as delivered
-        record_or_update_lead(
+        enqueue_lead_save(
             db=db,
             conversation=conversation,
             preferred_location=pref_loc,
@@ -5039,159 +5438,60 @@ class PublicAgentService:
                 only_id = stored_prefs["last_result_ids"][0]
                 _pctx = set_active_property(_pctx, only_id, reference=names.get(only_id))
             stored_prefs.update(save_property_context(conversation, _pctx))
-            # Plain filter searches use the deterministic card text by default: it is verified against the
-            # database, takes ~2 s instead of 10+ s, and cannot reword a price. Set SEARCH_REPLY_USE_LLM=true
-            # to let the model write the wording again (the validator still guards it).
-            if self.client and getattr(settings, "SEARCH_REPLY_USE_LLM", False):
-                try:
-                    projections = []
-                    for c in cards:
-                        p_min = c.get("price_thb_min")  # THB only: a USD/EUR price is never shown as baht
-                        approx_eur = f"~€{round(p_min / 38):,}" if p_min else None
-                        approx_pln = f"~{round(p_min / 8.5):,} PLN" if p_min else None
-                        projections.append({
-                            "id": c["property_id"],
-                            "name": c["name"],
-                            "price": c["price"],
-                            "approx_eur": approx_eur,
-                            "approx_pln": approx_pln,
-                            "location": c["location"],
-                            "type": c["property_type"],
-                            "bedrooms": c["bedrooms"],
-                            "pool": c["has_pool"]
-                        })
 
-                    hist_snippets = []
-                    for h in (conversation.message_history or [])[-2:]:
-                        hist_snippets.append(f"{h['role'].title()}: {h['content']}")
-                    hist_ctx = "\n".join(hist_snippets)
-
-                    system_prompt = get_compact_system_prompt(language, site_origin=conversation.site_origin)
-                    if language == "th":
-                        prompt_content = (
-                            (f"บริบทการสนทนา:\n{hist_ctx}\n\n" if hist_ctx else "") +
-                            f"คำขอของผู้ใช้: \"{user_message}\"\n\n"
-                            f"รายการอสังหาริมทรัพย์ที่ตรงเงื่อนไขในไทย:\n"
-                            f"{json.dumps(projections, ensure_ascii=False)}\n\n"
-                            f"ทำหน้าที่เป็นที่ปรึกษาอสังหาริมทรัพย์มืออาชีพ Tajlandia นำเสนอรายการแบบมืออาชีพ "
-                            f"ใช้ **1. [ชื่อโครงการ]** และจุด • เท่านั้น (ห้าม ### และห้าม '-') "
-                            f"หัวข้อย่อย: 📍 ทำเล, 💰 ราคา, 🛏️ ห้องนอน, 🏊 สิ่งอำนวยความสะดวก, 📜 กรรมสิทธิ์ "
-                            f"ห้ามตาราง Markdown ปิดท้ายด้วย **ขั้นตอนถัดไป**"
-                        )
-                    elif language == "pl":
-                        prompt_content = (
-                            (f"Kontekst rozmowy:\n{hist_ctx}\n\n" if hist_ctx else "") +
-                            f"Zapytanie użytkownika: \"{user_message}\"\n\n"
-                            f"Dopasowane zweryfikowane nieruchomości w Tajlandii:\n"
-                            f"{json.dumps(projections)}\n\n"
-                            f"Kontekst walutowy: 1 EUR ≈ 38 THB, 1 PLN ≈ 8.5 THB, 1 USD ≈ 35 THB (np. 8.5M THB to ok. 1.0M PLN / 224,000 EUR). "
-                            f"Wszystkie powyższe nieruchomości MIESZCZĄ SIĘ w budżecie klienta. Nigdy nie twierdz, że oferta przekracza budżet. "
-                            f"Działaj jako profesjonalny doradca ds. nieruchomości Tajlandia. Zaprezentuj oferty z punktorami • (NIGDY ### ani '-'):\n"
-                            f"**1. [Nazwa nieruchomości]**\n"
-                            f"• 📍 **Lokalizacja:** [Lokalizacja]\n"
-                            f"• 💰 **Cena wyjściowa:** **[Cena w THB]** (~€[EUR] / ~[PLN] PLN)\n"
-                            f"• 🛏️ **Sypialnie:** [Sypialnie] | 📐 **Typ:** [Typ]\n"
-                            f"• 🏊 **Udogodnienia:** [Basen itp.]\n"
-                            f"• 📜 **Forma własności:** [tylko jeśli dane oferty to podają; w przeciwnym razie: formę własności potwierdzi doradca]\n"
-                            f"NIGDY nie generuj tabel markdown. Zakończ sekcją **Kolejne kroki** z punktorami •."
-                        )
-                    else:
-                        prompt_content = (
-                            (f"Recent Context:\n{hist_ctx}\n\n" if hist_ctx else "") +
-                            f"User Request: \"{user_message}\"\n\n"
-                            f"Matching Verified Properties in Thailand:\n"
-                            f"{json.dumps(projections)}\n\n"
-                            f"Currency conversion context: 1 EUR ≈ 38 THB, 1 PLN ≈ 8.5 THB, 1 USD ≈ 35 THB. "
-                            f"(For example, 8.5M THB is only ~€224,000 / ~1.0M PLN, which is well below a 1 million EUR or 4.5M PLN budget; 19.5M THB is ~€513,000). "
-                            f"ALL properties in the list above are strictly WITHIN the user's budget. Never state that a returned property exceeds budget. "
-                            f"Act as a professional real estate advisor for Tajlandia. Present ALL verified properties in clean numbered blocks with • bullets only (NEVER use ### headers or dash '-' bullets):\n"
-                            f"**1. [Property Name]**\n"
-                            f"• 📍 **Location:** [Location]\n"
-                            f"• 💰 **Starting Price:** **[Price in THB]** (~€[EUR] / ~[PLN] PLN)\n"
-                            f"• 🛏️ **Bedrooms:** [Bedrooms] | 📐 **Type:** [Type]\n"
-                            f"• 🏊 **Amenities & Highlights:** [Pool, Sea View, etc.]\n"
-                            f"• 📜 **Ownership:** [only if the listing data states it; otherwise write: confirm ownership structure with your advisor. NEVER assume freehold or leasehold]\n"
-                            f"NEVER output markdown tables. Conclude with **Recommended next steps** using • bullets."
-                        )
-
-                    if is_sparse:
-                        if language == "th":
-                            prompt_content += (
-                                "\n\nคำแนะนำเพิ่มเติม: ผู้ใช้ยังไม่ได้ระบุรายละเอียดครบถ้วน (เช่น ทำเล งบประมาณ หรือจำนวนห้องนอน) "
-                                "ให้สอบถามคำถามเพิ่มเติม 2 ข้ออย่างชาญฉลาดในตอนท้าย เพื่อทำความเข้าใจความต้องการ "
-                                "(งบประมาณ / จำนวนห้องนอน / ทำเล เช่น ภูเก็ต เกาะสมุย กรุงเทพฯ) — ห้ามข้ามขั้นตอนนี้"
-                            )
-                        elif language == "pl":
-                            prompt_content += (
-                                "\n\nWAŻNE: Użytkownik nie podał jeszcze kluczowych szczegółów (np. preferowanej lokalizacji, budżetu lub liczby sypialni). "
-                                "Na końcu prezentacji ofert ZAWSZE zadaj dokładnie 2 konkretne pytania doprecyzowujące "
-                                "(budżet, liczba sypialni lub lokalizacja: Phuket / Koh Samui / Bangkok). Nie pomijaj tego kroku."
-                            )
-                        else:
-                            prompt_content += (
-                                "\n\nCRITICAL FOLLOW-UP INSTRUCTION: The user provided limited details "
-                                "(missing location, budget, and/or bedrooms). After the listings, ALWAYS ask exactly "
-                                "2 short consultative questions (budget range, bedrooms, or preferred island/city). "
-                                "Do not end only with brochure/viewing CTAs — questions first."
-                            )
-
-                    resp = _safe_openai_create(
-                        self.client,
-                        model=self.model,
-                        messages=[
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": prompt_content}
-                        ],
-                        temperature=0.0,
-                        max_tokens=800
+            # Text list must mirror cards (same count + order) — deterministic from card payload
+            if is_show_all:
+                intro = (
+                    "Here are all verified properties currently available in our Thailand portfolio:"
+                    if language == "en"
+                    else (
+                        "Oto wszystkie zweryfikowane nieruchomości dostępne w naszym portfolio w Tajlandii:"
+                        if language == "pl"
+                        else "นี่คืออสังหาริมทรัพย์ที่ผ่านการตรวจสอบทั้งหมดในพอร์ตโฟลิโอของเราในประเทศไทย:"
                     )
-                    reply_text = resp.choices[0].message.content or ""
-                    llm_calls = 1
-                    if resp.usage:
-                        prompt_tokens = resp.usage.prompt_tokens
-                        comp_tokens = resp.usage.completion_tokens
-                    # If sparse and LLM skipped clarifying questions, append them deterministically
-                    if reply_text and is_sparse:
-                        q_lines = [ln for ln in reply_text.splitlines() if "?" in ln]
-                        if len(q_lines) < 2:
-                            followups = build_consultative_followup_questions(
-                                language=language,
-                                location=loc,
-                                budget=max_p,
-                                bedrooms=bedrooms,
-                            )[:2]
-                            if followups:
-                                if language == "pl":
-                                    q_hdr = "Aby dopasować oferty precyzyjniej, powiedz proszę:"
-                                elif language == "th":
-                                    q_hdr = "เพื่อคัดกรองให้ตรงกับคุณมากขึ้น ขออนุญาตถามเพิ่มเติม:"
-                                else:
-                                    q_hdr = "To narrow this down to the best fit, may I ask:"
-                                reply_text = (
-                                    reply_text.rstrip()
-                                    + "\n\n"
-                                    + q_hdr
-                                    + "\n"
-                                    + "\n".join(f"• {q}" for q in followups)
-                                )
-                except Exception as e:
-                    logger.error(f"Error in search LLM synthesis: {e}")
-                    reply_text = ""
-
-            if not reply_text:
-                if is_show_all:
-                    intro = "Here are all verified properties currently available in our Thailand portfolio:" if language == "en" else ("Oto wszystkie zweryfikowane nieruchomości dostępne w naszym portfolio w Tajlandii:" if language == "pl" else "นี่คืออสังหาริมทรัพย์ที่ผ่านการตรวจสอบทั้งหมดในพอร์ตโฟลิโอของเราในประเทศไทย:")
-                    reply_text = intro
-                else:
-                    reply_text = build_rich_property_recommendation_text(
-                        cards=cards,
-                        language=language,
-                        is_alternative=False,
-                        is_sparse=is_sparse,
-                        location=loc,
-                        budget=max_p,
-                        bedrooms=bedrooms,
-                        site_origin=conversation.site_origin
+                )
+                body = build_rich_property_recommendation_text(
+                    cards=cards,
+                    language=language,
+                    is_alternative=False,
+                    is_sparse=is_sparse,
+                    location=loc,
+                    budget=max_p,
+                    bedrooms=bedrooms,
+                    site_origin=conversation.site_origin,
+                )
+                reply_text = f"{intro}\n\n{body}" if body else intro
+            else:
+                reply_text = build_rich_property_recommendation_text(
+                    cards=cards,
+                    language=language,
+                    is_alternative=False,
+                    is_sparse=is_sparse,
+                    location=loc,
+                    budget=max_p,
+                    bedrooms=bedrooms,
+                    site_origin=conversation.site_origin,
+                )
+            if is_sparse:
+                followups = build_consultative_followup_questions(
+                    language=language,
+                    location=loc,
+                    budget=max_p,
+                    bedrooms=bedrooms,
+                )[:2]
+                if followups:
+                    if language == "pl":
+                        q_hdr = "Aby dopasować oferty precyzyjniej, powiedz proszę:"
+                    elif language == "th":
+                        q_hdr = "เพื่อคัดกรองให้ตรงกับคุณมากขึ้น ขออนุญาตถามเพิ่มเติม:"
+                    else:
+                        q_hdr = "To narrow this down to the best fit, may I ask:"
+                    reply_text = (
+                        (reply_text or "").rstrip()
+                        + "\n\n"
+                        + q_hdr
+                        + "\n"
+                        + "\n".join(f"• {q}" for q in followups)
                     )
         elif amenity_none_match:
             # Honest amenity miss already composed; keep labelled alternatives only
@@ -5205,8 +5505,10 @@ class PublicAgentService:
             stored_prefs["last_result_ids"] = []
             if foreign_loc:
                 cards = []
-                reply_text = get_off_topic_text(
-                    language, site_origin=conversation.site_origin, user_message=user_message
+                reply_text = get_thailand_only_foreign_reply(
+                    language,
+                    site_origin=conversation.site_origin,
+                    foreign_place=str(foreign_loc),
                 )
             elif search_relaxed_alts and search_relaxed_filter:
                 cards = list(search_relaxed_alts)
@@ -5471,6 +5773,78 @@ class PublicAgentService:
             "session_id": conversation.session_id,
             "conversation_id": str(conversation.id),
             "language": language
+        }
+
+    def _handle_cannot_email_or_calendar(
+        self,
+        db: Session,
+        conversation: Conversation,
+        user_message: str,
+        start_time: float,
+        language: str = "en",
+    ) -> Dict[str, Any]:
+        """
+        Honest refusal when the visitor asks the chat to email them or add a calendar event.
+        Saves a lead when contact details are present. Never calls Gmail or Calendar APIs.
+        """
+        visitor_email = extract_contact_email_from_message(user_message)
+        phone_m = re.search(
+            r"(?:\+?\d{1,4}[-.\s]?(?:\(?\d{1,4}\)?[-.\s]?)?(?:\d{2,4}[-.\s]?){2,4}\d{2,4})",
+            user_message or "",
+        )
+        visitor_phone = phone_m.group(0).strip() if phone_m else None
+        lead_captured = False
+        if visitor_email or visitor_phone:
+            try:
+                enqueue_lead_save(
+                    db=db,
+                    conversation=conversation,
+                    contact_email=visitor_email,
+                    contact_phone=visitor_phone,
+                    notes=f"Visitor asked for email/calendar action from chat: {user_message[:200]}",
+                    buying_signal="Requested email or calendar action via public chat (recorded only)",
+                )
+                lead_captured = True
+            except Exception as le:
+                logger.warning("Lead save failed on cannot-email path (reply unaffected): %s", le)
+                lead_captured = False
+
+        reply_text = get_cannot_email_or_calendar_text(
+            language=language,
+            site_origin=getattr(conversation, "site_origin", None),
+            visitor_email=visitor_email,
+        )
+        append_conversation_turn(
+            db=db,
+            conversation=conversation,
+            user_message=user_message,
+            assistant_message=reply_text,
+        )
+        token_tracker.log_turn(
+            TurnTokenMetrics(
+                request_id=f"req_{uuid.uuid4().hex[:8]}",
+                session_id=conversation.session_id,
+                conversation_id=str(conversation.id),
+                intent="cannot_email_or_calendar",
+                model="deterministic",
+                prompt_tokens=0,
+                completion_tokens=0,
+                total_tokens=0,
+                llm_calls_count=0,
+                latency_sec=round(time.time() - start_time, 3),
+            ),
+            db=db,
+        )
+        return {
+            "type": "text",
+            "text": reply_text,
+            "properties": [],
+            "quick_replies": self._generate_quick_replies(user_message, [], language=language),
+            "lead_captured": lead_captured,
+            "preferences": conversation.preferences or {},
+            "session_id": conversation.session_id,
+            "conversation_id": str(conversation.id),
+            "language": language,
         }
 
     def _handle_greeting(
@@ -6031,16 +6405,16 @@ class PublicAgentService:
                 cards = matched_fresh
                 loc, p_type, bed, max_p, has_pool = fresh_loc, fresh_type, fresh_bed, fresh_max_p, fresh_pool
 
-        # Extract contact information
-        email_match = re.search(r"[\w\.-]+@[\w\.-]+\.\w+", user_message)
-        has_email = email_match.group(0) if email_match else None
-        
+        # Extract contact information (never from prompt-injection payloads)
+        has_email = extract_contact_email_from_message(user_message)
         phone_match = re.search(r"(?:\+?\d{1,3}[- ]?)?\(?\d{3}\)?[- ]?\d{3}[- ]?\d{4}", user_message)
-        has_phone = phone_match.group(0) if phone_match else None
+        has_phone = None if looks_like_prompt_injection(user_message) else (
+            phone_match.group(0) if phone_match else None
+        )
 
         lead_captured = False
         if has_email or has_phone or max_p:
-            record_or_update_lead(
+            enqueue_lead_save(
                 db=db,
                 conversation=conversation,
                 contact_email=has_email,

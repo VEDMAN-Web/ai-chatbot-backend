@@ -283,8 +283,292 @@ const API_ROUTES = {
   adminHistory: (id) => `/api/v1/admin/chat/history/${id}`,
   confirmAction: (id) => `/api/v1/admin/actions/${id}/confirm`,
   rejectAction: (id) => `/api/v1/admin/actions/${id}/reject`,
-  properties: '/api/v1/properties'
+  properties: '/api/v1/properties',
+  login: '/api/v1/auth/login',
+  logout: '/api/v1/auth/logout',
 };
+
+const ADMIN_TOKEN_KEY = 'tajlandia_admin_access_token';
+const ADMIN_USER_KEY = 'tajlandia_admin_user';
+
+function getAdminAccessToken() {
+  return (localStorage.getItem(ADMIN_TOKEN_KEY) || '').trim();
+}
+
+function getAdminUser() {
+  try {
+    return JSON.parse(localStorage.getItem(ADMIN_USER_KEY) || 'null');
+  } catch (e) {
+    return null;
+  }
+}
+
+function isAdminLoggedIn() {
+  return Boolean(getAdminAccessToken());
+}
+
+function adminAuthHeaders(extra = {}) {
+  const token = getAdminAccessToken();
+  const headers = { ...extra };
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+  return headers;
+}
+
+function isProtectedAdminDownloadUrl(url) {
+  if (!url || typeof url !== 'string') return false;
+  try {
+    const path = url.startsWith('http') ? new URL(url).pathname : url;
+    return /\/api\/v1\/admin\//i.test(path);
+  } catch (_) {
+    return /\/api\/v1\/admin\//i.test(url);
+  }
+}
+
+function triggerBlobDownload(blob, filename) {
+  const objectUrl = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = objectUrl;
+  a.download = filename || 'download';
+  a.style.display = 'none';
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => {
+    try { URL.revokeObjectURL(objectUrl); } catch (_) {}
+    try { a.remove(); } catch (_) {}
+  }, 1500);
+}
+
+const LARGE_REPORT_BLOB_BYTES = 20 * 1024 * 1024;
+
+/**
+ * Authenticated admin file download (Bearer via fetch). Never opens a blank tab.
+ * For large files, requests a short-lived signed URL instead of buffering a huge blob.
+ */
+async function downloadAdminProtectedFile(url, filename, buttonEl) {
+  const originalLabel = buttonEl ? buttonEl.innerHTML : '';
+  const setBusy = (busy, label) => {
+    if (!buttonEl) return;
+    buttonEl.disabled = !!busy;
+    if (label != null) buttonEl.innerHTML = label;
+  };
+  const showErr = (msg) => {
+    if (buttonEl) {
+      buttonEl.innerHTML = msg;
+      buttonEl.disabled = false;
+      setTimeout(() => { buttonEl.innerHTML = originalLabel; }, 4000);
+    } else {
+      alert(msg);
+    }
+  };
+
+  setBusy(true, 'Preparing download...');
+  try {
+    const path = (() => {
+      try {
+        return url.startsWith('http') ? new URL(url).pathname + new URL(url).search : url;
+      } catch (_) {
+        return url;
+      }
+    })();
+
+    // Large-file path: signed link (no Authorization header needed on GET)
+    const fname = filename || (path.split('/').pop() || 'report.pdf');
+    const reportsMatch = path.match(/\/api\/v1\/admin\/reports\/([^/?#]+)/i);
+    if (reportsMatch && reportsMatch[1] && reportsMatch[1].toLowerCase() !== 'download') {
+      // Probe with HEAD/GET; if Content-Length is huge, use signed link
+      const probe = await fetch(path, { method: 'GET', headers: adminAuthHeaders(), credentials: 'same-origin' });
+      if (probe.status === 401 || probe.status === 403) {
+        showErr('Please sign in again');
+        return;
+      }
+      if (probe.status === 404 || probe.status === 410) {
+        showErr('This report is no longer available - regenerate it');
+        try { await probe.body?.cancel?.(); } catch (_) {}
+        return;
+      }
+      if (!probe.ok) {
+        showErr('Download failed — please try again');
+        try { await probe.body?.cancel?.(); } catch (_) {}
+        return;
+      }
+      const len = parseInt(probe.headers.get('Content-Length') || '0', 10);
+      if (len > LARGE_REPORT_BLOB_BYTES) {
+        try { await probe.body?.cancel?.(); } catch (_) {}
+        const linkRes = await fetch(`/api/v1/admin/reports/${encodeURIComponent(reportsMatch[1])}/link`, {
+          method: 'POST',
+          headers: adminAuthHeaders({ 'Content-Type': 'application/json' }),
+          credentials: 'same-origin',
+        });
+        if (linkRes.status === 401 || linkRes.status === 403) {
+          showErr('Please sign in again');
+          return;
+        }
+        if (linkRes.status === 404 || linkRes.status === 410) {
+          showErr('This report is no longer available - regenerate it');
+          return;
+        }
+        if (!linkRes.ok) {
+          showErr('Download failed — please try again');
+          return;
+        }
+        const linkData = await linkRes.json();
+        if (!linkData.url) {
+          showErr('Download failed — please try again');
+          return;
+        }
+        // Same-window navigation to signed URL (no blank tab)
+        const a = document.createElement('a');
+        a.href = linkData.url;
+        a.download = fname;
+        a.style.display = 'none';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setBusy(false, originalLabel);
+        return;
+      }
+      const blob = await probe.blob();
+      triggerBlobDownload(blob, fname);
+      setBusy(false, originalLabel);
+      return;
+    }
+
+    const res = await fetch(path, { method: 'GET', headers: adminAuthHeaders(), credentials: 'same-origin' });
+    if (res.status === 401 || res.status === 403) {
+      showErr('Please sign in again');
+      return;
+    }
+    if (res.status === 404 || res.status === 410) {
+      showErr('This report is no longer available - regenerate it');
+      return;
+    }
+    if (!res.ok) {
+      showErr('Download failed — please try again');
+      return;
+    }
+    const blob = await res.blob();
+    triggerBlobDownload(blob, fname);
+    setBusy(false, originalLabel);
+  } catch (err) {
+    console.error('Admin download failed', err);
+    showErr('Download failed — please try again');
+  }
+}
+
+function updateAdminLoginUI() {
+  const btn = document.getElementById('btnAdminLoginTop');
+  const label = document.getElementById('btnAdminLoginTopLabel');
+  const avatar = document.getElementById('staffAvatarBtn');
+  const user = getAdminUser();
+  const loggedIn = isAdminLoggedIn();
+  if (btn) {
+    btn.style.display = currentMode === 'admin' ? 'inline-flex' : 'none';
+    if (label) label.innerText = loggedIn ? (user?.email ? `Logout (${user.email.split('@')[0]})` : 'Logout') : 'Staff Login';
+    btn.onclick = loggedIn ? () => logoutAdminStaff() : () => openAdminLoginModal();
+  }
+  if (avatar && user?.name) {
+    const initials = String(user.name || user.email || 'AD').trim().slice(0, 2).toUpperCase();
+    avatar.innerText = initials;
+    avatar.title = loggedIn ? `${user.email || user.name} (${user.role || 'staff'})` : 'Staff Account';
+  }
+}
+
+function openAdminLoginModal() {
+  const overlay = document.getElementById('adminLoginOverlay');
+  const modal = document.getElementById('adminLoginModal');
+  const err = document.getElementById('adminLoginError');
+  const status = document.getElementById('adminLoginStatus');
+  if (err) { err.style.display = 'none'; err.innerText = ''; }
+  if (status) {
+    if (isAdminLoggedIn()) {
+      const u = getAdminUser();
+      status.style.display = 'block';
+      status.innerText = `Currently signed in as ${u?.email || 'staff'}. Sign in again to refresh token, or use Logout.`;
+    } else {
+      status.style.display = 'none';
+    }
+  }
+  if (overlay) overlay.style.display = 'block';
+  if (modal) modal.style.display = 'block';
+  const emailEl = document.getElementById('adminLoginEmail');
+  if (emailEl) setTimeout(() => emailEl.focus(), 50);
+}
+
+function closeAdminLoginModal() {
+  const overlay = document.getElementById('adminLoginOverlay');
+  const modal = document.getElementById('adminLoginModal');
+  if (overlay) overlay.style.display = 'none';
+  if (modal) modal.style.display = 'none';
+}
+
+async function submitAdminLogin() {
+  const email = (document.getElementById('adminLoginEmail')?.value || '').trim();
+  const password = document.getElementById('adminLoginPassword')?.value || '';
+  const domain = document.getElementById('adminLoginDomain')?.value || 'tajlandia.com';
+  const err = document.getElementById('adminLoginError');
+  const btn = document.getElementById('btnAdminLogin');
+  if (!email || !password) {
+    if (err) { err.style.display = 'block'; err.innerText = 'Email and password are required.'; }
+    return;
+  }
+  if (btn) { btn.disabled = true; btn.innerText = 'Signing in…'; }
+  if (err) err.style.display = 'none';
+  try {
+    const res = await fetch(API_ROUTES.login, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password, domain, site_origin: domain }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const detail = data.detail || data.message || `Login failed (${res.status})`;
+      throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail));
+    }
+    const token = data.access_token;
+    if (!token) throw new Error('Login response missing access_token');
+    localStorage.setItem(ADMIN_TOKEN_KEY, token);
+    localStorage.setItem(ADMIN_USER_KEY, JSON.stringify(data.user || { email }));
+    if (data.user?.domain) activeTenantOrigin = data.user.domain;
+    else activeTenantOrigin = domain;
+    updateAdminLoginUI();
+    closeAdminLoginModal();
+    appendMessageRow('assistant', `✅ Signed in as **${data.user?.email || email}** (${data.user?.role || 'staff'}). You can use Admin Team chat now.`);
+  } catch (e) {
+    if (err) {
+      err.style.display = 'block';
+      err.innerText = e.message || 'Login failed';
+    }
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerText = 'Sign in'; }
+  }
+}
+
+async function logoutAdminStaff() {
+  const token = getAdminAccessToken();
+  try {
+    if (token) {
+      await fetch(API_ROUTES.logout, {
+        method: 'POST',
+        headers: adminAuthHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({}),
+      });
+    }
+  } catch (e) { /* ignore */ }
+  localStorage.removeItem(ADMIN_TOKEN_KEY);
+  localStorage.removeItem(ADMIN_USER_KEY);
+  updateAdminLoginUI();
+  if (currentMode === 'admin') {
+    appendMessageRow('assistant', 'You have been logged out of Admin Team. Sign in again to continue.');
+    openAdminLoginModal();
+  }
+}
+
+async function ensureAdminAuthOrPrompt() {
+  if (isAdminLoggedIn()) return true;
+  openAdminLoginModal();
+  appendMessageRow('assistant', '⚠️ **Authentication required.** Please sign in with your staff email/password to use Admin Team chat.');
+  return false;
+}
 
 const FALLBACK_VILLA_IMAGES = [
   'https://images.unsplash.com/photo-1580587771525-78b9dba3b914?auto=format&fit=crop&w=800&q=80',
@@ -319,6 +603,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Batch dropzone drag and drop listeners
   initBatchDropzone();
+  updateAdminLoginUI();
+
+  // /admin-ui lands directly in Admin Team mode (+ login if needed)
+  if (window.location.pathname.replace(/\/$/, '') === '/admin-ui') {
+    setAgentMode('admin', false);
+  }
 });
 
 function initSession() {
@@ -400,11 +690,15 @@ function setAgentMode(mode, createNew = true) {
 
   // Update Hero texts & prompt cards according to current mode & language
   updateHeroAndInputUI();
+  updateAdminLoginUI();
 
   if (mode === 'admin') {
     const bar = document.getElementById('userFocusBar');
     if (bar) bar.style.display = 'none';
     closeFocusDrawer();
+    if (!isAdminLoggedIn()) {
+      openAdminLoginModal();
+    }
   } else {
     updateFocusBarUI();
   }
@@ -499,6 +793,12 @@ async function handleSendMessage() {
   const text = input.value.trim();
   if (!text) return;
 
+  if (currentMode === 'admin' && !isAdminLoggedIn()) {
+    openAdminLoginModal();
+    appendMessageRow('assistant', '⚠️ **Authentication required.** Please sign in with your staff email/password to use Admin Team chat.');
+    return;
+  }
+
   // Hide hero if visible
   const hero = document.getElementById('welcomeHero');
   if (hero) hero.style.display = 'none';
@@ -532,9 +832,12 @@ async function handleSendMessage() {
   };
 
   try {
+    const headers = currentMode === 'admin'
+      ? adminAuthHeaders({ 'Content-Type': 'application/json' })
+      : { 'Content-Type': 'application/json' };
     const res = await fetch(endpoint, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify(payload),
       signal: controller.signal
     });
@@ -543,6 +846,14 @@ async function handleSendMessage() {
 
     if (!res.ok) {
       const errData = await res.json().catch(() => ({}));
+      if (res.status === 401 && currentMode === 'admin') {
+        localStorage.removeItem(ADMIN_TOKEN_KEY);
+        localStorage.removeItem(ADMIN_USER_KEY);
+        updateAdminLoginUI();
+        openAdminLoginModal();
+        appendMessageRow('assistant', '⚠️ **Session expired.** Please sign in again.');
+        return;
+      }
       const fb = fallbackByLang[currentLanguage] || fallbackByLang.en;
       appendMessageRow('assistant', errData.detail ? `⚠️ **Error (${res.status}):** ${errData.detail}` : fb);
       return;
@@ -637,10 +948,14 @@ async function appendAssistantResponse(data, animate = false) {
   // Detect if a report was generated and render prominent download card
   const directLink = data.download_link || null;
   const reportMatch = text.match(/\/api\/v1\/admin\/reports\/([a-zA-Z0-9_\-\.]+)/i) || 
-                      text.match(/(tajlandia_report_[a-zA-Z0-9_]+\.(pdf|xlsx|docx|csv))/i);
+                      text.match(/(tajlandia_(?:lead_)?report_[a-zA-Z0-9_]+\.(pdf|xlsx|docx|csv))/i);
   if (directLink || reportMatch) {
-    const downloadUrl = directLink || (reportMatch[0].startsWith('/') ? reportMatch[0] : `/api/v1/admin/reports/${reportMatch[1]}`);
-    const filename = downloadUrl.split('/').pop();
+    let downloadUrl = directLink || (reportMatch[0].startsWith('/') ? reportMatch[0] : `/api/v1/admin/reports/${reportMatch[1]}`);
+    // Strip signed-download tokens from display filename
+    if (/\/reports\/download\//i.test(downloadUrl)) {
+      downloadUrl = directLink;
+    }
+    const filename = (downloadUrl || '').split('/').pop().split('?')[0] || 'report.pdf';
     const isExcel = filename.endsWith('.xlsx');
     const isWord = filename.endsWith('.docx');
     const isCsv = filename.endsWith('.csv');
@@ -649,6 +964,11 @@ async function appendAssistantResponse(data, animate = false) {
 
     const reportCard = document.createElement('div');
     reportCard.className = 'report-download-card';
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'btn-download-report';
+    btn.innerHTML = `⬇ Download ${fileLabel}`;
+    btn.addEventListener('click', () => downloadAdminProtectedFile(downloadUrl, filename, btn));
     reportCard.innerHTML = `
       <div class="report-download-left">
         <div class="report-file-icon">${fileIcon}</div>
@@ -657,20 +977,19 @@ async function appendAssistantResponse(data, animate = false) {
           <div class="report-file-desc">${escapeHtml(filename)} (${fileLabel})</div>
         </div>
       </div>
-      <a href="${downloadUrl}" target="_blank" download="${filename}" class="btn-download-report">
-        ⬇ Download ${fileLabel}
-      </a>
     `;
+    reportCard.appendChild(btn);
     bubble.appendChild(reportCard);
   }
 
-  // Detect if a luxury brochure link was provided and render prominent action card
+  // Detect if a luxury brochure / dossier link was provided and render prominent action card
   const brochureLink = data.pdf_url || data.download_url || null;
   if (brochureLink && !directLink && !reportMatch) {
     const brochureCard = document.createElement('div');
     brochureCard.className = 'report-download-card';
     brochureCard.style.marginTop = '10px';
     const bTitle = data.property_name || (activeTenantBrand ? `${activeTenantBrand} Official Brochure` : 'Official Luxury Brochure');
+    const bFilename = (brochureLink.split('/').pop() || 'brochure.pdf').split('?')[0];
     brochureCard.innerHTML = `
       <div class="report-download-left">
         <div class="report-file-icon">📄</div>
@@ -679,10 +998,25 @@ async function appendAssistantResponse(data, animate = false) {
           <div class="report-file-desc">Official 8-Page Presentation Brochure (PDF)</div>
         </div>
       </div>
-      <a href="${brochureLink}" target="_blank" class="btn-download-report" style="background:#0284C7; color:#ffffff; font-weight:600;">
-        🔗 Open / Download PDF
-      </a>
     `;
+    if (isProtectedAdminDownloadUrl(brochureLink)) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'btn-download-report';
+      btn.style.cssText = 'background:#0284C7; color:#ffffff; font-weight:600;';
+      btn.innerHTML = '⬇ Download PDF';
+      btn.addEventListener('click', () => downloadAdminProtectedFile(brochureLink, bFilename, btn));
+      brochureCard.appendChild(btn);
+    } else {
+      const a = document.createElement('a');
+      a.href = brochureLink;
+      a.target = '_blank';
+      a.rel = 'noopener noreferrer';
+      a.className = 'btn-download-report';
+      a.style.cssText = 'background:#0284C7; color:#ffffff; font-weight:600;';
+      a.innerHTML = '🔗 Open / Download PDF';
+      brochureCard.appendChild(a);
+    }
     bubble.appendChild(brochureCard);
   }
 
@@ -830,6 +1164,11 @@ function streamTextToElement(element, fullText, speedMs = 14) {
 // Action Confirmation API Calls (Two-Step Admin Security)
 async function confirmAction(actionId) {
   const card = document.getElementById(`action-card-${actionId}`);
+  if (!isAdminLoggedIn()) {
+    openAdminLoginModal();
+    if (card) card.innerHTML = `<div style="color: var(--accent-red); font-size: 13px;">Sign in required before confirming.</div>`;
+    return;
+  }
   if (card) {
     card.innerHTML = `<div style="color: var(--gold); font-size: 13px;">Executing action...</div>`;
   }
@@ -837,21 +1176,32 @@ async function confirmAction(actionId) {
   try {
     const res = await fetch(API_ROUTES.confirmAction(actionId), {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: adminAuthHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({})
     });
 
     const data = await res.json();
     if (res.ok) {
       if (card) {
+        const toolName = data.tool_name || '';
+        const auditId = data.audit_log_id || '';
+        const auditDisabled = !!data.audit_logging_disabled || !auditId || String(auditId).startsWith('audit_ephemeral_');
+        const realAudit = toolName && auditId && !auditDisabled;
+        const auditLine = realAudit
+          ? `Tool: <code>${escapeHtml(toolName)}</code> | Audit Log ID: <code>${escapeHtml(auditId)}</code>`
+          : `Executed (audit logging disabled)${toolName ? ` — <code>${escapeHtml(toolName)}</code>` : ''}`;
+        const verifyLine = data.verification_line
+          ? `<div style="font-size: 12px; color: var(--text-muted); margin-top: 6px;">${escapeHtml(data.verification_line)}</div>`
+          : '';
         card.innerHTML = `
           <div style="color: var(--accent-green); font-weight: 700; font-size: 13px; display: flex; align-items: center; gap: 6px;">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>
             Action Executed Successfully
           </div>
           <div style="font-size: 12px; color: var(--text-muted); margin-top: 6px;">
-            Tool: <code>${escapeHtml(data.tool_name || '')}</code> | Audit Log ID: <code>${escapeHtml(data.audit_log_id || '')}</code>
+            ${auditLine}
           </div>
+          ${verifyLine}
         `;
       }
     } else {
@@ -866,10 +1216,15 @@ async function confirmAction(actionId) {
 
 async function rejectAction(actionId) {
   const card = document.getElementById(`action-card-${actionId}`);
+  if (!isAdminLoggedIn()) {
+    openAdminLoginModal();
+    if (card) card.innerHTML = `<div style="color: var(--accent-red); font-size: 13px;">Sign in required before rejecting.</div>`;
+    return;
+  }
   try {
     const res = await fetch(API_ROUTES.rejectAction(actionId), {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: adminAuthHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ reason: 'Rejected by staff via UI' })
     });
 
@@ -1612,6 +1967,12 @@ function initBatchDropzone() {
 }
 
 function openBatchOpsModal(initialTab = 'upload') {
+  if (!isAdminLoggedIn()) {
+    if (currentMode !== 'admin') setAgentMode('admin', false);
+    openAdminLoginModal();
+    appendMessageRow('assistant', '⚠️ **Authentication required.** Sign in as staff before using bulk operations.');
+    return;
+  }
   const modal = document.getElementById('batchModal');
   const overlay = document.getElementById('batchModalOverlay');
   if (modal) modal.style.display = 'flex';
@@ -1726,11 +2087,13 @@ async function submitBatchOperation() {
   }
 
   try {
+    if (!isAdminLoggedIn()) {
+      openAdminLoginModal();
+      throw new Error('Sign in required for batch operations');
+    }
     const res = await fetch('/api/v1/admin/properties/batch-file', {
       method: 'POST',
-      headers: {
-        'Authorization': 'Bearer admin-token'
-      },
+      headers: adminAuthHeaders(),
       body: formData
     });
 
@@ -1793,10 +2156,12 @@ async function loadBatchHistory(manual = false) {
   }
 
   try {
+    if (!isAdminLoggedIn()) {
+      if (listEl) listEl.innerHTML = '<div class="batch-empty-placeholder">Sign in as staff to view batch history.</div>';
+      return;
+    }
     const res = await fetch('/api/v1/admin/operations/history?limit=50', {
-      headers: {
-        'Authorization': 'Bearer admin-token'
-      }
+      headers: adminAuthHeaders()
     });
 
     if (!res.ok) throw new Error('Failed to fetch history');
@@ -1875,11 +2240,13 @@ async function executeBatchUndo(operationId, count) {
   if (!ok) return;
 
   try {
+    if (!isAdminLoggedIn()) {
+      openAdminLoginModal();
+      throw new Error('Sign in required to undo batch operations');
+    }
     const res = await fetch(`/api/v1/admin/operations/${encodeURIComponent(operationId)}/undo`, {
       method: 'POST',
-      headers: {
-        'Authorization': 'Bearer admin-token'
-      }
+      headers: adminAuthHeaders()
     });
 
     const data = await res.json();

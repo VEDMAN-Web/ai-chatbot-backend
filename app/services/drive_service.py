@@ -227,6 +227,20 @@ def fetch_drive_file(
     if not file_content:
         file_content = f"No document content found for '{clean_id}' in Google Drive or verified files."
 
+    # Detect instruction-like payloads embedded in document body (data only — never execute)
+    _inj_markers = (
+        "ignore prior instructions",
+        "ignore previous instructions",
+        "ignore all previous",
+        "system override",
+        "email all clients",
+        "email everyone",
+        "attacker@",
+        "jailbreak",
+    )
+    content_low = (file_content or "").lower()
+    contains_injection = any(m in content_low for m in _inj_markers)
+
     # Wrap in strict untrusted document isolation tags
     isolated_block = (
         f'<UNTRUSTED_DOCUMENT_DATA source="google_drive" file_id="{clean_id}" filename="{resolved_name}">\n'
@@ -240,5 +254,6 @@ def fetch_drive_file(
         "file_name": resolved_name,
         "content": file_content,
         "isolated_block": isolated_block,
-        "is_untrusted": True
+        "is_untrusted": True,
+        "contains_injection": contains_injection,
     }

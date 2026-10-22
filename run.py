@@ -36,6 +36,8 @@ def init_database():
                         ALTER TABLE users ADD COLUMN IF NOT EXISTS google_refresh_token TEXT;
                         ALTER TABLE users ADD COLUMN IF NOT EXISTS allowed_websites JSONB DEFAULT '[]'::jsonb;
                         ALTER TABLE users ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT 'active';
+                        ALTER TABLE users ADD COLUMN IF NOT EXISTS domain VARCHAR(100) DEFAULT 'tajlandia.com';
+                        ALTER TABLE users ADD COLUMN IF NOT EXISTS preferences JSONB DEFAULT '{}'::jsonb;
                         ALTER TABLE properties ADD COLUMN IF NOT EXISTS websites JSONB DEFAULT '[]'::jsonb;
                     """))
 
@@ -51,7 +53,18 @@ def init_database():
                 command.upgrade(alembic_cfg, "head")
                 print("    [OK] Alembic migration upgraded to head.")
             except Exception as ae:
+                msg = str(ae)
                 print(f"    [NOTICE] Alembic upgrade: {ae}")
+                # Railway DB may reference a deleted revision id — re-stamp to current head
+                if "Can't locate revision" in msg or "Can't locate revision identified by" in msg:
+                    try:
+                        from alembic.config import Config
+                        from alembic import command
+                        alembic_cfg = Config(os.path.join(BASE_DIR, "alembic.ini"))
+                        command.stamp(alembic_cfg, "head")
+                        print("    [OK] Alembic version stamped to head after missing-revision recovery.")
+                    except Exception as stamp_e:
+                        print(f"    [NOTICE] Alembic stamp recovery: {stamp_e}")
 
             return True
         except Exception as e:

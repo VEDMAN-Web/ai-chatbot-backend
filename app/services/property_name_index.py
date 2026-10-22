@@ -58,6 +58,9 @@ FILLER_TOKENS = frozenset({
     "daj", "poprosze", "poproszę", "jakis", "jakiś", "jakie", "jaką", "ten", "ta",
     "to", "tego", "tej", "those", "these", "that", "this", "some", "any",
     "can", "could", "would", "you", "your", "more", "info", "details", "detail",
+    # Question / chat fillers — never property names (admin + public)
+    "do", "does", "did", "which", "what", "who", "where", "when", "how",
+    "ok", "okay", "yes", "no", "private", "just", "also", "all",
 })
 
 # Address / street fragments: do not demote a unique brand hit (e.g. Mirage Sukhumvit 27)

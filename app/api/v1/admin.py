@@ -1,9 +1,10 @@
+import json
 import os
 import logging
 from datetime import datetime
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Generator
 from fastapi import APIRouter, Depends, HTTPException, Query, status, UploadFile, File, Form, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse, RedirectResponse, Response
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -60,6 +61,8 @@ class AdminChatResponse(BaseModel):
     tools_used: Optional[List[Dict[str, Any]]] = Field(None, description="Claude tools invoked during turn")
     download_link: Optional[str] = Field(None, description="Direct download URL for generated report")
     language: str = Field("en", description="Active response language ('en' or 'pl')", example="en")
+    suggestions: Optional[List[str]] = Field(None, description="Optional follow-up suggestions")
+    debug: Optional[Dict[str, Any]] = Field(None, description="Present only when ADMIN_DEBUG_TIMING=true")
 
 
 class ActionConfirmRequest(BaseModel):
@@ -70,10 +73,15 @@ class ActionRejectRequest(BaseModel):
     reason: Optional[str] = Field(None, description="Reason for rejecting the proposed action")
 
 
+def _sse_pack(event: str, data: Dict[str, Any]) -> str:
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
 # 1. Admin Chat (Unified Action & Chatbot Endpoint)
-@router.post("/chat", response_model=AdminChatResponse)
+@router.post("/chat", response_model=None)
 def admin_chat_endpoint(
     req: AdminChatRequest,
+    stream: bool = Query(False, description="If true, return Server-Sent Events (status then final verified text)"),
     staff: AuthenticatedStaff = Depends(require_admin_or_employee_with_sites),
     db: Session = Depends(get_db)
 ):
@@ -82,6 +90,10 @@ def admin_chat_endpoint(
     Handles general inquiries, technical dossiers, reports, write proposals,
     and in-chat action confirmations/rejections in one single API.
     Strictly scoped to the staff member's active selected websites.
+
+    Default: JSON AdminChatResponse.
+    With ?stream=true: SSE — status events while working, then a final
+    verified text event (never streams unverified claim text mid-flight).
     """
     user_msg = (req.message or "").strip()
     if not user_msg and not req.action:
@@ -103,17 +115,48 @@ def admin_chat_endpoint(
 
     active_origin = staff.selected_websites[0] if staff.selected_websites else req.site_origin
 
-    res = process_admin_chat(
-        db=db,
-        session_id=req.session_id,
-        message=user_msg,
-        staff_user=staff,
-        site_origin=active_origin,
-        requested_language=req.language,
-        action=req.action,
-        pending_action_id=req.pending_action_id
-    )
-    return res
+    def _run() -> Dict[str, Any]:
+        return process_admin_chat(
+            db=db,
+            session_id=req.session_id,
+            message=user_msg,
+            staff_user=staff,
+            site_origin=active_origin,
+            requested_language=req.language,
+            action=req.action,
+            pending_action_id=req.pending_action_id
+        )
+
+    if not stream:
+        return _run()
+
+    def event_gen() -> Generator[str, None, None]:
+        yield _sse_pack("status", {"message": "Checking the database..."})
+        try:
+            res = _run()
+        except Exception as e:
+            logger.exception("admin chat stream failed: %s", e)
+            yield _sse_pack("error", {"message": "Service temporarily unavailable"})
+            return
+        # Only emit verified final text (claim verifier already ran inside process_admin_chat)
+        payload = {
+            "type": res.get("type", "text"),
+            "text": res.get("text") or "",
+            "session_id": res.get("session_id"),
+            "conversation_id": res.get("conversation_id"),
+            "requires_confirmation": bool(res.get("requires_confirmation")),
+            "pending_action_id": res.get("pending_action_id"),
+            "action_status": res.get("action_status"),
+            "tools_used": res.get("tools_used") or [],
+            "download_link": res.get("download_link"),
+            "language": res.get("language") or "en",
+        }
+        if res.get("debug") is not None:
+            payload["debug"] = res["debug"]
+        yield _sse_pack("final", payload)
+        yield _sse_pack("done", {"ok": True})
+
+    return StreamingResponse(event_gen(), media_type="text/event-stream")
 
 
 # 2. Admin Conversation History
@@ -209,29 +252,136 @@ def reject_pending_action_endpoint(
     )
 
 
-# 6. Report Download Endpoint
+# 6. Report Download Endpoints (auth + short-lived signed links)
+def _serve_report_file(safe_filename: str, *, prefer_redirect: bool = True):
+    """Stream or redirect a report from the same provider that stored it."""
+    from app.services.report_service import (
+        ReportExpiredError,
+        ReportNotFoundError,
+        load_report_bytes,
+        get_report_metadata,
+        _provider_for_storage_mode,
+        get_storage_provider,
+    )
+
+    try:
+        meta = get_report_metadata(safe_filename) or {}
+        mode = meta.get("storage")
+        provider = _provider_for_storage_mode(mode) if mode else get_storage_provider()
+
+        if prefer_redirect and getattr(provider, "mode", None) == "s3":
+            url = provider.get_presigned_url(safe_filename, expires_in=600)
+            if url:
+                return RedirectResponse(url=url, status_code=status.HTTP_302_FOUND)
+
+        local_path = provider.local_path(safe_filename) if hasattr(provider, "local_path") else None
+        if local_path and os.path.isfile(local_path):
+            from app.services.report_service import REPORT_MEDIA_TYPES
+            ext = os.path.splitext(safe_filename)[1].lower()
+            media_type = REPORT_MEDIA_TYPES.get(ext, "application/octet-stream")
+            return FileResponse(local_path, media_type=media_type, filename=safe_filename)
+
+        content, media_type, _meta = load_report_bytes(safe_filename, storage=provider)
+        return Response(
+            content=content,
+            media_type=media_type,
+            headers={
+                "Content-Disposition": f'attachment; filename="{safe_filename}"',
+            },
+        )
+    except ReportExpiredError as e:
+        raise HTTPException(status_code=status.HTTP_410_GONE, detail=str(e)) from e
+    except ReportNotFoundError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(e) or "This report is no longer available - regenerate it",
+        ) from e
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+
+
+@router.post("/reports/{filename}/link")
+def create_report_signed_link_endpoint(
+    filename: str,
+    staff: AuthenticatedStaff = Depends(require_admin_or_employee),
+):
+    """Return a short-lived HMAC signed download URL (valid ~10 minutes)."""
+    from app.services.report_service import (
+        create_signed_download_token,
+        report_exists,
+        validate_report_filename,
+        ReportExpiredError,
+        get_report_metadata,
+    )
+
+    try:
+        safe = validate_report_filename(filename)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+
+    meta = get_report_metadata(safe) or {}
+    expires_at = meta.get("expires_at")
+    if expires_at:
+        try:
+            from datetime import datetime, timezone
+            exp_dt = datetime.fromisoformat(str(expires_at).replace("Z", "+00:00"))
+            if exp_dt.tzinfo is None:
+                exp_dt = exp_dt.replace(tzinfo=timezone.utc)
+            if datetime.now(timezone.utc) > exp_dt:
+                raise HTTPException(
+                    status_code=status.HTTP_410_GONE,
+                    detail="This report has expired",
+                )
+        except HTTPException:
+            raise
+        except Exception:
+            pass
+
+    if not report_exists(safe):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="This report is no longer available - regenerate it",
+        )
+
+    token, exp = create_signed_download_token(safe)
+    return {
+        "url": f"/api/v1/admin/reports/download/{token}",
+        "expires_at": exp,
+        "filename": safe,
+    }
+
+
+@router.get("/reports/download/{token}")
+def download_report_signed_endpoint(token: str):
+    """Public (token-gated) download — no Bearer header required."""
+    from app.services.report_service import (
+        verify_signed_download_token,
+        SignedLinkError,
+    )
+
+    try:
+        safe = verify_signed_download_token(token)
+    except SignedLinkError as e:
+        code = status.HTTP_410_GONE if e.expired else status.HTTP_403_FORBIDDEN
+        raise HTTPException(status_code=code, detail=str(e)) from e
+
+    return _serve_report_file(safe, prefer_redirect=True)
+
+
 @router.get("/reports/{filename}")
 def download_report_endpoint(
     filename: str,
     staff: AuthenticatedStaff = Depends(require_admin_or_employee)
 ):
-    """Downloads a generated PDF/XLSX/DOCX/CSV property intelligence report."""
-    safe_filename = os.path.basename(filename)
-    file_path = os.path.join(settings.REPORT_STORAGE_DIR, safe_filename)
-    if not os.path.exists(file_path):
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Requested report file not found on server."
-        )
-    media_map = {
-        ".pdf": "application/pdf",
-        ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        ".csv": "text/csv"
-    }
-    ext = os.path.splitext(safe_filename)[1].lower()
-    media_type = media_map.get(ext, "application/octet-stream")
-    return FileResponse(file_path, media_type=media_type, filename=safe_filename)
+    """Downloads a generated PDF/XLSX/DOCX/CSV property intelligence report (auth required)."""
+    from app.services.report_service import validate_report_filename
+
+    try:
+        safe_filename = validate_report_filename(filename)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+
+    return _serve_report_file(safe_filename, prefer_redirect=True)
 
 
 # ==============================================================================
@@ -333,6 +483,42 @@ def get_batch_operations_history_endpoint(
     return {
         "operations": get_batch_operations_history(limit=limit)
     }
+
+
+@router.post("/maintenance/purge-expired", tags=["Admin Maintenance"])
+def purge_expired_snapshots_endpoint(
+    staff: AuthenticatedStaff = Depends(require_admin_or_super_admin),
+):
+    """
+    Admin-only: delete expired undo snapshots from Firestore admin_batch_operations
+    (expire_at < now). Safe for Cloud Scheduler. Never raises from the purge itself.
+
+    Infra should also enable a Firestore TTL policy on field `expire_at` as a second safety net.
+    """
+    from app.services.admin_batch_service import purge_expired_snapshots
+    from app.services.report_service import purge_old_reports
+
+    deleted = purge_expired_snapshots()
+    reports_deleted = purge_old_reports()
+    return {
+        "success": True,
+        "deleted": deleted,
+        "reports_deleted": reports_deleted,
+        "message": f"Purged {deleted} expired snapshot(s), {reports_deleted} old report(s).",
+    }
+
+
+@router.get("/system/config-status", tags=["Admin Maintenance"])
+def admin_config_status_endpoint(
+    staff: AuthenticatedStaff = Depends(require_admin_or_super_admin),
+):
+    """
+    Admin-only: feature-flag / wiring status as labels and booleans only.
+    Never returns secrets, passwords, tokens, or credentialed URLs.
+    """
+    from app.core.config import get_admin_config_status
+
+    return get_admin_config_status()
 
 
 # ==============================================================================
