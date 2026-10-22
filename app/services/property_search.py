@@ -16,6 +16,8 @@ class PropertyFilterParams(BaseModel):
     min_price: Optional[Decimal] = None
     max_price: Optional[Decimal] = None
     bedrooms: Optional[int] = None
+    min_bedrooms: Optional[int] = None
+    max_bedrooms: Optional[int] = None
     bathrooms: Optional[int] = None
     min_area: Optional[Decimal] = None
     max_area: Optional[Decimal] = None
@@ -44,7 +46,7 @@ class PropertyFilterParams(BaseModel):
         except Exception:
             return None
 
-    @field_validator("bedrooms", "bathrooms", mode="before")
+    @field_validator("bedrooms", "min_bedrooms", "max_bedrooms", "bathrooms", mode="before")
     def sanitize_rooms(cls, v):
         if v is None:
             return None
@@ -137,6 +139,18 @@ def build_property_query(db: Session, filters: PropertyFilterParams):
                 Property.bedrooms_max >= filters.bedrooms
             )
         )
+    elif filters.min_bedrooms is not None and filters.max_bedrooms is not None:
+        # Overlap between listing [min, max] and requested [min_bedrooms, max_bedrooms]
+        conditions.append(Property.bedrooms_min <= filters.max_bedrooms)
+        conditions.append(Property.bedrooms_max >= filters.min_bedrooms)
+        conditions.append(Property.bedrooms_max.isnot(None))
+    elif filters.min_bedrooms is not None:
+        # Largest config must be >= min ("4 or more" matches "3-5")
+        conditions.append(Property.bedrooms_max >= filters.min_bedrooms)
+        conditions.append(Property.bedrooms_max.isnot(None))
+    elif filters.max_bedrooms is not None:
+        conditions.append(Property.bedrooms_max <= filters.max_bedrooms)
+        conditions.append(Property.bedrooms_max.isnot(None))
 
     if filters.bathrooms is not None:
         conditions.append(Property.bathrooms >= filters.bathrooms)
