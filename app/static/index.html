@@ -130,7 +130,10 @@
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path><path d="M13.73 21a2 2 0 0 1-3.46 0"></path></svg>
         </div>
 
-        <div class="avatar-btn" title="Staff Account">
+        <button class="btn-secondary" id="btnAdminLoginTop" onclick="openAdminLoginModal()" title="Admin login" style="display: none;">
+          <span id="btnAdminLoginTopLabel">Staff Login</span>
+        </button>
+        <div class="avatar-btn" id="staffAvatarBtn" title="Staff Account" onclick="if(currentMode==='admin') openAdminLoginModal()">
           TJ
         </div>
       </div>
@@ -565,6 +568,45 @@
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"></path></svg>
       <span id="btnExecuteBatchText">Execute Instantly</span>
     </button>
+  </div>
+</div>
+
+<!-- Admin Login Modal (required for /api/v1/admin/* on Railway) -->
+<div class="app-modal-overlay" id="adminLoginOverlay" style="display: none;" onclick="if(event.target===this) closeAdminLoginModal()"></div>
+<div class="app-modal" id="adminLoginModal" style="display: none; max-width: 420px;">
+  <div class="app-modal-header">
+    <div class="app-modal-title-wrap">
+      <div class="app-modal-icon">🔐</div>
+      <div>
+        <div class="app-modal-title">Admin Staff Login</div>
+        <div class="app-modal-subtitle">Sign in to use Admin Team chat on this Railway API</div>
+      </div>
+    </div>
+    <button class="app-modal-close" onclick="closeAdminLoginModal()">&times;</button>
+  </div>
+  <div class="app-modal-body" style="display: flex; flex-direction: column; gap: 14px;">
+    <div class="modal-form-group">
+      <label class="modal-form-label">Email</label>
+      <input type="email" id="adminLoginEmail" class="modal-form-input" placeholder="admin@tajlandia.com" autocomplete="username" />
+    </div>
+    <div class="modal-form-group">
+      <label class="modal-form-label">Password</label>
+      <input type="password" id="adminLoginPassword" class="modal-form-input" placeholder="••••••••" autocomplete="current-password" onkeydown="if(event.key==='Enter') submitAdminLogin()" />
+    </div>
+    <div class="modal-form-group">
+      <label class="modal-form-label">Domain / website</label>
+      <select id="adminLoginDomain" class="modal-form-input">
+        <option value="tajlandia.com">tajlandia.com</option>
+        <option value="varsoviaestate.com">varsoviaestate.com</option>
+        <option value="thai.estate">thai.estate</option>
+      </select>
+    </div>
+    <div id="adminLoginError" style="display:none; color:#f87171; font-size:13px;"></div>
+    <div id="adminLoginStatus" style="display:none; color:var(--text-muted); font-size:12px;"></div>
+  </div>
+  <div class="app-modal-footer">
+    <button class="btn-modal-secondary" onclick="closeAdminLoginModal()">Cancel</button>
+    <button class="btn-modal-primary" id="btnAdminLogin" onclick="submitAdminLogin()">Sign in</button>
   </div>
 </div>
 

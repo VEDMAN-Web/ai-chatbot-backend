@@ -183,7 +183,7 @@ def test_offer_dossier_pdf_empty_db_resilience(monkeypatch):
 
 def test_lead_pdf_report_generation():
     """Verify generate_report produces a buyer lead dossier PDF from real DB leads (no invented samples)."""
-    from app.services.report_service import generate_report
+    from app.services.report_service import generate_report, InMemoryStorageProvider
     from unittest.mock import MagicMock
     import uuid
 
@@ -194,19 +194,23 @@ def test_lead_pdf_report_generation():
     mock_lead.contact_phone = "+48 501 234 567"
     mock_lead.preferred_location = "Bang Tao, Phuket"
     mock_lead.budget_max = 25000000
+    mock_lead.budget_min = None
     mock_lead.lead_score = 92.0
     mock_lead.status = "qualified"
     mock_lead.buying_signals = ["Requested floor plan"]
+    mock_lead.created_at = None
 
     mock_db = MagicMock()
-    mock_db.query.return_value.filter.return_value.all.return_value = [mock_lead]
+    # filter(...).order_by(...).all()
+    mock_db.query.return_value.filter.return_value.order_by.return_value.all.return_value = [mock_lead]
 
     res = generate_report(
         db=mock_db,
         format_type="pdf",
         lead_ids=["Alexander Smith"],
         report_type="leads",
-        title="Buyer Lead Intelligence Dossier - Alexander Smith"
+        title="Buyer Lead Intelligence Dossier - Alexander Smith",
+        storage=InMemoryStorageProvider(),
     )
 
     assert res["format"] == "pdf"
@@ -216,12 +220,12 @@ def test_lead_pdf_report_generation():
 
 
 def test_lead_pdf_report_empty_when_no_db_leads():
-    """Empty DB must not invent sample leads — report total stays 0."""
-    from app.services.report_service import generate_report
+    """Empty lead_ids match must not invent samples — no empty PDF; clear empty result."""
+    from app.services.report_service import generate_report, InMemoryStorageProvider
     from unittest.mock import MagicMock
 
     mock_db = MagicMock()
-    mock_db.query.return_value.filter.return_value.all.return_value = []
+    mock_db.query.return_value.filter.return_value.order_by.return_value.all.return_value = []
     mock_db.query.return_value.order_by.return_value.limit.return_value.all.return_value = []
 
     res = generate_report(
@@ -229,12 +233,15 @@ def test_lead_pdf_report_empty_when_no_db_leads():
         format_type="pdf",
         lead_ids=["Alexander Smith"],
         report_type="leads",
-        title="Buyer Lead Intelligence Dossier - Alexander Smith"
+        title="Buyer Lead Intelligence Dossier - Alexander Smith",
+        storage=InMemoryStorageProvider(),
     )
 
     assert res["format"] == "pdf"
     assert res["total_leads"] == 0
-    assert "tajlandia_lead_report_" in res["filename"]
+    assert res.get("file_url") is None
+    assert res.get("empty_period") is True or res.get("storage_ok") is False
+    assert "No matching leads" in (res.get("message") or "")
 
 
 def test_guardrails_pdf_explicit_intents():

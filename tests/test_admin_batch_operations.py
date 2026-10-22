@@ -10,7 +10,8 @@ from app.services.admin_batch_service import (
     undo_batch_property_operation,
     get_batch_operations_history,
     BatchOperationError,
-    SNAPSHOT_RETENTION_DAYS
+    SNAPSHOT_RETENTION_DAYS,
+    EXPIRED_UNDO_MESSAGE,
 )
 
 
@@ -100,13 +101,15 @@ def test_execute_batch_and_undo_flow(mock_staff):
         assert res["undo_window_days"] == 6
         op_id = res["operation_id"]
 
-        # Verify snapshot was stored with 6 days expiration
+        # Verify snapshot was stored with 6 days expiration (expire_at + legacy expires_at)
         assert saved_batch_doc["operation_id"] == op_id
         assert saved_batch_doc["status"] == "APPLIED"
         assert saved_batch_doc["previous_snapshot"]["PROP-TEST-001"] == doc_snapshot
+        assert "expire_at" in saved_batch_doc
         created_at = datetime.fromisoformat(saved_batch_doc["created_at"])
-        expires_at = datetime.fromisoformat(saved_batch_doc["expires_at"])
-        assert (expires_at - created_at).days == SNAPSHOT_RETENTION_DAYS
+        expire_at = datetime.fromisoformat(saved_batch_doc["expire_at"])
+        assert (expire_at - created_at).days == SNAPSHOT_RETENTION_DAYS
+        assert saved_batch_doc.get("expires_at") == saved_batch_doc["expire_at"]
 
         # Verify update was instantly applied to the project doc
         mock_doc_ref.update.assert_called()
@@ -142,6 +145,7 @@ def test_undo_rejected_after_expiration(mock_staff):
         "action_type": "delete",
         "status": "APPLIED",
         "created_at": created_at,
+        "expire_at": expired_at,
         "expires_at": expired_at,
         "previous_snapshot": {"PROP-001": {"name": "Test"}}
     }
@@ -159,4 +163,5 @@ def test_undo_rejected_after_expiration(mock_staff):
         with pytest.raises(BatchOperationError) as exc_info:
             undo_batch_property_operation("batch-expired-01", mock_staff)
 
-        assert "expired" in str(exc_info.value).lower()
+        # Deliberate copy change: expired undo uses fixed retention phrase
+        assert str(exc_info.value) == EXPIRED_UNDO_MESSAGE

@@ -11,6 +11,9 @@ from app.core.auth import AuthenticatedStaff
 from app.services.audit_service import record_audit_log
 from app.services.google_services import google_manager
 
+# Re-exported so tests can patch `app.services.action_service.record_crud_operation_snapshot`
+from app.services.admin_batch_service import record_crud_operation_snapshot  # noqa: E402
+
 logger = logging.getLogger(__name__)
 
 # Lifecycle States
@@ -20,6 +23,7 @@ ACTION_STATUS_EXECUTED = "EXECUTED"
 ACTION_STATUS_REJECTED = "REJECTED"
 ACTION_STATUS_EXPIRED = "EXPIRED"
 ACTION_STATUS_FAILED = "FAILED"
+ACTION_STATUS_SUPERSEDED = "SUPERSEDED"
 
 
 def validate_property_data(
@@ -39,7 +43,14 @@ def validate_property_data(
     if not property_id or not str(property_id).strip() or str(property_id).strip().lower() in ["none", "null"]:
         missing.append("property_id")
 
-    is_create = (mode == "create") or (existing_property is None and not payload.get("is_update_only"))
+    # Required-field completeness ONLY for true creates of a brand-new id.
+    # Firestore-only / Postgres-existing listings use is_update_only or existing_property.
+    is_create = (
+        str(mode).lower() == "create"
+        and existing_property is None
+        and not payload.get("is_update_only")
+        and str(payload.get("resolve_source") or "").lower() not in ("postgres", "firestore")
+    )
 
     if is_create:
         # Check required fields for new property: property_name, property_type, location, price, bedrooms, status
@@ -68,13 +79,25 @@ def validate_property_data(
             missing.append("status")
 
     else:
-        # Update mode: must provide non-empty fields to update and no null/empty values among updated fields
-        if not fields or not isinstance(fields, dict):
-            missing.append("fields_to_update")
+        # Update mode for an EXISTING property: only the fields being changed are required.
+        # Never demand property_name/type/location/bedrooms/status for a partial update.
+        if existing_property is not None:
+            if not fields or not isinstance(fields, dict):
+                missing.append("fields_to_update")
+            else:
+                for k, v in fields.items():
+                    if k in ("websites", "selected_websites", "mode", "property_id"):
+                        continue
+                    if v is None or (isinstance(v, str) and (not v.strip() or v.strip().lower() in ["none", "null"])):
+                        missing.append(f"{k}")
         else:
-            for k, v in fields.items():
-                if v is None or (isinstance(v, str) and (not v.strip() or v.strip().lower() in ["none", "null"])):
-                    missing.append(f"{k}")
+            # Update claimed but no existing record → treat like create completeness
+            if not fields or not isinstance(fields, dict):
+                missing.append("fields_to_update")
+            else:
+                for k, v in fields.items():
+                    if v is None or (isinstance(v, str) and (not v.strip() or v.strip().lower() in ["none", "null"])):
+                        missing.append(f"{k}")
 
     if missing:
         msg = (
@@ -101,17 +124,54 @@ def create_pending_action(
     Validates data completeness for listing creations and updates.
     """
     if tool_name in ["create_or_update_listing", "propose_listing_update"]:
-        prop = db.query(Property).filter(Property.property_id == action_payload.get("property_id")).first() if action_payload.get("property_id") else None
-        is_valid, missing, err_msg = validate_property_data(action_payload, existing_property=prop)
+        from app.services.admin_property_fields import resolve_existing_property
+        src, rec = resolve_existing_property(db, action_payload.get("property_id"))
+        if src:
+            action_payload = dict(action_payload)
+            action_payload["mode"] = "update"
+            action_payload["is_update_only"] = True
+            action_payload["resolve_source"] = src
+        is_valid, missing, err_msg = validate_property_data(
+            action_payload, existing_property=rec if src else None
+        )
         if not is_valid:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=err_msg
             )
-    minutes = expires_in_minutes or settings.ACTION_EXPIRATION_MINUTES
+    minutes = (
+        expires_in_minutes
+        if expires_in_minutes is not None
+        else getattr(settings, "ADMIN_PENDING_ACTION_TTL_MIN", None)
+        or settings.ACTION_EXPIRATION_MINUTES
+    )
     now = datetime.now(timezone.utc)
     expires_at = now + timedelta(minutes=minutes)
     confirmation_token = f"act_{secrets.token_hex(16)}"
+
+    # Supersede older PENDING actions for the same property (same conversation preferred)
+    prop_id = (
+        (action_payload or {}).get("property_id")
+        or (action_payload or {}).get("target_property_id")
+        or ((action_payload or {}).get("change_diff") or {}).get("property_id")
+    )
+    if prop_id:
+        try:
+            q = db.query(PendingAction).filter(PendingAction.status == ACTION_STATUS_PENDING)
+            if conversation_id:
+                q = q.filter(PendingAction.conversation_id == str(conversation_id))
+            for old in q.all():
+                old_payload = old.action_payload or {}
+                old_pid = (
+                    old_payload.get("property_id")
+                    or old_payload.get("target_property_id")
+                    or ((old_payload.get("change_diff") or {}).get("property_id") if isinstance(old_payload.get("change_diff"), dict) else None)
+                )
+                if old_pid and str(old_pid).strip().lower() == str(prop_id).strip().lower():
+                    old.status = ACTION_STATUS_SUPERSEDED
+                    old.error_message = f"Superseded by newer proposal for property {prop_id}"
+        except Exception as e:
+            logger.warning(f"Could not supersede older pending actions: {e}")
 
     action = PendingAction(
         confirmation_token=confirmation_token,
@@ -200,6 +260,90 @@ def get_pending_action(db: Session, pending_action_id: str) -> PendingAction:
     return action
 
 
+def _append_action_lifecycle_note(
+    db: Session,
+    *,
+    conversation_id: Optional[str],
+    pending_action_id: str,
+    status: str,
+    tool_name: str,
+    result_data: Optional[Dict[str, Any]] = None,
+    verification_line: Optional[str] = None,
+    reason: Optional[str] = None,
+) -> None:
+    """
+    Append a system/assistant note to conversation history so the chat model
+    sees UI button confirms/rejects (not only free-text Confirm).
+    """
+    if not conversation_id or db is None:
+        return
+    try:
+        from app.db.models import Conversation
+        from app.services.admin_property_fields import format_price_thb
+
+        conv = db.query(Conversation).filter(Conversation.id == conversation_id).first()
+        if conv is None:
+            # conversation_id may be stored as string UUID
+            try:
+                conv = db.query(Conversation).filter(Conversation.id == str(conversation_id)).first()
+            except Exception:
+                conv = None
+        if conv is None:
+            return
+
+        result_data = result_data or {}
+        detail = ""
+        updated = result_data.get("updated_fields") or {}
+        if "price_numeric_min" in updated or "price_display" in updated:
+            new_p = updated.get("price_numeric_min") or updated.get("price_display")
+            # Prefer change_diff snapshot if present on result
+            detail = f" price → {format_price_thb(new_p)}"
+        elif updated:
+            detail = " fields=" + ",".join(list(updated.keys())[:5])
+
+        if status.upper() in ("CONFIRMED", "EXECUTED"):
+            text = (
+                f"[SYSTEM] Action `{pending_action_id}` was CONFIRMED and executed "
+                f"({tool_name}){detail}."
+            )
+            if verification_line:
+                text += f" {verification_line}"
+        else:
+            text = (
+                f"[SYSTEM] Action `{pending_action_id}` was REJECTED ({tool_name}). "
+                f"{reason or 'No changes applied.'}"
+            )
+
+        history = list(getattr(conv, "message_history", None) or [])
+        history.append({
+            "role": "assistant",
+            "content": text,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "system_note": True,
+            "pending_action_id": pending_action_id,
+            "action_lifecycle": status.upper(),
+        })
+        # Cap history growth
+        if len(history) > 400:
+            history = history[-400:]
+        conv.message_history = history
+        prefs = dict(getattr(conv, "preferences", None) or {})
+        if status.upper() in ("CONFIRMED", "EXECUTED", "REJECTED"):
+            # Clear stale pending id from session prefs
+            if prefs.get("last_pending_action_id") == str(pending_action_id):
+                prefs.pop("last_pending_action_id", None)
+            prefs["last_finished_action_id"] = str(pending_action_id)
+            prefs["last_finished_action_status"] = status.upper()
+        conv.preferences = prefs
+        db.commit()
+    except Exception as e:
+        logger.warning(f"_append_action_lifecycle_note failed: {e}")
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+
 def confirm_and_execute_action(
     db: Session,
     pending_action_id: str,
@@ -233,30 +377,156 @@ def confirm_and_execute_action(
             detail="Invalid confirmation token."
         )
 
+    # 3b. Stale-value guard: re-check stored "Current" vs live record before any write
+    payload = dict(action.action_payload or {})
+    change_diff = payload.get("change_diff")
+    if isinstance(change_diff, dict) and (
+        change_diff.get("rows") or change_diff.get("items")
+    ):
+        from app.services.admin_change_diff import (
+            verify_diff_still_current,
+            build_single_listing_change_diff,
+            build_batch_change_diff,
+        )
+
+        ok, stale_list = verify_diff_still_current(db, change_diff)
+        if not ok:
+            # Supersede old pending (not a silent loop of REJECTED twins)
+            action.status = ACTION_STATUS_SUPERSEDED
+            action.error_message = (
+                "Stale values detected; refused apply. Superseded with one fresh proposal. "
+                + "; ".join(stale_list[:8])
+            )
+            db.commit()
+            record_audit_log(
+                db=db,
+                staff_user_id=authenticated_staff.email,
+                tool_name=action.tool_name,
+                proposed_payload=payload,
+                confirmed_by_staff=True,
+                status="SUPERSEDED",
+                error_message=action.error_message,
+                conversation_id=action.conversation_id,
+                pending_action_id=str(action.id),
+            )
+            # Re-propose exactly ONE fresh pending action from live store
+            fresh_diff: Dict[str, Any] = {}
+            new_payload = dict(payload)
+            try:
+                if action.tool_name in ("create_or_update_listing", "ingest_property_from_drive"):
+                    fields = (
+                        (change_diff.get("canonical_fields") if isinstance(change_diff, dict) else None)
+                        or payload.get("fields_to_update")
+                        or payload.get("fields")
+                        or {}
+                    )
+                    # Drop injected websites on re-propose unless originally explicit
+                    if "websites" in fields and "websites" not in (
+                        (payload.get("explicit_fields") or [])
+                    ):
+                        # Keep websites only if admin put it in original fields_to_update keys intentionally
+                        orig = payload.get("fields_to_update") or payload.get("fields") or {}
+                        if "websites" not in orig and "selected_websites" not in orig:
+                            fields = {k: v for k, v in fields.items() if k != "websites"}
+                    mode = payload.get("mode") or "update"
+                    fresh_diff = build_single_listing_change_diff(
+                        db=db,
+                        property_id=str(payload.get("property_id") or ""),
+                        proposed_fields=fields,
+                        mode=mode,
+                    )
+                    if fresh_diff.get("canonical_fields"):
+                        new_payload["fields_to_update"] = fresh_diff["canonical_fields"]
+                elif action.tool_name == "execute_batch_property_action":
+                    fresh_diff = build_batch_change_diff(
+                        db=db,
+                        operation_type=payload.get("operation_type") or "update",
+                        items=payload.get("items") or [],
+                        update_fields=payload.get("update_fields"),
+                    )
+            except Exception as rebuild_exc:
+                logger.warning(f"Failed to rebuild change_diff after stale refuse: {rebuild_exc}")
+                fresh_diff = {}
+
+            new_action = None
+            if fresh_diff:
+                new_payload["change_diff"] = fresh_diff
+                new_payload["diff_markdown"] = fresh_diff.get("diff_markdown")
+                new_payload["risk_warnings"] = fresh_diff.get("risk_warnings") or []
+                if fresh_diff.get("requires_explicit_delete_ack") is not None:
+                    new_payload["requires_explicit_delete_ack"] = fresh_diff[
+                        "requires_explicit_delete_ack"
+                    ]
+                    new_payload["delete_count"] = fresh_diff.get("delete_count") or 0
+                new_action = create_pending_action(
+                    db=db,
+                    staff_user_id=authenticated_staff.email,
+                    tool_name=action.tool_name,
+                    action_payload=new_payload,
+                    conversation_id=action.conversation_id,
+                )
+
+            real_new_id = str(new_action.id) if new_action else None
+            msg = (
+                "Values changed since this proposal. Nothing was applied. "
+                "A fresh proposal was staged — review the new Current values and confirm again."
+            )
+            if real_new_id:
+                msg += f" New pending action ID: `{real_new_id}`."
+
+            return {
+                "status": "STALE_REFUSED",
+                "stale_fields": stale_list,
+                "pending_action_id": real_new_id,
+                "confirmation_token": new_action.confirmation_token if new_action else None,
+                "change_diff": fresh_diff or None,
+                "diff_table": (fresh_diff or {}).get("diff_markdown"),
+                "message": msg,
+                "previous_pending_action_id": str(action.id),
+                "action_status": "awaiting_confirmation" if new_action else "superseded",
+            }
+
     # 4. Mark confirmed
     action.status = ACTION_STATUS_CONFIRMED
     action.confirmed_at = datetime.now(timezone.utc)
     db.commit()
 
-    # 5. Execute action payload based on tool_name
+    # 5. Execute action payload based on tool_name (only previewed fields/items)
     result_data: Dict[str, Any] = {}
     try:
         if action.tool_name in ["create_or_update_listing", "ingest_property_from_drive"]:
-            result_data = _execute_update_listing(db, action.action_payload)
+            result_data = _execute_update_listing(
+                db, payload, authenticated_staff=authenticated_staff
+            )
         elif action.tool_name == "send_email":
             result_data = _execute_send_email(
-                action.action_payload,
+                payload,
                 staff_user_email=authenticated_staff.email if authenticated_staff else None,
                 db=db
             )
+            result_data["undoable"] = False
         elif action.tool_name == "create_calendar_event":
             result_data = _execute_create_calendar_event(
-                action.action_payload,
+                payload,
                 staff_user_email=authenticated_staff.email if authenticated_staff else None,
                 db=db
+            )
+            result_data["undoable"] = False
+        elif action.tool_name == "execute_batch_property_action":
+            result_data = _execute_batch_property_action(
+                db, payload, authenticated_staff
             )
         else:
             raise ValueError(f"Unsupported tool action: {action.tool_name}")
+
+        # Persist operation_id on the pending action so Data history / Activity logs can link undo
+        operation_id = None
+        if isinstance(result_data, dict):
+            operation_id = result_data.get("operation_id")
+            if operation_id:
+                merged_payload = dict(action.action_payload or {})
+                merged_payload["operation_id"] = operation_id
+                action.action_payload = merged_payload
 
         # 6. Mark executed
         action.status = ACTION_STATUS_EXECUTED
@@ -264,12 +534,34 @@ def confirm_and_execute_action(
         action.execution_result = result_data
         db.commit()
 
-        # 7. Record immutable audit log
+        # 7. Record immutable audit log (include recipient/subject or event details for non-undoable)
+        audit_payload = dict(action.action_payload or {})
+        if action.tool_name == "send_email":
+            audit_payload = {
+                **audit_payload,
+                "to": (action.action_payload or {}).get("to"),
+                "subject": (action.action_payload or {}).get("subject"),
+                "undoable": False,
+                "operation_id": operation_id,
+            }
+        elif action.tool_name == "create_calendar_event":
+            audit_payload = {
+                **audit_payload,
+                "title": (action.action_payload or {}).get("title"),
+                "start_time": (action.action_payload or {}).get("start_time"),
+                "attendees": (action.action_payload or {}).get("attendees"),
+                "undoable": False,
+                "operation_id": operation_id,
+            }
+        elif operation_id:
+            audit_payload["operation_id"] = operation_id
+
         audit = record_audit_log(
             db=db,
             staff_user_id=authenticated_staff.email,
             tool_name=action.tool_name,
-            proposed_payload=action.action_payload,
+            proposed_payload=audit_payload,
+            tool_arguments={"operation_id": operation_id} if operation_id else None,
             confirmed_by_staff=True,
             execution_result=str(result_data),
             status="SUCCESS",
@@ -277,13 +569,72 @@ def confirm_and_execute_action(
             pending_action_id=str(action.id)
         )
 
+        from app.core.config import settings as _settings
+        audit_disabled = bool(
+            getattr(audit, "audit_logging_disabled", False)
+            or getattr(audit, "is_ephemeral", False)
+            or not getattr(_settings, "ENABLE_AUDIT_LOGGING", False)
+        )
+        audit_id = None if audit_disabled else str(getattr(audit, "id", "") or "") or None
+
+        # Read-back verification line for listing updates
+        verification_line = None
+        if isinstance(result_data, dict):
+            verified = result_data.get("verified_fields") or {}
+            if not verified and result_data.get("updated_fields"):
+                try:
+                    from app.services.admin_change_diff import read_stored_property_fields
+                    from app.services.admin_property_fields import format_price_thb
+                    live = read_stored_property_fields(
+                        db, str(result_data.get("property_id") or ""), list(result_data["updated_fields"].keys())
+                    )
+                    bits = []
+                    for k, expected in (result_data.get("updated_fields") or {}).items():
+                        actual = live.get(k)
+                        if k.startswith("price"):
+                            bits.append(f"{k}={format_price_thb(actual)}")
+                        else:
+                            bits.append(f"{k}={actual}")
+                    if bits:
+                        verification_line = "Verified in database: " + ", ".join(bits[:4])
+                except Exception:
+                    verification_line = None
+            elif verified:
+                from app.services.admin_property_fields import format_price_thb
+                bits = []
+                for k, actual in verified.items():
+                    if k.startswith("price"):
+                        bits.append(f"{k}={format_price_thb(actual)}")
+                    else:
+                        bits.append(f"{k}={actual}")
+                if bits:
+                    verification_line = "Verified in database: " + ", ".join(bits[:4])
+
+        # Append system note to conversation so the chat model sees button confirms
+        try:
+            _append_action_lifecycle_note(
+                db,
+                conversation_id=action.conversation_id,
+                pending_action_id=str(action.id),
+                status="CONFIRMED",
+                tool_name=action.tool_name,
+                result_data=result_data if isinstance(result_data, dict) else {},
+                verification_line=verification_line,
+            )
+        except Exception as note_exc:
+            logger.warning(f"Failed to append confirm history note: {note_exc}")
+
         return {
             "status": ACTION_STATUS_EXECUTED,
             "pending_action_id": str(action.id),
             "tool_name": action.tool_name,
             "execution_result": result_data,
-            "audit_log_id": str(audit.id),
-            "confirmed_by": authenticated_staff.email
+            "operation_id": operation_id,
+            "audit_log_id": audit_id,
+            "audit_logging_disabled": audit_disabled,
+            "audit_logging_note": "Audit logging is disabled" if audit_disabled else None,
+            "verification_line": verification_line,
+            "confirmed_by": authenticated_staff.email,
         }
 
     except Exception as exc:
@@ -339,6 +690,17 @@ def reject_pending_action(
         conversation_id=action.conversation_id,
         pending_action_id=str(action.id)
     )
+    try:
+        _append_action_lifecycle_note(
+            db,
+            conversation_id=action.conversation_id,
+            pending_action_id=str(action.id),
+            status="REJECTED",
+            tool_name=action.tool_name,
+            reason=reason or "Rejected by staff.",
+        )
+    except Exception as note_exc:
+        logger.warning(f"Failed to append reject history note: {note_exc}")
 
     return {
         "status": ACTION_STATUS_REJECTED,
@@ -347,19 +709,165 @@ def reject_pending_action(
     }
 
 
-def _execute_update_listing(db: Session, payload: Dict[str, Any]) -> Dict[str, Any]:
+def _execute_batch_property_action(
+    db: Session,
+    payload: Dict[str, Any],
+    authenticated_staff: AuthenticatedStaff,
+) -> Dict[str, Any]:
+    """
+    Applies a previously proposed batch property action. Only invoked after explicit
+    staff confirmation (pending action id + confirming user).
+    """
+    from app.services.admin_batch_service import execute_batch_property_operation
+
+    op_type = (payload.get("operation_type") or payload.get("action_type") or "update").lower()
+    records = payload.get("records") or []
+    if not records and payload.get("items"):
+        records = []
+        for it in payload["items"]:
+            row = {
+                "property_id": it.get("property_id"),
+                "name": it.get("name") or it.get("property_id"),
+            }
+            fields = (it.get("change") or {}).get("fields") or payload.get("update_fields") or {}
+            row.update(fields)
+            records.append(row)
+    # Confirm applies only what was previewed in change_diff
+    change_diff = payload.get("change_diff") or {}
+    preview_items = change_diff.get("items") or []
+    if preview_items:
+        allowed_ids = {str(it.get("property_id")) for it in preview_items if it.get("property_id")}
+        records = [r for r in records if str(r.get("property_id")) in allowed_ids]
+        # For non-delete, restrict fields to those shown in each item's rows
+        if op_type != "delete":
+            field_map = {
+                str(it.get("property_id")): {r["field"] for r in (it.get("rows") or [])}
+                for it in preview_items
+            }
+            trimmed = []
+            for r in records:
+                pid = str(r.get("property_id"))
+                allowed_fields = field_map.get(pid)
+                if not allowed_fields:
+                    trimmed.append(r)
+                    continue
+                keep = {
+                    k: v
+                    for k, v in r.items()
+                    if k in ("property_id", "name") or k in allowed_fields
+                }
+                trimmed.append(keep)
+            records = trimmed
+    if not records:
+        raise ValueError("Batch pending action has no listed records/items to apply.")
+
+    return execute_batch_property_operation(
+        action_type=op_type,
+        records=records,
+        staff_user=authenticated_staff,
+        source_filename=payload.get("source_filename") or "pending_action_confirm",
+        db_session=db,
+        confirmed_by_staff=True,
+    )
+
+
+def _serialize_property_snapshot(prop: Any) -> Dict[str, Any]:
+    """Capture a plain dict of listing fields for the 6-day undo snapshot."""
+    if prop is None:
+        return {}
+    keys = (
+        "property_id", "property_name", "project_name", "property_type", "status",
+        "country", "province", "district", "subdistrict", "area", "address",
+        "price_display", "price_numeric_min", "price_numeric_max", "currency", "price_note",
+        "bedrooms_display", "bedrooms_min", "bedrooms_max", "bathrooms",
+        "area_display", "area_sqm_min", "area_sqm_max", "usable_area_sqm", "land_area_sqm",
+        "description", "has_pool", "beach_access", "sea_view",
+        "features", "facilities", "amenities", "highlights", "developer_name", "ownership_type",
+        "websites", "is_public",
+    )
+    out: Dict[str, Any] = {}
+    for k in keys:
+        if hasattr(prop, k):
+            out[k] = getattr(prop, k, None)
+    # Also keep common aliases used by Firestore restore
+    if out.get("property_name"):
+        out.setdefault("name", out["property_name"])
+        out.setdefault("title", out["property_name"])
+    return out
+
+
+def _execute_update_listing(
+    db: Session,
+    payload: Dict[str, Any],
+    authenticated_staff: Optional[AuthenticatedStaff] = None,
+) -> Dict[str, Any]:
     """
     Safely creates or updates property listings in PostgreSQL via parameterized ORM.
     Handles mode == 'create' (or missing property) and mode == 'update'.
+    Saves a 6-day undo snapshot BEFORE writing when staff_user is provided (chat confirm path).
     """
     property_id = payload.get("property_id")
-    fields = payload.get("fields_to_update", {}) or payload.get("fields", {})
+    fields = dict(payload.get("fields_to_update", {}) or payload.get("fields", {}) or {})
     mode = payload.get("mode", "update")
     if not property_id:
         raise ValueError("Missing required property_id in payload.")
 
-    prop = db.query(Property).filter(Property.property_id == property_id).first()
-    is_valid, missing, err_msg = validate_property_data(payload, existing_property=prop)
+    # Prefer canonical_fields from staged diff when present
+    change_diff = payload.get("change_diff") or {}
+    if isinstance(change_diff, dict) and change_diff.get("canonical_fields"):
+        fields = dict(change_diff["canonical_fields"])
+
+    # Confirm applies only fields that appeared in the staged Field|Current|New preview
+    preview_rows = change_diff.get("rows") or []
+    if preview_rows:
+        allowed = {r.get("field") for r in preview_rows if r.get("field")}
+        fields = {k: v for k, v in fields.items() if k in allowed}
+
+    # Never apply websites on update unless explicitly present in original payload keys
+    orig_fields = payload.get("fields_to_update") or payload.get("fields") or {}
+    if "websites" not in orig_fields and "selected_websites" not in orig_fields and "websites" not in payload:
+        fields.pop("websites", None)
+
+    from app.services.admin_property_fields import (
+        resolve_existing_property,
+        coerce_price_storage,
+        format_price_thb,
+    )
+
+    resolve_source, resolved = resolve_existing_property(db, property_id)
+    prop = resolved if resolve_source == "postgres" else (
+        db.query(Property).filter(Property.property_id == property_id).first()
+    )
+    if resolve_source == "firestore" and isinstance(resolved, dict):
+        property_id = str(resolved.get("property_id") or resolved.get("_firestore_doc_id") or property_id)
+        payload = dict(payload)
+        payload["property_id"] = property_id
+        payload["resolve_source"] = "firestore"
+        payload["is_update_only"] = True
+        payload["mode"] = "update"
+        mode = "update"
+
+    # Coerce price fields to int before write
+    for pk in ("price_numeric_min", "price_numeric_max"):
+        if pk in fields and fields[pk] is not None:
+            c = coerce_price_storage(fields[pk])
+            if c is not None:
+                fields[pk] = c
+                if pk == "price_numeric_min":
+                    fields.setdefault("price_display", format_price_thb(c))
+
+    validation_payload = dict(payload)
+    if "fields_to_update" in validation_payload or "fields_to_update" in payload:
+        validation_payload["fields_to_update"] = fields
+    else:
+        validation_payload["fields"] = fields
+    if resolve_source:
+        validation_payload["is_update_only"] = True
+        validation_payload["mode"] = "update"
+        validation_payload["resolve_source"] = resolve_source
+    is_valid, missing, err_msg = validate_property_data(
+        validation_payload, existing_property=resolved if resolve_source else prop
+    )
     if not is_valid:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -379,14 +887,88 @@ def _execute_update_listing(db: Session, payload: Dict[str, Any]) -> Dict[str, A
 
     updated_fields = {}
     is_created = False
+    operation_id: Optional[str] = None
+
+    # Snapshot BEFORE mutation (6-day undo window) — chat confirm path only
+    previous_state = _serialize_property_snapshot(prop) if prop else None
+    snapshot_action = "create" if not prop else ("delete" if mode == "delete" else "update")
+    if authenticated_staff is not None:
+        try:
+            operation_id = record_crud_operation_snapshot(
+                action_type=snapshot_action,
+                property_id=property_id,
+                previous_state=previous_state,
+                staff_user=authenticated_staff,
+                source="chat_confirm",
+                created_id=property_id if snapshot_action == "create" else None,
+                db_session=db,
+                confirmed_by_staff=True,
+            )
+        except Exception as snap_exc:
+            logger.warning(f"Failed to save CRUD undo snapshot before listing write: {snap_exc}")
 
     from app.core.tenant import normalize_website_list, get_current_env_domain
 
-    target_websites = payload.get("websites") or fields.get("websites") or payload.get("selected_websites")
+    # Websites only when explicitly requested
+    explicit_websites = (
+        "websites" in orig_fields
+        or "selected_websites" in orig_fields
+        or "websites" in payload
+    )
+    target_websites = fields.get("websites") if explicit_websites else None
+    if explicit_websites and target_websites is None:
+        target_websites = payload.get("websites") or payload.get("selected_websites")
     norm_websites = normalize_website_list(target_websites) if target_websites else None
 
-    if not prop:
-        # Create a new property
+    firestore_only = (resolve_source == "firestore" and prop is None)
+
+    if firestore_only:
+        # Firestore-only listing: write Firestore; do NOT invent an incomplete PG row
+        is_created = False
+        updated_fields = dict(fields)
+        if getattr(settings, "ENABLE_FIRESTORE_SYNC", True) or True:
+            try:
+                from app.services.firestore_service import save_or_update_property_firestore
+                save_or_update_property_firestore(
+                    property_id=property_id,
+                    fields=fields,
+                    images=payload.get("images") or fields.get("images") or [],
+                    cover_image=payload.get("cover_image") or fields.get("cover_image"),
+                    target="admin",
+                )
+            except Exception as e:
+                logger.warning(f"Firestore-only listing update failed: {e}")
+                raise
+        # Verify read-back
+        from app.services.admin_change_diff import read_stored_property_fields
+        live = read_stored_property_fields(db, property_id, list(fields.keys()))
+        verified = {}
+        for k, v in fields.items():
+            verified[k] = live.get(k)
+        from app.services.cache_service import search_cache
+        search_cache.invalidate()
+        title = (
+            (resolved or {}).get("property_name")
+            if isinstance(resolved, dict)
+            else property_id
+        )
+        return {
+            "property_id": property_id,
+            "title": title,
+            "mode": "update",
+            "updated_fields": updated_fields,
+            "images_count": 0,
+            "images": [],
+            "current_status": live.get("status") or (resolved or {}).get("status") if isinstance(resolved, dict) else None,
+            "operation_id": operation_id,
+            "undoable": bool(operation_id),
+            "undo_window_days": 6 if operation_id else None,
+            "resolve_source": "firestore",
+            "verified_fields": verified,
+            "success": True,
+        }
+    elif not prop:
+        # Create a new property (truly new id)
         is_created = True
         prop_name = fields.get("property_name") or payload.get("title") or property_id
         prop = Property(
@@ -412,8 +994,8 @@ def _execute_update_listing(db: Session, payload: Dict[str, Any]) -> Dict[str, A
         db.commit()
         db.refresh(prop)
     else:
-        # Update existing property
-        if norm_websites is not None:
+        # Update existing Postgres property — never inject websites
+        if explicit_websites and norm_websites is not None:
             prop.websites = norm_websites
             updated_fields["websites"] = norm_websites
 
@@ -476,7 +1058,10 @@ def _execute_update_listing(db: Session, payload: Dict[str, Any]) -> Dict[str, A
         "updated_fields": updated_fields,
         "images_count": len(input_images),
         "images": input_images,
-        "current_status": prop.status
+        "current_status": prop.status,
+        "operation_id": operation_id,
+        "undoable": bool(operation_id),
+        "undo_window_days": 6 if operation_id else None,
     }
 
 
@@ -502,14 +1087,18 @@ def _execute_send_email(
         staff_user_email=staff_user_email,
         db=db
     )
+    delivered = bool(res.get("success")) and not bool(res.get("is_mock"))
     return {
-        "delivered": res.get("success", True),
+        "delivered": delivered,
+        "success": bool(res.get("success")) and delivered,
+        "completed": delivered,
         "message_id": res.get("message_id"),
         "to": to_email,
         "subject": subject,
         "dispatched_at": res.get("timestamp", datetime.now(timezone.utc).isoformat()),
-        "provider": res.get("provider", "simulation"),
-        "is_mock": res.get("is_mock", True)
+        "provider": res.get("provider", "disconnected"),
+        "is_mock": bool(res.get("is_mock", True)),
+        "error": res.get("error"),
     }
 
 
@@ -539,14 +1128,18 @@ def _execute_create_calendar_event(
         staff_user_email=staff_user_email,
         db=db
     )
+    created = bool(res.get("success")) and not bool(res.get("is_mock"))
     return {
-        "created": res.get("success", True),
+        "created": created,
+        "success": created,
+        "completed": created,
         "event_id": res.get("event_id"),
         "title": title,
         "start_time": start_time,
         "end_time": end_time or start_time,
         "attendees": attendees,
-        "status": "confirmed",
+        "status": "confirmed" if created else "incomplete",
         "google_calendar_url": res.get("google_calendar_url"),
-        "is_mock": res.get("is_mock", True)
+        "is_mock": bool(res.get("is_mock", True)),
+        "error": res.get("error"),
     }

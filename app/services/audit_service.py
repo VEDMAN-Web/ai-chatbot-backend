@@ -71,8 +71,17 @@ def record_audit_log(
 
     from app.core.config import settings
     if not getattr(settings, "ENABLE_AUDIT_LOGGING", False):
-        # Permanent audit logging OFF until explicitly enabled; in-session work continues
+        # Keep an in-memory/ephemeral entry for debugging — never present as a real audit id
         log_entry.id = f"audit_ephemeral_{datetime.now(timezone.utc).timestamp()}"
+        setattr(log_entry, "is_ephemeral", True)
+        setattr(log_entry, "audit_logging_disabled", True)
+        logger.warning(
+            "ENABLE_AUDIT_LOGGING is off — not persisting audit for tool=%s pending=%s "
+            "(ephemeral id %s must not be shown as a real audit id)",
+            tool_name,
+            pending_action_id,
+            log_entry.id,
+        )
         return log_entry
 
     try:

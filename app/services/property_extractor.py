@@ -207,12 +207,12 @@ def extract_property_data_regex(text: str, filename: Optional[str] = None) -> Di
         data["bedrooms_max"] = b_max
         data["bedrooms_display"] = f"{b_min}" if b_min == b_max else f"{b_min}–{b_max}"
 
-    # 8. Bathrooms
+    # 8. Bathrooms — never invent from bedrooms; leave None if not documented
     bath_match = re.search(r'(\d+)\s*(?:bathrooms?|baths?|ba\b)', text_lower)
     if bath_match:
         data["bathrooms"] = int(bath_match.group(1))
-    elif data["bedrooms_min"]:
-        data["bathrooms"] = data["bedrooms_min"]
+    else:
+        data["bathrooms"] = None
 
     # 9. Usable Area (sqm)
     area_match = re.search(r'(\d+(?:\.\d+)?)\s*(?:-|to)?\s*(\d+(?:\.\d+)?)?\s*(?:sqm|sq\.m|m2|m²)', text_lower)

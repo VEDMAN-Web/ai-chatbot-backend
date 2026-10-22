@@ -1,7 +1,29 @@
+import logging
 import os
-from typing import List, Union, Optional
+import sys
+from typing import List, Union, Optional, Dict, Any
+from urllib.parse import urlparse
 from pydantic_settings import BaseSettings
 from pydantic import field_validator
+
+logger = logging.getLogger(__name__)
+
+# Clearly fake — no real credentials. Production/dev must set DATABASE_URL via env/.env.
+_DATABASE_URL_PLACEHOLDER = "postgresql://USER:PASSWORD@127.0.0.1:5432/tajlandia_db"
+
+_WEAK_SECRETS = {
+    "",
+    "secret",
+    "changeme",
+    "password",
+    "tajlandia-internal-secret-token",
+    "tajlandia-oauth-state-secret",
+    "tajlandia-reset-secret",
+    "test",
+    "dev",
+    "default",
+}
+
 
 class Settings(BaseSettings):
     PROJECT_NAME: str = "Varsovia Estate AI Property Platform"
@@ -65,9 +87,12 @@ class Settings(BaseSettings):
         return f"{base}/oferty/{clean_slug}"
     
     # Database Configuration (Multi-Database Support for Admin vs User Side)
-    DATABASE_URL: str = "postgresql://postgres:xyz123%4024@127.0.0.1:5432/tajlandia_db"
+    # Must be set via environment / .env in non-test runs — default has no real credentials.
+    DATABASE_URL: str = ""
     ADMIN_DATABASE_URL: Optional[str] = None
     USER_DATABASE_URL: Optional[str] = None
+    # Optional app signing secret (also check INTERNAL_API_SECRET for weakness)
+    SECRET_KEY: str = ""
     
     # AI Configuration — accuracy over speed/cost; harden timeouts so one stuck call cannot hang Cloud Run
     OPENAI_API_KEY: str = ""
@@ -84,7 +109,20 @@ class Settings(BaseSettings):
     ANTHROPIC_API_KEY: str = ""
     ANTHROPIC_MODEL: str = "claude-opus-5-5"
     ANTHROPIC_TEMPERATURE: float = 0.0
-    ANTHROPIC_TIMEOUT: float = 600.0  # 10 minutes — same for admin bot
+    ANTHROPIC_TIMEOUT: float = 60.0  # default; prefer ADMIN_MAIN_TIMEOUT / ADMIN_HELPER_TIMEOUT
+    ANTHROPIC_MAX_RETRIES: int = 1  # one retry on connection errors only (not timeouts)
+
+    # Admin chatbot performance (speed without losing accuracy)
+    ADMIN_FAST_MODEL: str = "claude-haiku-4-5"  # classifier + guardrail judge
+    ADMIN_MAIN_MODEL: str = ""  # empty → use ANTHROPIC_MODEL; set e.g. claude-sonnet-4-5 via env
+    ADMIN_HELPER_TIMEOUT: float = 30.0
+    ADMIN_MAIN_TIMEOUT: float = 60.0
+    ADMIN_TURN_BUDGET_SEC: float = 75.0
+    ADMIN_DEBUG_TIMING: bool = False
+    ADMIN_TOOL_CACHE_TTL_SEC: float = 60.0
+    ADMIN_MAX_TOOL_ROUNDS: int = 3
+    ADMIN_NORMAL_MAX_TOKENS: int = 700
+    ADMIN_LIST_MAX_TOKENS: int = 2000
 
     # Property catalog / name-index in-memory cache (stale-while-revalidate)
     CATALOG_CACHE_TTL_SEC: float = 900.0  # 15 minutes
@@ -116,11 +154,15 @@ class Settings(BaseSettings):
     ENABLE_AUDIT_LOGGING: bool = False
 
     # Action Confirmation & Security
-    ACTION_EXPIRATION_MINUTES: int = 15
+    ACTION_EXPIRATION_MINUTES: int = 30
+    # Preferred alias for pending-action TTL (Task E); falls back to ACTION_EXPIRATION_MINUTES
+    ADMIN_PENDING_ACTION_TTL_MIN: int = 30
     INTERNAL_API_SECRET: str = "tajlandia-internal-secret-token"
     ADMIN_EMAIL: Optional[str] = None
     ADMIN_PASSWORD: Optional[str] = None
     SESSION_EXPIRE_HOURS: int = 168  # 7 days session validity
+    # Admin batch/CRUD undo snapshots in Firestore admin_batch_operations
+    ADMIN_SNAPSHOT_RETENTION_DAYS: int = 6
 
     # Google Workspace Integrations (OAuth2, Maps, SMTP)
     GOOGLE_CLIENT_ID: str = ""
@@ -137,6 +179,10 @@ class Settings(BaseSettings):
 
     # Report Generation Storage
     REPORT_STORAGE_DIR: str = "data/reports"
+    # True when REPORT_STORAGE_DIR is a mounted persistent volume (not ephemeral container disk)
+    REPORT_PERSISTENT_VOLUME: bool = False
+    REPORT_RETENTION_DAYS: int = 7
+    REPORT_SIGNED_LINK_TTL_SEC: int = 600
 
     # Universal / Fallback Cloud Firestore & Firebase Settings
     FIRESTORE_PROJECT_ID: str = "varsovia-8c135"
@@ -248,4 +294,127 @@ class Settings(BaseSettings):
         env_file = ".env"
         extra = "allow"
 
+
 settings = Settings()
+
+
+def is_test_environment() -> bool:
+    """True when running under pytest or ENVIRONMENT=test/testing."""
+    env = (os.environ.get("ENVIRONMENT") or getattr(settings, "ENVIRONMENT", "") or "").lower()
+    if env in ("test", "testing"):
+        return True
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return True
+    if "pytest" in sys.modules:
+        return True
+    return False
+
+
+def _database_url_is_configured(url: Optional[str]) -> bool:
+    u = (url or "").strip()
+    if not u:
+        return False
+    # Reject empty-ish / placeholder-only values
+    if u in (_DATABASE_URL_PLACEHOLDER, "postgresql://USER:PASSWORD@127.0.0.1:5432/tajlandia_db"):
+        return False
+    if "USER:PASSWORD@" in u or "user:password@" in u.lower():
+        return False
+    if u.rstrip("/").endswith("://") or u in ("postgresql://", "postgresql+psycopg2://"):
+        return False
+    return True
+
+
+def assert_database_configured_or_exit() -> None:
+    """
+    Fail fast at startup when DATABASE_URL is missing in a non-test environment.
+    Tests must supply DATABASE_URL via conftest / env — never from a real password default.
+    """
+    if is_test_environment():
+        return
+    if _database_url_is_configured(settings.DATABASE_URL):
+        return
+    raise RuntimeError(
+        "DATABASE_URL is not configured. Set DATABASE_URL in the environment or .env file "
+        "(do not embed real passwords in code). Refusing to start."
+    )
+
+
+def log_config_warnings() -> None:
+    """
+    Emit WARNING logs once at startup for risky/off flags. Never logs secret values.
+    """
+    if not getattr(settings, "ENABLE_AUDIT_LOGGING", False):
+        logger.warning("Admin audit logging is OFF")
+    if not getattr(settings, "ENABLE_LEAD_SAVING", False):
+        logger.warning("Lead saving is OFF")
+
+    redirect = (getattr(settings, "GOOGLE_REDIRECT_URI", None) or "").strip()
+    if redirect and "railway.app" in redirect.lower():
+        on_cloud_run = bool(os.environ.get("K_SERVICE"))
+        base = (getattr(settings, "BASE_WEBSITE_URL", None) or "").lower()
+        if on_cloud_run or ("railway.app" not in base and base):
+            logger.warning(
+                "GOOGLE_REDIRECT_URI still points at a railway.app host while running on "
+                "Cloud Run (K_SERVICE set) or a different base URL — update OAuth redirect"
+            )
+
+    admin_fs = (getattr(settings, "ADMIN_FIRESTORE_PROJECT_ID", None) or "").strip()
+    if not admin_fs:
+        logger.warning(
+            "ADMIN_FIRESTORE_* is not set, so admin shares the public Firestore project"
+        )
+
+    secret = (getattr(settings, "INTERNAL_API_SECRET", None) or "").strip()
+    jwt_or_key = (getattr(settings, "SECRET_KEY", None) or "").strip()
+    if secret.lower() in _WEAK_SECRETS or len(secret) < 16:
+        logger.warning("JWT/secret key (INTERNAL_API_SECRET) is a default or weak value")
+    if jwt_or_key and (jwt_or_key.lower() in _WEAK_SECRETS or len(jwt_or_key) < 16):
+        logger.warning("JWT/secret key (SECRET_KEY) is a default or weak value")
+    if not secret and not jwt_or_key:
+        logger.warning("JWT/secret key is a default or weak value")
+
+    try:
+        from app.services.report_service import get_report_storage_mode, is_s3_configured, is_persistent_volume_configured
+        mode = get_report_storage_mode()
+        if mode == "ephemeral" and not is_s3_configured() and not is_persistent_volume_configured():
+            logger.warning(
+                "Reports are stored on ephemeral disk and will disappear on redeploy"
+            )
+    except Exception as e:
+        logger.debug("Could not evaluate report storage mode at startup: %s", e)
+
+
+def get_admin_config_status() -> Dict[str, Any]:
+    """
+    Labels/booleans only for admin system health. Never includes secrets or credentialed URLs.
+    """
+    redirect = (getattr(settings, "GOOGLE_REDIRECT_URI", None) or "").strip()
+    redirect_host = ""
+    if redirect:
+        try:
+            redirect_host = urlparse(redirect).hostname or ""
+        except Exception:
+            redirect_host = ""
+
+    admin_fs = (getattr(settings, "ADMIN_FIRESTORE_PROJECT_ID", None) or "").strip()
+    try:
+        from app.services.report_service import get_report_storage_mode
+        report_storage = get_report_storage_mode()
+    except Exception:
+        report_storage = "ephemeral"
+    # Normalize for API contract: ephemeral | s3 (persistent volumes report as ephemeral=false via label)
+    if report_storage == "persistent":
+        report_storage_label = "persistent"
+    elif report_storage == "s3":
+        report_storage_label = "s3"
+    else:
+        report_storage_label = "ephemeral"
+
+    return {
+        "audit_logging": bool(getattr(settings, "ENABLE_AUDIT_LOGGING", False)),
+        "lead_saving": bool(getattr(settings, "ENABLE_LEAD_SAVING", False)),
+        "firestore_project_shared": not bool(admin_fs),
+        "google_redirect_host": redirect_host,
+        "database_configured": _database_url_is_configured(settings.DATABASE_URL),
+        "report_storage": report_storage_label,
+    }
