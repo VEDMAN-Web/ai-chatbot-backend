@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="{{ data.language or 'en' }}">
+<head>
+  <meta charset="utf-8"/>
+  <title>{{ data.name or data.property_id or 'Property Brochure' }}</title>
+  <style>
+    @font-face {
+      font-family: "Brochure Serif";
+      src: url("{{ font_urls.serif_regular }}") format("truetype");
+      font-weight: 400;
+      font-style: normal;
+    }
+    @font-face {
+      font-family: "Brochure Serif";
+      src: url("{{ font_urls.serif_bold }}") format("truetype");
+      font-weight: 700;
+      font-style: normal;
+    }
+    @font-face {
+      font-family: "Brochure Serif";
+      src: url("{{ font_urls.serif_italic }}") format("truetype");
+      font-weight: 400;
+      font-style: italic;
+    }
+    @font-face {
+      font-family: "Brochure Sans";
+      src: url("{{ font_urls.sans_regular }}") format("truetype");
+      font-weight: 400;
+      font-style: normal;
+    }
+    @font-face {
+      font-family: "Brochure Sans";
+      src: url("{{ font_urls.sans_bold }}") format("truetype");
+      font-weight: 700;
+      font-style: normal;
+    }
+    @font-face {
+      font-family: "Brochure Thai";
+      src: url("{{ font_urls.thai_regular }}") format("truetype");
+      font-weight: 400;
+      font-style: normal;
+    }
+    @font-face {
+      font-family: "Brochure Thai";
+      src: url("{{ font_urls.thai_bold }}") format("truetype");
+      font-weight: 700;
+      font-style: normal;
+    }
+
+    :root {
+      --bg: {{ theme.bg }};
+      --bg_alt: {{ theme.bg_alt }};
+      --paper: {{ theme.paper }};
+      --ink: {{ theme.ink }};
+      --muted: {{ theme.muted }};
+      --accent: {{ theme.accent }};
+      --accent_text: {{ theme.accent_text }};
+      --chip: {{ theme.chip }};
+      --bar: {{ theme.bar }};
+      --card: {{ theme.card }};
+      --price_bg: {{ theme.price_bg }};
+      --price_fg: {{ theme.price_fg }};
+      --notice: {{ theme.notice }};
+      --cream: {{ theme.cream }};
+      --card_green: {{ theme.card_green or theme.card }};
+      --card_blue: {{ theme.card_blue or theme.card }};
+      --card_lilac: {{ theme.card_lilac or theme.bar }};
+      --green: {{ theme.green or theme.bar }};
+      --serif: "Brochure Serif", "Brochure Thai", serif;
+      --sans: "Brochure Sans", "Brochure Thai", sans-serif;
+      /* legacy aliases used by older section CSS */
+      --sage: {{ theme.cream or theme.paper }};
+    }
+
+    {{ theme_common_css }}
+    {{ theme_css }}
+  </style>
+</head>
+<body class="theme-{{ theme_id }} shape-{{ theme_shape }} layout-{{ theme_layout }}">
+{% for page in pages %}
+  {% set prepared = page.prepared %}
+  {% set page_label = page.page_label %}
+  {% set header_text = page.header_text %}
+  {% include page.template %}
+{% endfor %}
+{% if ai_footer %}
+<div class="ai-footer-note" style="position:fixed;bottom:2mm;left:0;right:0;text-align:center;font-size:5.5pt;color:var(--muted);letter-spacing:0.02em;">
+  {{ ai_footer }}
+</div>
+{% endif %}
+</body>
+</html>

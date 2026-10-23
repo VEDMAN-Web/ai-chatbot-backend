@@ -1,118 +1,35 @@
-<section class="page nearby-page" data-section="nearby_places">
+<section class="page location-page" data-section="nearby_places">
   <span class="section-marker">SECTION:nearby_places</span>
-  <div class="nearby-copy">
-    <h2 class="nearby-title">{{ labels.nearby_title }}</h2>
-    {% if data.location_text %}
-    <p class="nearby-sub">{{ data.location_text }}</p>
-    {% endif %}
-    {% for category, places in (prepared.nearby_by_category or {}).items() %}
-    <div class="nearby-cat">
-      <p class="nearby-cat-label">{{ category }}</p>
-      <ul>
-        {% for place in places %}
-        <li>
-          <span class="nearby-icon">{{ loop.index }}</span>
-          <span class="nearby-name">{{ place.name }}</span>
-          {% if place.distance_text %}
-          <span class="nearby-dist">{{ place.distance_text }}</span>
-          {% endif %}
-        </li>
-        {% endfor %}
-      </ul>
-    </div>
-    {% endfor %}
+  <div class="page-top-bar"></div>
+  <div class="page-chrome-header">
+    <span class="hdr-left">{{ header_text }}</span>
   </div>
-  <div class="nearby-map">
-    {% if data.name %}
-    <p class="nearby-map-title">{{ data.name }}</p>
+  <div class="page-chrome-body">
+    <p class="label-caps" style="margin-bottom:3mm;">{{ labels.location_title }}</p>
+    {% if data.location_text %}
+    <h2 class="display" style="font-size:18pt;margin-bottom:4mm;">{{ data.location_text }}</h2>
     {% endif %}
-    <div class="nearby-map-art">
-      <div class="map-shape"></div>
-      <div class="map-pin"></div>
-      {% if data.district %}<span class="map-label map-label-a">{{ data.district }}</span>{% endif %}
-      {% if data.province %}<span class="map-label map-label-b">{{ data.province }}</span>{% endif %}
+    {% if prepared.location_blurb %}
+    <p class="body-text max-prose" style="margin-bottom:6mm;">{{ prepared.location_blurb }}</p>
+    {% endif %}
+    {% if prepared.nearby_by_category %}
+    <p class="label-caps" style="margin-bottom:3mm;">{{ labels.nearby_title }}</p>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:5mm;">
+      {% for cat, places in prepared.nearby_by_category.items() %}
+      <div style="padding:4mm;background:var(--card);{% if theme_shape == 'rounded' %}border-radius:12px;{% endif %}">
+        <p class="label-caps" style="margin-bottom:2mm;color:var(--accent);">{{ cat }}</p>
+        {% for place in places %}
+        <p class="body-text" style="margin-bottom:1.5mm;">
+          {{ place.name }}{% if place.distance_text %} <span style="color:var(--muted);">· {{ place.distance_text }}</span>{% endif %}
+        </p>
+        {% endfor %}
+      </div>
+      {% endfor %}
     </div>
+    {% endif %}
+  </div>
+  <div class="page-chrome-footer">
+    <span></span>
+    <span class="page-num">{{ page_label }}</span>
   </div>
 </section>
-<style>
-  .nearby-page {
-    display: grid;
-    grid-template-columns: 48% 52%;
-    background: var(--cream);
-  }
-  .nearby-copy { padding: 16mm 14mm 14mm 18mm; }
-  .nearby-title { font-size: 24pt; margin-bottom: 3mm; }
-  .nearby-sub { font-size: 10pt; color: var(--muted); margin-bottom: 8mm; }
-  .nearby-cat { margin-bottom: 6mm; }
-  .nearby-cat-label {
-    font-size: 8pt;
-    letter-spacing: 0.2em;
-    text-transform: uppercase;
-    color: var(--accent);
-    margin-bottom: 2mm;
-    font-weight: 700;
-  }
-  .nearby-cat ul { list-style: none; }
-  .nearby-cat li {
-    display: grid;
-    grid-template-columns: 6mm 1fr auto;
-    gap: 3mm;
-    align-items: center;
-    padding: 1.5mm 0;
-    font-size: 9.5pt;
-  }
-  .nearby-icon {
-    width: 5mm;
-    height: 5mm;
-    background: var(--accent);
-    color: #fff;
-    font-size: 6.5pt;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
-  .nearby-dist { color: var(--muted); font-size: 8.5pt; }
-  .nearby-map {
-    padding: 16mm 16mm 14mm 8mm;
-    display: flex;
-    flex-direction: column;
-  }
-  .nearby-map-title {
-    text-align: right;
-    font-family: var(--serif);
-    color: var(--accent);
-    font-size: 14pt;
-    margin-bottom: 8mm;
-  }
-  .nearby-map-art {
-    flex: 1;
-    position: relative;
-    background: #e8dfd2;
-    border-radius: 2mm;
-    overflow: hidden;
-  }
-  .map-shape {
-    position: absolute;
-    inset: 18% 22% 22% 18%;
-    border: 1.5px solid rgba(90,70,50,0.35);
-    border-radius: 40% 60% 45% 55%;
-    background: rgba(255,255,255,0.25);
-  }
-  .map-pin {
-    position: absolute;
-    left: 52%;
-    top: 46%;
-    width: 5mm;
-    height: 5mm;
-    background: var(--accent);
-    border-radius: 50% 50% 50% 0;
-    transform: rotate(-45deg);
-  }
-  .map-label {
-    position: absolute;
-    font-size: 8pt;
-    color: var(--muted);
-  }
-  .map-label-a { left: 12%; bottom: 18%; }
-  .map-label-b { right: 14%; top: 20%; }
-</style>

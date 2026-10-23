@@ -4828,16 +4828,37 @@ class PublicAgentService:
         p_name = prop.property_name if prop else prop_id
         pref_loc = f"{prop.district}, {prop.province}" if prop and prop.district else (prop.province if prop else None)
         pref_type = prop.property_type if prop else None
+        fs_found = False
         if not prop and getattr(settings, "ENABLE_FIRESTORE_SYNC", True):
             try:
                 from app.services.firestore_service import get_property_by_id_from_firestore
                 fs_card = get_property_by_id_from_firestore(str(prop_id).strip())
                 if fs_card:
+                    fs_found = True
                     p_name = fs_card.get("name") or p_name
                     pref_loc = fs_card.get("location") or pref_loc
                     pref_type = fs_card.get("property_type") or pref_type
             except Exception:
                 pass
+
+        # A search sentence ("all Phuket listings under 10M") is not a property id.
+        if prop is None and not fs_found:
+            reply_text = clarification_msgs.get(language, clarification_msgs["en"])
+            append_conversation_turn(
+                db=db, conversation=conversation, user_message=user_message, assistant_message=reply_text
+            )
+            return {
+                "type": "text",
+                "text": reply_text,
+                "properties": [],
+                "quick_replies": ["Show me properties in Phuket", "Search villas under 15M THB"],
+                "lead_captured": False,
+                "preferences": stored_prefs,
+                "session_id": conversation.session_id,
+                "conversation_id": str(conversation.id),
+                "language": language,
+                "brochure_property_id": None,
+            }
 
         # Generate 8-page luxury presentation brochure and upload to S3 / storage
         from app.services.brochure_service import generate_and_upload_brochure

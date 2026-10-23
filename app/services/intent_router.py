@@ -788,6 +788,21 @@ def _lead_target_ref(msg_clean: str) -> Optional[str]:
     return None
 
 
+def _is_brochure_search_phrase(text: str) -> bool:
+    """True when the captured 'name' is a search description, not a project title."""
+    t = (text or "").strip().lower()
+    if not t:
+        return False
+    if re.search(
+        r"\b(?:listings?|properties|under|over|below|above|budget|cheaper|anything|everything)\b",
+        t,
+    ):
+        return True
+    if t.startswith("all ") and len(t.split()) >= 3:
+        return True
+    return False
+
+
 def detect_deterministic_intent(
     message: str,
     stored_state: Optional[Dict[str, Any]] = None
@@ -971,7 +986,12 @@ def detect_deterministic_intent(
                     )
                     if named:
                         prop_name = named.group(1).strip(" .,?!")
-                        prop_id = prop_name  # resolve via Firestore/SQL by name
+                        # "brochure for all Phuket listings under 10M" is a search, not a name
+                        if _is_brochure_search_phrase(prop_name):
+                            prop_id = None
+                            prop_name = None
+                        else:
+                            prop_id = prop_name  # resolve via Firestore/SQL by name
                     elif len(last_result_ids) == 1:
                         prop_id = last_result_ids[0]
                     elif state.get("selected_property_ids"):

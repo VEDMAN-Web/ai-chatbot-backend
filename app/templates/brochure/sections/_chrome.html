@@ -1,0 +1,13 @@
+{# Expects header_text, page_label, and optional dark=True #}
+{% macro header(header_text, dark=false) -%}
+<div class="page-chrome-header" {% if dark %}style="color:rgba(255,255,255,0.75);"{% endif %}>
+  <span class="hdr-left" {% if dark %}style="color:#fff;"{% endif %}>{{ header_text }}</span>
+</div>
+{%- endmacro %}
+
+{% macro footer(page_label, dark=false) -%}
+<div class="page-chrome-footer" {% if dark %}style="color:rgba(255,255,255,0.7);"{% endif %}>
+  <span></span>
+  <span class="page-num">{{ page_label }}</span>
+</div>
+{%- endmacro %}
