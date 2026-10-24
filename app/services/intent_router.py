@@ -47,7 +47,61 @@ SHOW_MORE_PATTERNS = [
     r"^(?:ดูเพิ่มเติม|เพิ่มเติม|หน้าถัดไป|ข้อเสนอถัดไป|แสดงเพิ่ม|ขอเพิ่ม|ดูเพิ่ม)$",
     r"^(?:ดู|ขอ)?\s*(?:เพิ่มเติม|เพิ่มอีก|รายการอื่น)$",
     r"\b(?:อย่างอื่น|รายการอื่น|ตัวเลือกอื่น|ไม่เอาอันนี้)\b",
+    r"\b(?:aur\s+dikhao|aur\s+dikhaiye|biju\s+batavo|vadhu\s+batavo|vadhu\s+dekhad)\b",
 ]
+
+_SHOW_MORE_LEAD = re.compile(
+    r"^(?:(?:no|nope|nah|okay|ok|yes|yeah|please|hey|hmm|then|and|so|can you|could you)[,!\s]+)+",
+    re.I,
+)
+_SHOW_MORE_TRAIL = re.compile(r"(?:[,!\s]+(?:please|thanks|thank you|again))+\s*$", re.I)
+_SHOW_MORE_CORE = re.compile(
+    r"^(?:"
+    r"(?:show|see|give|load|fetch|display|list)\s+(?:me\s+)?(?:some\s+|the\s+)?"
+    r"(?:more|next|other|another)(?:\s+\w+){0,4}"
+    r"|more(?:\s+please)?|next(?:\s+ones?)?|others?|another(?:\s+one)?|continue|keep going"
+    r"|more\s+results|more\s+options|see\s+more|show\s+me\s+some\s+more"
+    r"|give\s+me\s+more\s+options|show\s+me\s+the\s+next\s+ones|next\s+ones"
+    r"|aur\s+dikhao|biju\s+batavo|vadhu\s+batavo"
+    r")$",
+    re.I,
+)
+
+
+def strip_show_more_fillers(message: str) -> str:
+    """Drop leading 'no / okay / please / can you' and trailing 'please / thanks'."""
+    text = re.sub(r"[?!.]+$", "", (message or "").strip().lower()).strip()
+    previous = None
+    while previous != text:
+        previous = text
+        text = _SHOW_MORE_LEAD.sub("", text).strip()
+        text = _SHOW_MORE_TRAIL.sub("", text).strip()
+    return text
+
+
+def message_requests_show_more(message: str, *, listings_were_shown: bool = False) -> bool:
+    """
+    True for pagination, including 'no, show me more' and 'okay show me more'.
+    After listings, a short follow-up that only says more/next/other is also show-more.
+    """
+    raw = (message or "").strip()
+    if not raw:
+        return False
+    low = raw.lower()
+    for pat in SHOW_MORE_PATTERNS:
+        if re.search(pat, low):
+            return True
+    stripped = strip_show_more_fillers(raw)
+    if _SHOW_MORE_CORE.match(stripped):
+        return True
+    if listings_were_shown and not re.search(r"\b(about|tell|details|info|specs)\b", stripped):
+        words = re.findall(r"[a-zA-Z']+", stripped)
+        if 0 < len(words) <= 6 and not re.search(
+            r"\b(prime minister|president|recipe|homework|who is|capital of)\b", stripped
+        ):
+            if any(w in words for w in ("more", "next", "other", "others", "another", "else", "again")):
+                return True
+    return False
 
 # Reject the currently focused property and ask for alternatives
 REJECT_ACTIVE_PATTERNS = [
@@ -971,8 +1025,8 @@ def detect_deterministic_intent(
             return IntentType.PROPERTY_SEARCH, {"show_all": True}
 
     # 1.1 Show More / Pagination / "any other" alternatives
-    for pat in SHOW_MORE_PATTERNS:
-        if re.search(pat, msg_low):
+    _shown = bool(state.get("last_result_ids") or state.get("seen_property_ids"))
+    if message_requests_show_more(message, listings_were_shown=_shown):
             curr_offset = state.get("pagination_offset", 0)
             # NEW filter values in the same message override stored ones
             # (e.g. "show me other under 20 million" must not keep a 40M budget).

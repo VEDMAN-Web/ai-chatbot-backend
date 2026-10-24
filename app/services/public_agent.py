@@ -1278,20 +1278,18 @@ def extract_user_preferences(
     if m_match and "bed" not in m_match.group(0):
         val = float(m_match.group(1))
         thb_val = int(val * 1_000_000)
+        from app.services.conversation_controls import price_is_exclusive, format_budget_phrase
+        exclusive_budget = price_is_exclusive(user_message)
         prefs["budget_max"] = thb_val
-        usd_approx = int(thb_val / 35)
-        from app.services.conversation_controls import price_is_exclusive
-        if price_is_exclusive(user_message):
-            prefs["max_price_exclusive"] = True
-            prefs["budget_display"] = f"Under {val:g}M THB (~${usd_approx:,} USD)"
-        else:
-            prefs["max_price_exclusive"] = False
-            prefs["budget_display"] = f"Up to {val:g}M THB (~${usd_approx:,} USD)"
+        prefs["max_price_exclusive"] = exclusive_budget
+        prefs["budget_display"] = format_budget_phrase(thb_val, exclusive=exclusive_budget)
     elif tool_args.get("max_price"):
+        from app.services.conversation_controls import price_is_exclusive, format_budget_phrase
         max_p = float(tool_args["max_price"])
+        exclusive_budget = price_is_exclusive(user_message) or bool(prefs.get("max_price_exclusive"))
         prefs["budget_max"] = max_p
-        usd_approx = int(max_p / 35)
-        prefs["budget_display"] = f"Up to {int(max_p):,} THB (~${usd_approx:,} USD)"
+        prefs["max_price_exclusive"] = exclusive_budget
+        prefs["budget_display"] = format_budget_phrase(max_p, exclusive=exclusive_budget)
 
     # 5. Amenities & Desired Features
     features = set(prefs.get("features", []))
@@ -1352,32 +1350,33 @@ def extract_user_preferences(
         fetched.append(f"⏳ Timeline: {prefs['timeline']}")
     prefs["what_we_fetched"] = fetched
 
-    # 9. Active AI Focus Summary
-    focus_parts = []
-    if prefs.get("bedrooms"):
-        focus_parts.append(str(prefs["bedrooms"]))
-    if prefs.get("property_type"):
-        focus_parts.append(str(prefs["property_type"]).lower())
-    else:
-        focus_parts.append("properties")
+    answered = set(prefs.get("answered_slots") or [])
+    if prefs.get("budget_max") or prefs.get("budget_display"):
+        answered.add("budget")
+    if prefs.get("bedrooms") or prefs.get("bedrooms_num") or prefs.get("min_bedrooms"):
+        answered.add("bedrooms")
     if prefs.get("location"):
-        focus_parts.append(f"in {prefs['location']}")
-    if prefs.get("features"):
-        focus_parts.append(f"with {', '.join(prefs['features'][:2]).lower()}")
-    if prefs.get("budget_display"):
-        focus_parts.append(f"({prefs['budget_display']})")
-    if prefs.get("purpose"):
-        focus_parts.append(f"tailored for {prefs['purpose'].lower()}")
+        answered.add("location")
+    prefs["answered_slots"] = sorted(answered)
 
+    # 9. Active focus line — only validated slots, one budget wording
     if prefs.get("location") and not is_known_location(str(prefs.get("location"))):
         prefs.pop("location", None)
-        focus_parts = [part for part in focus_parts if not str(part).lower().startswith("in ")]
-
-    if focus_parts:
-        prefs["focus_summary"] = f"Focusing on {' '.join(focus_parts)}."
+    focus_bits = []
+    if prefs.get("bedrooms_num"):
+        focus_bits.append(f"{prefs['bedrooms_num']} bedrooms")
+    elif prefs.get("bedrooms"):
+        focus_bits.append(str(prefs["bedrooms"]))
+    if prefs.get("location"):
+        focus_bits.append(str(prefs["location"]))
+    if prefs.get("budget_display"):
+        short_budget = str(prefs["budget_display"]).split(" (about")[0]
+        focus_bits.append(short_budget)
+    if focus_bits:
+        prefs["focus_summary"] = "Searching: " + ", ".join(focus_bits)
     else:
         prefs["focus_summary"] = "Ready to discover your ideal Thailand property."
-    prefs["focus_validated"] = bool(prefs.get("location") or prefs.get("budget_display") or prefs.get("bedrooms") or prefs.get("property_type"))
+    prefs["focus_validated"] = bool(focus_bits)
 
     return prefs
 
@@ -1967,6 +1966,37 @@ def _safe_openai_create(client: Any, **kwargs) -> Any:
 
 
 
+def _dedupe_reply_blocks(text: str) -> str:
+    """Drop a repeated paragraph, and keep the narrowing question only once."""
+    if not text:
+        return text
+    marker = "To narrow this down to the best fit, may I ask:"
+    pieces = text.split(marker)
+    if len(pieces) > 2:
+        text = pieces[0] + marker + pieces[1]
+    paragraphs = re.split(r"\n\s*\n", text)
+    seen = []
+    kept = []
+    for paragraph in paragraphs:
+        key = re.sub(r"\s+", " ", paragraph.strip().lower())
+        if key and key in seen:
+            continue
+        if key:
+            seen.append(key)
+        kept.append(paragraph.strip())
+    return "\n\n".join(part for part in kept if part)
+
+
+def _history_has_listings(history: List[Dict[str, Any]], turns: int = 2) -> bool:
+    """True when a recent assistant turn already showed listings."""
+    assistants = [
+        m for m in (history or [])
+        if str(m.get("role", "")).lower() in {"assistant", "ai"}
+    ][-turns:]
+    blob = " ".join(str(m.get("content") or "") for m in assistants).lower()
+    return any(k in blob for k in ("thb", "bedroom", "villa", "condo", "listing", "property"))
+
+
 def classify_off_topic_dynamic(
     client: Optional[OpenAI],
     model: str,
@@ -2016,7 +2046,7 @@ def classify_off_topic_dynamic(
     # 5. If OpenAI client is available, run dynamic evaluation for borderline cases
     if client and getattr(settings, "OPENAI_API_KEY", None):
         try:
-            recent_turns = history[-50:] if history else []
+            recent_turns = history[-6:] if history else []
             ctx_snippets = []
             for t in recent_turns:
                 ctx_snippets.append(f"{t.get('role', 'user').title()}: {t.get('content', '')[:300]}")
@@ -2059,13 +2089,15 @@ def classify_off_topic_dynamic(
                 max_tokens=10
             )
             decision = (resp.choices[0].message.content or "").strip().upper()
-            if "OFF_TOPIC" in decision:
+            # Only an explicit OFF_TOPIC token counts. Ambiguous text stays on topic.
+            if decision == "OFF_TOPIC" or decision.startswith("OFF_TOPIC"):
                 logger.info(f"Dynamic LLM guardrail classified message as OFF-TOPIC: '{message}'")
                 return True
-            elif "ON_TOPIC" in decision:
-                return False
+            return False
         except Exception as e:
             logger.warning(f"Dynamic LLM guardrail classification exception: {e}")
+            if _history_has_listings(history):
+                return False
 
     return is_off_topic_query(message)
 
@@ -2856,6 +2888,18 @@ class PublicAgentService:
                 if isinstance(p, dict)
             )
             resp["text"] = strip_unverified_marketing(resp["text"], verified_blob)
+            resp["text"] = _dedupe_reply_blocks(resp["text"])
+        replies = resp.get("quick_replies")
+        if isinstance(replies, list):
+            seen_replies = set()
+            unique = []
+            for item in replies:
+                key = str(item or "").strip().lower()
+                if not key or key in seen_replies:
+                    continue
+                seen_replies.add(key)
+                unique.append(item)
+            resp["quick_replies"] = unique
             # Never leave literal None in visitor-facing text
             resp["text"] = re.sub(r"\bNone\b", "not listed in our verified data", resp["text"])
         if "preferences" in resp and isinstance(resp["preferences"], dict):
@@ -3316,6 +3360,20 @@ class PublicAgentService:
             is_off_topic = True
         elif intent in _re_intents:
             is_off_topic = False
+        elif (
+            _history_has_listings(history_list, turns=2)
+            and 0 < len(re.findall(r"\S+", user_message or "")) <= 8
+            and not is_off_topic_query(user_message)
+        ):
+            # Short follow-up after listings stays in the property conversation.
+            is_off_topic = False
+            from app.services.intent_router import message_requests_show_more
+            if message_requests_show_more(
+                user_message,
+                listings_were_shown=bool((conversation.preferences or {}).get("last_result_ids")),
+            ) and intent not in (IntentType.PROPERTY_SEARCH, IntentType.REFINE_FILTER):
+                intent = IntentType.SHOW_MORE
+                parsed_args = parsed_args or {"offset": int((conversation.preferences or {}).get("pagination_offset") or 0) + 4, "limit": 4, "filters_changed": False}
         else:
             is_off_topic = classify_off_topic_dynamic(
                 client=self.client,
@@ -3969,7 +4027,12 @@ class PublicAgentService:
         if _bl:
             criteria_bits.append(_bl)
         if max_p is not None:
-            criteria_bits.append(f"budget <= {max_p}")
+            from app.services.conversation_controls import format_budget_phrase
+            criteria_bits.append(format_budget_phrase(
+                float(max_p),
+                exclusive=bool(stored_prefs.get("max_price_exclusive")),
+                with_usd=False,
+            ))
         criteria_summary = ", ".join(criteria_bits) if criteria_bits else None
 
         if cards and not used_relaxed_alternatives:
@@ -4029,6 +4092,29 @@ class PublicAgentService:
                 stored_prefs["last_result_ids"] = [c["property_id"] for c in cards]
             else:
                 cards = []
+
+        if empty_reason == "seen_all" and language == "en":
+            bits = []
+            if loc:
+                bits.append(str(loc))
+            if bedrooms:
+                bits.append(f"{bedrooms} bedrooms" if str(bedrooms).isdigit() else str(bedrooms))
+            elif _beds_label_show():
+                bits.append(_beds_label_show())
+            if max_p is not None:
+                from app.services.conversation_controls import format_budget_phrase
+                bits.append(format_budget_phrase(
+                    float(max_p),
+                    exclusive=bool(stored_prefs.get("max_price_exclusive")),
+                    with_usd=False,
+                ))
+            where = ", ".join(bits) if bits else "these filters"
+            widen = "another area" if str(loc or "").lower().find("samui") >= 0 else "Koh Samui"
+            reply_text = (
+                f"That is all I have for {where}. You have already seen every matching listing. "
+                f"Want me to widen the budget or look at {widen}?"
+            )
+            cards = []
 
         if empty_reason != "seen_all":
             reply_text, cards = self._validate_or_fallback(
@@ -5876,6 +5962,9 @@ class PublicAgentService:
                 )
                 reply_text = f"{intro}\n\n{body}" if body else intro
             else:
+                order_note = None
+                if max_p is not None and "luxury" not in user_message.lower() and "most expensive" not in user_message.lower():
+                    order_note = "Cheapest first."
                 reply_text = build_rich_property_recommendation_text(
                     cards=cards,
                     language=language,
@@ -5883,11 +5972,13 @@ class PublicAgentService:
                     is_sparse=is_sparse,
                     location=loc,
                     budget=max_p,
-                    bedrooms=bedrooms,
+                    bedrooms=bedrooms if bedrooms is not None else min_bedrooms,
                     site_origin=conversation.site_origin,
+                    asked_slots=set(stored_prefs.get("asked_slots") or []) | set(stored_prefs.get("answered_slots") or []),
+                    order_note=order_note,
                 )
             if is_sparse:
-                asked = set(stored_prefs.get("asked_slots") or [])
+                asked = set(stored_prefs.get("asked_slots") or []) | set(stored_prefs.get("answered_slots") or [])
                 followups = build_consultative_followup_questions(
                     language=language,
                     location=loc,
@@ -5900,7 +5991,7 @@ class PublicAgentService:
                         "bedrooms" if "bedroom" in followups[0].lower() else "location"
                     )
                     stored_prefs["asked_slots"] = list(asked | {slot})
-                if followups:
+                if followups and "To narrow this down to the best fit, may I ask:" not in (reply_text or ""):
                     if language == "pl":
                         q_hdr = "Aby dopasować oferty precyzyjniej, powiedz proszę:"
                     elif language == "th":

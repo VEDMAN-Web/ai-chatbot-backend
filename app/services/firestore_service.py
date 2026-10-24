@@ -1231,30 +1231,28 @@ def search_properties_firestore(
     # Preserve any direct match at position 0; rank remaining by relevance (not A–Z)
     direct_ids = {m.get("property_id") for m in matched if m.get("property_id")}
     remaining = [c for c in candidates if c.get("property_id") not in direct_ids]
-    remaining.sort(
-        key=lambda p: (
-            -score_property_relevance(
-                p,
-                location=location,
-                property_type=property_type,
-                bedrooms=bedrooms,
-                min_bedrooms=min_bedrooms,
-                max_bedrooms=max_bedrooms,
-                max_price=max_price,
-                min_price=min_price,
-                has_pool=has_pool,
-                required_amenities=list(required_amenities) if required_amenities else None,
-            ),
-            str(p.get("property_id") or ""),
+    def _rank(p: Dict[str, Any]) -> tuple:
+        score = score_property_relevance(
+            p,
+            location=location,
+            property_type=property_type,
+            bedrooms=bedrooms,
+            min_bedrooms=min_bedrooms,
+            max_bedrooms=max_bedrooms,
+            max_price=max_price,
+            min_price=min_price,
+            has_pool=has_pool,
+            required_amenities=list(required_amenities) if required_amenities else None,
         )
-    )
+        price = p.get("price_thb_min") or 10 ** 15
+        # Relevance first, then cheaper, unless the user asked for the most expensive.
+        if sort_by_price == "desc":
+            return (-score, -price if price < 10 ** 15 else 0, str(p.get("property_id") or ""))
+        if sort_by_price == "asc":
+            return (price, -score, str(p.get("property_id") or ""))
+        return (-score, price, str(p.get("property_id") or ""))
 
-    if sort_by_price in ("asc", "desc"):
-        # "Cheapest" / "most expensive" must be true across ALL matches, not across the first few by relevance.
-        # Listings with no usable price are left out of a price ranking rather than shown as "cheapest".
-        priced = [c for c in remaining if (c.get("price_thb_min") or 0) > 0]
-        priced.sort(key=lambda c: (c["price_thb_min"], str(c.get("property_id") or "")), reverse=(sort_by_price == "desc"))
-        remaining = priced
+    remaining.sort(key=_rank)
 
     for p in remaining:
         # Add Google Maps URL & Embed

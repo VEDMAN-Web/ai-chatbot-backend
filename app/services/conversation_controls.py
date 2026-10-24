@@ -235,6 +235,19 @@ def price_is_exclusive(message: str) -> bool:
     return False
 
 
+def format_budget_phrase(amount_thb: float, exclusive: bool = False, with_usd: bool = True) -> str:
+    """One budget phrase for the whole chat. 'under' is strict; 'up to' includes the cap."""
+    amount = float(amount_thb or 0)
+    millions = amount / 1_000_000
+    amount_label = f"{millions:g}M THB" if millions >= 1 else f"{int(amount):,} THB"
+    word = "under" if exclusive else "up to"
+    phrase = f"{word} {amount_label}"
+    if with_usd and amount:
+        usd_m = amount / 35 / 1_000_000
+        phrase = f"{phrase} (about ${usd_m:.2f}M)"
+    return phrase
+
+
 def price_within_budget(price: Optional[float], max_price: Optional[float], exclusive: bool) -> bool:
     if price is None or max_price is None:
         return False

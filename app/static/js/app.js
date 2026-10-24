@@ -5,6 +5,15 @@ let currentLanguage = localStorage.getItem('tajlandia_language') || 'en'; // 'en
 let isTypingActive = false;
 let activeUserPreferences = {};
 
+function bedLabel(value) {
+  const text = String(value == null ? '' : value).trim();
+  if (!text || /^n\/?a$/i.test(text)) return 'Beds: on request';
+  if (/^beds:/i.test(text)) return text;
+  if (/\bbeds?\b/i.test(text)) return text;
+  if (/^\d+\s*-\s*\d+$/.test(text) || /^\d+$/.test(text)) return `${text} Beds`;
+  return text;
+}
+
 // Multi-tenant branding state (tajlandia.com, thai.estate, varsoviaestate.com)
 let activeTenantOrigin = 'varsoviaestate.com';
 let activeTenantBrand = 'Varsovia Estate';
@@ -912,7 +921,6 @@ async function appendAssistantResponse(data, animate = false) {
     focusPill.onclick = () => openFocusDrawer();
     focusPill.innerHTML = `
       <span class="inline-focus-icon">🎯</span>
-      <span class="inline-focus-label">AI Focus:</span>
       <span class="inline-focus-text">${escapeHtml(data.preferences.focus_summary)}</span>
       <span class="inline-focus-action">Matching properties</span>
     `;
@@ -1043,9 +1051,7 @@ async function appendAssistantResponse(data, animate = false) {
       const name = p.name || p.property_name || 'Thailand Luxury Property';
       const price = p.price || p.price_display || 'Price on request';
       const loc = p.location || p.district || 'Thailand';
-      const beds = (p.bedrooms && !/^beds:/i.test(String(p.bedrooms)))
-        ? `${p.bedrooms} Beds`
-        : (p.property_type || 'Beds: on request');
+      const beds = bedLabel(p.bedrooms);
       const area = p.area || '';
       const photoCount = (p.images && p.images.length) ? `${p.images.length} Photos` : 'Verified';
       const propId = p.property_id || '';
@@ -1117,7 +1123,11 @@ async function appendAssistantResponse(data, animate = false) {
   if (quickReplies && quickReplies.length > 0) {
     const wrap = document.createElement('div');
     wrap.className = 'quick-replies-wrap';
+    const seenChips = new Set();
     quickReplies.forEach(qr => {
+      const chipKey = String(qr || '').trim().toLowerCase();
+      if (!chipKey || seenChips.has(chipKey)) return;
+      seenChips.add(chipKey);
       const chip = document.createElement('div');
       chip.className = 'quick-chip';
       chip.innerText = qr;

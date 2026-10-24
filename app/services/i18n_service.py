@@ -1318,6 +1318,31 @@ def build_encouraging_alternative_intro(
     )
 
 
+def bedroom_fit_label(listing_beds: Any, requested: Any = None) -> str:
+    """Show the listing's real bedroom range, and say when a requested size sits inside it."""
+    raw = str(listing_beds or "").strip()
+    if not raw or raw.lower() in {"n/a", "na", "none", "null"}:
+        return "Beds: on request"
+    if raw.lower().startswith("beds:"):
+        base = raw
+    elif re.search(r"\bbeds?\b", raw, re.I):
+        base = raw
+    elif re.fullmatch(r"\d+\s*-\s*\d+", raw):
+        base = re.sub(r"\s+", "", raw) + " beds"
+    elif re.fullmatch(r"\d+", raw):
+        base = f"{raw} beds"
+    else:
+        base = raw
+    match = re.search(r"(\d+)", str(requested or ""))
+    if not match:
+        return base
+    requested_n = int(match.group(1))
+    span = re.search(r"(\d+)\s*-\s*(\d+)", raw)
+    if span and int(span.group(1)) <= requested_n <= int(span.group(2)):
+        return f"{span.group(1)}-{span.group(2)} beds ({requested_n}-bed units available)"
+    return base
+
+
 def build_rich_property_recommendation_text(
     cards: Optional[List[Dict[str, Any]]] = None,
     language: str = "en",
@@ -1329,7 +1354,9 @@ def build_rich_property_recommendation_text(
     site_origin: Optional[str] = None,
     searched_location: Optional[str] = None,
     searched_budget: Optional[Any] = None,
-    searched_bedrooms: Optional[Any] = None
+    searched_bedrooms: Optional[Any] = None,
+    asked_slots: Optional[Any] = None,
+    order_note: Optional[str] = None,
 ) -> str:
     """
     Builds rich consultative message content for property recommendations:
@@ -1359,6 +1386,8 @@ def build_rich_property_recommendation_text(
             intro = "นี่คือรายการที่ผ่านการตรวจสอบซึ่งตรงกับเงื่อนไขของคุณครับ:"
         else:
             intro = "Here are verified listings that match your criteria:"
+            if order_note:
+                intro = f"{intro} {order_note}"
 
     # 2. Descriptions from listing fields only (omit missing fields; no marketing filler)
     property_descriptions: List[str] = []
@@ -1382,7 +1411,7 @@ def build_rich_property_recommendation_text(
             price_display = price
 
         beds = c.get("bedrooms")
-        beds_raw = str(beds).strip() if beds not in (None, "", "N/A") else ""
+        beds_raw = bedroom_fit_label(beds, bedrooms) if beds not in (None, "", "N/A") else ""
         if beds_raw:
             low_b = beds_raw.lower()
             if any(x in low_b for x in ["bed", "sypial", "ห้องนอน"]):
@@ -1427,7 +1456,9 @@ def build_rich_property_recommendation_text(
             location=None if loc_missing else location,
             budget=budget,
             bedrooms=bedrooms,
-        )[:2]
+            asked_slots=None if asked_slots is None else set(asked_slots),
+        )
+        followups = followups[:3] if asked_slots is None else followups[:1]
 
     if language == "pl":
         if followups:
@@ -1480,7 +1511,13 @@ def build_rich_property_recommendation_text(
         parts.append(body)
     parts.append(closing.strip())
 
-    return "\n\n".join(parts)
+    text = "\n\n".join(part for part in parts if part and part.strip())
+    text = re.sub(
+        r"([^\n])\s*(To narrow this down to the best fit, may I ask:)",
+        r"\1\n\n\2",
+        text,
+    )
+    return text
 
 
 def get_zero_match_text(
