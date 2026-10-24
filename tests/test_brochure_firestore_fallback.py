@@ -239,6 +239,8 @@ def test_5_agent_brochure_failure_honest_no_fake_link():
         ), patch(
             "app.services.public_agent.append_conversation_turn"
         ), patch(
+            "app.services.public_agent.settings.ENABLE_FIRESTORE_SYNC", True
+        ), patch(
             "app.services.firestore_service.get_property_by_id_from_firestore",
             return_value=FAKE_FS_CARD,
         ):
