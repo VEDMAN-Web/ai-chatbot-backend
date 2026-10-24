@@ -66,35 +66,14 @@ def startup_db_init():
         logger.warning("Startup config checks failed (non-fatal if already asserted): %s", e)
 
     try:
-        import sqlalchemy as sa
-        from app.db.session import admin_engine, user_engine, Base
-        import app.db.models  # noqa
+        from app.db.schema_sync import ensure_postgres_schema
+        from app.db.session import admin_engine, user_engine
 
-        # Safe DDL synchronization for existing users & properties tables across both database instances
-        engines_to_verify = {admin_engine, user_engine}
-        schema_ok = True
-        for eng in engines_to_verify:
-            try:
-                Base.metadata.create_all(bind=eng)
-                with eng.begin() as conn:
-                    conn.execute(sa.text("""
-                        ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE;
-                        ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash VARCHAR(255);
-                        ALTER TABLE users ADD COLUMN IF NOT EXISTS google_email VARCHAR(255);
-                        ALTER TABLE users ADD COLUMN IF NOT EXISTS google_refresh_token TEXT;
-                        ALTER TABLE users ADD COLUMN IF NOT EXISTS allowed_websites JSONB DEFAULT '[]'::jsonb;
-                        ALTER TABLE users ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT 'active';
-                        ALTER TABLE users ADD COLUMN IF NOT EXISTS domain VARCHAR(100) DEFAULT 'tajlandia.com';
-                        ALTER TABLE users ADD COLUMN IF NOT EXISTS preferences JSONB DEFAULT '{}'::jsonb;
-                        ALTER TABLE properties ADD COLUMN IF NOT EXISTS websites JSONB DEFAULT '[]'::jsonb;
-                    """))
-            except Exception as eng_e:
-                schema_ok = False
-                print(f"Startup notice for engine {eng}: {eng_e}")
-        if schema_ok:
+        try:
+            ensure_postgres_schema((admin_engine, user_engine))
             print("FastAPI Startup: Verified all admin and user database tables and columns.")
-        else:
-            print("FastAPI Startup: Database schema was not fully applied.")
+        except Exception as eng_e:
+            print(f"FastAPI Startup: Database schema was not fully applied: {eng_e}")
     except Exception as e:
         print(f"FastAPI Startup DB Notice: {e}")
 
