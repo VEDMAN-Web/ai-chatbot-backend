@@ -198,7 +198,7 @@ def test_active_checkbox_selection_and_isolation():
     # 2. Select authorized checkbox (tajlandia.com)
     prop_id = f"prop-taj-{uuid.uuid4().hex[:6]}"
     create_resp = client.post(
-        "/api/v1/admin/properties",
+        "/api/v1/admin/properties?allow_without_undo=true",
         headers={
             "Authorization": f"Bearer {worker_token}",
             "X-Selected-Websites": "tajlandia.com"
@@ -286,7 +286,7 @@ def test_cross_website_crud_with_all_access():
 
     thai_prop_id = f"prop-thai-{uuid.uuid4().hex[:6]}"
     create_resp = client.post(
-        "/api/v1/admin/properties",
+        "/api/v1/admin/properties?allow_without_undo=true",
         headers={
             "Authorization": f"Bearer {sa_token}",
             "X-Selected-Websites": "thai.estate"
