@@ -165,9 +165,12 @@ def _generate_html_brochure_pdf(
     safe_name = re.sub(r"[^A-Za-z0-9_\-]+", "_", str(data.property_id or property_id))
     out_filename = f"{safe_brand}_Property_{safe_name}_brochure.pdf"
 
-    saved_url = default_storage_provider.save_file(
-        filename=out_filename,
-        content=pdf_bytes,
+    from app.services.report_service import TEMPORARY_STORAGE_NOTE, save_bytes_with_fallback
+
+    saved_url, temporary_storage = save_bytes_with_fallback(
+        default_storage_provider,
+        out_filename,
+        pdf_bytes,
         content_type="application/pdf",
     )
     logger.info(
@@ -187,6 +190,7 @@ def _generate_html_brochure_pdf(
         "pdf_bytes": pdf_bytes,
         "file_size_bytes": len(pdf_bytes),
         "engine": "html",
+        "message": TEMPORARY_STORAGE_NOTE if temporary_storage else "",
     }
 
 
@@ -879,10 +883,13 @@ def _generate_reportlab_brochure_pdf(
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     out_filename = f"{tenant.brand_name.replace(' ', '_')}_Property_{clean_pname}_{ts}.pdf"
 
-    saved_url = default_storage_provider.save_file(
-        filename=out_filename,
-        content=pdf_bytes,
-        content_type="application/pdf"
+    from app.services.report_service import TEMPORARY_STORAGE_NOTE, save_bytes_with_fallback
+
+    saved_url, temporary_storage = save_bytes_with_fallback(
+        default_storage_provider,
+        out_filename,
+        pdf_bytes,
+        content_type="application/pdf",
     )
 
     logger.info(f"Generated 8-page luxury property brochure: {out_filename} ({len(pdf_bytes)} bytes) stored at {saved_url}")
@@ -898,6 +905,7 @@ def _generate_reportlab_brochure_pdf(
         "pdf_bytes": pdf_bytes,
         "file_size_bytes": len(pdf_bytes),
         "engine": "reportlab",
+        "message": TEMPORARY_STORAGE_NOTE if temporary_storage else "",
     }
 
 

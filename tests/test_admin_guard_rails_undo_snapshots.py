@@ -271,7 +271,8 @@ def test_confirm_reply_includes_undo_operation_id(monkeypatch, staff):
             pending_action_id=str(action.id),
         )
     text = res.get("text") or ""
-    assert "crud_reply99" in text
+    assert res.get("operation_id") == "crud_reply99"
+    assert "crud_reply99" not in text
     assert "undo" in text.lower()
     assert "6 day" in text.lower() or "6-day" in text.lower() or "6 days" in text.lower()
 

@@ -119,6 +119,18 @@ See [RAILWAY_DEPLOYMENT_GUIDE.md](./RAILWAY_DEPLOYMENT_GUIDE.md) for a step-by-s
 
 ---
 
+## Admin replay (staging only)
+
+Vedant can replay the admin conversations against staging with a real model key. Do not point this at production.
+
+```bash
+set REPLAY_BASE_URL=https://<staging-host>
+set REPLAY_TOKEN=<super-admin bearer token>
+python scripts/admin_replay.py
+```
+
+The script reads `tests/replay/admin_conversations.yaml`, creates only a property whose name starts with `ZZ_TEST_`, prints a pass/fail scorecard with latency, writes `replay_report.json`, and deletes the test property through the API. It exits immediately if the name does not start with `ZZ_TEST_` or the URL looks like production. Turns written as `Probe Villa` are rewritten to that test name before they are sent, so a real listing is never the target. After a confirmed write it reads the property and the store-consistency endpoint.
+
 ## API Reference
 
 Once running, interactive API documentation is available at:

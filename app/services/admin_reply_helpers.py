@@ -220,7 +220,7 @@ def contextual_followup_suggestions(
     tool_results: Optional[Sequence[Any]] = None,
     *,
     language: str = "en",
-    limit: int = 3,
+    limit: int = 2,
 ) -> List[str]:
     """
     Up to 3 contextual suggestions from the type of tool result.
@@ -347,13 +347,13 @@ def append_followup_suggestions(text: str, suggestions: Sequence[str], language:
     if not suggestions:
         return text or ""
     pl = (language or "en").lower().startswith("pl")
-    header = "**Sugestie (nie uruchamiają akcji):**" if pl else "**Suggestions (do not run an action by themselves):**"
+    header = "**Sugestie:**" if pl else "**Suggestions:**"
     body = (text or "").rstrip()
     # Merge duplicated Suggestions blocks into one per reply
-    if "Suggestions (do not run" in body or "Sugestie (nie uruchamiają" in body:
+    if "Suggestions" in body or "Sugestie" in body:
         # Strip previous suggestion sections
         body = re.sub(
-            r"\n\n\*\*(?:Suggestions \(do not run an action by themselves\)|Sugestie \(nie uruchamiają akcji\)):\*\*(?:\n\d+\).*)+",
+            r"\n\n\*\*(?:Suggestions(?: \(do not run an action by themselves\))?|Sugestie(?: \(nie uruchamiają akcji\))?):\*\*(?:\n\d+\).*)+",
             "",
             body,
             flags=re.I,

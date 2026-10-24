@@ -383,6 +383,40 @@ def get_report_storage_mode() -> str:
     return "ephemeral"
 
 
+TEMPORARY_STORAGE_NOTE = (
+    "The file was saved on temporary storage and may disappear after a restart."
+)
+
+
+def local_fallback_allowed() -> bool:
+    return os.getenv("REPORT_REQUIRE_S3", "").strip() != "1"
+
+
+def save_bytes_with_fallback(
+    storage: StorageProvider,
+    filename: str,
+    content: bytes,
+    content_type: str = "application/pdf",
+) -> tuple:
+    """Save bytes. Missing boto3 or a failed S3 upload can land on local disk."""
+    temporary = bool(is_s3_configured() and S3StorageProvider.boto3_import_error())
+    active = storage
+    if temporary and not isinstance(active, LocalStorageProvider):
+        S3StorageProvider.log_missing_boto3_once()
+        active = LocalStorageProvider()
+    try:
+        return active.save_file(filename, content, content_type=content_type), temporary
+    except StorageError:
+        if isinstance(active, S3StorageProvider) and local_fallback_allowed():
+            logger.warning(
+                "S3 upload failed for %s. Falling back to LocalStorageProvider.",
+                filename,
+            )
+            local = LocalStorageProvider()
+            return local.save_file(filename, content, content_type=content_type), True
+        raise
+
+
 def get_storage_provider() -> StorageProvider:
     """S3 is primary when configured and boto3 imports; otherwise local disk (may be ephemeral)."""
     if is_s3_configured():
@@ -1167,8 +1201,11 @@ def _finalize_report_save(
             "memory" if isinstance(storage, InMemoryStorageProvider) else "local"
         )
 
+    temporary_storage = False
     try:
-        file_url = storage.save_file(filename, content_bytes, content_type=content_type)
+        file_url, temporary_storage = save_bytes_with_fallback(
+            storage, filename, content_bytes, content_type=content_type
+        )
     except StorageError as e:
         return {
             "filename": filename,
@@ -1198,14 +1235,19 @@ def _finalize_report_save(
     if file_url and file_url.startswith("/api/v1/chat/"):
         admin_url = file_url
 
+    message = format_report_ready_message(
+        filename=filename, format_type=os.path.splitext(filename)[1].lstrip(".") or "pdf"
+    )
+    if temporary_storage or (is_s3_configured() and isinstance(storage, LocalStorageProvider)):
+        message = f"{message} {TEMPORARY_STORAGE_NOTE}"
+        meta_storage = "local"
     return {
         "filename": filename,
         "file_url": admin_url,
         "storage_ok": True,
         "storage": meta_storage,
-        "message": format_report_ready_message(
-            filename=filename, format_type=os.path.splitext(filename)[1].lstrip(".") or "pdf"
-        ),
+        "temporary_storage": bool(temporary_storage or (is_s3_configured() and isinstance(storage, LocalStorageProvider))),
+        "message": message,
     }
 
 
@@ -1377,6 +1419,8 @@ def generate_report(
                 f"✅ Generated {fmt.upper()} leads report ({len(leads_data)} leads — {period_subtitle})"
                 f"{note}. Use the download card below."
             )
+        if saved.get("temporary_storage"):
+            ready_msg = f"{ready_msg} {TEMPORARY_STORAGE_NOTE}"
         return {
             "format": fmt,
             "filename": filename,

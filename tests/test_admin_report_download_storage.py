@@ -170,6 +170,7 @@ def test_missing_boto3_falls_back_to_local_provider(tmp_path, monkeypatch):
     result = rs.generate_report(db, "csv", report_type="leads", days=0, created_by="admin@test.com")
     assert result["storage_ok"] is True
     assert result["storage"] == "local"
+    assert "temporary storage" in (result.get("message") or "").lower()
     assert isinstance(rs.get_storage_provider(), rs.LocalStorageProvider)
     saved = os.path.join(str(tmp_path / "reports"), result["filename"])
     assert os.path.isfile(saved)

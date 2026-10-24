@@ -28,7 +28,8 @@ def test_suggestions_merged_once():
         "1) C"
     )
     out = append_followup_suggestions(text, ["X", "Y"], language="en")
-    assert out.count("Suggestions (do not run") == 1
+    assert out.lower().count("suggestions") == 1
+    assert "do not run an action" not in out.lower()
     assert "1) X" in out
 
 

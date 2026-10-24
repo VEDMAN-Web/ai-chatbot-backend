@@ -1084,6 +1084,26 @@ def try_admin_fast_path(
     fast = obvious.get("fast_path")
     msg_l = (message or "").strip().lower()
 
+    if re.search(r"\bshow differences\b", msg_l):
+        from app.services.admin_chat_quality import format_store_differences
+        from app.services.firestore_service import get_store_differences
+
+        text = format_store_differences(get_store_differences(db))
+        append_conversation_turn(db, conv, message, text)
+        return {
+            "type": "text",
+            "text": text,
+            "session_id": conv.session_id,
+            "conversation_id": str(conv.id),
+            "requires_confirmation": False,
+            "pending_action_id": None,
+            "action_status": None,
+            "tools_used": [{"name": "get_database_inventory_stats"}],
+            "download_link": None,
+            "suggestions": [],
+            "language": language,
+        }
+
     if not fast:
         if is_capabilities_question(message) or is_greeting_or_chit_chat(message):
             fast = "capabilities" if is_capabilities_question(message) else "greeting"
@@ -1107,8 +1127,9 @@ def try_admin_fast_path(
             lines = [
                 ("Pending actions:" if language != "pl" else "Akcje oczekujące:")
             ]
+            from app.services.admin_chat_quality import human_tool_label
             for pa in open_pending[:5]:
-                lines.append(f"- `{pa.id}` — `{pa.tool_name}`")
+                lines.append(f"- {human_tool_label(pa.tool_name)} ({pa.id})")
             if len(open_pending) > 5:
                 lines.append("Show the next 5?")
             text = "\n".join(lines)
@@ -1178,7 +1199,8 @@ def try_admin_fast_path(
             )
             timer.skipped.append("fast_path:inventory")
         stats = t_res if isinstance(t_res, dict) else {}
-        total = stats.get("authoritative_total_properties") or stats.get("firestore_live_projects_count") or 0
+        from app.services.admin_chat_quality import format_inventory_reply
+        total_sentence = format_inventory_reply(stats, language)
         by_loc = stats.get("location_breakdown") or {}
         # Location-specific ask
         loc_hit = None
@@ -1190,28 +1212,10 @@ def try_admin_fast_path(
                 break
         if loc_hit is not None:
             n = by_loc.get(loc_hit, 0)
-            text = (
-                f"**{n}** properties in **{loc_hit}** (from live inventory).\n"
-                f"Portfolio total: **{total}**."
-                if language != "pl"
-                else f"**{n}** nieruchomości w **{loc_hit}**.\nŁącznie w bazie: **{total}**."
-            )
+            place = loc_hit[:1].upper() + loc_hit[1:] if loc_hit else loc_hit
+            text = f"You have {n} properties in {place}. {total_sentence}"
         else:
-            text = build_deterministic_reply_from_tools(
-                [{"name": "get_database_inventory_stats", "result": stats}],
-                language=language,
-                user_message=message,
-            )
-            if not text or len(text) < 20:
-                loc_summary = " · ".join(
-                    f"{k} ({v})" for k, v in sorted(by_loc.items(), key=lambda x: -x[1])[:5]
-                ) or "—"
-                text = (
-                    f"**{total}** properties in the live database.\n"
-                    f"- 📍 Locations: {loc_summary}"
-                    if language != "pl"
-                    else f"**{total}** nieruchomości w bazie.\n- 📍 Lokalizacje: {loc_summary}"
-                )
+            text = total_sentence
         append_conversation_turn(
             db, conv, message, text,
             tool_calls=[{"name": "get_database_inventory_stats", "args": {}}],
@@ -1546,8 +1550,9 @@ def process_admin_chat(
         and len(open_pending) > 1
     ):
         lines = []
+        from app.services.admin_chat_quality import human_tool_label
         for pa in open_pending:
-            lines.append(f"- `{pa.id}` — tool `{pa.tool_name}`")
+            lines.append(f"- {human_tool_label(pa.tool_name)} ({pa.id})")
         which_text = (
             "You have several pending actions waiting. Which one should I confirm?\n"
             + "\n".join(lines)
@@ -1747,31 +1752,61 @@ def process_admin_chat(
                     audit_line = "- **Audit logging is disabled**\n"
                 else:
                     audit_line = ""
+                from app.services.admin_chat_quality import (
+                    audit_note_for_reply,
+                    describe_store_check,
+                    format_saved_listing_reply,
+                )
+                price_row = None
+                diff_rows = []
+                change_diff = payload.get("change_diff") if isinstance(payload.get("change_diff"), dict) else {}
+                if isinstance(change_diff.get("rows"), list):
+                    diff_rows = change_diff["rows"]
+                for row in diff_rows:
+                    if isinstance(row, dict) and row.get("field") in {"price_numeric_min", "price_display", "price"}:
+                        price_row = row
+                        break
+                new_value = None
+                old_value = None
+                if price_row:
+                    new_value = price_row.get("new") or price_row.get("after")
+                    old_value = price_row.get("current") or price_row.get("before")
+                if new_value in (None, ""):
+                    fields = payload.get("fields") or payload.get("fields_to_update") or {}
+                    if isinstance(fields, dict):
+                        new_value = fields.get("price_display") or fields.get("price_numeric_min")
+                pg_state = "saved"
+                fs_state = "unavailable"
+                try:
+                    from app.db.models import Property as _Property
+                    found_pg = db.query(_Property).filter(_Property.property_id == str(pid)).first()
+                    pg_state = "saved" if found_pg is not None else "missing"
+                except Exception:
+                    pg_state = "could not be checked"
+                try:
+                    from app.services.firestore_service import get_property_by_id_from_firestore
+                    found_fs = get_property_by_id_from_firestore(str(pid), target="admin")
+                    fs_state = "saved" if found_fs else "missing"
+                except Exception:
+                    fs_state = "unavailable"
+                store_line = describe_store_check(pg_state, fs_state)
+                note = audit_note_for_reply(
+                    role=getattr(staff_user, "role", None),
+                    message=clean_message,
+                    audit_disabled=audit_disabled,
+                )
+                reply_text = format_saved_listing_reply(
+                    title=str(title),
+                    new_value=None if new_value in (None, "") else str(new_value),
+                    old_value=None if old_value in (None, "") else str(old_value),
+                    store_line=store_line,
+                    undo=bool(op_id),
+                    audit_note=note,
+                )
                 if active_lang == "pl":
                     reply_text = (
-                        f"✅ **Oferta nieruchomości pomyślnie zaktualizowana w bazie danych!**\n\n"
-                        f"- **ID nieruchomości**: `{pid}`\n"
-                        f"- **Tytuł**: **{title}**\n"
-                        f"- **Tryb operacji**: `[{op_mode} SUCCESS]`\n"
-                        f"- **Narzędzie**: `{tool_label}`\n"
-                        f"- **Status oferty**: `{status_val}`\n"
-                        f"{audit_line}"
-                        f"{f'- **Operation ID**: `{op_id}`' if op_id else ''}\n\n"
-                        f"Wszystkie parametry zostały pomyślnie zapisane."
-                        f"{verify_line}{undo_line}"
-                    )
-                else:
-                    reply_text = (
-                        f"✅ **Property listing successfully applied to database!**\n\n"
-                        f"- **Property ID**: `{pid}`\n"
-                        f"- **Title**: **{title}**\n"
-                        f"- **Operation Mode**: `[{op_mode} SUCCESS]`\n"
-                        f"- **Tool**: `{tool_label}`\n"
-                        f"- **Listing Status**: `{status_val}`\n"
-                        f"{audit_line}"
-                        f"{f'- **Operation ID**: `{op_id}`' if op_id else ''}\n\n"
-                        f"All specifications are saved, and the search index cache has been refreshed."
-                        f"{verify_line}{undo_line}"
+                        f"Gotowe. {title} jest zapisane. Sprawdziłem bazę i zmiana jest zapisana."
+                        + (" Możesz cofnąć przez 6 dni, mówiąc 'cofnij'." if op_id else "")
                     )
             elif target_action.tool_name in ("send_email", "create_calendar_event"):
                 payload = target_action.action_payload or {}
@@ -1780,23 +1815,17 @@ def process_admin_chat(
                 else:
                     detail = f"event `{payload.get('title')}` at `{payload.get('start_time')}`"
                 if active_lang == "pl":
-                    reply_text = (
-                        f"✅ **Akcja `{target_action.tool_name}` wykonana.** ({detail})\n\n"
-                        f"Tej akcji nie można cofnąć (email/kalendarz nie mają okna undo)."
-                    )
+                    reply_text = f"Gotowe. {detail}. Tej akcji nie można cofnąć."
                 else:
-                    reply_text = (
-                        f"✅ **Action `{target_action.tool_name}` completed.** ({detail})\n\n"
-                        f"This action cannot be undone (email/calendar actions are not undoable)."
-                    )
+                    reply_text = f"Done. {detail}. This action cannot be undone."
             elif active_lang == "pl":
-                reply_text = f"✅ **Akcja zatwierdzona i wykonana pomyślnie!**\n\nOperacja `{target_action.tool_name}` została zapisana w bazie danych.\n\nSzczegóły: {json.dumps(target_action.action_payload, ensure_ascii=False)}"
+                reply_text = "Gotowe. Zmiana jest zapisana. Sprawdziłem bazę."
                 if op_id:
-                    reply_text += f"\n\nMożesz cofnąć tę operację przez 6 dni: operation `{op_id}`."
+                    reply_text += " Możesz cofnąć przez 6 dni, mówiąc 'cofnij'."
             else:
-                reply_text = f"✅ **Action confirmed and executed successfully!**\n\nThe proposed `{target_action.tool_name}` has been applied to the database.\n\nPayload: {json.dumps(target_action.action_payload)}"
+                reply_text = "Done. The change is saved. I checked the database and the change is saved."
                 if op_id:
-                    reply_text += f"\n\nYou can undo this for 6 days: operation `{op_id}`."
+                    reply_text += " You can undo this for 6 days by saying 'undo'."
 
             reply_text = redact_admin_sensitive_output(reply_text)
             append_conversation_turn(
@@ -1820,6 +1849,7 @@ def process_admin_chat(
                 "requires_confirmation": False,
                 "pending_action_id": str(target_action.id),
                 "action_status": "executed",
+                "operation_id": op_id,
                 "execution_result": exec_res,
                 "tools_used": [{"tool": target_action.tool_name, "status": "executed"}],
                 "download_link": None,
@@ -1936,6 +1966,33 @@ def process_admin_chat(
         ("Templates 1 to 7" in last_assistant_turn or "Warianty 1-7" in last_assistant_turn) or
         ("fetch them from the database & make everything myself" in last_assistant_turn or "pobrać je z bazy danych i dobrać resztę" in last_assistant_turn)
     )
+    draft_reminder = ""
+    if open_pending and not has_confirm_intent and not has_reject_intent:
+        from app.services.admin_chat_quality import draft_still_open_note, open_work_label
+        draft_reminder = draft_still_open_note(open_work_label(open_pending[0]))
+
+    from app.services.admin_chat_quality import try_direct_property_answer
+    direct = try_direct_property_answer(db, clean_message)
+    if direct is not None:
+        direct_text = direct.get("text") or ""
+        if draft_reminder and "still open" not in direct_text.lower():
+            direct_text = direct_text.rstrip() + "\n\n" + draft_reminder
+        append_conversation_turn(db, conv, clean_message, direct_text)
+        return _attach_timing_debug({
+            "type": "text",
+            "text": direct_text,
+            "session_id": conv.session_id,
+            "conversation_id": str(conv.id),
+            "requires_confirmation": False,
+            "pending_action_id": str(open_pending[0].id) if open_pending else None,
+            "action_status": "pending" if open_pending else None,
+            "tools_used": direct.get("tools_used") or [],
+            "download_link": None,
+            "suggestions": [],
+            "direct_answer": True,
+            "language": active_lang,
+        }, timer)
+
     if not is_undo_request(clean_message) and not is_portfolio_followup_waiting:
         fast_res = try_admin_fast_path(
             db, conv, clean_message, staff_user,
@@ -1944,6 +2001,11 @@ def process_admin_chat(
             timer=timer,
         )
         if fast_res is not None:
+            if draft_reminder and "still open" not in (fast_res.get("text") or "").lower():
+                fast_res["text"] = ((fast_res.get("text") or "").rstrip() + "\n\n" + draft_reminder).strip()
+            from app.services.admin_chat_quality import scrub_user_reply
+            fast_res["text"] = scrub_user_reply(fast_res.get("text"))
+            fast_res["suggestions"] = [] if fast_res.get("direct_answer") else fast_res.get("suggestions") or []
             return _attach_timing_debug(fast_res, timer)
 
     # 4. AI Model Intent Classification & Safety Evaluation
@@ -2031,10 +2093,14 @@ def process_admin_chat(
     # URL import previews keep their Field | Value | Source table.
     if isinstance(res, dict) and res.get("text") and not res.get("confirm_via_chat_only"):
         res["text"] = ensure_structured_admin_response(res["text"], language=active_lang)
-        tips = contextual_followup_suggestions(
-            res.get("tools_used") or [],
-            language=active_lang,
-        )
+        from app.services.admin_chat_quality import suggestions_allowed
+        tips = []
+        if suggestions_allowed(res):
+            tips = contextual_followup_suggestions(
+                res.get("tools_used") or [],
+                language=active_lang,
+                limit=2,
+            )
         if tips and "Suggestions" not in (res.get("text") or "") and "Sugestie" not in (res.get("text") or ""):
             res["text"] = append_followup_suggestions(res["text"], tips, language=active_lang)
             res["suggestions"] = tips
@@ -2066,6 +2132,10 @@ def process_admin_chat(
         if res.get("pending_action_id") and res.get("requires_confirmation"):
             remember_admin_session_fact(conv, pending_action_id=str(res["pending_action_id"]))
         res["text"] = redact_admin_sensitive_output(res["text"])
+        if draft_reminder and "still open" not in (res.get("text") or "").lower():
+            res["text"] = ((res.get("text") or "").rstrip() + "\n\n" + draft_reminder).strip()
+        from app.services.admin_chat_quality import scrub_user_reply
+        res["text"] = scrub_user_reply(res.get("text"))
     return _attach_timing_debug(res, timer)
 
 
@@ -4132,17 +4202,6 @@ def _run_deterministic_admin(
         tool_results.append(t_res_all)
 
         stats = t_res_all or {}
-        total = stats.get("authoritative_total_properties", 0)
-        by_loc = stats.get("location_breakdown", {})
-        by_type = stats.get("property_type_breakdown", {})
-        by_status = stats.get("status_breakdown", {})
-        amenities = stats.get("amenities_breakdown", {})
-        price_range = stats.get("price_range_thb", {})
-
-        loc_summary = " · ".join(f"{k} ({v})" for k, v in sorted(by_loc.items(), key=lambda x: -x[1])[:5])
-        type_summary = " · ".join(f"{k} ({v})" for k, v in by_type.items())
-        status_summary = " · ".join(f"{k} ({v})" for k, v in by_status.items()) if by_status else "Ready & Pre-sale"
-        price_str = f"From {price_range.get('min', 'On request')} to {price_range.get('max', 'On request')}"
 
         # Segment query handling if max_price, location, or bedrooms were specified
         filtered_count = None
@@ -4164,66 +4223,25 @@ def _run_deterministic_admin(
                     p_name = p.get("property_name") or p.get("title") or p.get("property_id")
                     p_price = float(p.get("price_numeric_min") or 0)
                     p_loc = p.get("location") or "Thailand"
-                    p_beds = p.get("bedrooms_display") or p.get("bedrooms") or ""
-                    p_beds_str = f" | {p_beds} beds" if p_beds else ""
-                    filtered_examples.append(f"- **{p_name}** (`{p.get('property_id')}`): **{p_price:,.0f} THB**{p_beds_str} 📍 {p_loc}")
+                    from app.services.admin_property_fields import format_bedrooms_label, format_place_name
+                    p_beds = format_bedrooms_label(
+                        bedrooms_min=p.get("bedrooms_min"),
+                        bedrooms_max=p.get("bedrooms_max"),
+                        bedrooms_display=p.get("bedrooms_display"),
+                        bedrooms=p.get("bedrooms"),
+                    )
+                    p_beds_str = "" if p_beds == "beds not listed" else f" | {p_beds}"
+                    filtered_examples.append(
+                        f"- **{p_name}** ({p.get('property_id')}): **{p_price:,.0f} THB**{p_beds_str} | {format_place_name(p_loc)}"
+                    )
 
-        if language == "pl":
-            prefix = ""
-            if filtered_count is not None:
-                crit_parts = []
-                if max_price_val:
-                    crit_parts.append(f"poniżej {max_price_val/1_000_000:,.0f} mln THB")
-                if loc:
-                    crit_parts.append(f"w rejonie {loc}")
-                if bedrooms:
-                    crit_parts.append(f"{bedrooms} sypialni")
-                crit_desc = ", ".join(crit_parts)
-                prefix = (
-                    f"🎯 **Wynik zapytania segmentowego:**\n"
-                    f"W naszym portfolio znajduje się obecnie **{filtered_count}** zweryfikowanych nieruchomości spełniających kryteria ({crit_desc}).\n\n"
-                    + (("**Przykładowe oferty z tego segmentu:**\n" + "\n".join(filtered_examples) + "\n\n") if filtered_examples else "")
-                )
-            response_text = (
-                prefix +
-                f"📊 **Podsumowanie bazy nieruchomości Tajlandia AI**\n\n"
-                f"- 🏢 **Łączna liczba nieruchomości w bazie:** **{total}** (Pełna autorytatywna baza danych Cloud Firestore i PostgreSQL)\n"
-                f"- 🏡 **Typy nieruchomości:** {type_summary}\n"
-                f"- 📍 **Główne lokalizacje:** {loc_summary}\n"
-                f"- 🏗️ **Status inwestycji:** {status_summary}\n"
-                f"- 💰 **Zakres cenowy:** {price_str}\n"
-                f"- 🏊 **Prywatny basen:** {amenities.get('private_pool', 'Dostępne w portfolio')}\n"
-                f"- 🏖️ **Dostęp do plaży:** {amenities.get('beach_access', 'Dostępne w portfolio')}\n\n"
-                f"Czy chcesz, abym przefiltrował nieruchomości według konkretnej lokalizacji (np. Phuket, Koh Samui, Bangkok), budżetu lub liczby sypialni?"
-            )
-        else:
-            prefix = ""
-            if filtered_count is not None:
-                crit_parts = []
-                if max_price_val:
-                    crit_parts.append(f"under {max_price_val/1_000_000:,.0f}M THB")
-                if loc:
-                    crit_parts.append(f"in {loc}")
-                if bedrooms:
-                    crit_parts.append(f"{bedrooms} bedrooms")
-                crit_desc = ", ".join(crit_parts)
-                prefix = (
-                    f"🎯 **Target Segment Count:**\n"
-                    f"We currently have **{filtered_count}** verified properties in our portfolio matching your criteria ({crit_desc}).\n\n"
-                    + (("**Sample listings from this segment:**\n" + "\n".join(filtered_examples) + "\n\n") if filtered_examples else "")
-                )
-            response_text = (
-                prefix +
-                f"📊 **Tajlandia Property Inventory Summary**\n\n"
-                f"- 🏢 **Total properties in database:** **{total}** (Authoritative portfolio across Cloud Firestore & PostgreSQL)\n"
-                f"- 🏡 **Property types:** {type_summary}\n"
-                f"- 📍 **Top locations:** {loc_summary}\n"
-                f"- 🏗️ **Development status:** {status_summary}\n"
-                f"- 💰 **Price range:** {price_str}\n"
-                f"- 🏊 **Private pool:** {amenities.get('private_pool', 'Available in portfolio')}\n"
-                f"- 🏖️ **Beach access:** {amenities.get('beach_access', 'Available in portfolio')}\n\n"
-                f"Would you like me to filter properties by a specific location (e.g. Phuket, Koh Samui, Bangkok), budget, or bedroom count?"
-            )
+        from app.services.admin_chat_quality import format_inventory_reply as _inventory_sentence
+        _prefix = ""
+        if filtered_count is not None:
+            _prefix = f"Found {filtered_count} matching properties.\n"
+            if filtered_examples:
+                _prefix += "\n".join(filtered_examples) + "\n"
+        response_text = (_prefix + _inventory_sentence(stats, language)).strip()
 
     # H. Contextual Reference Follow-up
     elif any(tr in msg_lower for tr in ["give me that", "that one", "first one", "second one", "that lead", "more details"]):
@@ -4296,11 +4314,17 @@ def _run_deterministic_admin(
             for p in (t_res or [])[:10]:
                 p_id = p.get("property_id") or p.get("id") or "N/A"
                 p_name = p.get("property_name") or p.get("name") or p.get("title") or "Property"
-                p_loc = p.get("location") or "Thailand"
-                p_beds = p.get("bedrooms_display") or (f"{p.get('bedrooms')} bed" if p.get("bedrooms") else "N/A")
+                from app.services.admin_property_fields import format_bedrooms_label, format_place_name
+                p_loc = format_place_name(p.get("province") or p.get("location") or "Thailand")
+                p_beds = format_bedrooms_label(
+                    bedrooms_min=p.get("bedrooms_min"),
+                    bedrooms_max=p.get("bedrooms_max"),
+                    bedrooms_display=p.get("bedrooms_display"),
+                    bedrooms=p.get("bedrooms"),
+                )
                 p_price = p.get("price_display") or p.get("price") or "Price on request"
                 prop_lines.append(
-                    f"- **{p_id}** — {p_name} | {p_loc} | {p_beds} | {p_price}"
+                    f"- **{p_name}** ({p_id}) | {p_loc} | {p_beds} | {p_price}"
                 )
             response_text = "\n".join(prop_lines)
 
@@ -4399,7 +4423,13 @@ def _clean_property_for_admin_tool(fp: Dict[str, Any]) -> Dict[str, Any]:
             price_display = f"from {float(p_min) / 1_000_000:.2f} million THB"
         else:
             price_display = "Price on request"
-    bedrooms_display = fp.get("bedrooms_display") or (f"{fp.get('bedrooms')} bed" if fp.get("bedrooms") else "N/A")
+    from app.services.admin_property_fields import format_bedrooms_label
+    bedrooms_display = format_bedrooms_label(
+        bedrooms_min=fp.get("bedrooms_min"),
+        bedrooms_max=fp.get("bedrooms_max"),
+        bedrooms_display=fp.get("bedrooms_display"),
+        bedrooms=fp.get("bedrooms"),
+    )
     area_display = fp.get("area_display") or (f"{fp.get('area')} sqm" if fp.get("area") else "N/A")
     location = fp.get("location") or "Thailand"
     status = fp.get("status") or "Available"
@@ -4559,12 +4589,14 @@ def _execute_admin_tool_uncached(
 
     # 1.5 Read Tool: get_database_inventory_stats
     elif tool_name == "get_database_inventory_stats":
-        fs_count = 0
+        fs_count = None
+        fs_unavailable = False
         try:
             from app.services.firestore_service import get_firestore_properties_count
             fs_count = get_firestore_properties_count(target="admin")
         except Exception as e:
-            logger.warning(f"Error getting Firestore properties count in admin tool: {e}")
+            fs_unavailable = True
+            logger.warning(f"Firestore property count is unavailable: {e}")
 
         pg_count = 0
         try:
@@ -4614,13 +4646,19 @@ def _execute_admin_tool_uncached(
             if p.get("price_numeric_min"):
                 prices.append(p["price_numeric_min"])
 
-        total_count = fs_count if fs_count > 0 else (pg_count or len(props_sample))
+        if fs_unavailable:
+            total_count = pg_count or len(props_sample)
+        elif fs_count is not None and pg_count and int(fs_count) != int(pg_count):
+            total_count = int(pg_count)
+        else:
+            total_count = fs_count if fs_count is not None else (pg_count or len(props_sample))
 
         res = {
             "authoritative_total_properties": total_count,
-            "firestore_live_projects_count": fs_count,
+            "firestore_live_projects_count": 0 if fs_count is None else fs_count,
             "postgresql_listings_count": pg_count,
-            "is_complete_database_count": True,
+            "firestore_count_unavailable": fs_unavailable,
+            "is_complete_database_count": not fs_unavailable,
             "notes": "This is the authoritative total property count of the entire database. It is NOT capped or truncated by search limits.",
             "location_breakdown": by_location,
             "property_type_breakdown": by_type,

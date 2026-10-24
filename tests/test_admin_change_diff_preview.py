@@ -349,7 +349,8 @@ def test_chat_delete_requires_count_ack(staff, monkeypatch):
     assert conf2.called
     assert res2.get("action_status") == "executed"
     assert "undo" in (res2.get("text") or "").lower()
-    assert "batch_del1" in (res2.get("text") or "")
+    assert res2.get("operation_id") == "batch_del1"
+    assert "batch_del1" not in (res2.get("text") or "")
 
 
 def test_format_helpers_smoke():

@@ -267,14 +267,21 @@ def normalize_firestore_project(doc_id: str, data: Dict[str, Any]) -> Dict[str, 
     if cover_image and cover_image not in images:
         images.insert(0, cover_image)
 
-    # Bedrooms & Area
+    # Bedrooms & Area. Never invent a 1-4 range when the document has no bedroom values.
+    from app.services.admin_property_fields import format_bedrooms_label
     layouts = data.get("layouts") or []
-    bedrooms_str = "1-4 Beds"
+    layout_min = None
+    layout_max = None
     if layouts and isinstance(layouts, list):
         bed_nums = [l.get("bedrooms") for l in layouts if isinstance(l, dict) and l.get("bedrooms") is not None]
         if bed_nums:
-            min_b, max_b = min(bed_nums), max(bed_nums)
-            bedrooms_str = f"{min_b}-{max_b} Beds" if min_b != max_b else f"{min_b} Beds"
+            layout_min, layout_max = min(bed_nums), max(bed_nums)
+    bedrooms_str = format_bedrooms_label(
+        bedrooms_min=data.get("bedrooms_min") or data.get("bedroomsMin") or layout_min,
+        bedrooms_max=data.get("bedrooms_max") or data.get("bedroomsMax") or layout_max,
+        bedrooms_display=data.get("bedrooms_display") or data.get("bedroomsDisplay"),
+        bedrooms=data.get("bedrooms"),
+    )
 
     area_from = data.get("areaFrom")
     area_to = data.get("areaTo")
@@ -694,10 +701,14 @@ def score_property_relevance(
 
 
 def get_firestore_properties_count(target: str = "user") -> int:
-    """Returns the total number of property projects in Firestore 'projects' collection."""
+    """Count projects with the same collection scan the rest of the app uses.
+
+    Aggregation is tried first. If that API is missing, a plain stream count is used.
+    Raises RuntimeError instead of pretending the collection is empty.
+    """
     client = get_firestore_client(target=target)
     if not client:
-        return 0
+        raise RuntimeError("Firestore count is unavailable")
     try:
         count_query = client.collection("projects").count()
         results = count_query.get()
@@ -705,11 +716,78 @@ def get_firestore_properties_count(target: str = "user") -> int:
     except Exception as e:
         logger.debug(f"Firestore aggregation count query fallback: {e}")
         try:
-            docs = list(client.collection("projects").select([]).stream())
+            docs = list(client.collection("projects").stream())
             return len(docs)
         except Exception as e2:
             logger.warning(f"Error counting Firestore properties: {e2}")
-            return 0
+            raise RuntimeError("Firestore count is unavailable") from e2
+
+
+def _norm_store_value(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(int(value))
+    text = str(value).strip().lower().replace(",", "")
+    digits = re.sub(r"[^\d.]", "", text)
+    if digits and re.fullmatch(r"\d+(?:\.\d+)?", digits) and not re.search(r"[a-z]", text.replace("thb", "").replace("baht", "")):
+        try:
+            return str(int(float(digits)))
+        except ValueError:
+            pass
+    return re.sub(r"\s+", " ", text)
+
+
+def get_store_differences(db: Any) -> Dict[str, Any]:
+    """List ids that exist in only one store, or whose name, price, or status differ."""
+    from app.db.models import Property
+
+    postgres: Dict[str, Dict[str, Any]] = {}
+    try:
+        for row in db.query(Property).all():
+            postgres[str(row.property_id)] = {
+                "name": row.property_name,
+                "price": row.price_numeric_min if row.price_numeric_min is not None else row.price_display,
+                "status": row.status,
+            }
+    except Exception as exc:
+        return {"error": f"Postgres could not be read ({exc}).", "items": []}
+
+    firestore: Dict[str, Dict[str, Any]] = {}
+    try:
+        client = get_firestore_client(target="admin")
+        if not client:
+            raise RuntimeError("Firestore count is unavailable")
+        for doc in client.collection("projects").stream():
+            data = doc.to_dict() or {}
+            name = data.get("name") or data.get("title") or doc.id
+            if isinstance(name, dict):
+                name = name.get("en") or next(iter(name.values()), doc.id)
+            firestore[str(doc.id)] = {
+                "name": name,
+                "price": data.get("priceFrom") if data.get("priceFrom") is not None else data.get("price"),
+                "status": data.get("completionStatus") or data.get("status"),
+            }
+    except Exception:
+        return {"error": "The Firestore count is unavailable.", "items": []}
+
+    items = []
+    for property_id in sorted(set(postgres) | set(firestore)):
+        if property_id not in firestore:
+            items.append({"property_id": property_id, "issue": "only in Postgres"})
+            continue
+        if property_id not in postgres:
+            items.append({"property_id": property_id, "issue": "only in Firestore"})
+            continue
+        differed = []
+        for field in ("name", "price", "status"):
+            if _norm_store_value(postgres[property_id].get(field)) != _norm_store_value(firestore[property_id].get(field)):
+                differed.append(field)
+        if differed:
+            items.append({"property_id": property_id, "issue": "differs in " + ", ".join(differed)})
+    return {"error": None, "items": items}
 
 
 def get_property_by_id_from_firestore(property_id: str, target: str = "user") -> Optional[Dict[str, Any]]:

@@ -323,8 +323,8 @@ def generate_property_diff_table(
     table_lines = [
         f"### 📋 Staged Property Listing Proposal: **{extracted_data.get('property_name', target_property_id)}**",
         f"- **Target Property ID**: `{target_property_id}`",
-        f"- **Operation Mode**: `[{mode.upper()} LISTING]`",
-        f"- **Source Document**: `{source_filename or 'Google Drive File'}`",
+        f"- This is a {mode} of the listing.",
+        f"- Source: {source_filename or 'the uploaded file'}",
         "",
         "| Field Name | Current Database Value | Extracted From Document | Change Status |",
         "| :--- | :--- | :--- | :--- |"

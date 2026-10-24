@@ -778,9 +778,25 @@ def preview_rows(draft: Dict[str, Any], *, only_fields: Optional[List[str]] = No
     if "province" not in provenance and "area" not in provenance and (only_fields is None or "location" in (only_fields or [])):
         if not any(row["field"] == "province" for row in decision_fields):
             decision_fields.append({"field": "location", "value": "", "source": "Missing"})
-    if not any(row["field"] in {"price_display", "price_numeric_min"} and row["source"] != "Missing" for row in decision_fields + other_fields):
-        if not any(row["field"] == "price_numeric_min" for row in decision_fields):
-            decision_fields.append({"field": "price", "value": "", "source": "Missing"})
+    visible_price = any(
+        row["field"] in {"price_display", "price_numeric_min"} and row["source"] != "Missing" and row.get("value") not in (None, "")
+        for row in decision_fields + other_fields
+    )
+    numeric = provenance.get("price_numeric_min") or {}
+    if (
+        not visible_price
+        and numeric.get("status") in {"found", "inferred", "provided"}
+        and not numeric.get("needs_decision")
+        and not _blank(numeric.get("value"))
+    ):
+        other_fields.append({
+            "field": "price_numeric_min",
+            "value": numeric.get("value"),
+            "source": _source_label(numeric),
+        })
+        visible_price = True
+    if not visible_price and not any(row["field"] == "price" for row in decision_fields):
+        decision_fields.append({"field": "price", "value": "", "source": "Missing"})
     return decision_fields, other_fields
 
 
@@ -852,12 +868,38 @@ def savable_fields(draft: Dict[str, Any]) -> Dict[str, Any]:
         out["location"] = out["address"]
     if out.get("bedrooms_min") is not None and "bedrooms" not in out:
         out["bedrooms"] = out["bedrooms_min"]
+    previewed = draft.get("previewed_values")
+    if isinstance(previewed, dict) and previewed:
+        allowed = set(previewed)
+        if "price_display" in allowed or "price_numeric_min" in allowed or "price" in allowed:
+            allowed.update({"price_display", "price_numeric_min", "currency"})
+        if "bedrooms_display" in allowed or "bedrooms_min" in allowed:
+            allowed.update({"bedrooms_display", "bedrooms_min", "bedrooms_max", "bedrooms"})
+        out = {key: value for key, value in out.items() if key in allowed}
     return out
+
+
+def _record_previewed(draft: Dict[str, Any], rows: List[Dict[str, str]]) -> None:
+    shown = dict(draft.get("previewed_values") or {})
+    for row in rows:
+        source = str(row.get("source") or "")
+        field = row.get("field")
+        if not field:
+            continue
+        if source == "Missing" or "needs your decision" in source.lower():
+            shown.pop(field, None)
+            continue
+        if row.get("value") in (None, ""):
+            continue
+        shown[field] = row.get("value")
+    draft["previewed_values"] = shown
 
 
 def render_preview(draft: Dict[str, Any], *, changed_only: Optional[List[str]] = None, superseded: Optional[str] = None) -> str:
     from app.services.admin_change_diff import format_provenance_table
 
+    full_decision, full_other = preview_rows(draft)
+    _record_previewed(draft, full_decision + full_other)
     decision, other = preview_rows(draft, only_fields=changed_only)
     lines = []
     if superseded:
@@ -918,6 +960,14 @@ def parse_draft_command(message: Optional[str]) -> Optional[Dict[str, Any]]:
         return {"op": "cancel"}
     if is_strict_confirm_message(raw) or low in {"yes save it", "yes save"}:
         return {"op": "confirm"}
+    skip = re.fullmatch(r"skip ([a-z_ ]+)", low)
+    if skip:
+        return {"op": "skip", "field": skip.group(1).strip().replace(" ", "_")}
+    from app.services.admin_chat_quality import parse_natural_edit_commands
+
+    natural = parse_natural_edit_commands(raw)
+    if natural:
+        return {"op": "multi", "commands": natural}
     if low in {"use your guesses", "accept guesses", "accept all guesses"}:
         return {"op": "accept_guesses"}
     accept = re.fullmatch(r"accept ([a-z_ ]+)", low)
@@ -971,10 +1021,22 @@ def _parse_admin_price(text: str) -> Tuple[Optional[float], str]:
     return None, text
 
 
+_REQUIRED_SKIP_BLOCK = {"property_name", "name", "price", "price_display", "property_type", "status", "websites", "website"}
+
+
+def skip_is_refused(field: str) -> bool:
+    token = (field or "").strip().lower().replace(" ", "_")
+    return token in _REQUIRED_SKIP_BLOCK
+
+
 def apply_command(draft: Dict[str, Any], command: Dict[str, Any]) -> List[str]:
     """Update the draft in memory. Returns the field names that changed. Never writes."""
     op = command.get("op")
     changed: List[str] = []
+    if op == "multi":
+        for sub in command.get("commands") or []:
+            changed.extend(apply_command(draft, sub))
+        return changed
     if op == "set" and command.get("field") == "price":
         number, display = _parse_admin_price(str(command.get("value") or ""))
         _set_provided(draft, "price_display", display)
@@ -993,11 +1055,46 @@ def apply_command(draft: Dict[str, Any], command: Dict[str, Any]) -> List[str]:
         _set_provided(draft, "bathrooms", int(command["value"]))
         changed.append("bathrooms")
     elif op == "set" and command.get("field") == "status":
-        _set_provided(draft, "status", command.get("value"))
+        from app.services.action_service import ALLOWED_STATUSES
+        token = str(command.get("value") or "").strip().lower()
+        canon = ALLOWED_STATUSES.get(token) or ALLOWED_STATUSES.get(token.replace("-", " ")) or command.get("value")
+        _set_provided(draft, "status", canon)
         changed.append("status")
     elif op == "set" and command.get("field") == "property_type":
         _set_provided(draft, "property_type", command.get("value"))
         changed.append("property_type")
+    elif op == "set" and command.get("field") == "province":
+        text = str(command.get("value") or "").strip()
+        if text:
+            _set_provided(draft, "province", text[:1].upper() + text[1:])
+            changed.append("province")
+    elif op == "set" and command.get("field") == "property_name":
+        text = str(command.get("value") or "").strip()
+        if text:
+            _set_provided(draft, "property_name", text)
+            changed.append("property_name")
+    elif op == "set" and command.get("field") == "has_pool":
+        _set_provided(draft, "has_pool", bool(command.get("value")))
+        changed.append("has_pool")
+    elif op == "set" and command.get("field") == "parking":
+        _set_provided(draft, "parking_spaces", int(command["value"]))
+        changed.append("parking_spaces")
+    elif op == "keep_page":
+        provenance = draft.get("provenance") or {}
+        kept = False
+        for field in ("price_numeric_min", "price_display"):
+            prov = provenance.get(field)
+            if not prov or _blank(prov.get("value")):
+                continue
+            if prov.get("status") not in {"found", "inferred", "provided"}:
+                continue
+            prov["needs_decision"] = False
+            prov["status"] = "provided"
+            prov["reason"] = "admin kept the page value"
+            kept = True
+            changed.append(field)
+        if not kept:
+            draft["keep_page_missing"] = True
     elif op == "set" and command.get("field") == "location":
         text = str(command.get("value") or "")
         _set_provided(draft, "address", text)
@@ -1151,8 +1248,34 @@ def _save_one(db: Any, staff: Any, action: Any) -> str:
 
     draft = dict(action.action_payload or {})
     missing = missing_requirements(draft)
-    if missing:
-        return "I cannot save yet. Still needed: " + ", ".join(missing) + ".\n\n" + CONFIRM_FOOTER
+    if not draft.get("websites"):
+        missing.append("website")
+    unresolved = [
+        field for field, prov in (draft.get("provenance") or {}).items()
+        if isinstance(prov, dict) and prov.get("needs_decision") and prov.get("status") != "provided"
+    ]
+    if missing or unresolved:
+        parts = []
+        for field in missing:
+            if field == "price":
+                parts.append("price (the page showed no price)")
+            else:
+                parts.append(field)
+        for field in unresolved:
+            if field not in parts:
+                parts.append(field)
+        optional = [field for field in ("bedrooms", "bathrooms", "parking") if field not in missing]
+        skip_hint = ""
+        if optional:
+            skip_hint = f" You can say 'skip {optional[0]}' for an optional field."
+        return (
+            "I still need: "
+            + "; ".join(parts)
+            + ". Tell me the missing value."
+            + skip_hint
+            + " Nothing was saved.\n\n"
+            + CONFIRM_FOOTER
+        )
     pending_guesses = unaccepted_guesses(draft)
     if pending_guesses:
         return (
@@ -1183,8 +1306,8 @@ def _save_one(db: Any, staff: Any, action: Any) -> str:
         pass
     audit = result.get("audit")
     text = result["message"]
-    if audit == "disabled":
-        text += " Audit logging is disabled."
+    if audit == "disabled" and (getattr(staff, "role", "") or "").lower() == "super_admin":
+        text += " History logging is turned off, so this change has no history entry."
     return text
 
 
@@ -1205,7 +1328,10 @@ def try_handle_property_url_turn(
     drafts = [item for item in (open_pending or []) if getattr(item, "tool_name", None) == INGEST_TOOL and getattr(item, "status", None) == "PENDING"]
     urls = extract_urls(message)
     command = parse_draft_command(message) if drafts and not urls else None
-    if not urls and not command:
+    from app.services.admin_chat_quality import classify_draft_question
+
+    asking = bool(drafts and not urls and not command and classify_draft_question(message))
+    if not urls and not command and not asking:
         return None
     if not _role_ok(staff):
         text = "Only an admin or super admin can import a property from a URL."
@@ -1256,8 +1382,12 @@ def try_handle_property_url_turn(
         pieces = []
         for draft_action in reversed(drafts):
             payload = dict(draft_action.action_payload or {})
-            if payload.get("duplicate") or missing_requirements(payload) or unaccepted_guesses(payload):
-                pieces.append(f"Skipped {payload.get('source_url')}: incomplete or a duplicate.")
+            needed = missing_requirements(payload)
+            if not payload.get("websites"):
+                needed.append("website")
+            if payload.get("duplicate") or needed or unaccepted_guesses(payload):
+                why = ", ".join(needed) if needed else "duplicate or unaccepted guess"
+                pieces.append(f"Skipped {payload.get('source_url')}: {why}.")
                 continue
             pieces.append(_save_one(db, staff, draft_action))
         text = "\n\n".join(pieces) if pieces else "Nothing was saved."
@@ -1265,6 +1395,39 @@ def try_handle_property_url_turn(
         return _chat_response(conv, text, None, language)
 
     latest = drafts[0]
+    if command and command.get("op") == "skip":
+        field = str(command.get("field") or "")
+        if skip_is_refused(field):
+            text = f"I cannot skip {field}. It is required before I can save."
+        else:
+            payload = copy.deepcopy(dict(latest.action_payload or {}))
+            payload.setdefault("skipped_fields", [])
+            if field not in payload["skipped_fields"]:
+                payload["skipped_fields"].append(field)
+            provenance = payload.get("provenance") or {}
+            provenance.pop(field, None)
+            from sqlalchemy.orm.attributes import flag_modified
+
+            latest.action_payload = payload
+            flag_modified(latest, "action_payload")
+            try:
+                db.commit()
+            except Exception:
+                pass
+            text = f"Skipped {field}.\n\n" + render_preview(payload)
+        append_conversation_turn(db, conv, message or "", text)
+        return _chat_response(conv, text, str(latest.id), language)
+
+    if drafts and not command and not urls:
+        from app.services.admin_chat_quality import classify_draft_question
+
+        if classify_draft_question(message):
+            payload = latest.action_payload or {}
+            text = render_preview(payload if isinstance(payload, dict) else {})
+            append_conversation_turn(db, conv, message or "", text)
+            return _chat_response(conv, text, str(latest.id), language)
+        return None
+
     if command and command.get("op") == "confirm":
         text = _save_one(db, staff, latest)
         append_conversation_turn(db, conv, message or "", text)
@@ -1274,7 +1437,9 @@ def try_handle_property_url_turn(
     # tracked objects. An in-place append looks unchanged and is not written.
     payload = copy.deepcopy(dict(latest.action_payload or {}))
     changed = apply_command(payload, command or {})
-    if not changed and command and command.get("op") not in {"confirm", "cancel", "confirm_all"}:
+    if payload.get("keep_page_missing"):
+        text = "The page has no price to keep. Tell me the price. Nothing was invented."
+    elif not changed and command and command.get("op") not in {"confirm", "cancel", "confirm_all"}:
         text = "I did not change the draft. " + CONFIRM_FOOTER
     else:
         from sqlalchemy.orm.attributes import flag_modified

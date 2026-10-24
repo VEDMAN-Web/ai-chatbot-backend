@@ -577,6 +577,99 @@ def test_incomplete_confirm_lists_required_fields(world, monkeypatch):
     assert save_ingested_listing  # the save path stays unused until the draft is complete
 
 
+def test_natural_edit_updates_open_draft_without_search(world, monkeypatch):
+    world["routes"]({
+        "https://example.com/probe": _page(
+            "https://example.com/probe",
+            "<table><tr><th>Name</th><td>Probe Villa</td></tr><tr><th>Type</th><td>Villa</td></tr>"
+            "<tr><th>Status</th><td>Available</td></tr><tr><th>Province</th><td>Phuket</td></tr></table>",
+        )
+    })
+    monkeypatch.setattr("app.services.property_extractor.extract_property_data_with_llm", lambda *a, **k: None)
+    searched = []
+    real_exec = __import__("app.services.admin_agent", fromlist=["_execute_admin_tool"])._execute_admin_tool
+
+    def _spy(db, tool_name, tool_args, staff_user, conversation_id):
+        searched.append(tool_name)
+        return real_exec(db, tool_name, tool_args, staff_user, conversation_id)
+
+    monkeypatch.setattr("app.services.admin_agent._execute_admin_tool", _spy)
+    _chat(world, "https://example.com/probe")
+    edited = _chat(world, "use price 25000000 and bedrooms 4")
+    assert "search_properties_full" not in searched
+    assert "25,000,000" in edited["text"]
+    assert "4" in edited["text"]
+    pending = world["db"].query(PendingAction).filter(PendingAction.status == "PENDING").one()
+    fields = pending.action_payload["provenance"]
+    assert fields["price_numeric_min"]["value"] == 25000000
+    assert fields["bedrooms_min"]["value"] == 4
+    assert "found" in edited["text"].lower() or "provided" in edited["text"].lower()
+
+
+def test_unrelated_question_keeps_the_draft_open(world, monkeypatch):
+    world["routes"]({
+        "https://example.com/open": _page(
+            "https://example.com/open",
+            "<table><tr><th>Name</th><td>Open Villa</td></tr><tr><th>Price</th><td>5,000,000 THB</td></tr>"
+            "<tr><th>Type</th><td>Villa</td></tr><tr><th>Status</th><td>Available</td></tr>"
+            "<tr><th>Province</th><td>Phuket</td></tr></table>",
+        )
+    })
+    monkeypatch.setattr("app.services.property_extractor.extract_property_data_with_llm", lambda *a, **k: None)
+    _chat(world, "https://example.com/open")
+    reply = _chat(world, "what is the weather in Bangkok")
+    assert "still open" in reply["text"].lower()
+    assert "Open Villa" in reply["text"]
+    assert world["db"].query(PendingAction).filter(PendingAction.status == "PENDING").count() == 1
+
+
+def test_several_fields_and_cancel(world, monkeypatch):
+    world["routes"]({
+        "https://example.com/multi": _page(
+            "https://example.com/multi",
+            "<table><tr><th>Name</th><td>Multi Villa</td></tr><tr><th>Price</th><td>5,000,000 THB</td></tr>"
+            "<tr><th>Type</th><td>Villa</td></tr><tr><th>Status</th><td>Available</td></tr>"
+            "<tr><th>Province</th><td>Phuket</td></tr></table>",
+        )
+    })
+    monkeypatch.setattr("app.services.property_extractor.extract_property_data_with_llm", lambda *a, **k: None)
+    _chat(world, "https://example.com/multi")
+    edited = _chat(world, "price 25M, set bedrooms to 4, change the status to Off-plan, add Phuket as province, name it Layan Palm Villa 2")
+    pending = world["db"].query(PendingAction).filter(PendingAction.status == "PENDING").one()
+    prov = pending.action_payload["provenance"]
+    assert prov["price_numeric_min"]["value"] == 25000000
+    assert prov["bedrooms_min"]["value"] == 4
+    assert prov["status"]["value"] == "Off-plan"
+    assert "Layan Palm Villa 2" in edited["text"]
+    cancelled = _chat(world, "cancel")
+    assert "discarded" in cancelled["text"].lower() or "nothing was saved" in cancelled["text"].lower()
+    assert world["db"].query(PendingAction).filter(PendingAction.status == "PENDING").count() == 0
+
+
+def test_confirm_missing_price_skip_required_and_preview_match(world, monkeypatch):
+    world["routes"]({
+        "https://example.com/noprice": _page(
+            "https://example.com/noprice",
+            "<table><tr><th>Name</th><td>No Price Villa</td></tr><tr><th>Type</th><td>Villa</td></tr>"
+            "<tr><th>Status</th><td>Available</td></tr><tr><th>Province</th><td>Phuket</td></tr></table>",
+        )
+    })
+    monkeypatch.setattr("app.services.property_extractor.extract_property_data_with_llm", lambda *a, **k: None)
+    _chat(world, "https://example.com/noprice")
+    refused = _chat(world, "confirm")
+    assert "i still need" in refused["text"].lower()
+    assert "price" in refused["text"].lower()
+    assert "nothing was saved" in refused["text"].lower()
+    skipped = _chat(world, "skip price")
+    assert "cannot skip price" in skipped["text"].lower()
+    supplied = _chat(world, "use price 18500000")
+    assert "18,500,000" in supplied["text"]
+    saved = _chat(world, "confirm")
+    assert "nothing was saved" not in saved["text"].lower()
+    row = world["db"].query(Property).filter(Property.property_name == "No Price Villa").one()
+    assert int(row.price_numeric_min) == 18500000
+
+
 def test_config_status_lists_ingest_limits():
     status = __import__("app.core.config", fromlist=["get_admin_config_status"]).get_admin_config_status()
     assert "ingest_ignore_robots" in status

@@ -232,6 +232,57 @@ def parse_bedrooms(raw: Any) -> Dict[str, Any]:
     return out
 
 
+def format_bedrooms_label(
+    bedrooms_min: Any = None,
+    bedrooms_max: Any = None,
+    bedrooms_display: Any = None,
+    bedrooms: Any = None,
+) -> str:
+    """
+    '2-3 beds', '3 beds', or 'beds not listed'.
+    Never invents 1-4 and never appends a second 'bed'.
+    """
+    def _int(value: Any) -> Optional[int]:
+        if value is None or isinstance(value, bool):
+            return None
+        if isinstance(value, (int, float)):
+            return int(value)
+        text = str(value).strip()
+        if not text or text.lower() in {"n/a", "none", "null", "beds not listed"}:
+            return None
+        parsed = parse_bedrooms(text)
+        if parsed.get("bedrooms_min") is None:
+            return None
+        return int(parsed["bedrooms_min"])
+
+    lo = _int(bedrooms_min)
+    hi = _int(bedrooms_max)
+    if lo is None and hi is None:
+        raw = bedrooms_display if bedrooms_display not in (None, "") else bedrooms
+        blob = str(raw or "").strip().lower()
+        if blob in {"", "n/a", "none", "1-4", "1-4 beds", "1–4 beds"}:
+            return "beds not listed"
+        parsed = parse_bedrooms(raw)
+        lo = parsed.get("bedrooms_min")
+        hi = parsed.get("bedrooms_max")
+        if lo is None:
+            return "beds not listed"
+    if hi is None or int(hi) == int(lo):
+        return f"{int(lo)} beds"
+    return f"{min(int(lo), int(hi))}-{max(int(lo), int(hi))} beds"
+
+
+def format_place_name(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    return re.sub(
+        r"[A-Za-z]+",
+        lambda match: match.group(0) if any(ch.isupper() for ch in match.group(0)[1:]) else match.group(0).capitalize(),
+        text,
+    )
+
+
 def resolve_alias(field: str) -> Optional[str]:
     f = (field or "").strip()
     if not f:
