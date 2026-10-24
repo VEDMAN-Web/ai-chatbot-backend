@@ -2952,8 +2952,9 @@ def _run_deterministic_admin(
     bed_match = re.search(r'(\d+)\s*[-]?\s*(?:bedroom|bed(?:rooms?)?|br\b)', msg_lower)
     bedrooms = int(bed_match.group(1)) if bed_match else None
 
-    price_match = re.search(r'(?:under|below|max|less than|poniżej)\s+(\d+(?:\.\d+)?)\s*(?:million|m\b|mln|mil)', msg_lower)
-    max_price_val = float(price_match.group(1)) * 1_000_000 if price_match else None
+    price_match = re.search(r'(?:under|below|max|less than|poniżej)\s+(.+)', msg_lower)
+    from app.services.admin_property_fields import parse_money
+    max_price_val = parse_money(price_match.group(1)) if price_match else None
 
     has_pool = True if any(w in msg_lower for w in ["pool", "swimming", "basen"]) else None
 
@@ -3195,10 +3196,30 @@ def _run_deterministic_admin(
                 _stored_price = None
 
         price_num = parse_relative_price_change(message, _stored_price)
+        price_details = None
         if price_num is None:
-            price_num = parse_price_amount(message)
+            from app.services.admin_property_fields import describe_money
+            price_details = describe_money(message)
+            price_num = price_details["thb"] if price_details else None
+        if price_num is not None and any(word in msg_lower for word in ("price", "cena")):
+            from app.services.admin_property_fields import price_sanity_message
+            refusal = price_sanity_message(price_num, _stored_price)
+            if refusal:
+                append_conversation_turn(db, conv, message, refusal)
+                return {
+                    "type": "text",
+                    "text": refusal,
+                    "session_id": conv.session_id,
+                    "conversation_id": str(conv.id),
+                    "requires_confirmation": False,
+                    "pending_action_id": None,
+                    "action_status": None,
+                    "tools_used": [],
+                    "language": language,
+                }
         if price_num is not None:
-            price_masked = f"{price_num:,.0f} THB"
+            from app.services.admin_property_fields import money_phrase
+            price_masked = money_phrase(price_num, price_details)
         else:
             price_masked = None
 
@@ -3590,7 +3611,8 @@ def _run_deterministic_admin(
     is_explicit_answer = any(p in msg_lower for p in [
         "details out of 7", "out of 7", "assume the rest", "assume the rest of the details",
         "fetch from db", "make everything myself", "make everything yourself",
-        "carry on", "pobierz z bazy", "dobierz z bazy", "resztę dobierz", "reszte dobierz"
+        "carry on", "pobierz z bazy", "dobierz z bazy", "resztę dobierz", "reszte dobierz",
+        "use defaults", "with defaults", "continue with defaults", "go ahead",
     ])
 
     # Guard: Inventory queries or negative feedback must never trigger portfolio generation
@@ -3664,24 +3686,44 @@ def _run_deterministic_admin(
                     client_name = "Alexander Smith" if language != "pl" else "Dariusz Kowalski"
                     client_name_provided = False
 
+            default_client = "Alexander Smith" if language != "pl" else "Dariusz Kowalski"
+            subject_match = re.search(r"(?:dossier|offer|portfolio)\s+for\s+(.+)$", prev_user_turn or "", re.I)
+            subject_name = subject_match.group(1).strip(" .") if subject_match else ""
+            property_names = set()
+            try:
+                from app.db.models import Property as _Property
+                property_rows = db.query(_Property).all()
+                if isinstance(property_rows, list):
+                    property_names = {
+                        str(getattr(row, "property_name", "") or "").strip().lower()
+                        for row in property_rows
+                    }
+            except Exception:
+                property_names = set()
+            if subject_name:
+                property_names.add(subject_name.lower())
+            if client_name.strip().lower() in property_names:
+                client_name = default_client
+                client_name_provided = False
+
             # 2. Budget
             budget_provided = False
-            b_match = re.search(r'(\d+(?:\s*\d+)*(?:\.\d+)?)\s*(?:million|m\b|mln|mil|thb|baht)', message, re.IGNORECASE)
-            if b_match or max_price_val:
-                if max_price_val:
-                    budget_str = f"{int(max_price_val):,} THB".replace(",", " ")
-                elif "28" in msg_lower:
-                    budget_str = "28 000 000 THB"
-                elif "30" in msg_lower:
-                    budget_str = "30 000 000 THB"
-                elif "35" in msg_lower:
-                    budget_str = "35 000 000 THB"
-                else:
-                    b_num = re.sub(r'[^\d]', '', b_match.group(1))
-                    if len(b_num) <= 3:
-                        budget_str = f"{int(b_num) * 1_000_000:,} THB".replace(",", " ")
-                    else:
-                        budget_str = f"{int(b_num):,} THB".replace(",", " ")
+            from app.services.admin_property_fields import describe_money
+            budget_details = describe_money(message)
+            if budget_details and (budget_details.get("multiplier") or budget_details["thb"] >= 100_000):
+                budget_str = f"{int(round(budget_details['thb'])):,} THB".replace(",", " ")
+                budget_provided = True
+            elif max_price_val:
+                budget_str = f"{int(max_price_val):,} THB".replace(",", " ")
+                budget_provided = True
+            elif "28" in msg_lower:
+                budget_str = "28 000 000 THB"
+                budget_provided = True
+            elif "30" in msg_lower:
+                budget_str = "30 000 000 THB"
+                budget_provided = True
+            elif "35" in msg_lower:
+                budget_str = "35 000 000 THB"
                 budget_provided = True
             else:
                 if "28" in prev_user_turn:
@@ -3775,6 +3817,16 @@ def _run_deterministic_admin(
             else:
                 lang_val = language
 
+            language_given = any(word in msg_lower for word in ("polish", "polski", "po polsku", "english", "angielski", "po angielsku"))
+            supplied_details = any((
+                client_name_provided,
+                budget_provided,
+                brand_provided,
+                props_provided,
+                tmpl_provided,
+                goal_provided,
+                language_given,
+            ))
             offer_args = {
                 "client_name": client_name,
                 "budget": budget_str,
@@ -3784,51 +3836,62 @@ def _run_deterministic_admin(
                 "template_variant": tmpl_variant,
                 "language": lang_val
             }
-            t_res, _, _ = _execute_admin_tool(db, "generate_client_offer_dossier", offer_args, staff_user, str(conv.id))
-            tool_calls.append({"name": "generate_client_offer_dossier", "args": offer_args})
-            tool_results.append(t_res)
-
-            fname = t_res.get("filename", "tajlandia_offer.pdf")
-            furl = t_res.get("file_url", "#")
-            tmpl_name = t_res.get("template_used", f"Szablon {tmpl_variant}")
-            props_inc = ", ".join(t_res.get("properties_included", []))
-
-            if lang_val == "pl":
-                badge_u = "*(Podane przez Ciebie)*"
-                badge_a = "*(Domyślne udokumentowane / z bazy)*"
-                badge_r = "*(Domyślne udokumentowane)*"
+            if not is_explicit_answer and not supplied_details:
                 response_text = (
-                    f"✅ **Wygenerowano 8-stronicowe Dossier Ofertowe dla Klienta: {client_name}!**\n\n"
-                    f"Podsumowanie konfiguracji:\n"
-                    f"- **Klient**: `{client_name}` {badge_u if client_name_provided else badge_a}\n"
-                    f"- **Budżet inwestora**: `{budget_str}` {badge_u if budget_provided else badge_a}\n"
-                    f"- **Szablon graficzny**: `{tmpl_name}` {badge_u if tmpl_provided else badge_r}\n"
-                    f"- **Branding i logo**: `{brand_val.upper()}` {badge_u if brand_provided else badge_a}\n"
-                    f"- **Strategia inwestycyjna**: `{goal_val}` {badge_u if goal_provided else badge_a}\n"
-                    f"- **Nieruchomości**: `{props_inc}` {badge_u if props_provided else '*(Wyselekcjonowane z bazy danych)*'}\n"
-                    f"- **Język dokumentu**: `{lang_val.upper()}`\n"
-                    f"- **Układ**: `8 stron` (Okładka, Strategia, 4x Karty Willi/Kondominium, Tabela Zwrotu ROI, 3 Kroki Zakupu)\n\n"
-                    f"👉 **[🔗 Kliknij tutaj, aby pobrać Ofertę PDF dla Klienta]({furl})**\n\n"
-                    f"Dokument został wygenerowany z czystymi wektorami bez nakładających się napisów i jest gotowy do wysłania inwestorowi pocztą e-mail lub prezentacji na spotkaniu!"
+                    "I still need client details before I generate that offer dossier. "
+                    "Send the client name and budget, or say 'assume the rest' to continue with defaults. "
+                    "I have not generated it.\n\n"
+                    "1. **Client Name** is still missing. "
+                    "You can also say 'fetch them from the database & make everything myself'."
                 )
+                t_res = None
             else:
-                badge_u = "*(Specified by you)*"
-                badge_a = "*(Documented default / fetched from DB)*"
-                badge_r = "*(Documented default)*"
-                response_text = (
-                    f"✅ **Generated 8-Page Client Investor Portfolio Dossier for: {client_name}!**\n\n"
-                    f"Here is your customized portfolio summary:\n"
-                    f"- **Client Name**: `{client_name}` {badge_u if client_name_provided else badge_a}\n"
-                    f"- **Investor Budget**: `{budget_str}` {badge_u if budget_provided else badge_a}\n"
-                    f"- **Design Theme**: `{tmpl_name}` {badge_u if tmpl_provided else badge_r}\n"
-                    f"- **Agency Branding**: `{brand_val.upper()}` {badge_u if brand_provided else badge_a}\n"
-                    f"- **Investment Strategy**: `{goal_val}` {badge_u if goal_provided else badge_a}\n"
-                    f"- **Properties Included**: `{props_inc}` {badge_u if props_provided else '*(Curated luxury options from DB)*'}\n"
-                    f"- **Document Language**: `{lang_val.upper()}`\n"
-                    f"- **Page Count**: `8 pages` (Cover, Executive Strategy, 4x Property Showcases, Multi-Year ROI Analysis, 3-Step Buying Guide)\n\n"
-                    f"👉 **[🔗 Click here to Download Client Offer PDF]({furl})**\n\n"
-                    f"The bespoke presentation has been rendered with high-res photos and clean typography, ready for client delivery or private viewing discussions!"
-                )
+                t_res, _, _ = _execute_admin_tool(db, "generate_client_offer_dossier", offer_args, staff_user, str(conv.id))
+                tool_calls.append({"name": "generate_client_offer_dossier", "args": offer_args})
+                tool_results.append(t_res)
+
+            if t_res is not None:
+                fname = t_res.get("filename", "tajlandia_offer.pdf")
+                furl = t_res.get("file_url", "#")
+                tmpl_name = t_res.get("template_used", f"Szablon {tmpl_variant}")
+                props_inc = ", ".join(t_res.get("properties_included", []))
+
+                if lang_val == "pl":
+                    badge_u = "*(Podane przez Ciebie)*"
+                    badge_a = "*(Domyślne udokumentowane / z bazy)*"
+                    badge_r = "*(Domyślne udokumentowane)*"
+                    response_text = (
+                        f"✅ **Wygenerowano 8-stronicowe Dossier Ofertowe dla Klienta: {client_name}!**\n\n"
+                        f"Podsumowanie konfiguracji:\n"
+                        f"- **Klient**: `{client_name}` {badge_u if client_name_provided else badge_a}\n"
+                        f"- **Budżet inwestora**: `{budget_str}` {badge_u if budget_provided else badge_a}\n"
+                        f"- **Szablon graficzny**: `{tmpl_name}` {badge_u if tmpl_provided else badge_r}\n"
+                        f"- **Branding i logo**: `{brand_val.upper()}` {badge_u if brand_provided else badge_a}\n"
+                        f"- **Strategia inwestycyjna**: `{goal_val}` {badge_u if goal_provided else badge_a}\n"
+                        f"- **Nieruchomości**: `{props_inc}` {badge_u if props_provided else '*(Wyselekcjonowane z bazy danych)*'}\n"
+                        f"- **Język dokumentu**: `{lang_val.upper()}`\n"
+                        f"- **Układ**: `8 stron` (Okładka, Strategia, 4x Karty Willi/Kondominium, Tabela Zwrotu ROI, 3 Kroki Zakupu)\n\n"
+                        f"👉 **[🔗 Kliknij tutaj, aby pobrać Ofertę PDF dla Klienta]({furl})**\n\n"
+                        f"Dokument został wygenerowany z czystymi wektorami bez nakładających się napisów i jest gotowy do wysłania inwestorowi pocztą e-mail lub prezentacji na spotkaniu!"
+                    )
+                else:
+                    badge_u = "*(Specified by you)*"
+                    badge_a = "*(Documented default / fetched from DB)*"
+                    badge_r = "*(Documented default)*"
+                    response_text = (
+                        f"✅ **Generated 8-Page Client Investor Portfolio Dossier for: {client_name}!**\n\n"
+                        f"Here is your customized portfolio summary:\n"
+                        f"- **Client Name**: `{client_name}` {badge_u if client_name_provided else badge_a}\n"
+                        f"- **Investor Budget**: `{budget_str}` {badge_u if budget_provided else badge_a}\n"
+                        f"- **Design Theme**: `{tmpl_name}` {badge_u if tmpl_provided else badge_r}\n"
+                        f"- **Agency Branding**: `{brand_val.upper()}` {badge_u if brand_provided else badge_a}\n"
+                        f"- **Investment Strategy**: `{goal_val}` {badge_u if goal_provided else badge_a}\n"
+                        f"- **Properties Included**: `{props_inc}` {badge_u if props_provided else '*(Curated luxury options from DB)*'}\n"
+                        f"- **Document Language**: `{lang_val.upper()}`\n"
+                        f"- **Page Count**: `8 pages` (Cover, Executive Strategy, 4x Property Showcases, Multi-Year ROI Analysis, 3-Step Buying Guide)\n\n"
+                        f"👉 **[🔗 Click here to Download Client Offer PDF]({furl})**\n\n"
+                        f"The bespoke presentation has been rendered with high-res photos and clean typography, ready for client delivery or private viewing discussions!"
+                    )
 
     # F0. "That report again" — re-link if still stored, otherwise regenerate
     elif not is_negative_report_inquiry and any(
@@ -4326,13 +4389,9 @@ def _run_deterministic_admin(
                     p_name = p.get("property_name") or p.get("title") or p.get("property_id")
                     p_price = float(p.get("price_numeric_min") or 0)
                     p_loc = p.get("location") or "Thailand"
-                    from app.services.admin_property_fields import format_bedrooms_label, format_place_name
-                    p_beds = format_bedrooms_label(
-                        bedrooms_min=p.get("bedrooms_min"),
-                        bedrooms_max=p.get("bedrooms_max"),
-                        bedrooms_display=p.get("bedrooms_display"),
-                        bedrooms=p.get("bedrooms"),
-                    )
+                    from app.services.conversation_controls import bedrooms_display_value
+                    from app.services.admin_property_fields import format_place_name
+                    p_beds = bedrooms_display_value(p)
                     p_beds_str = "" if p_beds == "beds not listed" else f" | {p_beds}"
                     filtered_examples.append(
                         f"- **{p_name}** ({p.get('property_id')}): **{p_price:,.0f} THB**{p_beds_str} | {format_place_name(p_loc)}"
@@ -4417,11 +4476,11 @@ def _run_deterministic_admin(
             for p in (t_res or [])[:10]:
                 p_id = p.get("property_id") or p.get("id") or "N/A"
                 p_name = p.get("property_name") or p.get("name") or p.get("title") or "Property"
-                from app.services.admin_chat_quality import listing_bed_label
+                from app.services.conversation_controls import bedrooms_display_value
                 from app.services.admin_property_fields import format_place_name
                 place = p.get("province") or p.get("location") or ""
                 p_loc = format_place_name(place) or "Thailand"
-                p_beds = listing_bed_label(p)
+                p_beds = bedrooms_display_value(p)
                 p_price = p.get("price_display") or p.get("price") or "Price on request"
                 prop_lines.append(
                     f"- **{p_name}** ({p_id}) | {p_loc} | {p_beds} | {p_price}"
@@ -4664,6 +4723,8 @@ def _execute_admin_tool_uncached(
                 limit=tool_args.get("limit", 10)
             )
             if fs_props:
+                from app.services.conversation_controls import overlay_missing_bedrooms
+                overlay_missing_bedrooms(db, fs_props)
                 res = [_clean_property_for_admin_tool(fp) for fp in fs_props]
         except Exception as e:
             logger.warning(f"Error querying Firestore in search_properties_full: {e}")

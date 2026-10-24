@@ -426,6 +426,88 @@ def try_rule_based_write(db: Any, conv: Any, message: str, staff: Any, language:
             tools=[{"name": "execute_batch_property_action", "args": {"count": len(items)}}],
         )
 
+    from app.services.admin_property_fields import MONEY_PHRASE, describe_money, money_phrase, price_sanity_message
+
+    bulk_amount = re.search(
+        rf"\b(increase|decrease|raise|lower)\s+all\s+(.+?)\s+by\s+({MONEY_PHRASE})",
+        text,
+        re.I,
+    )
+    if bulk_amount and "%" not in bulk_amount.group(0):
+        from app.db.models import Property
+        from app.services.action_service import create_pending_action
+        from app.services.admin_change_diff import build_batch_change_diff
+
+        direction, place_type, raw_amount = bulk_amount.group(1), bulk_amount.group(2), bulk_amount.group(3)
+        money = describe_money(raw_amount)
+        if money is None:
+            return _text(conv, "I could not read that price. Nothing was changed.")
+        delta = float(money["thb"])
+        try:
+            queried = db.query(Property).all()
+            rows = queried if isinstance(queried, list) else []
+        except Exception:
+            rows = []
+        words = [word for word in re.findall(r"[A-Za-z]+", place_type) if word.lower() not in {"the", "villas", "villa", "properties", "property"}]
+        place = words[0] if words else ""
+        matched = []
+        for row in rows:
+            province = str(getattr(row, "province", "") or "")
+            kind = str(getattr(row, "property_type", "") or "")
+            if place and place.lower() not in province.lower():
+                continue
+            if "villa" in place_type.lower() and "villa" not in kind.lower():
+                continue
+            if getattr(row, "price_numeric_min", None) is None:
+                continue
+            matched.append(row)
+        if not matched:
+            return _text(conv, "I could not find properties for that bulk price change. Nothing was changed.")
+        items = []
+        for row in matched:
+            current_price = float(row.price_numeric_min)
+            new_price = _round_money(current_price + delta if direction.lower() in {"increase", "raise"} else current_price - delta)
+            refusal = price_sanity_message(new_price, current_price)
+            if refusal:
+                return _text(conv, refusal)
+            items.append({
+                "property_id": row.property_id,
+                "name": row.property_name,
+                "change": {"fields": {"price_numeric_min": new_price, "price_display": f"{new_price:,.0f} THB"}},
+            })
+        change_diff = build_batch_change_diff(db, "update", items, {})
+        examples = ", ".join(item["name"] for item in items[:3])
+        payload = {
+            "operation_type": "update",
+            "items": items,
+            "records": [
+                {"property_id": item["property_id"], "name": item["name"], **item["change"]["fields"]}
+                for item in items
+            ],
+            "update_fields": {},
+            "notes": text,
+            "change_diff": change_diff,
+            "diff_markdown": change_diff.get("diff_markdown"),
+            "risk_warnings": change_diff.get("risk_warnings") or [],
+            "requires_explicit_delete_ack": False,
+            "delete_count": 0,
+        }
+        action = create_pending_action(
+            db=db,
+            staff_user_id=getattr(staff, "email", None) or "admin",
+            tool_name="execute_batch_property_action",
+            action_payload=payload,
+            conversation_id=str(getattr(conv, "id", "") or ""),
+        )
+        return _text(
+            conv,
+            f"I found {len(items)} matching properties ({examples}). Each price changes by {money_phrase(delta, money)}. Confirm to apply. Nothing has been written.\n\n{change_diff.get('diff_markdown') or ''}",
+            requires=True,
+            pending_id=str(action.id),
+            token=action.confirmation_token,
+            tools=[{"name": "execute_batch_property_action", "args": {"count": len(items)}}],
+        )
+
     status_match = re.search(r"\bset\s+(.+?)\s+status\s+to\s+(.+)$", text, re.I) or re.search(
         r"\bmark\s+(.+?)\s+as\s+(sold out|available|reserved|archived|off-plan|ready to move in)$",
         text,
@@ -441,6 +523,8 @@ def try_rule_based_write(db: Any, conv: Any, message: str, staff: Any, language:
         status = ALLOWED_STATUSES.get(raw_status.lower(), raw_status)
         return _propose_listing(db, conv, staff, text, target, {"status": status})
 
+    from app.services.admin_property_fields import MONEY_PHRASE, describe_money, money_phrase, price_sanity_message
+
     percent_match = re.search(
         r"\b(increase|decrease|raise|lower)\s+the price of\s+(.+?)\s+by\s+(\d+(?:\.\d+)?)\s*%",
         text,
@@ -451,32 +535,41 @@ def try_rule_based_write(db: Any, conv: Any, message: str, staff: Any, language:
         re.I,
     )
     amount_match = re.search(
-        r"\b(raise|lower|increase|decrease)\s+(.+?)\s+price\s+by\s+(\d{3,})\b",
+        rf"\b(raise|lower|increase|decrease)\s+the price of\s+(.+?)\s+by\s+({MONEY_PHRASE})",
+        text,
+        re.I,
+    ) or re.search(
+        rf"\b(raise|lower|increase|decrease)\s+(.+?)\s+price\s+by\s+({MONEY_PHRASE})",
         text,
         re.I,
     )
     absolute = re.search(
-        r"\b(?:set|change|update)(?: the)? price of\s+(.+?)\s+to\s+([0-9][0-9,\.]*)",
+        rf"\b(?:set|change|update)(?: the)? price of\s+(.+?)\s+to\s+({MONEY_PHRASE})",
         text,
         re.I,
     ) or re.search(
-        r"\b(?:set|change|update)\s+(.+?)\s+price\s+to\s+([0-9][0-9,\.]*)",
+        rf"\b(?:set|change|update)\s+(.+?)\s+price\s+to\s+({MONEY_PHRASE})",
         text,
         re.I,
     )
     if percent_match or amount_match or absolute:
         if percent_match:
             direction, raw_name, raw_number = percent_match.group(1), percent_match.group(2), percent_match.group(3)
+            money = None
         elif amount_match:
             direction, raw_name, raw_number = amount_match.group(1), amount_match.group(2), amount_match.group(3)
+            money = describe_money(raw_number)
         else:
             direction, raw_name, raw_number = "set", absolute.group(1), absolute.group(2)
+            money = describe_money(raw_number)
         target, problem = resolve_write_target(db, raw_name)
         if problem:
             return _text(conv, problem)
         current = _current_price(db, target)
         if absolute and direction == "set":
-            new_price = _round_money(float(raw_number.replace(",", "")))
+            if money is None:
+                return _text(conv, "I could not read that price. Nothing was changed.")
+            new_price = _round_money(float(money["thb"]))
             percent_note = ""
         elif current is None:
             return _text(conv, f"I could not find a stored price for {_property_name(target)}. Nothing was changed.")
@@ -485,10 +578,18 @@ def try_rule_based_write(db: Any, conv: Any, message: str, staff: Any, language:
             factor = 1 + percent / 100.0 if direction.lower() in {"increase", "raise"} else 1 - percent / 100.0
             new_price = _round_money(current * factor)
             percent_note = f" ({percent:g}% from {current:,.0f} THB)"
+            money = {"note": "", "short": ""}
         else:
-            delta = float(raw_number)
+            if money is None:
+                return _text(conv, "I could not read that price. Nothing was changed.")
+            delta = float(money["thb"])
             new_price = _round_money(current + delta if direction.lower() in {"raise", "increase"} else current - delta)
             percent_note = f" (from {current:,.0f} THB)"
+        if not percent_match:
+            refusal = price_sanity_message(new_price, current)
+            if refusal:
+                return _text(conv, refusal)
+        shown = money_phrase(new_price, money if not percent_match else None)
         proposal = _propose_listing(
             db,
             conv,
@@ -497,8 +598,8 @@ def try_rule_based_write(db: Any, conv: Any, message: str, staff: Any, language:
             target,
             {"price_numeric_min": new_price, "price_display": f"{new_price:,.0f} THB"},
         )
-        if percent_note and proposal.get("text"):
-            proposal["text"] = f"New price {new_price:,.0f} THB{percent_note}.\n\n" + proposal["text"]
+        if proposal.get("text"):
+            proposal["text"] = f"New price {shown}{percent_note}.\n\n" + proposal["text"]
         return proposal
 
     delete_match = re.search(r"^(?:please\s+)?delete\s+(.+)$", text, re.I)

@@ -158,21 +158,9 @@ def human_field_label(field_name: str) -> str:
 
 def listing_bed_label(source: Any) -> str:
     """Bed label from display, then min/max. 'beds not listed' only when all are empty."""
-    from app.services.admin_property_fields import format_bedrooms_label
+    from app.services.conversation_controls import bedrooms_display_value
 
-    def _get(key: str) -> Any:
-        if isinstance(source, dict):
-            return source.get(key)
-        return getattr(source, key, None)
-
-    label = format_bedrooms_label(
-        bedrooms_min=_get("bedrooms_min"),
-        bedrooms_max=_get("bedrooms_max"),
-        bedrooms_display=_get("bedrooms_display"),
-        bedrooms=_get("bedrooms"),
-    )
-    text = re.sub(r"\bbeds?\s+beds?\b", "beds", str(label or ""), flags=re.I).strip()
-    return text or "beds not listed"
+    return bedrooms_display_value(source)
 
 
 def humanise_field_list(fields: Any) -> str:
@@ -839,8 +827,13 @@ def _edit_clause(clause: str) -> Optional[Dict[str, Any]]:
         if not match:
             continue
         value: Any = match.group(1).strip()
-        if field == "price" and not re.search(r"\d", value):
-            return None
+        if field == "price":
+            if not re.search(r"\d", value):
+                return None
+            from app.services.admin_property_fields import parse_money
+
+            if parse_money(value) is None:
+                return None
         if field == "status" and (len(value) > 40 or not re.search(r"[a-z]", value, re.I)):
             return None
         if numeric:

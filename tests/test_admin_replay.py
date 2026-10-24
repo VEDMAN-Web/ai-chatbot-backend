@@ -506,3 +506,143 @@ def test_admin_replay_script(world):
     thanks = _say(world, "thanks")
     assert "Found **" not in hello["text"]
     assert "Found **" not in thanks["text"]
+
+
+_PRICE_FORMATS = (
+    ("12 million", 12_000_000),
+    ("12M", 12_000_000),
+    ("12 m", 12_000_000),
+    ("12mln", 12_000_000),
+    ("12.5 million THB", 12_500_000),
+    ("850k", 850_000),
+    ("5 000 000", 5_000_000),
+    ("฿5m", 5_000_000),
+    ("5,0 mln", 5_000_000),
+)
+
+
+def test_parse_money_understands_words_and_separators():
+    from app.services.admin_property_fields import parse_money, parse_price_amount
+
+    for phrase, expected in _PRICE_FORMATS:
+        assert parse_money(phrase) == expected
+    assert parse_money("$1 million") == 35_000_000
+    assert parse_price_amount("5 million") == 5_000_000
+    assert parse_price_amount("5M") == 5_000_000
+    assert parse_price_amount("5,000,000") == 5_000_000
+    assert parse_price_amount("increase price by 80%") is None
+
+
+def _rule(world, message):
+    from types import SimpleNamespace
+    from app.services.admin_turn_rules import try_rule_based_write
+
+    conv = SimpleNamespace(id="conv-price", session_id="price", message_history=[])
+    return try_rule_based_write(world["db"], conv, message, _staff(), "en")
+
+
+def test_set_raise_and_lower_use_parsed_amounts(world):
+    current = 10_000_000
+    for phrase, expected in _PRICE_FORMATS:
+        reply = _rule(world, f"change the price of Probe Villa to {phrase}")
+        assert f"{expected:,}" in reply["text"]
+        if expected < 100_000 or expected > 1_000_000_000 or expected > current * 10 or expected < current / 10:
+            assert reply["requires_confirmation"] is False
+            assert "nothing was changed" in reply["text"].lower()
+        else:
+            assert reply["requires_confirmation"] is True
+            assert f"{expected:,} THB" in reply["text"]
+
+        raised = _rule(world, f"raise Probe Villa price by {phrase}")
+        raised_price = current + expected
+        assert f"{expected:,}" in raised["text"] or f"{raised_price:,}" in raised["text"]
+        if raised_price < 100_000 or raised_price > current * 10:
+            assert raised["requires_confirmation"] is False
+        else:
+            assert raised["requires_confirmation"] is True
+            assert f"{raised_price:,}" in raised["text"]
+
+        lowered = _rule(world, f"lower Probe Villa price by {phrase}")
+        lowered_price = current - expected
+        if lowered_price < 100_000 or (lowered_price > 0 and lowered_price < current / 10):
+            assert lowered["requires_confirmation"] is False
+            assert "nothing was changed" in lowered["text"].lower()
+            assert "9,999,988" not in lowered["text"]
+        else:
+            assert lowered["requires_confirmation"] is True
+            assert f"{lowered_price:,}" in lowered["text"]
+    assert _price(world) == current
+
+
+def test_percent_price_change_is_unchanged(world):
+    reply = _rule(world, "increase the price of Laguna Villa by 10%")
+    assert reply["requires_confirmation"] is True
+    assert "22,000,000" in reply["text"]
+    assert "too low" not in reply["text"].lower()
+
+
+def test_price_guards_ask_before_proposing(world):
+    low = _rule(world, "change the price of Probe Villa to 12")
+    assert low["requires_confirmation"] is False
+    assert "12 THB looks too low" in low["text"]
+    assert "12,000,000 THB" in low["text"]
+    high = _rule(world, "change the price of Probe Villa to 2 billion")
+    assert high["requires_confirmation"] is False
+    assert "too high" in high["text"].lower()
+    assert "2,000,000,000" in high["text"]
+    jumped = _rule(world, "change the price of Probe Villa to 200 million")
+    assert jumped["requires_confirmation"] is False
+    assert "ten times" in jumped["text"].lower()
+    assert "200,000,000" in jumped["text"]
+    assert _price(world) == 10_000_000
+
+
+def test_twelve_million_confirms_in_both_stores_and_undoes(world):
+    proposed = _say(world, "change the price of Probe Villa to 12 million")
+    assert proposed["requires_confirmation"] is True
+    assert "12,000,000 THB" in proposed["text"]
+    assert "12 million" in proposed["text"]
+    assert _price(world) == 10_000_000
+    confirmed = _say(world, "yes confirm")
+    assert "Done." in confirmed["text"]
+    assert _price(world) == 12_000_000
+    doc = world["fs"].get("projects", "probe-villa")
+    assert doc and int(doc.get("priceFrom") or 0) == 12_000_000
+    undone = _say(world, "undo the last change")
+    assert _price(world) == 10_000_000
+    restored = world["fs"].get("projects", "probe-villa")
+    if restored:
+        assert int(restored.get("priceFrom") or 0) == 10_000_000
+
+
+def test_bed_label_uses_min_and_max_before_not_listed():
+    from app.services.conversation_controls import bedrooms_display_value
+
+    assert bedrooms_display_value({"bedrooms_min": 2, "bedrooms_max": 3}) == "2-3 beds"
+    assert bedrooms_display_value({"bedrooms_display": "beds not listed", "bedrooms_min": 2, "bedrooms_max": 3}) == "2-3 beds"
+    assert bedrooms_display_value({"bedrooms_display": "1-4", "bedroomsMin": 2, "bedroomsMax": 3}) == "2-3 beds"
+    assert bedrooms_display_value({}) == "beds not listed"
+
+
+def test_dossier_greeting_is_not_the_client(world, monkeypatch):
+    monkeypatch.setattr(
+        "app.services.offer_dossier_service.generate_offer_dossier_pdf",
+        lambda **kwargs: {
+            "filename": "offer.pdf",
+            "file_url": "/api/v1/admin/reports/offer.pdf",
+            "template_used": "Classic Elegance",
+            "properties_included": ["Probe Villa"],
+        },
+    )
+    asked = _say(world, "generate offer dossier for Probe Villa")
+    assert "Client Name" in asked["text"]
+    hello = _say(world, "hello")
+    thanks = _say(world, "thanks")
+    assert "have not generated" in hello["text"].lower()
+    assert "have not generated" in thanks["text"].lower()
+    assert "8-Page" not in hello["text"]
+    assert "8-Page" not in thanks["text"]
+    continued = _say(world, "assume the rest")
+    assert "Alexander Smith" in continued["text"]
+    assert "Client Name**: `Probe Villa`" not in continued["text"]
+    assert "**Client Name**: `Probe Villa`" not in continued["text"]

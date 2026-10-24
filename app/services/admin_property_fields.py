@@ -135,44 +135,213 @@ def localize_name(val: Any) -> Optional[str]:
     return s or None
 
 
-def parse_price_amount(raw: Any) -> Optional[float]:
-    """
-    Parse '5 million', '5M', '5 mln', '5,000,000', 5000000 → float THB.
-    Returns None if unclear.
-    """
-    if raw is None:
+# Same THB rates as intent_router.extract_search_filters_deterministic.
+_FX_TO_THB = {"usd": 35.0, "eur": 38.0, "pln": 8.5, "thb": 1.0}
+_UNIT_MULTIPLIER = {
+    "million": 1_000_000,
+    "millions": 1_000_000,
+    "mln": 1_000_000,
+    "mil": 1_000_000,
+    "mn": 1_000_000,
+    "m": 1_000_000,
+    "thousand": 1_000,
+    "tys": 1_000,
+    "tys.": 1_000,
+    "k": 1_000,
+    "billion": 1_000_000_000,
+    "bn": 1_000_000_000,
+    "b": 1_000_000_000,
+    "mld": 1_000_000_000,
+    "ล้าน": 1_000_000,
+    "แสน": 100_000,
+    "หมื่น": 10_000,
+}
+MONEY_PHRASE = (
+    r"(?:฿|\$|€)?\s*[0-9][0-9,.\s'_]*\s*"
+    r"(?:(?:millions|million|mln|mld|billion|thousand|tys\.?|ล้าน|แสน|หมื่น|bn|mn|mil|k|m|b)(?!\w))?"
+    r"(?:\s*(?:thb|baht|฿|usd|dollars?|eur|euros?|€|บาท|pln|zł))?"
+)
+_MONEY_RE = re.compile(
+    r"(?P<prefix>฿|\$|€)?\s*"
+    r"(?P<number>[0-9][0-9,.\s'_]*)"
+    r"\s*"
+    r"(?:(?P<unit>millions|million|mln|mld|billion|thousand|tys\.?|ล้าน|แสน|หมื่น|bn|mn|mil|k|m|b)(?!\w))?"
+    r"\s*"
+    r"(?P<suffix>thb|baht|฿|usd|dollars?|eur|euros?|€|บาท|pln|zł)?",
+    re.IGNORECASE,
+)
+
+
+def thb_per_unit(currency: str) -> float:
+    """THB per 1 unit of currency. Settings can override the project rates."""
+    code = (currency or "thb").lower()
+    try:
+        from app.core.config import settings
+
+        custom = getattr(settings, "FX_RATES", None)
+        if isinstance(custom, dict) and code in custom:
+            return float(custom[code])
+        override = getattr(settings, f"FX_{code.upper()}_TO_THB", None)
+        if override:
+            return float(override)
+    except Exception:
+        pass
+    return _FX_TO_THB.get(code, 1.0)
+
+
+def _parse_number_token(token: str) -> Optional[float]:
+    text = (token or "").strip().replace("\u00a0", "").replace("_", "").replace("'", "").replace("’", "")
+    text = re.sub(r"\s+", "", text)
+    if not text:
         return None
-    if isinstance(raw, bool):
+    if re.fullmatch(r"\d+,\d{1,2}", text):
+        text = text.replace(",", ".")
+    elif re.fullmatch(r"\d{1,3}(?:\.\d{3})+", text):
+        text = text.replace(".", "")
+    elif "," in text:
+        text = text.replace(",", "")
+    if text.count(".") > 1:
+        text = text.replace(".", "")
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def _currency_code(prefix: str, suffix: str) -> str:
+    blob = f"{prefix or ''} {suffix or ''}".lower()
+    if "$" in blob or "usd" in blob or "dollar" in blob:
+        return "USD"
+    if "€" in blob or "eur" in blob or "euro" in blob:
+        return "EUR"
+    if "pln" in blob or "zł" in blob:
+        return "PLN"
+    return "THB"
+
+
+def short_money(value: float) -> str:
+    number = abs(float(value))
+    sign = "-" if float(value) < 0 else ""
+
+    def compact(amount: float, word: str) -> str:
+        text = f"{amount:.2f}".rstrip("0").rstrip(".")
+        if word == "k":
+            return f"{sign}{text}k"
+        return f"{sign}{text} {word}"
+
+    if number >= 1_000_000_000:
+        return compact(number / 1_000_000_000, "billion")
+    if number >= 1_000_000:
+        return compact(number / 1_000_000, "million")
+    if number >= 1_000 and abs(number - round(number / 1000) * 1000) < 1:
+        return compact(number / 1000, "k")
+    return f"{sign}{number:,.0f} THB"
+
+
+def describe_money(raw: Any) -> Optional[Dict[str, Any]]:
+    """One money reading: THB amount, currency, and a conversion note when FX applies."""
+    if raw is None or isinstance(raw, bool):
         return None
     if isinstance(raw, (int, float, Decimal)):
         try:
-            return float(raw)
+            value = float(raw)
         except Exception:
             return None
-    s = str(raw).strip().lower().replace("\u00a0", " ")
-    if not s or s in ("none", "null", "n/a", "-", "—"):
+        return {
+            "thb": value,
+            "source_amount": value,
+            "currency": "THB",
+            "rate": 1.0,
+            "multiplier": False,
+            "note": "",
+            "short": short_money(value),
+        }
+    text = str(raw).strip().replace("\u00a0", " ")
+    if not text or text.lower() in {"none", "null", "n/a", "-", "—"}:
         return None
-    # Relative change phrases are not absolute amounts
-    if re.search(r"\b(increase|decrease|raise|lower|by)\b", s) and "%" in s:
+    best: Optional[Dict[str, Any]] = None
+    for match in _MONEY_RE.finditer(text):
+        number = _parse_number_token(match.group("number") or "")
+        if number is None:
+            continue
+        unit = (match.group("unit") or "").lower()
+        multiplier = _UNIT_MULTIPLIER.get(unit, 1.0)
+        source = number * multiplier
+        currency = _currency_code(match.group("prefix") or "", match.group("suffix") or "")
+        rate = thb_per_unit(currency)
+        thb = source * rate
+        note = ""
+        if currency != "THB":
+            note = f"Converted from {source:,.0f} {currency} at {rate:g} THB per {currency}."
+        candidate = {
+            "thb": thb,
+            "source_amount": source,
+            "currency": currency,
+            "rate": rate,
+            "multiplier": bool(match.group("unit") or match.group("prefix") or match.group("suffix")),
+            "note": note,
+            "short": short_money(thb),
+        }
+        explicit = bool(match.group("unit") or match.group("prefix") or match.group("suffix"))
+        candidate["multiplier"] = explicit
+        if best is None or explicit or not best.get("multiplier"):
+            best = candidate
+    return best
+
+
+def parse_money(raw: Any) -> Optional[float]:
+    """Parse a price phrase to THB. USD and EUR use the project FX rates."""
+    details = describe_money(raw)
+    if not details:
         return None
-    s = s.replace("thb", "").replace("baht", "").replace(",", "").strip()
-    m = re.search(
-        r"(\d+(?:\.\d+)?)\s*(million|mln|m\.?|m\b)?",
-        s,
-    )
-    if not m:
-        digits = re.sub(r"[^\d.]", "", s)
-        if not digits:
-            return None
+    return float(details["thb"])
+
+
+def money_phrase(value: float, details: Optional[Dict[str, Any]] = None) -> str:
+    """Full digits and the short form, plus an FX note when one was applied."""
+    amount = float(value)
+    phrase = f"{amount:,.0f} THB ({short_money(amount)})"
+    note = (details or {}).get("note") or ""
+    if note:
+        phrase = f"{phrase}. {note}"
+    return phrase
+
+
+def price_sanity_message(new_thb: float, current: Optional[float] = None) -> Optional[str]:
+    """Refuse a proposal when the new price is implausible. None means it can be proposed."""
+    try:
+        amount = float(new_thb)
+    except (TypeError, ValueError):
+        return "I could not read that price. Nothing was changed."
+    shown = f"{amount:,.0f} THB"
+    if amount < 100_000:
+        if amount > 0:
+            suggested = amount * 1_000_000
+            return f"{shown} looks too low. Did you mean {suggested:,.0f} THB? Nothing was changed."
+        return f"{shown} looks too low. Nothing was changed."
+    if amount > 1_000_000_000:
+        return f"{shown} looks too high. Please confirm the amount you want. Nothing was changed."
+    if current is not None:
         try:
-            return float(digits)
-        except ValueError:
-            return None
-    num = float(m.group(1))
-    unit = (m.group(2) or "").rstrip(".")
-    if unit in ("million", "mln", "m"):
-        num *= 1_000_000
-    return num
+            stored = float(current)
+        except (TypeError, ValueError):
+            stored = 0
+        if stored > 0 and (amount / stored > 10 or amount / stored < 0.1):
+            return (
+                f"{shown} is more than ten times away from the current price of {stored:,.0f} THB. "
+                f"Did you mean {shown}? Nothing was changed."
+            )
+    return None
+
+
+def parse_price_amount(raw: Any) -> Optional[float]:
+    """
+    Parse '5 million', '5M', '5 mln', '5,000,000', 5000000 → float THB.
+    Returns None if unclear. Percent phrases are not absolute amounts.
+    """
+    if isinstance(raw, str) and "%" in raw and re.search(r"\b(increase|decrease|raise|lower|by)\b", raw, re.I):
+        return None
+    return parse_money(raw)
 
 
 def parse_relative_price_change(message: str, current: Optional[float]) -> Optional[float]:

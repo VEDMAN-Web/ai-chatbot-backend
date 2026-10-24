@@ -506,14 +506,9 @@ def _apply_inferences(fields: Dict[str, Dict[str, Any]], page_text: str) -> None
     currency = str((fields.get("currency") or {}).get("value") or "")
     if display and "price_numeric_min" not in fields:
         text = str(display.get("value"))
-        if re.search(r"\b(THB|baht)\b", text, re.I) or currency.upper() == "THB":
-            million = re.search(r"(\d+(?:\.\d+)?)\s*(?:million|mln|m)\b", text, re.I)
-            plain = re.search(r"(\d{1,3}(?:[,\s]\d{3})+|\d{5,})", text)
-            number = None
-            if million:
-                number = float(million.group(1)) * 1_000_000
-            elif plain:
-                number = _as_number(plain.group(1))
+        if re.search(r"\b(THB|baht)\b", text, re.I) or currency.upper() == "THB" or re.search(r"[฿$€]", text):
+            from app.services.admin_property_fields import parse_money
+            number = parse_money(text)
             if number and number > 0:
                 fields["price_numeric_min"] = _prov(
                     int(number) if number == int(number) else number,
@@ -1011,13 +1006,12 @@ def parse_draft_command(message: Optional[str]) -> Optional[Dict[str, Any]]:
 
 
 def _parse_admin_price(text: str) -> Tuple[Optional[float], str]:
-    million = re.search(r"(\d+(?:\.\d+)?)\s*m\b", text.lower())
-    if million:
-        value = float(million.group(1)) * 1_000_000
-        return value, f"{int(value):,} THB"
-    number = _as_number(text)
-    if number and number > 0:
-        return number, f"{int(number):,} THB"
+    from app.services.admin_property_fields import parse_money
+
+    value = parse_money(text)
+    if value and value > 0:
+        shown = int(value) if value == int(value) else value
+        return float(shown), f"{shown:,.0f} THB" if isinstance(shown, float) else f"{shown:,} THB"
     return None, text
 
 
@@ -1038,7 +1032,17 @@ def apply_command(draft: Dict[str, Any], command: Dict[str, Any]) -> List[str]:
             changed.extend(apply_command(draft, sub))
         return changed
     if op == "set" and command.get("field") == "price":
-        number, display = _parse_admin_price(str(command.get("value") or ""))
+        from app.services.admin_property_fields import parse_money, price_sanity_message
+
+        raw_price = str(command.get("value") or "")
+        number, display = _parse_admin_price(raw_price)
+        current_raw = ((draft.get("provenance") or {}).get("price_numeric_min") or {}).get("value")
+        current_price = parse_money(current_raw) if current_raw is not None else None
+        if number is not None:
+            refusal = price_sanity_message(number, current_price)
+            if refusal:
+                draft["price_warning"] = refusal
+                return changed
         _set_provided(draft, "price_display", display)
         changed.append("price_display")
         if number:
@@ -1437,6 +1441,11 @@ def try_handle_property_url_turn(
     # tracked objects. An in-place append looks unchanged and is not written.
     payload = copy.deepcopy(dict(latest.action_payload or {}))
     changed = apply_command(payload, command or {})
+    price_warning = payload.pop("price_warning", None)
+    if price_warning:
+        text = price_warning
+        append_conversation_turn(db, conv, message or "", text)
+        return _chat_response(conv, text, str(latest.id), language)
     if payload.get("keep_page_missing"):
         text = "The page has no price to keep. Tell me the price. Nothing was invented."
     elif not changed and command and command.get("op") not in {"confirm", "cancel", "confirm_all"}:
