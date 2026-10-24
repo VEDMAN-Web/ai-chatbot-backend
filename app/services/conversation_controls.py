@@ -62,12 +62,16 @@ def _low(message: str) -> str:
 
 
 def is_full_reset(message: str) -> bool:
-    low = _low(message)
+    low = _low(normalize_command_text(message))
     if not low:
         return False
     if low in {"reset", "start over", "new search", "never mind", "nevermind"}:
         return True
-    return any(p in low for p in _RESET_PHRASES)
+    if any(p in low for p in _RESET_PHRASES):
+        return True
+    forgot = bool(re.search(r"\b(forget|forgot|reset|clear)\b", low))
+    target = bool(re.search(r"\b(requirements|filters|everything)\b", low))
+    return forgot and target
 
 
 def is_fresh_topic(message: str) -> bool:
@@ -257,11 +261,11 @@ def price_within_budget(price: Optional[float], max_price: Optional[float], excl
 
 
 def is_free_or_cheapest(message: str) -> bool:
-    low = _low(message)
+    low = _low(normalize_command_text(message))
     if "freehold" in low:
-        return bool(re.search(r"\b(cheapest|lowest price|very cheap)\b", low))
+        return bool(re.search(r"\b(cheapest|lowest price|very cheap|cheap)\b", low))
     return bool(re.search(
-        r"\b(free properties|free listings|properties for free|very cheap|cheapest|lowest price|lowest-priced)\b"
+        r"\b(free properties|free listings|properties for free|very cheap|cheapest|lowest price|lowest-priced|cheap properties)\b"
         r"|(^|\s)free(\s+propert|\s+listing)",
         low,
     ))
@@ -478,3 +482,386 @@ def natural_amenity_yes(property_name: str, amenity: str) -> str:
     name = (property_name or "This listing").strip()
     thing = (amenity or "facility").strip()
     return f"Yes, {name} lists a {thing} among its facilities."
+
+
+# Command words only. Fuzzy matching never runs on free-text property names.
+_COMMAND_CANON = {
+    "forget": "forget",
+    "forgot": "forgot",
+    "reset": "reset",
+    "clear": "clear",
+    "requirements": "requirements",
+    "requirement": "requirements",
+    "properties": "properties",
+    "property": "properties",
+    "cheapest": "cheapest",
+    "cheap": "cheap",
+    "bedroom": "bedroom",
+    "bedrooms": "bedroom",
+    "filters": "filters",
+    "everything": "everything",
+    "free": "free",
+}
+# Listed typos that sit just under the 0.85 cutoff against the longer canon word.
+_TYPO_EXACT = {
+    "cheep": "cheap",
+    "propertys": "properties",
+    "properies": "properties",
+    "requiredments": "requirements",
+    "requirments": "requirements",
+    "chepest": "cheapest",
+    "bedroon": "bedroom",
+}
+
+
+def fuzzy_command_token(token: str) -> Optional[str]:
+    """Map a token to a command word when difflib ratio is at least 0.85."""
+    from difflib import SequenceMatcher
+
+    raw = (token or "").lower()
+    if raw in _TYPO_EXACT:
+        return _TYPO_EXACT[raw]
+    if raw in _COMMAND_CANON:
+        return _COMMAND_CANON[raw]
+    if len(raw) < 4:
+        return None
+    best_word = None
+    best_ratio = 0.0
+    for canon in _COMMAND_CANON:
+        if abs(len(canon) - len(raw)) > 3:
+            continue
+        ratio = SequenceMatcher(None, raw, canon).ratio()
+        if ratio > best_ratio:
+            best_ratio = ratio
+            best_word = canon
+    if best_word and best_ratio >= 0.85:
+        return _COMMAND_CANON[best_word]
+    return None
+
+
+def normalize_command_text(message: str) -> str:
+    """Rewrite whitelist typos inside a message. Leaves names and places alone."""
+    text = message or ""
+
+    def _swap(match: re.Match) -> str:
+        token = match.group(0)
+        canon = fuzzy_command_token(token)
+        if not canon:
+            return token
+        if token.lower() in _COMMAND_CANON or token.lower() in _TYPO_EXACT:
+            return canon
+        return canon
+
+    return re.sub(r"[A-Za-z]+", _swap, text)
+
+
+def is_weather_question(message: str) -> bool:
+    low = _low(normalize_command_text(message))
+    return bool(re.search(r"\b(weather|forecast|pogoda|อากาศ)\b", low))
+
+
+def is_advisor_request(message: str) -> bool:
+    low = _low(normalize_command_text(message))
+    if not low:
+        return False
+    patterns = (
+        "connect me with an advisor",
+        "talk to an advisor",
+        "speak to a senior advisor",
+        "speak to an advisor",
+        "contact an agent",
+        "contact an advisor",
+        "call me",
+        "please call me",
+        "i want to talk to someone",
+        "talk to someone",
+        "request a callback",
+        "book a consultation",
+        "połącz mnie z doradcą",
+        "polacz mnie z doradca",
+        "chcę rozmawiać z doradcą",
+        "ติดต่อที่ปรึกษา",
+        "นัดคุยกับที่ปรึกษา",
+        "advisor se baat",
+        "salahkar se baat",
+        "salahkar sathe",
+        "baat karo",
+        "call karo",
+        "mujhe advisor",
+        "mane advisor joiye",
+    )
+    return any(p in low for p in patterns)
+
+
+def has_property_search_signal(message: str) -> bool:
+    """A foreign place becomes a property search only when the user is asking about property."""
+    low = _low(normalize_command_text(message))
+    return bool(re.search(
+        r"\b(buy|buying|property|properties|villa|villas|condo|condos|condominium|apartment|apartments|"
+        r"house|houses|flat|land|invest|investment|listing|listings|price|prices|budget|bedroom|bedrooms|"
+        r"rent|rental|real estate|willa|wille|nieruchomo\w*|mieszkan\w*|คอนโด|วิลล่า|อสังหา)\b",
+        low,
+    ))
+
+
+def is_cheaper_request(message: str) -> bool:
+    low = _low(normalize_command_text(message))
+    return bool(re.search(r"\b(cheaper ones|cheaper|something cheaper|tańsze|tansze|ถูกกว่า)\b", low))
+
+
+def is_sort_only_request(message: str) -> bool:
+    low = _low(normalize_command_text(message))
+    sort_word = bool(re.search(r"\b(cheapest|lowest price|show cheapest|most expensive|luxury)\b", low))
+    if not sort_word:
+        return False
+    if re.search(
+        r"\b(villa|condo|bedroom|bedrooms|phuket|bangkok|pattaya|samui|under|budget|pool|beach|explore|properties)\b",
+        low,
+    ):
+        return False
+    return True
+
+
+def opens_any_budget_search(message: str) -> bool:
+    """'any under 1 million' drops place, type, and bedrooms. 'under 5 million' does not."""
+    low = _low(normalize_command_text(message))
+    return bool(re.search(r"\bany\s+(?:under|below|up to|budget)\b", low))
+
+
+def is_open_place_search(message: str) -> bool:
+    low = _low(message)
+    return bool(re.search(r"\b(?:something|anything)\s+in\b", low))
+
+
+def _stored_filter_snapshot(stored: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    src = dict(stored or {})
+    active = dict(src.get("active_filters") or {})
+
+    def pick(key: str, *tops: str):
+        if key in active and active.get(key) is not None:
+            return active.get(key)
+        for top in tops:
+            if src.get(top) is not None:
+                return src.get(top)
+        return None
+
+    return {
+        "location": pick("location", "location"),
+        "property_type": pick("property_type", "property_type"),
+        "bedrooms": pick("bedrooms", "bedrooms_num"),
+        "min_bedrooms": pick("min_bedrooms", "min_bedrooms"),
+        "max_bedrooms": pick("max_bedrooms", "max_bedrooms"),
+        "max_price": pick("max_price", "budget_max"),
+        "min_price": pick("min_price", "min_price"),
+        "has_pool": pick("has_pool", "has_pool"),
+        "beach_access": pick("beach_access", "beach_access"),
+        "required_amenities": list(active.get("required_amenities") or []),
+        "status": pick("status", "project_status"),
+        "max_price_exclusive": bool(src.get("max_price_exclusive") or active.get("max_price_exclusive")),
+        "sort_by_price": active.get("sort_by_price"),
+    }
+
+
+def merge_applied_filters(
+    stored: Optional[Dict[str, Any]],
+    extracted: Optional[Dict[str, Any]],
+    message: str,
+) -> Dict[str, Any]:
+    """
+    One filter object for the search, the 'Searching:' line, and saved preferences.
+    A pure refinement changes one slot. A new search drops slots the message does not name.
+    Budget from the previous turn stays only for a bedroom+place follow-up that sets no new price.
+    """
+    base = _stored_filter_snapshot(stored)
+    ext = dict(extracted or {})
+    low = _low(normalize_command_text(message))
+    mentions_location = bool(ext.get("location")) or bool(ext.get("is_broad_thailand"))
+    mentions_type = bool(ext.get("property_type")) or bool(ext.get("is_multiple_types"))
+    mentions_beds = any(ext.get(k) is not None for k in ("bedrooms", "min_bedrooms", "max_bedrooms"))
+    mentions_budget = ext.get("max_price") is not None or ext.get("min_price") is not None
+    mentions_amenity = bool(ext.get("has_pool") or ext.get("beach_access") or ext.get("required_amenities"))
+    mentions_status = bool(ext.get("status"))
+    sort_value = ext.get("sort_by_price")
+
+    def take_new() -> Dict[str, Any]:
+        out = {
+            "location": None if ext.get("is_broad_thailand") else ext.get("location"),
+            "property_type": None if ext.get("is_multiple_types") else ext.get("property_type"),
+            "bedrooms": ext.get("bedrooms"),
+            "min_bedrooms": ext.get("min_bedrooms"),
+            "max_bedrooms": ext.get("max_bedrooms"),
+            "max_price": ext.get("max_price"),
+            "min_price": ext.get("min_price"),
+            "has_pool": True if ext.get("has_pool") else None,
+            "beach_access": True if ext.get("beach_access") else None,
+            "required_amenities": list(ext.get("required_amenities") or []),
+            "status": ext.get("status"),
+            "max_price_exclusive": bool(ext.get("max_price_exclusive")),
+            "sort_by_price": sort_value,
+        }
+        if mentions_beds and ext.get("bedrooms") is not None and "min_bedrooms" not in ext and "max_bedrooms" not in ext:
+            out["min_bedrooms"] = None
+            out["max_bedrooms"] = None
+        return out
+
+    if opens_any_budget_search(message):
+        out = {k: None for k in base}
+        out["required_amenities"] = []
+        out["max_price"] = ext.get("max_price")
+        out["min_price"] = ext.get("min_price")
+        out["max_price_exclusive"] = bool(ext.get("max_price_exclusive"))
+        out["sort_by_price"] = sort_value
+        return out
+
+    if is_sort_only_request(message) or (
+        sort_value and not any((mentions_location, mentions_type, mentions_beds, mentions_budget, mentions_amenity, mentions_status))
+    ):
+        out = dict(base)
+        if "expensive" in low:
+            out["sort_by_price"] = "desc"
+        elif re.search(r"\b(cheapest|lowest price|show cheapest)\b", low):
+            out["sort_by_price"] = "asc"
+        else:
+            out["sort_by_price"] = sort_value
+        if not any(out.get(k) for k in ("location", "property_type", "bedrooms", "min_bedrooms", "max_bedrooms", "max_price")):
+            out["broad_thailand"] = True
+        return out
+
+    if is_cheaper_request(message) and not mentions_budget and not mentions_location and not mentions_type and not mentions_beds:
+        out = dict(base)
+        out["cheaper"] = True
+        return out
+
+    single_budget = mentions_budget and not any((mentions_location, mentions_type, mentions_beds, mentions_amenity, mentions_status))
+    single_location = mentions_location and not any((mentions_budget, mentions_type, mentions_beds, mentions_amenity, mentions_status))
+    single_amenity = mentions_amenity and not any((mentions_budget, mentions_location, mentions_type, mentions_beds, mentions_status))
+
+    if single_budget:
+        out = dict(base)
+        out["max_price"] = ext.get("max_price", out.get("max_price"))
+        out["min_price"] = ext.get("min_price", out.get("min_price"))
+        out["max_price_exclusive"] = bool(ext.get("max_price_exclusive"))
+        return out
+
+    if single_location and is_open_place_search(message):
+        return {
+            "location": None if ext.get("is_broad_thailand") else ext.get("location"),
+            "property_type": None,
+            "bedrooms": None,
+            "min_bedrooms": None,
+            "max_bedrooms": None,
+            "max_price": None,
+            "min_price": None,
+            "has_pool": None,
+            "beach_access": None,
+            "required_amenities": [],
+            "status": None,
+            "max_price_exclusive": False,
+            "sort_by_price": sort_value,
+            "broad_thailand": bool(ext.get("is_broad_thailand")),
+        }
+
+    if single_location:
+        out = dict(base)
+        if ext.get("is_broad_thailand"):
+            out["location"] = None
+            out["broad_thailand"] = True
+        else:
+            out["location"] = ext.get("location")
+        return out
+
+    if single_amenity:
+        out = dict(base)
+        if ext.get("has_pool"):
+            out["has_pool"] = True
+        if ext.get("beach_access"):
+            out["beach_access"] = True
+        if ext.get("required_amenities"):
+            out["required_amenities"] = list(ext.get("required_amenities") or [])
+        return out
+
+    # New combination. Drop slots the message does not name.
+    out = take_new()
+    keep_budget = (
+        not mentions_budget
+        and mentions_beds
+        and mentions_location
+        and not mentions_type
+        and not mentions_status
+        and not mentions_amenity
+    )
+    if keep_budget:
+        out["max_price"] = base.get("max_price")
+        out["min_price"] = base.get("min_price")
+        out["max_price_exclusive"] = bool(base.get("max_price_exclusive"))
+    if not mentions_location and not ext.get("is_broad_thailand"):
+        out["location"] = None
+    if not mentions_type:
+        out["property_type"] = None
+    if not mentions_beds:
+        out["bedrooms"] = None
+        out["min_bedrooms"] = None
+        out["max_bedrooms"] = None
+    if not mentions_amenity:
+        out["has_pool"] = None
+        out["beach_access"] = None
+        out["required_amenities"] = []
+    if not mentions_status:
+        out["status"] = None
+    return out
+
+
+def active_filter_count(filters: Optional[Dict[str, Any]]) -> int:
+    src = filters or {}
+    count = 0
+    if src.get("location"):
+        count += 1
+    if src.get("property_type"):
+        count += 1
+    if any(src.get(k) is not None for k in ("bedrooms", "min_bedrooms", "max_bedrooms")):
+        count += 1
+    if src.get("max_price") is not None or src.get("min_price") is not None:
+        count += 1
+    if src.get("has_pool") or src.get("beach_access") or src.get("required_amenities"):
+        count += 1
+    if src.get("status"):
+        count += 1
+    return count
+
+
+def describe_applied_filters(filters: Optional[Dict[str, Any]]) -> str:
+    """Plain-language filter line. No raw floats or comparison operators."""
+    src = filters or {}
+    bits: List[str] = []
+    if src.get("broad_thailand") and not src.get("location"):
+        bits.append("all Thailand")
+    elif src.get("location"):
+        bits.append(str(src["location"]))
+    if src.get("property_type"):
+        bits.append(str(src["property_type"]))
+    if src.get("min_bedrooms") is not None and src.get("max_bedrooms") is not None:
+        bits.append(f"{src['min_bedrooms']}-{src['max_bedrooms']} bedrooms")
+    elif src.get("min_bedrooms") is not None:
+        bits.append(f"{src['min_bedrooms']}+ bedrooms")
+    elif src.get("max_bedrooms") is not None:
+        bits.append(f"up to {src['max_bedrooms']} bedrooms")
+    elif src.get("bedrooms") is not None:
+        bits.append(f"{src['bedrooms']} bedrooms")
+    if src.get("min_price") is not None and src.get("max_price") is not None:
+        bits.append(
+            f"{format_budget_phrase(float(src['min_price']), exclusive=False, with_usd=False).replace('up to ', '')}"
+            f" to {format_budget_phrase(float(src['max_price']), exclusive=False, with_usd=False).replace('up to ', '')}"
+        )
+    elif src.get("max_price") is not None:
+        bits.append(format_budget_phrase(
+            float(src["max_price"]),
+            exclusive=bool(src.get("max_price_exclusive")),
+            with_usd=False,
+        ))
+    if src.get("beach_access"):
+        bits.append("beach access")
+    elif src.get("has_pool"):
+        bits.append("pool")
+    if src.get("status"):
+        bits.append(str(src["status"]))
+    return ", ".join(bits)

@@ -1075,11 +1075,11 @@ def get_thailand_only_foreign_reply(
             f"Nasz zespół doradców ({tenant.advisor_email}) chętnie pomoże. "
             "Podaj lokalizację, budżet lub typ w Tajlandii — wyszukam tylko wśród zweryfikowanych ofert."
         )
+    place_name = place or "that country"
     return (
-        f"{tenant.brand_name} only covers verified real estate in Thailand"
-        f"{place_bit_en}. We do not represent properties outside Thailand.\n\n"
-        f"Our advisory team ({tenant.advisor_email}) can help. "
-        "Share a Thailand location, budget, or property type and I will search only among verified listings."
+        f"We specialise in Thailand property only, so I cannot show listings in {place_name}. "
+        "Would you like to see options in Phuket, Koh Samui, Bangkok or Pattaya?\n\n"
+        f"Our advisory team ({tenant.advisor_email}) can help."
     )
 
 
@@ -1553,7 +1553,8 @@ def get_zero_match_text(
     if searched_bedrooms:
         detail_parts.append(f"{searched_bedrooms} bed")
     if searched_budget_max:
-        detail_parts.append(f"budget ≤ {searched_budget_max}")
+        from app.services.conversation_controls import format_budget_phrase
+        detail_parts.append(format_budget_phrase(float(searched_budget_max), exclusive=False, with_usd=False))
     detail = ", ".join(detail_parts) if detail_parts else None
     return get_data_unavailable_fallback(language=language, site_origin=site_origin, detail=detail)
 

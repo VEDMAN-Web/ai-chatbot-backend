@@ -145,6 +145,9 @@ def resolve_display_name(
     if lang == "en":
         if en and not _looks_like_long_polish_marketing(en):
             return sanitize_marketing_claims(en, mode="title")
+        # A short plain name (SQL listings) wins over a slug built from the document id.
+        if other and not _looks_like_long_polish_marketing(other):
+            return sanitize_marketing_claims(other, mode="title")
         # Prefer readable slug over long PL marketing title
         if slug_title and (not pl or _looks_like_long_polish_marketing(pl) or len(pl) > 60):
             return sanitize_marketing_claims(slug_title, mode="title")

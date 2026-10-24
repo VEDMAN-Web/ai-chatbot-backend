@@ -1124,6 +1124,11 @@ async function appendAssistantResponse(data, animate = false) {
     const wrap = document.createElement('div');
     wrap.className = 'quick-replies-wrap';
     const seenChips = new Set();
+    const focusLine = (data.preferences && data.preferences.focus_summary) || '';
+    const activeFilterCount = focusLine.indexOf('Searching:') === 0 ? focusLine.split(',').length : 0;
+    if (activeFilterCount >= 3) {
+      quickReplies.push('Clear filters');
+    }
     quickReplies.forEach(qr => {
       const chipKey = String(qr || '').trim().toLowerCase();
       if (!chipKey || seenChips.has(chipKey)) return;

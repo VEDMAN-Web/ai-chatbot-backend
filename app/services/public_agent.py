@@ -945,6 +945,25 @@ def extract_explicit_property_token(
     return None
 
 
+def _sql_card_fallback(row: Property) -> Dict[str, Any]:
+    """Card fields the public response requires when image rows cannot be loaded."""
+    return {
+        "property_id": row.property_id,
+        "name": row.property_name,
+        "property_type": row.property_type or "Residential",
+        "price": row.price_display or "Price on request",
+        "bedrooms": row.bedrooms_display or "N/A",
+        "area": getattr(row, "area_display", None) or "N/A",
+        "location": row.area or row.province or "Thailand",
+        "status": row.status or "Available",
+        "images": [],
+        "highlights": [],
+        "detail_page_url": row.detail_page_url or settings.get_property_detail_url(
+            row.property_id, country=row.province, city=row.district
+        ),
+    }
+
+
 def lookup_property_by_slug_or_name(token: str) -> Optional[Dict[str, Any]]:
     """
     Resolve slug / exact name via Firestore id+slug fields and the name index.
@@ -975,8 +994,46 @@ def lookup_property_by_slug_or_name(token: str) -> Optional[Dict[str, Any]]:
                 fs = get_property_by_id_from_firestore(mr.confident.doc_id)
                 if fs:
                     return fs
+                try:
+                    from app.db.session import UserSessionLocal
+                    from app.services.property_search import get_property_by_id
+                    _db = UserSessionLocal()
+                    try:
+                        row = get_property_by_id(_db, mr.confident.doc_id)
+                        if row is not None:
+                            try:
+                                return format_property_card(row)
+                            except Exception:
+                                return _sql_card_fallback(row)
+                    finally:
+                        _db.close()
+                except Exception:
+                    pass
     except Exception as e:
         logger.warning(f"Name-index slug lookup failed for '{raw}': {e}")
+    try:
+        from app.db.session import UserSessionLocal
+        from app.db.models import Property
+        _db = UserSessionLocal()
+        try:
+            from sqlalchemy import or_
+            row = (
+                _db.query(Property)
+                .filter(or_(
+                    Property.property_id == raw,
+                    Property.property_name.ilike(f"%{raw}%"),
+                ))
+                .first()
+            )
+            if row is not None:
+                try:
+                    return format_property_card(row)
+                except Exception:
+                    return _sql_card_fallback(row)
+        finally:
+            _db.close()
+    except Exception:
+        pass
     return None
 
 
@@ -3178,6 +3235,27 @@ class PublicAgentService:
             except Exception:
                 save_property_context(conversation, pctx)
 
+        from app.services.conversation_controls import is_weather_question
+        if is_weather_question(user_message):
+            place = "Phuket" if "phuket" in user_message.lower() else "that area"
+            reply_text = (
+                f"I cannot give a weather forecast for {place}. "
+                f"I can show you properties in {place} instead."
+                if place != "that area"
+                else "I cannot give weather forecasts. I can show you properties in Phuket, Koh Samui, Bangkok, or Pattaya."
+            )
+            append_conversation_turn(
+                db=db, conversation=conversation, user_message=user_message,
+                assistant_message=reply_text, new_preferences=conversation.preferences,
+            )
+            return {
+                "type": "text", "text": reply_text, "properties": [],
+                "quick_replies": ["Show properties in Phuket", "Koh Samui", "Bangkok", "Pattaya"],
+                "lead_captured": False, "preferences": conversation.preferences or {},
+                "session_id": conversation.session_id, "conversation_id": str(conversation.id),
+                "language": active_lang,
+            }
+
         if is_foreign_ownership_question(user_message):
             own = ptype = pname = None
             try:
@@ -3207,23 +3285,58 @@ class PublicAgentService:
 
         if is_recall_shown(user_message):
             prefs = conversation.preferences or {}
-            names = list(prefs.get("last_shown_names") or [])
-            ids = list(prefs.get("last_result_ids") or [])
-            if names:
-                lines = "\n".join(f"• {n}" for n in names)
-                reply_text = "Here are the properties already shown in this chat:\n" + lines
-            elif ids:
-                reply_text = "Here are the properties already shown in this chat:\n" + "\n".join(f"• {i}" for i in ids)
+            groups = list(prefs.get("shown_searches") or [])
+            if not groups and (prefs.get("last_shown_names") or prefs.get("seen_property_ids")):
+                groups = [{
+                    "label": "Earlier in this chat",
+                    "ids": list(prefs.get("seen_property_ids") or prefs.get("last_result_ids") or []),
+                    "names": list(prefs.get("last_shown_names") or []),
+                }]
+            lines = []
+            cards = []
+            seen_names = set()
+            for index, group in enumerate(groups, start=1):
+                label = group.get("label") or f"Search {index}"
+                names = [n for n in (group.get("names") or []) if n and n not in seen_names]
+                for name in names:
+                    seen_names.add(name)
+                if names:
+                    lines.append(f"Your search ({label}): " + ", ".join(names))
+            unique_ids = []
+            for group in groups:
+                for pid in group.get("ids") or []:
+                    if pid and pid not in unique_ids:
+                        unique_ids.append(pid)
+            if unique_ids:
+                try:
+                    from app.services.property_search import get_property_by_id
+                    for pid in unique_ids[:12]:
+                        row = get_property_by_id(db, pid)
+                        if row is not None and not isinstance(row, dict):
+                            cards.append(format_property_card(row))
+                        elif isinstance(row, dict):
+                            cards.append(row)
+                except Exception:
+                    cards = []
+            if lines:
+                reply_text = "Here is everything already shown in this chat:\n" + "\n".join(lines)
             else:
                 reply_text = "I have not shown any properties in this chat yet."
+            extra = max(0, len(unique_ids) - 12)
+            replies = self._generate_quick_replies(user_message, cards, language=active_lang)
+            if extra:
+                replies = [f"Show all {len(unique_ids)}"] + list(replies)
             append_conversation_turn(
                 db=db, conversation=conversation, user_message=user_message,
                 assistant_message=reply_text, new_preferences=prefs,
             )
             return {
-                "type": "text", "text": reply_text, "properties": [],
-                "quick_replies": self._generate_quick_replies(user_message, [], language=active_lang),
-                "lead_captured": False, "preferences": prefs,
+                "type": "property_cards" if cards else "text",
+                "text": reply_text,
+                "properties": cards,
+                "quick_replies": replies,
+                "lead_captured": False,
+                "preferences": prefs,
                 "session_id": conversation.session_id, "conversation_id": str(conversation.id),
                 "language": active_lang,
             }
@@ -3608,6 +3721,38 @@ class PublicAgentService:
         c_name = args.get("name")
         c_email = args.get("email")
         c_phone = args.get("phone")
+        if args.get("advisor_request") and not c_email and not c_phone:
+            reply_text = (
+                f"I can connect you with an advisor at {tenant.advisor_email}. "
+                "Please share your name and a phone number or email, and they will contact you."
+            )
+            append_conversation_turn(
+                db=db, conversation=conversation, user_message=user_message,
+                assistant_message=reply_text, new_preferences=conversation.preferences,
+            )
+            return {
+                "type": "text", "text": reply_text, "properties": [],
+                "quick_replies": ["Show villas in Phuket", "Condo in Koh Samui"],
+                "lead_captured": False, "preferences": conversation.preferences or {},
+                "session_id": conversation.session_id, "conversation_id": str(conversation.id),
+                "language": language,
+            }
+        if args.get("advisor_request") and (c_email or c_phone):
+            who = ", ".join(bit for bit in (c_name, c_email, c_phone) if bit)
+            reply_text = (
+                f"Thank you. I have {who}. An advisor at {tenant.advisor_email} will contact you."
+            )
+            append_conversation_turn(
+                db=db, conversation=conversation, user_message=user_message,
+                assistant_message=reply_text, new_preferences=conversation.preferences,
+            )
+            return {
+                "type": "text", "text": reply_text, "properties": [],
+                "quick_replies": ["Show villas in Phuket"],
+                "lead_captured": True, "preferences": conversation.preferences or {},
+                "session_id": conversation.session_id, "conversation_id": str(conversation.id),
+                "language": language,
+            }
         pref_loc = args.get("location")
         budget = args.get("budget")
         budget_dec = Decimal(str(budget)) if budget else None
@@ -3979,7 +4124,8 @@ class PublicAgentService:
             has_pool=has_pool,
             required_amenities=req_amenities or None,
             limit=4,
-            offset=0 if filters_changed else int(args.get("offset") or 0),
+            # Seen ids already skip what was shown. A second offset would skip the next page too.
+            offset=0 if filters_changed or exclude_ids else int(args.get("offset") or 0),
         )
         cards = search_properties_unified(db, params, limit=4, exclude_property_ids=exclude_ids)
         relaxed_filter_label = None
@@ -4110,9 +4256,22 @@ class PublicAgentService:
                 ))
             where = ", ".join(bits) if bits else "these filters"
             widen = "another area" if str(loc or "").lower().find("samui") >= 0 else "Koh Samui"
+            shown_n = len(seen_ids) or len(stored_prefs.get("seen_property_ids") or [])
+
+            def _count(extra):
+                try:
+                    found = search_properties_unified(db, extra, limit=20) or []
+                    return len(found)
+                except Exception:
+                    return 0
+
+            n_budget = _count(PropertyFilterParams(location=loc, property_type=p_type, bedrooms=bedrooms, limit=20)) if (loc or p_type or bedrooms) else 0
+            n_place = _count(PropertyFilterParams(location=widen if widen != "another area" else "Koh Samui", bedrooms=bedrooms, max_price=max_p, limit=20))
+            n_beds = _count(PropertyFilterParams(location=loc or "Phuket", property_type=p_type, bedrooms=2, max_price=max_p, limit=20))
             reply_text = (
-                f"That is all I have for {where}. You have already seen every matching listing. "
-                f"Want me to widen the budget or look at {widen}?"
+                f"That is all I have for {where} ({shown_n} properties shown). "
+                f"You have already seen every matching listing. "
+                f"Would you like to raise the budget ({n_budget}), try {widen} ({n_place}), or see 2 bedrooms ({n_beds})?"
             )
             cards = []
 
@@ -5519,6 +5678,7 @@ class PublicAgentService:
                 )
         else:
             # Exact refine with exclusion empty — seen-all vs true no-match
+            from app.services.conversation_controls import format_budget_phrase
             criteria_bits = []
             if loc:
                 criteria_bits.append(str(loc))
@@ -5527,7 +5687,7 @@ class PublicAgentService:
             if bedrooms:
                 criteria_bits.append(f"{bedrooms} bed")
             if max_p is not None:
-                criteria_bits.append(f"budget <= {max_p}")
+                criteria_bits.append(format_budget_phrase(float(max_p), exclusive=bool(stored_prefs.get("max_price_exclusive")), with_usd=False))
             criteria_summary = ", ".join(criteria_bits) if criteria_bits else None
             reply_text, recovered, empty_reason = resolve_empty_search_after_seen_exclusion(
                 db,
@@ -5619,7 +5779,8 @@ class PublicAgentService:
         """Directly executes search in DB/cache, then synthesizes recommendations with a single compact LLM call without tool schemas."""
         from app.services.conversation_controls import (
             is_fresh_topic, clear_stale_for_fresh_topic, slots_to_clear, clear_filter_keys,
-            is_free_or_cheapest,
+            is_free_or_cheapest, format_budget_phrase, describe_applied_filters,
+            active_filter_count, is_cheaper_request,
         )
         stored_prefs = dict(conversation.preferences or {})
         if is_fresh_topic(user_message):
@@ -5668,67 +5829,69 @@ class PublicAgentService:
             stored_prefs["active_filters"] = search_filters
             seen_ids = get_session_seen_property_ids(conversation)
         else:
-            if extracted.get("is_broad_thailand") or (any(k in user_message.lower() for k in ["in thailand", "across thailand", "w tajlandii", "w całej tajlandii", "ทั่วไทย", "ในไทย"]) and not extracted.get("location")):
-                loc = None
-                stored_prefs.pop("location", None)
-            else:
-                loc = extracted.get("location") or stored_prefs.get("location")
-
-            if extracted.get("is_multiple_types"):
-                p_type = None
-                stored_prefs.pop("property_type", None)
-            else:
-                p_type = extracted.get("property_type") or stored_prefs.get("property_type")
-
-            bedrooms = extracted.get("bedrooms") if "bedrooms" in extracted else stored_prefs.get("bedrooms_num")
-            if extracted.get("min_bedrooms") is not None or extracted.get("max_bedrooms") is not None:
-                # New range replaces prior exact count
-                bedrooms = extracted.get("bedrooms")
-            min_bedrooms = (
-                extracted.get("min_bedrooms")
-                if "min_bedrooms" in extracted
-                else (stored_prefs.get("min_bedrooms") or (stored_prefs.get("active_filters") or {}).get("min_bedrooms"))
-            )
-            max_bedrooms = (
-                extracted.get("max_bedrooms")
-                if "max_bedrooms" in extracted
-                else (stored_prefs.get("max_bedrooms") or (stored_prefs.get("active_filters") or {}).get("max_bedrooms"))
-            )
-            if extracted.get("bedrooms") is not None and "min_bedrooms" not in extracted and "max_bedrooms" not in extracted:
-                # Exact bedroom ask replaces prior min/max
-                min_bedrooms = None
-                max_bedrooms = None
-            max_p = Decimal(str(extracted["max_price"])) if extracted.get("max_price") else (Decimal(str(stored_prefs["budget_max"])) if stored_prefs.get("budget_max") else None)
-            if max_p is not None:
-                stored_prefs["budget_max"] = float(max_p)
-                if extracted.get("max_price") is not None:
-                    stored_prefs["max_price_exclusive"] = bool(extracted.get("max_price_exclusive"))
-            has_pool = extracted.get("has_pool", stored_prefs.get("has_pool"))
-            beach_access = extracted.get("beach_access", stored_prefs.get("beach_access"))
-            required_amenities = list(
-                extracted.get("required_amenities")
-                or (stored_prefs.get("active_filters") or {}).get("required_amenities")
-                or []
-            )
-
+            from app.services.conversation_controls import merge_applied_filters, is_cheaper_request
+            applied = merge_applied_filters(stored_prefs, extracted, user_message)
+            if applied.get("cheaper"):
+                shown_prices = [float(p) for p in (stored_prefs.get("last_shown_prices") or []) if p]
+                if shown_prices:
+                    applied["max_price"] = min(shown_prices) - 1
+                    applied["max_price_exclusive"] = True
+                elif applied.get("max_price"):
+                    applied["max_price"] = float(applied["max_price"]) - 1
+                    applied["max_price_exclusive"] = True
+            loc = applied.get("location")
+            p_type = applied.get("property_type")
+            bedrooms = applied.get("bedrooms")
+            min_bedrooms = applied.get("min_bedrooms")
+            max_bedrooms = applied.get("max_bedrooms")
+            max_p = Decimal(str(applied["max_price"])) if applied.get("max_price") is not None else None
+            min_p = Decimal(str(applied["min_price"])) if applied.get("min_price") is not None else None
+            has_pool = applied.get("has_pool")
+            beach_access = applied.get("beach_access")
+            required_amenities = list(applied.get("required_amenities") or [])
             search_filters = {
                 "location": loc,
                 "property_type": p_type,
                 "bedrooms": bedrooms,
                 "min_bedrooms": min_bedrooms,
                 "max_bedrooms": max_bedrooms,
-                "max_price": float(max_p) if max_p else None,
+                "max_price": float(max_p) if max_p is not None else None,
+                "min_price": float(min_p) if min_p is not None else None,
                 "has_pool": has_pool,
                 "beach_access": beach_access,
                 "required_amenities": required_amenities or None,
+                "status": applied.get("status"),
+                "max_price_exclusive": bool(applied.get("max_price_exclusive")),
+                "sort_by_price": applied.get("sort_by_price"),
             }
-            stored_prefs["active_filters"] = search_filters
-            if min_bedrooms is not None:
-                stored_prefs["min_bedrooms"] = min_bedrooms
-            if max_bedrooms is not None:
-                stored_prefs["max_bedrooms"] = max_bedrooms
-            if bedrooms is not None:
-                stored_prefs["bedrooms_num"] = bedrooms
+            stored_prefs["active_filters"] = dict(search_filters)
+            for key, pref_key in (
+                ("location", "location"),
+                ("property_type", "property_type"),
+                ("bedrooms", "bedrooms_num"),
+                ("min_bedrooms", "min_bedrooms"),
+                ("max_bedrooms", "max_bedrooms"),
+                ("has_pool", "has_pool"),
+                ("beach_access", "beach_access"),
+                ("status", "project_status"),
+            ):
+                if applied.get(key) is None:
+                    stored_prefs.pop(pref_key, None)
+                else:
+                    stored_prefs[pref_key] = applied.get(key)
+            if max_p is None:
+                stored_prefs.pop("budget_max", None)
+                stored_prefs.pop("max_price", None)
+                stored_prefs.pop("budget_display", None)
+            else:
+                stored_prefs["budget_max"] = float(max_p)
+                stored_prefs["max_price_exclusive"] = bool(applied.get("max_price_exclusive"))
+            if min_p is None:
+                stored_prefs.pop("min_price", None)
+            else:
+                stored_prefs["min_price"] = float(min_p)
+            if not has_pool and not beach_access and not required_amenities:
+                stored_prefs["features"] = []
             seen_ids = get_session_seen_property_ids(conversation)
             params = PropertyFilterParams(
                 location=loc,
@@ -5737,16 +5900,13 @@ class PublicAgentService:
                 min_bedrooms=min_bedrooms,
                 max_bedrooms=max_bedrooms,
                 max_price=max_p,
-                max_price_exclusive=bool(
-                    extracted.get("max_price_exclusive")
-                    if extracted.get("max_price") is not None
-                    else stored_prefs.get("max_price_exclusive")
-                ),
-                status=extracted.get("status") or stored_prefs.get("project_status"),
+                min_price=min_p,
+                max_price_exclusive=bool(applied.get("max_price_exclusive")),
+                status=applied.get("status"),
                 has_pool=has_pool,
                 beach_access=beach_access,
                 required_amenities=required_amenities or None,
-                sort_by_price=extracted.get("sort_by_price") or detect_price_sort(user_message),
+                sort_by_price=applied.get("sort_by_price") or detect_price_sort(user_message),
                 offset=0,
                 limit=4
             )
@@ -5766,15 +5926,17 @@ class PublicAgentService:
                 or extracted.get("has_pool")
                 or extracted.get("required_amenities")
             )
-            if not cards and has_fresh_criteria:
-                fresh_loc = extracted.get("location")
-                fresh_type = extracted.get("property_type")
-                fresh_bed = extracted.get("bedrooms")
-                fresh_min_bed = extracted.get("min_bedrooms")
-                fresh_max_bed = extracted.get("max_bedrooms")
-                fresh_max_p = Decimal(str(extracted["max_price"])) if extracted.get("max_price") else None
-                fresh_pool = extracted.get("has_pool")
-                fresh_am = list(extracted.get("required_amenities") or [])
+            if not cards and has_fresh_criteria and False:
+                # Kept for reference. The merge above is the only filter source, so a second
+                # search must not drop a budget the visitor did not replace.
+                fresh_loc = loc
+                fresh_type = p_type
+                fresh_bed = bedrooms
+                fresh_min_bed = min_bedrooms
+                fresh_max_bed = max_bedrooms
+                fresh_max_p = max_p
+                fresh_pool = has_pool
+                fresh_am = list(required_amenities or [])
 
                 fresh_params = PropertyFilterParams(
                     location=fresh_loc,
@@ -5923,6 +6085,19 @@ class PublicAgentService:
                 str(c.get("name") or c.get("property_name") or c.get("property_id"))
                 for c in cards if c.get("property_id") or c.get("name")
             ]
+            stored_prefs["last_shown_prices"] = [
+                c.get("price_thb_min") or c.get("price_numeric_min")
+                for c in cards
+                if c.get("price_thb_min") or c.get("price_numeric_min")
+            ]
+            group_label = describe_applied_filters(search_filters if isinstance(search_filters, dict) else {}) or "this search"
+            groups = list(stored_prefs.get("shown_searches") or [])
+            groups.append({
+                "label": group_label,
+                "ids": list(stored_prefs["last_result_ids"]),
+                "names": list(stored_prefs["last_shown_names"]),
+            })
+            stored_prefs["shown_searches"] = groups[-12:]
             # Persistent property context: ordinals for follow-ups; single-result => active focus
             _pctx = load_property_context(conversation)
             names = {
@@ -6022,6 +6197,7 @@ class PublicAgentService:
                     site_origin=conversation.site_origin,
                     foreign_place=str(foreign_loc),
                 )
+                stored_prefs["quick_replies_foreign"] = ["Phuket", "Koh Samui", "Bangkok", "Pattaya"]
             elif search_relaxed_alts and search_relaxed_filter:
                 cards = list(search_relaxed_alts)
                 criteria_bits = []
@@ -6038,7 +6214,7 @@ class PublicAgentService:
                 elif bedrooms:
                     criteria_bits.append(f"{bedrooms} bed")
                 if max_p is not None:
-                    criteria_bits.append(f"budget <= {max_p}")
+                    criteria_bits.append(format_budget_phrase(float(max_p), exclusive=bool(stored_prefs.get("max_price_exclusive")), with_usd=False))
                 reply_text = build_no_match_reply(
                     language=language,
                     site_origin=getattr(conversation, "site_origin", None),
@@ -6063,31 +6239,42 @@ class PublicAgentService:
                 elif bedrooms:
                     criteria_bits.append(f"{bedrooms} bed")
                 if max_p is not None:
-                    if extracted.get("max_price_exclusive") or stored_prefs.get("max_price_exclusive"):
-                        criteria_bits.append(f"under {max_p}")
-                    else:
-                        criteria_bits.append(f"up to {max_p}")
+                    criteria_bits.append(format_budget_phrase(
+                        float(max_p),
+                        exclusive=bool(extracted.get("max_price_exclusive") or stored_prefs.get("max_price_exclusive")),
+                        with_usd=False,
+                    ))
                 lowest = None
                 cheap = []
                 # Quote the cheapest verified price inside the same place or type.
                 # Never run a fully unfiltered catalogue scan.
-                if loc or p_type:
-                    try:
+                try:
+                    scope_filters = {}
+                    if loc:
+                        scope_filters["location"] = loc
+                    if p_type:
+                        scope_filters["property_type"] = p_type
+                    if bedrooms is not None:
+                        scope_filters["bedrooms"] = bedrooms
+                    elif min_bedrooms is not None:
+                        scope_filters["min_bedrooms"] = min_bedrooms
+                    if scope_filters:
                         cheap = search_properties_unified(
                             db,
-                            PropertyFilterParams(
-                                location=loc,
-                                property_type=p_type,
-                                sort_by_price="asc",
-                                limit=1,
-                            ),
+                            PropertyFilterParams(sort_by_price="asc", limit=1, **scope_filters),
                             limit=1,
                         ) or []
-                        if cheap:
-                            lowest = cheap[0].get("price_thb_min") or cheap[0].get("price_numeric_min")
-                    except Exception:
-                        lowest = None
-                        cheap = []
+                    else:
+                        cheap = search_properties_unified(
+                            db,
+                            PropertyFilterParams(sort_by_price="asc", limit=1),
+                            limit=1,
+                        ) or []
+                    if cheap:
+                        lowest = cheap[0].get("price_thb_min") or cheap[0].get("price_numeric_min")
+                except Exception:
+                    lowest = None
+                    cheap = []
                 reply_text = build_no_match_reply(
                     language=language,
                     site_origin=getattr(conversation, "site_origin", None),
@@ -6130,6 +6317,23 @@ class PublicAgentService:
             )
             if preface not in (reply_text or ""):
                 reply_text = preface + "\n\n" + (reply_text or "")
+        filter_line = describe_applied_filters(search_filters if isinstance(search_filters, dict) else {})
+        if filter_line and not foreign_loc and "Searching:" not in (reply_text or ""):
+            sort_name = (search_filters or {}).get("sort_by_price") if isinstance(search_filters, dict) else None
+            if sort_name == "asc" and not (search_filters or {}).get("location"):
+                headline = "Cheapest across all Thailand:"
+            elif sort_name == "asc":
+                headline = f"Cheapest in {filter_line}:"
+            elif sort_name == "desc":
+                headline = f"Most expensive in {filter_line}:"
+            else:
+                headline = f"Searching: {filter_line}"
+            reply_text = headline + "\n\n" + (reply_text or "")
+        if is_cheaper_request(user_message) and not cards and max_p is not None:
+            reply_text = (
+                f"Nothing in this search is cheaper than {format_budget_phrase(float(max_p) + 1, exclusive=False, with_usd=False)}. "
+                + (reply_text or "")
+            )
         reply_text = ThaiPropertyLegalGuardrail.sanitize_response(
             user_message=user_message,
             response_text=reply_text,
@@ -6149,7 +6353,7 @@ class PublicAgentService:
         elif bedrooms:
             criteria_bits.append(f"{bedrooms} bed")
         if max_p is not None:
-            criteria_bits.append(f"budget <= {max_p}")
+            criteria_bits.append(format_budget_phrase(float(max_p), exclusive=bool(stored_prefs.get("max_price_exclusive")), with_usd=False))
         reply_text, cards = self._validate_or_fallback(
             reply_text,
             cards,
@@ -6197,7 +6401,15 @@ class PublicAgentService:
             "type": "property_cards" if cards else "text",
             "text": reply_text,
             "properties": cards,
-            "quick_replies": self._generate_quick_replies(user_message, cards, language=language),
+            "quick_replies": (
+                ["Phuket", "Koh Samui", "Bangkok", "Pattaya"]
+                if foreign_loc
+                else (
+                    ["Clear filters"] + self._generate_quick_replies(user_message, cards, language=language)
+                    if active_filter_count(search_filters if isinstance(search_filters, dict) else {}) >= 3
+                    else self._generate_quick_replies(user_message, cards, language=language)
+                )
+            ),
             "lead_captured": False,
             "preferences": conversation.preferences or updated_prefs,
             "session_id": conversation.session_id,

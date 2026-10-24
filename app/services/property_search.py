@@ -346,15 +346,8 @@ def get_property_by_id(db: Session, property_id: str) -> Optional[Any]:
     except Exception as e:
         logger.debug(f"Firestore get_property_by_id fallback: {e}")
 
-    # 2. Local database only when Firestore client is unavailable (offline/dev) —
-    # never silently serve seed/placeholder rows when production Firestore is configured.
+    # 2. SQL fallback when Firestore is down or has no row for this id.
     if db is not None:
-        try:
-            from app.services.firestore_service import get_firestore_client
-            if get_firestore_client("user") or get_firestore_client("admin"):
-                return None
-        except Exception:
-            pass
         return db.query(Property).filter(
             Property.property_id == clean_id
         ).first()
@@ -375,14 +368,8 @@ def get_property_by_name(db: Session, name_query: str) -> Optional[Any]:
     except Exception as e:
         logger.debug(f"Firestore get_property_by_name fallback: {e}")
 
-    # 2. Local database only when Firestore is unavailable
+    # 2. SQL fallback when Firestore is down or has no row for this name.
     if db is not None:
-        try:
-            from app.services.firestore_service import get_firestore_client
-            if get_firestore_client("user") or get_firestore_client("admin"):
-                return None
-        except Exception:
-            pass
         return db.query(Property).filter(
             Property.property_name.ilike(f"%{clean_name}%")
         ).first()
