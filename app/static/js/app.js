@@ -692,8 +692,11 @@ function setAgentMode(mode, createNew = true) {
   // Toggle Admin-only controls (Batch operations button & attachment paperclip)
   const btnBatchOps = document.getElementById('btnBatchOps');
   const btnAttachment = document.getElementById('btnAttachment');
+  const btnPropertyImages = document.getElementById('btnPropertyImages');
   if (btnBatchOps) btnBatchOps.style.display = (mode === 'admin') ? 'inline-flex' : 'none';
   if (btnAttachment) btnAttachment.style.display = (mode === 'admin') ? 'inline-flex' : 'none';
+  if (btnPropertyImages) btnPropertyImages.style.display = (mode === 'admin') ? 'inline-flex' : 'none';
+  if (mode !== 'admin') clearPropertyImageTray();
 
   // Update Hero texts & prompt cards according to current mode & language
   updateHeroAndInputUI();
@@ -798,7 +801,8 @@ async function handleSendMessage() {
   if (isTypingActive) return; // Prevent overlapping requests while streaming
   const input = document.getElementById('chatInput');
   const text = input.value.trim();
-  if (!text) return;
+  const stagedImages = currentMode === 'admin' ? pendingPropertyImages.slice() : [];
+  if (!text && stagedImages.length === 0) return;
 
   if (currentMode === 'admin' && !isAdminLoggedIn()) {
     openAdminLoginModal();
@@ -810,8 +814,21 @@ async function handleSendMessage() {
   const hero = document.getElementById('welcomeHero');
   if (hero) hero.style.display = 'none';
 
+  let attachedUrls = [];
+  if (stagedImages.length) {
+    setPropertyImageStatus('Uploading images…');
+    try {
+      attachedUrls = await uploadPropertyImages(stagedImages);
+    } catch (err) {
+      setPropertyImageStatus('');
+      showPropertyImageError(err.message || 'Image upload failed.');
+      return;
+    }
+    clearPropertyImageTray();
+  }
+
   // Render user message bubble
-  appendMessageRow('user', text);
+  appendMessageRow('user', text, attachedUrls);
   input.value = '';
   input.style.height = 'auto';
 
@@ -826,6 +843,9 @@ async function handleSendMessage() {
     site_origin: activeTenantOrigin,
     language: currentLanguage
   };
+  if (currentMode === 'admin' && attachedUrls.length) {
+    payload.attached_images = attachedUrls;
+  }
   const pendingIds = Object.keys(confirmationTokens);
   const shortConfirm = /^(yes|ok|okay|confirm|apply)(\s+(confirm|yes|ok|apply))?$/i.test((text || '').trim());
   if (currentMode !== 'public' && shortConfirm && pendingIds.length) {
@@ -1691,7 +1711,7 @@ function renderHistoryList() {
 }
 
 // UI Helpers
-function appendMessageRow(role, content) {
+function appendMessageRow(role, content, imageUrls) {
   const area = document.getElementById('messagesArea');
   const row = document.createElement('div');
   row.className = `message-row ${role}`;
@@ -1704,8 +1724,21 @@ function appendMessageRow(role, content) {
 
   const bubble = document.createElement('div');
   bubble.className = 'message-bubble';
+  if (role === 'user' && imageUrls && imageUrls.length) {
+    const thumbs = document.createElement('div');
+    thumbs.className = 'message-image-row';
+    imageUrls.forEach((url) => {
+      const img = document.createElement('img');
+      img.src = url;
+      img.alt = 'Attached property image';
+      thumbs.appendChild(img);
+    });
+    bubble.appendChild(thumbs);
+  }
   if (content) {
-    bubble.innerHTML = parseMarkdown(content);
+    const textNode = document.createElement('div');
+    textNode.innerHTML = parseMarkdown(content);
+    bubble.appendChild(textNode);
   }
 
   if (role === 'assistant') {
@@ -2269,5 +2302,157 @@ async function executeBatchUndo(operationId, count) {
     alert(`❌ Rollback error: ${err.message || 'Could not complete rollback'}`);
   }
 }
+
+const pendingPropertyImages = [];
+const PROPERTY_IMAGE_MAX_BYTES = 10 * 1024 * 1024;
+const PROPERTY_IMAGE_EXT = /\.(jpe?g|png|webp)$/i;
+
+function openPropertyImagePicker() {
+  if (currentMode !== 'admin') return;
+  const input = document.getElementById('propertyImageInput');
+  if (input) input.click();
+}
+
+function clearPropertyImageTray() {
+  pendingPropertyImages.splice(0, pendingPropertyImages.length);
+  renderPropertyImageTray();
+}
+
+function setPropertyImageStatus(text) {
+  const tray = document.getElementById('imageAttachTray');
+  if (!tray) return;
+  let note = tray.querySelector('.image-thumb-status');
+  if (!text) {
+    if (note) note.remove();
+    return;
+  }
+  if (!note) {
+    note = document.createElement('div');
+    note.className = 'image-thumb-status';
+    tray.appendChild(note);
+  }
+  note.textContent = text;
+}
+
+function showPropertyImageError(text) {
+  const tray = document.getElementById('imageAttachTray');
+  if (!tray) return;
+  tray.style.display = 'flex';
+  let note = tray.querySelector('.image-attach-error');
+  if (!note) {
+    note = document.createElement('div');
+    note.className = 'image-attach-error';
+    tray.appendChild(note);
+  }
+  note.textContent = text;
+}
+
+function renderPropertyImageTray() {
+  const tray = document.getElementById('imageAttachTray');
+  if (!tray) return;
+  tray.innerHTML = '';
+  if (!pendingPropertyImages.length) {
+    tray.style.display = 'none';
+    return;
+  }
+  tray.style.display = 'flex';
+  pendingPropertyImages.forEach((item, index) => {
+    const thumb = document.createElement('div');
+    thumb.className = 'image-thumb';
+    const img = document.createElement('img');
+    img.src = item.previewUrl;
+    img.alt = item.name || 'Selected image';
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'image-thumb-remove';
+    remove.textContent = '×';
+    remove.title = 'Remove image';
+    remove.onclick = () => {
+      pendingPropertyImages.splice(index, 1);
+      renderPropertyImageTray();
+    };
+    thumb.appendChild(img);
+    thumb.appendChild(remove);
+    tray.appendChild(thumb);
+  });
+}
+
+function addPropertyImageFiles(fileList) {
+  if (currentMode !== 'admin') return;
+  const incoming = Array.from(fileList || []);
+  if (pendingPropertyImages.length + incoming.length > 10) {
+    showPropertyImageError('Upload between 1 and 10 images.');
+    return;
+  }
+  let error = '';
+  incoming.forEach((file) => {
+    const name = file.name || '';
+    if (!PROPERTY_IMAGE_EXT.test(name)) {
+      error = 'Only jpg, jpeg, png, and webp images are allowed.';
+      return;
+    }
+    if (file.size > PROPERTY_IMAGE_MAX_BYTES) {
+      error = 'Each image must be 10 MB or smaller.';
+      return;
+    }
+    pendingPropertyImages.push({
+      file,
+      name,
+      previewUrl: URL.createObjectURL(file),
+    });
+  });
+  renderPropertyImageTray();
+  if (error) showPropertyImageError(error);
+}
+
+async function uploadPropertyImages(items) {
+  const body = new FormData();
+  items.forEach((item) => body.append('files', item.file, item.name));
+  const res = await fetch('/api/v1/admin/property-images/upload', {
+    method: 'POST',
+    headers: adminAuthHeaders(),
+    body,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const detail = data.detail || 'Image upload failed.';
+    throw new Error(typeof detail === 'string' ? detail : 'Image upload failed.');
+  }
+  const files = data.files || [];
+  if (!files.length) throw new Error('Image upload failed.');
+  return files.map((file) => file.url).filter(Boolean);
+}
+
+function initPropertyImageAttach() {
+  const input = document.getElementById('propertyImageInput');
+  if (input) {
+    input.addEventListener('change', () => {
+      addPropertyImageFiles(input.files);
+      input.value = '';
+    });
+  }
+  const dropTarget = document.getElementById('bottomInputContainer');
+  if (!dropTarget) return;
+  ['dragenter', 'dragover'].forEach((name) => {
+    dropTarget.addEventListener(name, (event) => {
+      if (currentMode !== 'admin') return;
+      event.preventDefault();
+      dropTarget.classList.add('drag-over');
+    });
+  });
+  ['dragleave', 'drop'].forEach((name) => {
+    dropTarget.addEventListener(name, (event) => {
+      if (currentMode !== 'admin') return;
+      event.preventDefault();
+      dropTarget.classList.remove('drag-over');
+    });
+  });
+  dropTarget.addEventListener('drop', (event) => {
+    if (currentMode !== 'admin') return;
+    addPropertyImageFiles(event.dataTransfer && event.dataTransfer.files);
+  });
+}
+
+initPropertyImageAttach();
 
 

@@ -248,19 +248,26 @@ def _undo_last(db: Any, conv: Any, staff: Any) -> Dict[str, Any]:
     return _text(conv, f"Undone. The last change ({label}) was restored in both databases.")
 
 
-def try_rule_based_write(db: Any, conv: Any, message: str, staff: Any, language: str = "en") -> Optional[Dict[str, Any]]:
+def try_rule_based_write(
+    db: Any,
+    conv: Any,
+    message: str,
+    staff: Any,
+    language: str = "en",
+    attached_images: Optional[List[str]] = None,
+) -> Optional[Dict[str, Any]]:
     """Proposal or honest answer for common writes. None leaves the turn to the model."""
     from app.services.admin_reply_helpers import is_undo_request
 
     text = re.sub(r"\s+", " ", (message or "").strip())
-    if not text or safety_refusal_text(text):
+    if (not text and not attached_images) or safety_refusal_text(text):
         return None
-    if is_undo_request(text):
+    if text and is_undo_request(text):
         return _undo_last(db, conv, staff)
 
     from app.services.admin_image_commands import try_image_command
 
-    image_turn = try_image_command(db, conv, text, staff)
+    image_turn = try_image_command(db, conv, text, staff, attached_images=attached_images)
     if image_turn is not None:
         return image_turn
 

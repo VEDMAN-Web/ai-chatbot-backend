@@ -48,6 +48,11 @@ class AdminChatRequest(BaseModel):
     action: Optional[str] = Field(None, description="Direct action trigger ('confirm' or 'reject')", example="confirm")
     pending_action_id: Optional[str] = Field(None, description="Target action ID to confirm or reject", example="act_550e8400-...")
     confirmation_token: Optional[str] = Field(None, description="Required when action is confirm")
+    attached_images: Optional[List[str]] = Field(
+        None,
+        max_length=10,
+        description="Image URLs already uploaded by this admin chat. They are not attached until the change is confirmed.",
+    )
 
 
 class AdminChatResponse(BaseModel):
@@ -117,7 +122,7 @@ def admin_chat_endpoint(
             window_seconds=int(settings.RATE_LIMIT_IMPORT_WINDOW_SEC),
             message="Too many URL import requests. Try again later.",
         )
-    if not user_msg and not req.action:
+    if not user_msg and not req.action and not req.attached_images:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Please provide a chat message or specify an action ('confirm'/'reject')."
@@ -147,6 +152,7 @@ def admin_chat_endpoint(
             action=req.action,
             pending_action_id=req.pending_action_id,
             confirmation_token=req.confirmation_token,
+            attached_images=list(req.attached_images or []) or None,
         )
 
     if not stream:
@@ -238,6 +244,37 @@ def inspect_pending_action_endpoint(
         "created_at": action.created_at.isoformat(),
         "execution_result": action.execution_result
     }
+
+
+@router.post("/property-images/upload")
+def upload_property_images_endpoint(
+    request: Request,
+    files: Optional[List[UploadFile]] = File(None),
+    staff: AuthenticatedStaff = Depends(require_admin_or_employee),
+):
+    """
+    Store 1 to 10 property images. This does not attach them to a listing.
+    The admin chat command proposes that change, and confirm writes it.
+    """
+    _limit_admin_write(request, staff)
+    from app.services.admin_image_storage import store_uploads
+
+    stored = store_uploads(list(files or []))
+    return {"files": stored}
+
+
+@router.get("/property-images/files/{filename}")
+def serve_property_image_endpoint(filename: str):
+    """Public image URL used by the admin chat and the public chatbot."""
+    from fastapi.responses import Response
+
+    from app.services.admin_image_storage import load_property_image
+
+    try:
+        content, media = load_property_image(filename)
+    except FileNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Image not found.")
+    return Response(content=content, media_type=media)
 
 
 def _limit_admin_write(request: Optional[Request], staff: AuthenticatedStaff) -> None:

@@ -1375,6 +1375,7 @@ def process_admin_chat(
     action: Optional[str] = None,
     pending_action_id: Optional[str] = None,
     confirmation_token: Optional[str] = None,
+    attached_images: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """
     Main processing entrypoint for Admin / Internal AI Agent.
@@ -1575,7 +1576,7 @@ def process_admin_chat(
         target_action = open_pending[0] if open_pending else None
 
     # URL import is chat-only: a pasted link or an edit of that draft never reaches other write tools.
-    if clean_message and staff_user is not None:
+    if clean_message and staff_user is not None and not attached_images:
         from app.services.property_web_ingest import try_handle_property_url_turn
         ingest_turn = try_handle_property_url_turn(
             db, conv, clean_message, staff_user, active_lang, open_pending
@@ -2116,9 +2117,11 @@ def process_admin_chat(
             fast_res["suggestions"] = [] if fast_res.get("direct_answer") else fast_res.get("suggestions") or []
             return _attach_timing_debug(fast_res, timer)
 
-    if clean_message and staff_user is not None and action not in ("confirm", "reject"):
+    if staff_user is not None and action not in ("confirm", "reject") and (clean_message or attached_images):
         from app.services.admin_turn_rules import try_rule_based_write
-        ruled = try_rule_based_write(db, conv, clean_message, staff_user, active_lang)
+        ruled = try_rule_based_write(
+            db, conv, clean_message, staff_user, active_lang, attached_images=attached_images
+        )
         if ruled is not None:
             if draft_reminder and "still open" not in (ruled.get("text") or "").lower():
                 ruled["text"] = ((ruled.get("text") or "").rstrip() + "\n\n" + draft_reminder).strip()

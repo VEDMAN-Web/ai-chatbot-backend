@@ -15,8 +15,34 @@ from urllib.parse import urlparse
 
 _IMAGE_EXT = re.compile(r"\.(?:jpg|jpeg|png|webp)(?:[?#].*)?$", re.IGNORECASE)
 _URL_RE = re.compile(r"https?://[^\s,\"'<>]+", re.IGNORECASE)
-_IMAGE_WORD = re.compile(r"\b(images?|photos?|pictures?|cover)\b", re.IGNORECASE)
-_IMAGE_VERB = re.compile(r"\b(add|change|replace|remove|set|make)\b", re.IGNORECASE)
+_IMAGE_LINK = re.compile(r"https?://\S+\.(?:jpe?g|png|webp)(?:[?#]\S*)?", re.IGNORECASE)
+_IMAGE_WORD = re.compile(
+    r"\b(images?|photos?|pictures?|cover|zdj[eę]ci[ae]|foto|obraz(?:ek|y)?)\b",
+    re.IGNORECASE,
+)
+_IMAGE_VERB = re.compile(
+    r"\b(add|change|replace|remove|set|make|dodaj|zmie[nń]|usu[nń]|ustaw)\b",
+    re.IGNORECASE,
+)
+_PL_ADD = re.compile(
+    r"""(?ix)
+    ^(?:prosze\s+|proszę\s+)?dodaj\s+(?:zdjecie|zdjęcie|zdjecia|zdjęcia|foto|obraz)
+    \s+(?P<urls>.+?)\s+do\s+["']?(?P<name>.+?)["']?\s*$
+    """
+)
+_PL_REPLACE = re.compile(
+    r"""(?ix)
+    ^(?:prosze\s+|proszę\s+)?(?:zmien|zmień)\s+(?:zdjecie|zdjęcie|zdjecia|zdjęcia)
+    \s+["']?(?P<name>.+?)["']?\s+na\s+(?P<urls>.+?)\s*$
+    """
+)
+_PL_REMOVE_ALL = re.compile(
+    r"""(?ix)
+    ^(?:prosze\s+|proszę\s+)?(?:usun|usuń)\s+wszystkie\s+(?:zdjecia|zdjęcia|zdjecie|zdjęcie)
+    \s+(?:z\s+|ze\s+)?["']?(?P<name>.+?)["']?\s*$
+    """
+)
+_PENDING_KEY = "pending_property_images"
 
 _ADD = re.compile(
     r"""(?ix)
@@ -65,8 +91,12 @@ class ImageUrlError(Exception):
 
 def looks_like_image_command(message: Optional[str]) -> bool:
     """True when the words, not a URL path, ask to change images."""
-    bare = _URL_RE.sub(" ", message or "")
-    return bool(_IMAGE_WORD.search(bare) and _IMAGE_VERB.search(bare))
+    text = message or ""
+    bare = _URL_RE.sub(" ", text)
+    if _IMAGE_WORD.search(bare) and _IMAGE_VERB.search(bare):
+        return True
+    # An image word plus an image URL is never a listing page to ingest.
+    return bool(_IMAGE_WORD.search(bare) and _IMAGE_LINK.search(text))
 
 
 def _clean_name(value: str) -> str:
@@ -132,6 +162,19 @@ def parse_image_command(message: Optional[str]) -> Optional[Dict[str, Any]]:
     text = re.sub(r"\s+", " ", (message or "").strip())
     if not text:
         return None
+    polish_remove = _PL_REMOVE_ALL.match(text)
+    if polish_remove:
+        return {"op": "remove_all", "name": _clean_name(polish_remove.group("name")), "urls": []}
+    polish_replace = _PL_REPLACE.match(text)
+    if polish_replace:
+        return {
+            "op": "replace",
+            "name": _clean_name(polish_replace.group("name")),
+            "urls": _urls_in(polish_replace.group("urls")),
+        }
+    polish_add = _PL_ADD.match(text)
+    if polish_add:
+        return {"op": "add", "name": _clean_name(polish_add.group("name")), "urls": _urls_in(polish_add.group("urls"))}
     remove_all = _REMOVE_ALL.match(text)
     if remove_all:
         return {"op": "remove_all", "name": _clean_name(remove_all.group("name")), "urls": []}
@@ -177,8 +220,9 @@ def _reply(
     requires: bool = False,
     pending_id: Optional[str] = None,
     token: Optional[str] = None,
+    suggestions: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
-    return {
+    body = {
         "type": "text",
         "text": text,
         "session_id": getattr(conv, "session_id", None),
@@ -191,13 +235,22 @@ def _reply(
         "download_link": None,
         "language": "en",
     }
+    if suggestions:
+        body["suggestions"] = suggestions
+        body["quick_replies"] = suggestions
+    return body
 
 
 def _checked_urls(urls: List[str]) -> Tuple[List[str], Optional[str]]:
     if not urls:
         return [], "I need an http or https image link. Nothing was changed."
+    from app.services.admin_image_storage import is_owned_image_url
+
     checked: List[str] = []
     for url in urls:
+        if is_owned_image_url(url):
+            checked.append(url.strip())
+            continue
         try:
             checked.append(validate_image_url(url))
         except ImageUrlError as exc:
@@ -354,28 +407,129 @@ def plan_image_change(current: List[Dict[str, Any]], command: Dict[str, Any]) ->
     return None, "I could not read that image request. Nothing was changed.", ""
 
 
-def try_image_command(db: Any, conv: Any, message: str, staff: Any) -> Optional[Dict[str, Any]]:
-    command = parse_image_command(message)
-    if command is None:
-        if looks_like_image_command(message):
-            return _reply(
-                conv,
-                "I could not read that image request. Name the property and the image link, for example: "
-                "add image https://example.com/pool.jpg to Probe Villa. Nothing was changed.",
-            )
+def _accepted_attachments(urls: Optional[List[str]]) -> Tuple[Optional[List[str]], Optional[str]]:
+    """Keep only URLs produced by our upload endpoint. A foreign URL rejects the field."""
+    if not urls:
+        return None, None
+    if len(urls) > 10:
+        return None, "Attach between 1 and 10 images. Nothing was changed."
+    from app.services.admin_image_storage import is_owned_image_url
+
+    cleaned = []
+    for url in urls:
+        if not is_owned_image_url(str(url or "")):
+            return None, "I can only use images uploaded from this chat. Nothing was changed."
+        if url not in cleaned:
+            cleaned.append(str(url).strip())
+    if not cleaned:
+        return None, "I can only use images uploaded from this chat. Nothing was changed."
+    return cleaned, None
+
+
+def _load_pending(conv: Any) -> Optional[Dict[str, Any]]:
+    prefs = getattr(conv, "preferences", None) or {}
+    pending = prefs.get(_PENDING_KEY) if isinstance(prefs, dict) else None
+    return pending if isinstance(pending, dict) and pending.get("urls") else None
+
+
+def _remember_images(db: Any, conv: Any, payload: Optional[Dict[str, Any]]) -> None:
+    prefs = dict(getattr(conv, "preferences", None) or {})
+    if payload is None:
+        prefs.pop(_PENDING_KEY, None)
+    else:
+        prefs[_PENDING_KEY] = payload
+    conv.preferences = prefs
+    try:
+        from sqlalchemy.orm.attributes import flag_modified
+
+        flag_modified(conv, "preferences")
+    except Exception:
+        pass
+    try:
+        if db is not None:
+            db.commit()
+    except Exception:
+        pass
+
+
+def _parse_attachment_message(message: str) -> Dict[str, Any]:
+    """Flexible wording when the images were uploaded instead of pasted."""
+    text = re.sub(r"\s+", " ", (message or "").strip())
+    if not text:
+        return {"op": None, "name": None}
+    patterns = (
+        ("cover", r"(?i)^(?:please\s+)?make this the cover of\s+(.+)$"),
+        ("cover", r"(?i)^(?:please\s+)?set this as (?:the )?cover image (?:for|of)\s+(.+)$"),
+        ("cover", r"(?i)^(?:please\s+)?set this as (?:the )?cover (?:for|of)\s+(.+)$"),
+        ("cover", r"(?i)^set as the cover$"),
+        ("add", r"(?i)^(?:please\s+)?add (?:this|these) (?:images?|photos?|pictures?) to\s+(.+)$"),
+        ("add", r"(?i)^(?:please\s+)?add (?:this|these) (?:images?|photos?|pictures?)$"),
+        ("add", r"(?i)^(?:please\s+)?use this (?:image|photo|picture) for\s+(.+)$"),
+        ("add", r"(?i)^add these to\s+(.+)$"),
+        ("replace", r"(?i)^(?:please\s+)?(?:change|replace) (?:the )?(?:images?|photos?|pictures?) of\s+(.+?)(?:\s+to\s+.+)?$"),
+        ("replace", r"(?i)^(?:please\s+)?(?:change|replace) (?:the )?(?:images?|photos?|pictures?)$"),
+        ("replace", r"(?i)^replace the current images$"),
+    )
+    for op, pattern in patterns:
+        match = re.match(pattern, text)
+        if not match:
+            continue
+        name = _clean_name(match.group(1)) if match.groups() else None
+        return {"op": op, "name": name or None}
+    name = _bare_property_name(text)
+    if name:
+        return {"op": None, "name": name}
+    return {"op": None, "name": None}
+
+
+def _action_question(name: str) -> Tuple[str, List[str]]:
+    text = (
+        f"Do you want to add these to {name}, replace the current images, or set as the cover?"
+    )
+    return text, [
+        f"Add these to {name}",
+        "Replace the current images",
+        "Set as the cover",
+    ]
+
+
+_OTHER_REQUEST = re.compile(
+    r"\b(what|how|where|why|when|price|status|show|search|delete|undo|generate|report|email|calendar|archive|list)\b",
+    re.IGNORECASE,
+)
+
+
+def _bare_property_name(message: str) -> Optional[str]:
+    text = re.sub(r"\s+", " ", (message or "").strip())
+    if not text or "?" in text or len(text) > 80:
         return None
-    from app.services.admin_turn_rules import resolve_write_target
+    if _IMAGE_VERB.search(text) or _OTHER_REQUEST.search(text) or _URL_RE.search(text):
+        return None
+    return _clean_name(text)
 
-    record, problem = resolve_write_target(db, command["name"])
-    if problem:
-        return _reply(conv, problem)
-    from app.services.admin_turn_rules import _property_id, _property_name
 
-    property_id = _property_id(record)
-    property_name = _property_name(record)
-    if not property_id:
-        return _reply(conv, f"I could not find a property named '{command['name']}'. Nothing was changed.")
+def _continuing_upload(message: str, pending: Dict[str, Any]) -> bool:
+    if parse_image_command(message):
+        return False
+    parsed = _parse_attachment_message(message)
+    if pending.get("stage") == "action":
+        return parsed.get("op") in {"add", "replace", "cover"}
+    if pending.get("stage") == "property":
+        return bool(parsed.get("name"))
+    return False
+
+
+def _propose_image_change(
+    db: Any,
+    conv: Any,
+    staff: Any,
+    command: Dict[str, Any],
+    property_id: str,
+    property_name: str,
+) -> Dict[str, Any]:
     urls = list(command.get("urls") or [])
+    if command["op"] == "cover" and len(urls) > 1:
+        urls = urls[:1]
     if command["op"] in {"add", "replace", "cover", "remove_url"}:
         urls, error = _checked_urls(urls)
         if error:
@@ -384,6 +538,7 @@ def try_image_command(db: Any, conv: Any, message: str, staff: Any) -> Optional[
             return _reply(conv, "Set the cover with one image link. Nothing was changed.")
         if command["op"] == "remove_url" and len(urls) != 1:
             return _reply(conv, "Tell me which image URL or number to remove. Nothing was changed.")
+    command = dict(command)
     command["urls"] = urls
     command["property_name"] = property_name
     current = load_property_images(db, property_id)
@@ -416,6 +571,7 @@ def try_image_command(db: Any, conv: Any, message: str, staff: Any) -> Optional[
         },
         conversation_id=str(getattr(conv, "id", "") or ""),
     )
+    _remember_images(db, conv, None)
     return _reply(
         conv,
         "\n".join(lines),
@@ -423,6 +579,135 @@ def try_image_command(db: Any, conv: Any, message: str, staff: Any) -> Optional[
         pending_id=str(action.id),
         token=action.confirmation_token,
     )
+
+
+def _resolve_named(db: Any, name: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    from app.services.admin_turn_rules import _property_id, _property_name, resolve_write_target
+
+    record, problem = resolve_write_target(db, name)
+    if problem:
+        return None, None, problem
+    property_id = _property_id(record)
+    property_name = _property_name(record)
+    if not property_id:
+        return None, None, f"I could not find a property named '{name}'. Nothing was changed."
+    return property_id, property_name, None
+
+
+def _ask_for_property(db: Any, conv: Any, urls: List[str], op: Optional[str]) -> Dict[str, Any]:
+    _remember_images(db, conv, {
+        "urls": urls,
+        "op": op,
+        "stage": "property",
+        "property_id": None,
+        "property_name": None,
+    })
+    return _reply(conv, "Which property should these images go to?")
+
+
+def _ask_for_action(db: Any, conv: Any, urls: List[str], property_id: str, property_name: str) -> Dict[str, Any]:
+    _remember_images(db, conv, {
+        "urls": urls,
+        "op": None,
+        "stage": "action",
+        "property_id": property_id,
+        "property_name": property_name,
+    })
+    text, suggestions = _action_question(property_name)
+    return _reply(conv, text, suggestions=suggestions)
+
+
+def _finish_attached(
+    db: Any,
+    conv: Any,
+    staff: Any,
+    op: Optional[str],
+    name: Optional[str],
+    urls: List[str],
+    *,
+    property_id: Optional[str] = None,
+    property_name: Optional[str] = None,
+) -> Dict[str, Any]:
+    if not property_id:
+        if not name:
+            return _ask_for_property(db, conv, urls, op)
+        property_id, property_name, problem = _resolve_named(db, name)
+        if problem:
+            _remember_images(db, conv, {
+                "urls": urls,
+                "op": op,
+                "stage": "property",
+                "property_id": None,
+                "property_name": None,
+            })
+            return _reply(conv, problem)
+    if not op:
+        return _ask_for_action(db, conv, urls, property_id, property_name or name or "this property")
+    return _propose_image_change(
+        db,
+        conv,
+        staff,
+        {"op": op, "urls": urls, "name": property_name},
+        property_id,
+        property_name or name or "this property",
+    )
+
+
+def _handle_attached(db: Any, conv: Any, message: str, staff: Any, urls: List[str]) -> Dict[str, Any]:
+    parsed = _parse_attachment_message(message)
+    classic = parse_image_command(message)
+    op = parsed.get("op")
+    name = parsed.get("name")
+    if classic and classic.get("name") and classic.get("op") in {"add", "replace", "cover"}:
+        op = op or classic["op"]
+        name = name or classic["name"]
+    return _finish_attached(db, conv, staff, op, name, urls)
+
+
+def _continue_upload(db: Any, conv: Any, message: str, staff: Any, pending: Dict[str, Any]) -> Dict[str, Any]:
+    parsed = _parse_attachment_message(message)
+    op = parsed.get("op") or pending.get("op")
+    name = parsed.get("name") or pending.get("property_name")
+    return _finish_attached(
+        db,
+        conv,
+        staff,
+        op,
+        name,
+        list(pending.get("urls") or []),
+        property_id=pending.get("property_id") if not parsed.get("name") else None,
+        property_name=pending.get("property_name") if not parsed.get("name") else None,
+    )
+
+
+def try_image_command(
+    db: Any,
+    conv: Any,
+    message: str,
+    staff: Any,
+    attached_images: Optional[List[str]] = None,
+) -> Optional[Dict[str, Any]]:
+    owned, rejected = _accepted_attachments(attached_images)
+    if rejected:
+        return _reply(conv, rejected)
+    if owned:
+        return _handle_attached(db, conv, message, staff, owned)
+    pending = _load_pending(conv)
+    if pending and _continuing_upload(message, pending):
+        return _continue_upload(db, conv, message, staff, pending)
+    command = parse_image_command(message)
+    if command is None:
+        if looks_like_image_command(message):
+            return _reply(
+                conv,
+                "I could not read that image request. Name the property and the image link, for example: "
+                "add image https://example.com/pool.jpg to Probe Villa. Nothing was changed.",
+            )
+        return None
+    property_id, property_name, problem = _resolve_named(db, command["name"])
+    if problem:
+        return _reply(conv, problem)
+    return _propose_image_change(db, conv, staff, command, property_id, property_name)
 
 
 def execute_property_image_change(db: Any, payload: Dict[str, Any], staff: Any) -> Dict[str, Any]:
