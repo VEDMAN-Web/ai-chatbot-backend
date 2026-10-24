@@ -196,7 +196,7 @@ def test_active_checkbox_selection_and_isolation():
     assert "Access denied" in resp_unauth.json()["detail"]
 
     # 2. Select authorized checkbox (tajlandia.com)
-    prop_id = f"PROP-TAJ-{uuid.uuid4().hex[:6].upper()}"
+    prop_id = f"prop-taj-{uuid.uuid4().hex[:6]}"
     create_resp = client.post(
         "/api/v1/admin/properties",
         headers={
@@ -284,7 +284,7 @@ def test_cross_website_crud_with_all_access():
     """
     sa_token = _login_and_get_token("test_super_admin@tajlandia.com", "SuperAdmin123!")
 
-    thai_prop_id = f"PROP-THAI-{uuid.uuid4().hex[:6].upper()}"
+    thai_prop_id = f"prop-thai-{uuid.uuid4().hex[:6]}"
     create_resp = client.post(
         "/api/v1/admin/properties",
         headers={

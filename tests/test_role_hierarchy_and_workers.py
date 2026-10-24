@@ -166,7 +166,7 @@ def test_admin_can_promote_worker_to_admin_with_all_websites():
         "X-Selected-Websites": "thai.estate"
     }
     create_as_admin = client.post("/api/v1/admin/properties", headers=admin_headers, json={
-        "property_id": "TEST-PROMOTED-ADMIN-01",
+        "property_id": "test-promoted-admin-01",
         "property_name": "Promoted Admin Luxury Villa",
         "property_type": "Villa",
         "location": "Bang Tao, Phuket",
