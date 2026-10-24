@@ -794,6 +794,10 @@ def confirm_and_execute_action(
             result_data = _execute_batch_property_action(
                 db, payload, authenticated_staff
             )
+        elif action.tool_name == "manage_property_images":
+            from app.services.admin_image_commands import execute_property_image_change
+
+            result_data = execute_property_image_change(db, payload, authenticated_staff)
         else:
             raise ValueError(f"Unsupported tool action: {action.tool_name}")
 

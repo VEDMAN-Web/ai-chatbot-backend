@@ -646,3 +646,182 @@ def test_dossier_greeting_is_not_the_client(world, monkeypatch):
     assert "Alexander Smith" in continued["text"]
     assert "Client Name**: `Probe Villa`" not in continued["text"]
     assert "**Client Name**: `Probe Villa`" not in continued["text"]
+
+
+def _image_rows(world, property_id="probe-villa"):
+    from app.db.models import PropertyImage
+
+    world["db"].expire_all()
+    rows = (
+        world["db"].query(PropertyImage)
+        .filter(PropertyImage.property_id == property_id)
+        .order_by(PropertyImage.sort_order, PropertyImage.image_url)
+        .all()
+    )
+    return [(row.image_url, row.image_type) for row in rows]
+
+
+def _prepare_images(world, monkeypatch):
+    from app.db.models import PropertyImage
+
+    PropertyImage.__table__.create(bind=world["db"].get_bind(), checkfirst=True)
+    monkeypatch.setattr("app.services.admin_image_commands.lookup_image_content_type", lambda url: "")
+    one = "https://cdn.example.com/one.jpg"
+    two = "https://cdn.example.com/two.jpg"
+    world["db"].add(PropertyImage(property_id="probe-villa", image_url=one, image_type="cover", sort_order=0, image_host="cdn.example.com"))
+    world["db"].add(PropertyImage(property_id="probe-villa", image_url=two, image_type="exterior", sort_order=1, image_host="cdn.example.com"))
+    world["db"].commit()
+    world["fs"].set("projects", "probe-villa", {
+        "name": "Probe Villa",
+        "images": [one, two],
+        "coverImage": one,
+        "priceFrom": 10000000,
+    })
+    return one, two
+
+
+def test_add_images_confirms_in_both_stores_and_undoes(world, monkeypatch):
+    one, two = _prepare_images(world, monkeypatch)
+    added = "https://cdn.example.com/pool.jpg"
+    proposed = _say(world, f'add image "{added}" to "Probe Villa"')
+    assert proposed["requires_confirmation"] is True
+    assert "Probe Villa" in proposed["text"]
+    assert "1 image" in proposed["text"]
+    assert "Nothing has been changed" in proposed["text"]
+    assert _image_rows(world) == [(one, "cover"), (two, "exterior")]
+    pending = world["db"].query(PendingAction).filter(PendingAction.status == "PENDING").one()
+    assert pending.action_payload["previous_images"][0]["image_url"] == one
+    from app.services.cache_service import search_cache
+
+    calls = {"n": 0}
+    original = search_cache.invalidate
+
+    def _counted():
+        calls["n"] += 1
+        return original()
+
+    monkeypatch.setattr(search_cache, "invalidate", _counted)
+    confirmed = _say(world, "yes confirm")
+    assert calls["n"] >= 1
+    assert "Done." in confirmed["text"]
+    assert "3 images" in confirmed["text"]
+    assert "undo" in confirmed["text"].lower()
+    assert _image_rows(world) == [(one, "cover"), (two, "exterior"), (added, "exterior")]
+    doc = world["fs"].get("projects", "probe-villa")
+    assert doc["images"] == [one, two, added]
+    assert doc["coverImage"] == one
+    audit = world["db"].query(AuditLog).filter(AuditLog.tool_name == "manage_property_images").all()
+    assert audit and audit[-1].confirmed_by_staff is True
+    undone = _say(world, "undo")
+    assert "undo" in undone["text"].lower() or "restored" in undone["text"].lower()
+    assert _image_rows(world) == [(one, "cover"), (two, "exterior")]
+    restored = world["fs"].get("projects", "probe-villa")
+    assert restored["images"] == [one, two]
+    assert restored["coverImage"] == one
+
+
+def test_add_photos_and_replace_images(world, monkeypatch):
+    one, two = _prepare_images(world, monkeypatch)
+    extra = "https://cdn.example.com/extra.png"
+    proposed = _say(world, f"add photos {extra}, https://cdn.example.com/two.jpg to probe-villa")
+    assert "1 image" in proposed["text"]
+    assert "Probe Villa" in proposed["text"]
+    _say(world, "yes confirm")
+    assert [url for url, _kind in _image_rows(world)] == [one, two, extra]
+    replacement = "https://cdn.example.com/new.webp"
+    replace = _say(world, f"replace image of Probe Villa to {replacement}")
+    assert replace["requires_confirmation"] is True
+    assert "Replace all 3 images" in replace["text"]
+    assert "1 image" in replace["text"]
+    _say(world, "yes confirm")
+    assert _image_rows(world) == [(replacement, "cover")]
+    doc = world["fs"].get("projects", "probe-villa")
+    assert doc["images"] == [replacement]
+    assert doc["coverImage"] == replacement
+
+
+def test_cover_image_by_url_and_by_number(world, monkeypatch):
+    one, two = _prepare_images(world, monkeypatch)
+    numbered = _say(world, "make image 2 the cover of Probe Villa")
+    assert numbered["requires_confirmation"] is True
+    assert "image 2" in numbered["text"]
+    assert "Probe Villa" in numbered["text"]
+    _say(world, "yes confirm")
+    assert _image_rows(world) == [(one, "exterior"), (two, "cover")]
+    assert world["fs"].get("projects", "probe-villa")["coverImage"] == two
+    fresh = "https://cdn.example.com/cover.jpeg"
+    by_url = _say(world, f"set cover image of Probe Villa to {fresh}")
+    assert "1 new image" in by_url["text"] or "1 image" in by_url["text"]
+    _say(world, "yes confirm")
+    rows = _image_rows(world)
+    assert rows[0] == (fresh, "cover")
+    assert (one, "exterior") in rows
+    assert (two, "exterior") in rows
+    again = _say(world, f"set cover image of Probe Villa to {two}")
+    assert "already attached" in again["text"]
+    _say(world, "yes confirm")
+    assert (two, "cover") in _image_rows(world)
+    assert (fresh, "cover") not in _image_rows(world)
+
+
+def test_image_url_accepts_image_content_type(monkeypatch):
+    monkeypatch.setattr(
+        "app.services.property_web_ingest._resolve_ips",
+        lambda host: ["8.8.8.8"],
+    )
+    monkeypatch.setattr(
+        "app.services.admin_image_commands.lookup_image_content_type",
+        lambda url: "image/jpeg",
+    )
+    from app.services.admin_image_commands import looks_like_image_command, validate_image_url
+
+    assert validate_image_url("https://cdn.example.com/photo") == "https://cdn.example.com/photo"
+    assert looks_like_image_command("add image https://cdn.example.com/a.jpg to Probe Villa") is True
+    assert looks_like_image_command("add property from https://example.com/image-gallery") is False
+
+
+def test_remove_image_and_remove_all(world, monkeypatch):
+    one, two = _prepare_images(world, monkeypatch)
+    by_number = _say(world, "remove image 2 from Probe Villa")
+    assert by_number["requires_confirmation"] is True
+    assert "remove 1 image" in by_number["text"]
+    assert "Probe Villa" in by_number["text"]
+    assert _image_rows(world) == [(one, "cover"), (two, "exterior")]
+    _say(world, "yes confirm")
+    assert _image_rows(world) == [(one, "cover")]
+    _say(world, "undo")
+    assert _image_rows(world) == [(one, "cover"), (two, "exterior")]
+    remove_one = _say(world, f"remove image {two} from Probe Villa")
+    assert remove_one["requires_confirmation"] is True
+    assert "remove 1 image" in remove_one["text"]
+    assert "Nothing has been removed" in remove_one["text"]
+    assert _image_rows(world) == [(one, "cover"), (two, "exterior")]
+    _say(world, "yes confirm")
+    assert _image_rows(world) == [(one, "cover")]
+    remove_all = _say(world, "remove all images of Probe Villa")
+    assert "remove all 1 image" in remove_all["text"]
+    assert "Nothing has been removed" in remove_all["text"]
+    _say(world, "yes confirm")
+    assert _image_rows(world) == []
+    doc = world["fs"].get("projects", "probe-villa")
+    assert doc["images"] == []
+
+
+def test_invalid_image_url_and_unknown_property(world, monkeypatch):
+    one, two = _prepare_images(world, monkeypatch)
+    private = _say(world, "add image http://127.0.0.1/secret.jpg to Probe Villa")
+    assert private["requires_confirmation"] is False
+    assert "private or local" in private["text"].lower()
+    assert private.get("pending_action_id") is None
+    text_file = _say(world, "add image https://cdn.example.com/notes.txt to Probe Villa")
+    assert text_file["requires_confirmation"] is False
+    assert "not a jpg" in text_file["text"].lower()
+    missing = _say(world, "add image https://cdn.example.com/pool.jpg to Ghost Palace")
+    assert "could not find" in missing["text"].lower()
+    assert missing["requires_confirmation"] is False
+    assert _image_rows(world) == [(one, "cover"), (two, "exterior")]
+    analyzed = _say(world, "analyze this photo")
+    assert "Vision API" in analyzed["text"]
+    changed = _say(world, "change image of Probe Villa to https://cdn.example.com/pool.jpg")
+    assert "Vision API" not in changed["text"]
+    assert changed["requires_confirmation"] is True

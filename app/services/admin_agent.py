@@ -1897,6 +1897,23 @@ def process_admin_chat(
                         f"Gotowe. {title} jest zapisane. Sprawdziłem bazę i zmiana jest zapisana."
                         + (" Możesz cofnąć przez 6 dni, mówiąc 'cofnij'." if op_id else "")
                     )
+            elif target_action.tool_name == "manage_property_images":
+                raw_res = raw_exec if isinstance(raw_exec, dict) else {}
+                payload = target_action.action_payload or {}
+                title = raw_res.get("title") or payload.get("property_name") or "The property"
+                count = int(raw_res.get("image_count") or 0)
+                count_text = "1 image" if count == 1 else f"{count} images"
+                if active_lang == "pl":
+                    reply_text = f"Gotowe. {title} ma teraz {count_text}. Sprawdziłem obie bazy i zmiana jest zapisana."
+                    if op_id:
+                        reply_text += " Możesz cofnąć przez 6 dni, mówiąc 'cofnij'."
+                else:
+                    reply_text = (
+                        f"Done. {title} now has {count_text}. "
+                        "I checked both databases and the change is saved."
+                    )
+                    if op_id:
+                        reply_text += " You can undo this for 6 days by saying 'undo'."
             elif target_action.tool_name in ("send_email", "create_calendar_event"):
                 payload = target_action.action_payload or {}
                 if target_action.tool_name == "send_email":
@@ -4123,8 +4140,11 @@ def _run_deterministic_admin(
         requires_confirmation = False
         pending_action_id = None
 
-    # FIX 12 — Image analysis graceful fallback
-    elif any(k in msg_lower for k in ["image", "photo", "picture", "analyze image", "look at", "visual"]):
+    # FIX 12 — Image analysis graceful fallback. Image add/replace/cover/remove is handled earlier.
+    elif (
+        any(k in msg_lower for k in ["analyze", "analyse", "vision", "look at", "describe"])
+        and any(k in msg_lower for k in ["image", "photo", "picture", "visual"])
+    ):
         if language == "pl":
             response_text = (
                 "Analiza obrazow przez Vision API nie jest jeszcze podlaczona do panelu administracyjnego.\n\n"

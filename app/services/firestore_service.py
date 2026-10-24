@@ -1233,7 +1233,8 @@ def save_or_update_property_firestore(
     fields: Dict[str, Any],
     images: Optional[List[str]] = None,
     cover_image: Optional[str] = None,
-    target: str = "admin"
+    target: str = "admin",
+    image_mode: str = "append",
 ) -> bool:
     """
     Creates or updates a property project in Cloud Firestore `projects` collection.
@@ -1326,21 +1327,37 @@ def save_or_update_property_firestore(
                 update_payload["domains"] = norm_ws
                 update_payload["siteOrigin"] = norm_ws[0]
 
-        # Images
-        final_images = list(existing_data.get("images") or [])
-        if images:
-            for img in images:
-                if img and str(img).strip() and str(img).strip() not in final_images:
-                    final_images.append(str(img).strip())
+        # Images. "replace" writes the given list exactly, including an empty list.
+        if image_mode == "replace":
+            final_images = []
+            for img in images or []:
+                clean = str(img).strip() if img else ""
+                if clean and clean not in final_images:
+                    final_images.append(clean)
             update_payload["images"] = final_images
-
-        if cover_image:
-            update_payload["coverImage"] = str(cover_image).strip()
-            if str(cover_image).strip() not in final_images:
-                final_images.insert(0, str(cover_image).strip())
+            if cover_image:
+                cover = str(cover_image).strip()
+                update_payload["coverImage"] = cover
+                if cover and cover not in final_images:
+                    final_images.insert(0, cover)
+                    update_payload["images"] = final_images
+            else:
+                update_payload["coverImage"] = ""
+        else:
+            final_images = list(existing_data.get("images") or [])
+            if images:
+                for img in images:
+                    if img and str(img).strip() and str(img).strip() not in final_images:
+                        final_images.append(str(img).strip())
                 update_payload["images"] = final_images
-        elif final_images and not existing_data.get("coverImage"):
-            update_payload["coverImage"] = final_images[0]
+
+            if cover_image:
+                update_payload["coverImage"] = str(cover_image).strip()
+                if str(cover_image).strip() not in final_images:
+                    final_images.insert(0, str(cover_image).strip())
+                    update_payload["images"] = final_images
+            elif final_images and not existing_data.get("coverImage"):
+                update_payload["coverImage"] = final_images[0]
 
         doc_ref.set(update_payload, merge=True)
         logger.info(f"Successfully saved/updated property '{clean_id}' in Firestore 'projects'.")

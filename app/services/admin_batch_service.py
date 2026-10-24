@@ -81,6 +81,52 @@ def _sql_row_dict(prop: Any) -> Dict[str, Any]:
     return out
 
 
+def _property_image_snapshot(db: Any, property_id: str) -> Optional[List[Dict[str, Any]]]:
+    """Image rows for undo. None when the image table is not available."""
+    if not _is_real_db_session(db):
+        return None
+    try:
+        from app.db.models import PropertyImage
+
+        rows = (
+            db.query(PropertyImage)
+            .filter(PropertyImage.property_id == property_id)
+            .order_by(PropertyImage.sort_order, PropertyImage.image_url)
+            .all()
+        )
+    except Exception:
+        return None
+    if not isinstance(rows, list):
+        return None
+    return [
+        {
+            "image_url": row.image_url,
+            "image_type": row.image_type or "exterior",
+            "sort_order": int(row.sort_order or 0),
+            "image_host": row.image_host,
+            "alt_text": row.alt_text,
+        }
+        for row in rows
+    ]
+
+
+def _restore_property_images(db: Any, property_id: str, images: List[Dict[str, Any]]) -> None:
+    from app.db.models import PropertyImage
+
+    db.query(PropertyImage).filter(PropertyImage.property_id == property_id).delete(synchronize_session=False)
+    for index, item in enumerate(images or []):
+        if not isinstance(item, dict) or not item.get("image_url"):
+            continue
+        db.add(PropertyImage(
+            property_id=property_id,
+            image_url=item["image_url"],
+            image_type=item.get("image_type") or "exterior",
+            image_host=item.get("image_host"),
+            alt_text=item.get("alt_text"),
+            sort_order=int(item.get("sort_order") if item.get("sort_order") is not None else index),
+        ))
+
+
 def _capture_raw_sql(db: Any, property_id: str) -> Tuple[Optional[Dict[str, Any]], bool]:
     if not _is_real_db_session(db):
         return None, False
@@ -88,7 +134,11 @@ def _capture_raw_sql(db: Any, property_id: str) -> Tuple[Optional[Dict[str, Any]
     prop = db.query(Property).filter(Property.property_id == property_id).first()
     if prop is None:
         return None, False
-    return _sql_row_dict(prop), True
+    data = _sql_row_dict(prop)
+    images = _property_image_snapshot(db, property_id)
+    if images is not None:
+        data["property_images"] = images
+    return data, True
 
 
 def _coerce_sql_value(col: Any, value: Any) -> Any:
@@ -134,6 +184,8 @@ def _restore_sql_row(db: Any, property_id: str, raw: Optional[Dict[str, Any]]) -
         if col.name == "property_id" or col.name not in raw:
             continue
         setattr(prop, col.name, _coerce_sql_value(col, raw[col.name]))
+    if "property_images" in raw and isinstance(raw.get("property_images"), list):
+        _restore_property_images(db, property_id, raw["property_images"])
     db.commit()
 
 
@@ -170,7 +222,11 @@ def _read_back_sql(db: Any, property_id: str) -> Any:
     prop = db.query(Property).filter(Property.property_id == property_id).first()
     if prop is None:
         return None
-    return _sql_row_dict(prop)
+    data = _sql_row_dict(prop)
+    images = _property_image_snapshot(db, property_id)
+    if images is not None:
+        data["property_images"] = images
+    return data
 
 
 def _dict_field_diffs(expected: Dict[str, Any], actual: Dict[str, Any], prefix: str) -> List[str]:
@@ -922,6 +978,8 @@ def _verify_exact_restore(
         elif actual_sql is None:
             diffs.append(f"{pid}.sql: missing row")
         else:
+            if isinstance(actual_sql, dict) and "property_images" not in expect_sql:
+                actual_sql = {key: value for key, value in actual_sql.items() if key != "property_images"}
             diffs.extend(_dict_field_diffs(expect_sql, actual_sql, f"{pid}.sql"))
     return diffs
 

@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional
 
 _TOOL_LABELS = {
     "create_or_update_listing": "Property change",
+    "manage_property_images": "Image change",
     "ingest_property_from_url": "Property import from a URL",
     "ingest_property_from_drive": "Property import from Drive",
     "execute_batch_property_action": "Bulk property change",
@@ -183,6 +184,8 @@ def open_work_label(pending_action: Any) -> str:
     name = _listing_name(payload)
     if tool in {"ingest_property_from_url", "ingest_property_from_drive"} or payload.get("source_url") or payload.get("provenance"):
         return f"property import draft for {name}" if name else "property import draft"
+    if tool == "manage_property_images":
+        return f"image change for {name}" if name else "image change"
     if tool == "create_or_update_listing" and _is_price_change(payload):
         return f"price change for {name}" if name else "price change"
     if tool == "create_or_update_listing":

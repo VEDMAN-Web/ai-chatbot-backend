@@ -258,6 +258,12 @@ def try_rule_based_write(db: Any, conv: Any, message: str, staff: Any, language:
     if is_undo_request(text):
         return _undo_last(db, conv, staff)
 
+    from app.services.admin_image_commands import try_image_command
+
+    image_turn = try_image_command(db, conv, text, staff)
+    if image_turn is not None:
+        return image_turn
+
     email = re.search(r"send an email to\s+(\S+@\S+)\s+saying\s+(.+)$", text, re.I)
     if email:
         if not _google_connected(db, staff):

@@ -1328,6 +1328,10 @@ def try_handle_property_url_turn(
     Returns None when this turn is not an ingest turn.
     """
     from app.services.conversation_service import append_conversation_turn
+    from app.services.admin_image_commands import looks_like_image_command
+
+    if looks_like_image_command(message):
+        return None
 
     drafts = [item for item in (open_pending or []) if getattr(item, "tool_name", None) == INGEST_TOOL and getattr(item, "status", None) == "PENDING"]
     urls = extract_urls(message)
