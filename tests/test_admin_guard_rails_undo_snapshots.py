@@ -149,6 +149,12 @@ def test_undo_restores_old_values_second_undo_refused(staff):
         "expire_at": (datetime.now(timezone.utc) + timedelta(days=6)).isoformat(),
         "expires_at": (datetime.now(timezone.utc) + timedelta(days=6)).isoformat(),
         "previous_snapshot": {"prop-1": original},
+        "raw_firestore": {"prop-1": original},
+        "raw_sql": {},
+        "existed_in_firestore": {"prop-1": True},
+        "existed_in_sql": {"prop-1": False},
+        "snapshot_format": "raw_v1",
+        "affected_ids": ["prop-1"],
         "created_ids": [],
     }
     audits = []
@@ -167,6 +173,10 @@ def test_undo_restores_old_values_second_undo_refused(staff):
     mock_fs.collection.side_effect = col
     batch.document.return_value = op_ref
     proj_ref = MagicMock()
+    restored = MagicMock()
+    restored.exists = True
+    restored.to_dict.return_value = dict(original)
+    proj_ref.get.return_value = restored
     projects.document.return_value = proj_ref
 
     def capture_audit(**kwargs):
@@ -374,12 +384,22 @@ def test_audit_chain_propose_confirm_execute_undo(staff):
         "expire_at": (datetime.now(timezone.utc) + timedelta(days=5)).isoformat(),
         "expires_at": (datetime.now(timezone.utc) + timedelta(days=5)).isoformat(),
         "previous_snapshot": {"prop-1": {"property_name": "Old"}},
+        "raw_firestore": {"prop-1": {"property_name": "Old"}},
+        "raw_sql": {},
+        "existed_in_firestore": {"prop-1": True},
+        "existed_in_sql": {"prop-1": False},
+        "snapshot_format": "raw_v1",
+        "affected_ids": ["prop-1"],
         "created_ids": [],
     }
     op_ref = MagicMock()
     op_ref.get.return_value = op_doc
     batch.document.return_value = op_ref
     projects = MagicMock()
+    project_snap = MagicMock()
+    project_snap.exists = True
+    project_snap.to_dict.return_value = {"property_name": "Old"}
+    projects.document.return_value.get.return_value = project_snap
 
     def col(n):
         return batch if n == "admin_batch_operations" else projects

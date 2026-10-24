@@ -923,6 +923,71 @@ def canonical_region_name(loc: str) -> str:
     return low
 
 
+def get_raw_property_document(property_id: str, target: str = "admin") -> Optional[Dict[str, Any]]:
+    """Return the stored Firestore project document, not the normalised card."""
+    client = get_firestore_client(target=target)
+    if not client:
+        return None
+    clean_id = str(property_id or "").strip()
+    if not clean_id:
+        return None
+    try:
+        snap = client.collection("projects").document(clean_id).get()
+        if getattr(snap, "exists", False) is not True:
+            return None
+        data = snap.to_dict() or {}
+        if not isinstance(data, dict):
+            return None
+        return data
+    except Exception as e:
+        logger.error(f"Error reading raw property '{clean_id}' from Firestore: {e}")
+        return None
+
+
+def write_admin_property_document(
+    property_id: str,
+    document: Dict[str, Any],
+    *,
+    merge: bool = True,
+    target: str = "admin",
+) -> bool:
+    """
+    Write a project document. A create (missing doc, or merge=False) is refused
+    when the payload has no name/title, so a nameless stub is never stored.
+    """
+    client = get_firestore_client(target=target)
+    if not client:
+        logger.warning(f"Firestore client ({target}) not available for property write.")
+        return False
+    clean_id = str(property_id or "").strip()
+    if not clean_id or not isinstance(document, dict):
+        return False
+
+    def _has_name(payload: Dict[str, Any]) -> bool:
+        name = payload.get("name") or payload.get("title") or payload.get("property_name")
+        if isinstance(name, dict):
+            name = name.get("en") or next((v for v in name.values() if v), None)
+        return bool(name and str(name).strip())
+
+    try:
+        ref = client.collection("projects").document(clean_id)
+        if not merge:
+            if not _has_name(document):
+                logger.warning("Refusing nameless Firestore replace for '%s'.", clean_id)
+                return False
+            ref.set(document)
+            return True
+        snap = ref.get()
+        if getattr(snap, "exists", False) is not True and not _has_name(document):
+            logger.warning("Refusing nameless Firestore create for '%s'.", clean_id)
+            return False
+        ref.set(document, merge=True)
+        return True
+    except Exception as e:
+        logger.error(f"Error writing property '{clean_id}' in Firestore: {e}")
+        return False
+
+
 def search_properties_firestore(
     location: Optional[str] = None,
     property_type: Optional[str] = None,
@@ -939,7 +1004,9 @@ def search_properties_firestore(
     target: str = "user",
     limit: int = 6,
     exclude_property_ids: Optional[List[str]] = None,
-    sort_by_price: Optional[str] = None
+    sort_by_price: Optional[str] = None,
+    max_price_exclusive: bool = False,
+    status: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """
     Searches properties in Firestore projects collection using structured criteria.
@@ -1140,8 +1207,14 @@ def search_properties_firestore(
             continue
         if min_price is not None and p_thb < min_price:
             continue
-        if max_price is not None and p_thb > max_price:
+        if max_price is not None and max_price_exclusive and p_thb >= max_price:
             continue
+        if max_price is not None and not max_price_exclusive and p_thb > max_price:
+            continue
+        if status:
+            p_status = str(p.get("status") or p.get("project_status") or "").lower()
+            if p_status and status.lower().split()[0] not in p_status and status.lower() not in p_status:
+                continue
 
         # Amenities filter (legacy flags + canonical amenity keys)
         if has_pool is True and not p.get("has_pool"):
@@ -1241,12 +1314,23 @@ def save_or_update_property_firestore(
         existing_data = doc.to_dict() or {} if doc.exists else {}
 
         update_payload: Dict[str, Any] = {"updatedAt": now_iso}
+        prop_name = fields.get("property_name") or fields.get("title") or fields.get("name")
         if not doc.exists:
+            if not prop_name or not str(prop_name).strip():
+                logger.warning(
+                    "Refusing to create a nameless Firestore document for '%s'.",
+                    clean_id,
+                )
+                return False
             update_payload["createdAt"] = now_iso
-            update_payload["isActive"] = True
+            if fields.get("is_public") is not None:
+                update_payload["isActive"] = bool(fields.get("is_public"))
+            elif fields.get("isActive") is not None:
+                update_payload["isActive"] = bool(fields.get("isActive"))
+            else:
+                update_payload["isActive"] = True
 
         # Property Name & Title
-        prop_name = fields.get("property_name") or fields.get("title") or fields.get("name")
         if prop_name:
             update_payload["name"] = prop_name
             update_payload["title"] = prop_name
@@ -1348,6 +1432,10 @@ def delete_property_firestore(
 
     try:
         doc_ref = client.collection("projects").document(clean_id)
+        snap = doc_ref.get()
+        if getattr(snap, "exists", False) is not True:
+            logger.info("Property '%s' is not in Firestore; not creating a delete stub.", clean_id)
+            return False
         if hard_delete:
             doc_ref.delete()
             logger.info(f"Permanently deleted property '{clean_id}' from Firestore 'projects'.")

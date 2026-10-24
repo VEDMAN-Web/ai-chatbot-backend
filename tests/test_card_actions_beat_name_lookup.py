@@ -28,6 +28,15 @@ def test_pdf_requests_stay_brochure_requests(msg):
     assert not params.get("needs_clarification")
 
 
+def test_brochure_search_phrase_is_not_a_property_id():
+    intent, params = ir.detect_deterministic_intent(
+        "Download brochure for all Phuket listings under 10M"
+    )
+    assert intent == IntentType.BROCHURE_REQUEST
+    assert params.get("property_id") is None
+    assert params.get("needs_clarification") is True
+
+
 def test_email_button_message_is_lead_capture_not_details():
     msg = "Please email the verified brochure and floor plans for MlijGwytZdYL1EiGumjV (Anava Condominium) to my email: a@b.com (Name: Vedant)."
     intent, _ = ir.detect_deterministic_intent(msg)

@@ -204,29 +204,27 @@ def mock_weasy(monkeypatch):
 
 def test_full_data_html_contains_all_sections_and_pdf_header():
     data = _full_data()
-    html = build_brochure_html(data, embed_remote_images=False)
+    html = build_brochure_html(data, embed_remote_images=False, theme_id=1)
     markers = count_section_markers(html)
     for sid in (
         "cover",
         "intro",
-        "highlights",
+        "overview",
         "gallery",
-        "facilities",
-        "at_a_glance",
         "nearby_places",
         "unit_types",
-        "floor_plans",
-        "master_plan",
         "contact",
     ):
         assert markers.get(sid, 0) >= 1, f"missing section {sid} in {markers}"
+    assert "investment" not in markers  # no investment_info on fixture
     assert "N/A" not in html
     assert EM_DASH not in html
+    assert "01 /" in html and " / " in html
 
     with patch("app.services.brochure_renderer.HTML", create=True) as HTML_cls:
         # Force renderer path via Fake if import fails
         try:
-            pdf = render_brochure_pdf(data, use_cache=False)
+            pdf = render_brochure_pdf(data, use_cache=False, theme_id=1)
         except Exception:
             pdf = MIN_PDF[:-6] + html.encode("utf-8", errors="ignore")[:5000] + b"\n%%EOF\n"
     assert pdf.startswith(b"%PDF")
@@ -235,15 +233,17 @@ def test_full_data_html_contains_all_sections_and_pdf_header():
 def test_sparse_property_smaller_page_count():
     full = _full_data()
     sparse = _sparse_data(name="Sparse Villa", location_text="Phuket", price_display="from 5M THB")
-    full_html = build_brochure_html(full, embed_remote_images=False)
-    sparse_html = build_brochure_html(sparse, embed_remote_images=False)
+    full_html = build_brochure_html(full, embed_remote_images=False, theme_id=1)
+    sparse_html = build_brochure_html(sparse, embed_remote_images=False, theme_id=1)
     assert count_section_markers(sparse_html).get("cover") == 1
     assert count_section_markers(sparse_html).get("contact") == 1
-    assert "at_a_glance" in count_section_markers(sparse_html)
-    assert "intro" not in count_section_markers(sparse_html)
+    # price/location feed intro + overview + nearby; gallery skipped
+    assert "intro" in count_section_markers(sparse_html) or "overview" in count_section_markers(sparse_html)
     assert "gallery" not in count_section_markers(sparse_html)
     assert sparse_html.count('data-section="') < full_html.count('data-section="')
     assert "N/A" not in sparse_html
+    # Renumbered footer like "01 / N"
+    assert "01 /" in sparse_html
 
 
 def test_no_images_renders():

@@ -524,6 +524,8 @@ def validate_reply(
             reasons.append(f"bedrooms_mismatch:{pid}")
 
     allowed = _allowed_text_blob(cards, tool_results)
+    if facts_text:
+        allowed = f"{allowed} {facts_text}"
 
     # b0. Unverified marketing / guaranteed-return claims must not be stated as facts
     # (allowed only when explicitly labelled as developer marketing claim)

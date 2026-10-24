@@ -234,8 +234,8 @@ def test_sections_cover_contact_always_others_skip_when_empty():
     assert ids[-1] == "contact"
     assert "intro" not in ids
     assert "gallery" not in ids
-    assert "facilities" not in ids
-    assert "floor_plans" not in ids
+    assert "investment" not in ids
+    assert "unit_types" not in ids
 
 
 def test_sections_render_only_when_data_present():
@@ -253,14 +253,14 @@ def test_sections_render_only_when_data_present():
     ids = [s.id for s in select_sections(rich)]
     assert "cover" in ids
     assert "intro" in ids
-    assert "highlights" in ids
+    assert "overview" in ids
     assert "gallery" in ids
-    assert "facilities" in ids
-    assert "at_a_glance" in ids
-    assert "floor_plans" in ids
+    assert "unit_types" in ids  # floor_plans present
+    assert "nearby_places" in ids  # location_text
     assert "contact" in ids
-    assert "master_plan" not in ids
-    assert "unit_types" not in ids
+    assert "investment" not in ids
+    assert "highlights" not in ids
+    assert "facilities" not in ids
 
 
 def test_at_a_glance_only_real_rows_no_na():
@@ -296,7 +296,8 @@ def test_truncate_and_chunk_helpers():
     assert chunk_list([], 14) == []
 
 
-def test_page_plan_paginates_facilities_and_skips_empty():
+def test_page_plan_skips_empty_and_renumbers_via_page_count():
+    """Facilities no longer get their own pages; amenities fold into overview facts."""
     facilities = [f"Facility {i}" for i in range(20)]
     data = BrochureData(
         name="Paginated",
@@ -309,12 +310,11 @@ def test_page_plan_paginates_facilities_and_skips_empty():
     section_ids = [p["section_id"] for p in pages]
     assert section_ids[0] == "cover"
     assert section_ids[-1] == "contact"
-    facility_pages = [p for p in pages if p["section_id"] == "facilities"]
-    assert len(facility_pages) == 2
-    assert len(facility_pages[0]["facilities"]) == 14
-    assert len(facility_pages[1]["facilities"]) == 6
-    assert "intro" not in section_ids
+    assert "facilities" not in section_ids
     assert "gallery" not in section_ids
+    # Overview appears because facilities/amenities feed fact cells
+    assert "overview" in section_ids
+    assert "intro" not in section_ids
 
 
 def test_firestore_real_price_and_pl_description():

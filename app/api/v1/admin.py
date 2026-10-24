@@ -457,7 +457,14 @@ def undo_batch_operation_endpoint(
             staff_user=staff,
             db_session=db
         )
+        if result.get("restored_ok") is False:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=result,
+            )
         return result
+    except HTTPException:
+        raise
     except BatchOperationError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -518,7 +525,7 @@ def admin_config_status_endpoint(
     """
     from app.core.config import get_admin_config_status
 
-    return get_admin_config_status()
+    return {**get_admin_config_status(), **_brochure_config_labels()}
 
 
 # ==============================================================================
@@ -527,10 +534,10 @@ def admin_config_status_endpoint(
 
 class PropertyCreateRequest(BaseModel):
     property_id: Optional[str] = Field(None, example="villa-horizon-phuket", description="Unique property ID. If omitted, will be auto-generated.")
-    property_name: str = Field(..., example="Villa Horizon Luxury Residences", description="Property title/name")
+    property_name: Optional[str] = Field(None, example="Villa Horizon Luxury Residences", description="Property title/name")
     project_name: Optional[str] = Field(None, example="Villa Horizon")
-    property_type: Optional[str] = Field("Villa", example="Villa", description="'Villa', 'Condominium', 'Townhouse'")
-    status: Optional[str] = Field("Ready to move in", example="Ready to move in", description="'Ready to move in', 'Under construction', 'Off-plan'")
+    property_type: Optional[str] = Field(None, example="Villa", description="'Villa', 'Condominium', 'Townhouse'")
+    status: Optional[str] = Field(None, example="Ready to move in", description="'Ready to move in', 'Under construction', 'Off-plan'")
     location: Optional[str] = Field("Phuket, Thailand", example="Bang Tao, Phuket")
     province: Optional[str] = Field("Phuket", example="Phuket")
     district: Optional[str] = Field(None, example="Thalang")
@@ -783,21 +790,40 @@ def get_admin_property_endpoint(
     }
 
 
+def _property_scope_target(property_id: str, db: Session):
+    """Raw Firestore document or SQL row used for existence and website checks."""
+    from app.services.firestore_service import get_raw_property_document
+    raw = None
+    try:
+        raw = get_raw_property_document(property_id, target="admin")
+    except Exception:
+        raw = None
+    prop = db.query(Property).filter(Property.property_id == property_id).first() if db is not None else None
+    return raw, prop
+
+
 @router.post("/properties", status_code=status.HTTP_201_CREATED)
 def create_property_endpoint(
     req: PropertyCreateRequest,
+    overwrite: Optional[bool] = Query(None, description="Not supported. Use PUT to update an existing property."),
+    allow_without_undo: bool = Query(False, description="Admin only: write even if the undo snapshot cannot be saved."),
     staff: AuthenticatedStaff = Depends(require_admin_or_super_admin_with_sites),
     db: Session = Depends(get_db)
 ):
     """
-    Direct REST API to create a new property listing.
-    Scoped strictly to the staff member's active selected websites.
-    Restricted to Admins and Super Admins (Workers are read-only).
-    Instantly saves to Cloud Firestore `projects` collection (ADMIN_FIRESTORE_*).
+    Create a property in Postgres and Firestore after validation.
+    Workers are read-only. A duplicate id or name returns 409.
     """
     import uuid
-    from app.services.action_service import _execute_update_listing
-    pid = req.property_id or f"PROP-{uuid.uuid4().hex[:8].upper()}"
+    from app.services.action_service import rest_create_property
+
+    if overwrite is True:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="overwrite=true is not supported; use update",
+        )
+
+    pid = req.property_id or f"prop-{uuid.uuid4().hex[:8]}"
 
     # Website scope validation
     if req.websites:
@@ -818,83 +844,62 @@ def create_property_endpoint(
     else:
         assigned_websites = list(staff.selected_websites)
 
-    payload = {
-        "property_id": pid,
-        "mode": "create",
-        "fields": req.model_dump(exclude={"images", "cover_image"}),
-        "images": req.images or [],
-        "cover_image": req.cover_image,
-        "websites": assigned_websites,
-        "selected_websites": assigned_websites
-    }
+    fields = req.model_dump(exclude={"images", "cover_image", "property_id"})
+    return rest_create_property(
+        db,
+        staff,
+        fields,
+        property_id=pid,
+        websites=assigned_websites,
+        images=req.images or [],
+        cover_image=req.cover_image,
+        allow_without_undo=allow_without_undo,
+    )
 
-    # Direct save to Cloud Firestore 'projects'
-    try:
-        from app.services.firestore_service import save_or_update_property_firestore
-        save_or_update_property_firestore(
-            property_id=pid,
-            fields={**payload["fields"], "websites": assigned_websites},
-            images=payload["images"],
-            cover_image=payload["cover_image"],
-            target="admin"
+
+@router.get("/properties/{property_id}/consistency")
+def property_consistency_endpoint(
+    property_id: str,
+    staff: AuthenticatedStaff = Depends(require_admin_or_super_admin_with_sites),
+    db: Session = Depends(get_db),
+):
+    """Admin-only comparison of the Firestore document and the Postgres row."""
+    from app.services.action_service import rest_property_consistency
+
+    raw, prop = _property_scope_target(property_id, db)
+    target_obj = raw or prop
+    if not target_obj:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Property with ID '{property_id}' not found.",
         )
-    except Exception as e:
-        logger.warning(f"Error saving property to Firestore: {e}")
-
-    result = _execute_update_listing(db, payload)
-
-    # Record 6-day snapshot for 1-click Undo
-    operation_id = None
-    try:
-        from app.services.admin_batch_service import record_crud_operation_snapshot
-        operation_id = record_crud_operation_snapshot(
-            action_type="create",
-            property_id=pid,
-            previous_state=None,
-            staff_user=staff,
-            source="admin_api_create",
-            created_id=pid,
-            db_session=db
+    if not property_belongs_to_websites(target_obj, staff.selected_websites):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                f"Access denied: Property '{property_id}' does not belong to your currently selected website(s) "
+                f"{staff.selected_websites}."
+            ),
         )
-    except Exception as e:
-        logger.warning(f"Error recording CRUD snapshot for create: {e}")
-
-    return {
-        "status": "CREATED",
-        "message": f"Property '{pid}' successfully created in database and Firestore.",
-        "property_id": pid,
-        "operation_id": operation_id,
-        "undo_window_days": 6,
-        "websites": assigned_websites,
-        "details": result
-    }
+    return rest_property_consistency(db, property_id)
 
 
 @router.put("/properties/{property_id}")
 def update_property_endpoint(
     property_id: str,
     req: PropertyUpdateRequest,
+    allow_without_undo: bool = Query(False),
     staff: AuthenticatedStaff = Depends(require_admin_or_super_admin_with_sites),
     db: Session = Depends(get_db)
 ):
     """
-    Direct REST API to update an existing property listing.
-    Strictly verifies that the property belongs to the staff member's currently selected websites.
-    Restricted to Admins and Super Admins (Workers are read-only).
-    Updates fields, pricing, bedrooms, and images directly in Cloud Firestore.
+    Update a property that already exists in Firestore, Postgres, or both.
+    A Postgres-only row is not given a nameless Firestore stub.
     """
-    from app.services.action_service import _execute_update_listing
-    
-    # 1. Verify property existence in Cloud Firestore or DB
-    fs_prop = None
-    try:
-        from app.services.firestore_service import get_property_by_id_from_firestore
-        fs_prop = get_property_by_id_from_firestore(property_id, target="admin")
-    except Exception:
-        fs_prop = None
+    from app.services.action_service import rest_update_property
 
-    prop = db.query(Property).filter(Property.property_id == property_id).first() if db is not None else None
-    target_obj = fs_prop or prop
+    raw, prop = _property_scope_target(property_id, db)
+    target_obj = raw or prop
     if not target_obj:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -928,92 +933,38 @@ def update_property_endpoint(
         assigned_websites = norm_targets
 
     update_data = req.model_dump(exclude_unset=True, exclude={"images", "cover_image"})
-
-    # Record 6-day snapshot for 1-click Undo before applying update
-    operation_id = None
-    try:
-        from app.services.admin_batch_service import record_crud_operation_snapshot
-        operation_id = record_crud_operation_snapshot(
-            action_type="update",
-            property_id=property_id,
-            previous_state=fs_prop or (prop.__dict__ if prop else {}),
-            staff_user=staff,
-            source="admin_api_update",
-            db_session=db
-        )
-    except Exception as e:
-        logger.warning(f"Error recording CRUD snapshot for update: {e}")
-    
-    # 3. Update directly in Cloud Firestore (Primary Datastore)
-    try:
-        from app.services.firestore_service import save_or_update_property_firestore
-        fs_fields = dict(update_data)
-        if assigned_websites is not None:
-            fs_fields["websites"] = assigned_websites
-        save_or_update_property_firestore(
-            property_id=property_id,
-            fields=fs_fields,
-            images=req.images,
-            cover_image=req.cover_image,
-            target="admin"
-        )
-    except Exception as e:
-        logger.warning(f"Error updating property in Firestore: {e}")
-
-    # 4. Update in SQL if prop exists
-    payload = {
-        "property_id": property_id,
-        "mode": "update",
-        "fields": update_data,
-        "images": req.images,
-        "cover_image": req.cover_image
-    }
-    if assigned_websites is not None:
-        payload["websites"] = assigned_websites
-
-    result = _execute_update_listing(db, payload) if (db is not None and prop is not None) else {
-        "property_id": property_id,
-        "title": (fs_prop.get("name") if fs_prop else property_id),
-        "mode": "update",
-        "updated_fields": update_data,
-        "images": req.images or []
-    }
-    return {
-        "status": "UPDATED",
-        "message": f"Property '{property_id}' successfully updated in database and Firestore.",
-        "property_id": property_id,
-        "operation_id": operation_id,
-        "undo_window_days": 6,
-        "websites": assigned_websites or (prop.websites if prop else (fs_prop.get("websites") if fs_prop else [])),
-        "details": result
-    }
+    return rest_update_property(
+        db,
+        staff,
+        property_id,
+        update_data,
+        websites=assigned_websites,
+        images=req.images,
+        cover_image=req.cover_image,
+        allow_without_undo=allow_without_undo,
+    )
 
 
 @router.delete("/properties/{property_id}")
 def delete_property_endpoint(
     property_id: str,
     hard_delete: bool = False,
+    confirm_property_id: Optional[str] = Query(
+        None,
+        description="Required when hard_delete=true. Must equal the property id.",
+    ),
+    allow_without_undo: bool = Query(False),
     staff: AuthenticatedStaff = Depends(require_admin_or_super_admin_with_sites),
     db: Session = Depends(get_db)
 ):
     """
-    Direct REST API to delete/deactivate a property listing.
-    Deletes/archives from Cloud Firestore (primary) and PostgreSQL.
-    Strictly verifies that the property belongs to the staff member's currently selected websites.
+    Soft-delete (archive) a property, or permanently delete it when hard_delete=true
+    and confirm_property_id matches the property id.
     """
-    from app.services.firestore_service import delete_property_firestore
-    from app.services.cache_service import search_cache
+    from app.services.action_service import rest_delete_property
 
-    # 1. Verify property existence in Cloud Firestore or DB
-    fs_prop = None
-    try:
-        from app.services.firestore_service import get_property_by_id_from_firestore
-        fs_prop = get_property_by_id_from_firestore(property_id, target="admin")
-    except Exception:
-        fs_prop = None
-
-    prop = db.query(Property).filter(Property.property_id == property_id).first() if db is not None else None
-    target_obj = fs_prop or prop
+    raw, prop = _property_scope_target(property_id, db)
+    target_obj = raw or prop
     if not target_obj:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -1028,50 +979,14 @@ def delete_property_endpoint(
             )
         )
 
-    # Record 6-day snapshot for 1-click Undo before applying delete
-    operation_id = None
-    try:
-        from app.services.admin_batch_service import record_crud_operation_snapshot
-        operation_id = record_crud_operation_snapshot(
-            action_type="delete",
-            property_id=property_id,
-            previous_state=fs_prop or (prop.__dict__ if prop else {}),
-            staff_user=staff,
-            source="admin_api_delete",
-            db_session=db
-        )
-    except Exception as e:
-        logger.warning(f"Error recording CRUD snapshot for delete: {e}")
-
-    # 2. Update/Delete in Cloud Firestore (Primary)
-    fs_ok = delete_property_firestore(
-        property_id=property_id,
+    return rest_delete_property(
+        db,
+        staff,
+        property_id,
         hard_delete=hard_delete,
-        staff_email=staff.email,
-        target="admin"
+        confirm_property_id=confirm_property_id,
+        allow_without_undo=allow_without_undo,
     )
-
-    # 3. Update/Delete in PostgreSQL if present
-    if prop and db is not None:
-        if hard_delete:
-            db.delete(prop)
-        else:
-            prop.is_public = False
-            prop.status = "Archived"
-        db.commit()
-
-    # 4. Invalidate search cache
-    search_cache.invalidate()
-
-    return {
-        "status": "DELETED" if hard_delete else "ARCHIVED",
-        "message": f"Property '{property_id}' successfully {'permanently deleted' if hard_delete else 'archived/deactivated'}.",
-        "property_id": property_id,
-        "operation_id": operation_id,
-        "undo_window_days": 6,
-        "hard_delete": hard_delete,
-        "firestore_synced": fs_ok
-    }
 
 
 # ==============================================================================
@@ -1148,6 +1063,84 @@ from app.api.v1.auth import (
     CreateUserRequest,
     UpdateUserRequest
 )
+
+def _brochure_config_labels() -> Dict[str, Any]:
+    """
+    Non-secret brochure config labels, merged into /system/config-status.
+    Never returns API keys or secrets.
+    """
+    llm_on = bool(getattr(settings, "BROCHURE_LLM_ENABLED", False)) and bool(
+        (getattr(settings, "ANTHROPIC_API_KEY", None) or "").strip()
+    )
+    return {
+        "brochure_llm": "on" if llm_on else "off",
+        "brochure_llm_enabled": bool(getattr(settings, "BROCHURE_LLM_ENABLED", False)),
+        "brochure_llm_model": str(
+            getattr(settings, "BROCHURE_LLM_MODEL", "claude-sonnet-5-5") or "claude-sonnet-5-5"
+        ),
+        "brochure_engine": str(getattr(settings, "BROCHURE_ENGINE", "reportlab") or "reportlab"),
+        "openai_model_label": str(getattr(settings, "OPENAI_MODEL", "") or ""),
+    }
+
+
+@router.get("/brochure/preview", tags=["Admin Brochure"])
+def admin_brochure_preview(
+    property_id: str = Query(..., description="Property / project id"),
+    template: int = Query(1, ge=1, le=7, description="Visual theme 1–7"),
+    lang: str = Query("en", description="Language: en, pl, or th"),
+    site_origin: Optional[str] = Query(None, description="Tenant site origin"),
+    staff: AuthenticatedStaff = Depends(require_admin_or_employee),
+    db: Session = Depends(get_db),
+):
+    """
+    Admin-only design preview: return a single-property brochure PDF for a chosen theme.
+    Does not change the public chat / offer dossier paths.
+    """
+    from fastapi.responses import Response
+
+    from app.services.brochure_data import load_brochure_data
+    from app.services.brochure_renderer import render_brochure_pdf
+    from app.services.brochure_themes import get_theme
+
+    language = lang if lang in ("en", "pl", "th") else "en"
+    try:
+        data = load_brochure_data(
+            db=db,
+            property_id=property_id,
+            site_origin=site_origin,
+            language=language,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+
+    theme = get_theme(template)
+    logger.info(
+        "brochure_theme id=%s name=%s property=%s lang=%s preview=1",
+        theme.id,
+        theme.name,
+        data.property_id or property_id,
+        language,
+    )
+    try:
+        # Deterministic preview (no Sonnet) for fast design review
+        pdf_bytes = render_brochure_pdf(
+            data,
+            use_cache=False,
+            copy=None,
+            ai_footer=None,
+            theme_id=template,
+        )
+    except Exception as e:
+        logger.error("Admin brochure preview failed: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail="Brochure preview failed") from e
+
+    filename = f"brochure_preview_{property_id}_t{template}.pdf"
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'inline; filename="{filename}"'},
+    )
+
 
 router.get("/users", response_model=List[AdminUserDirectoryItem], tags=["Admin Directory Management"])(list_admin_users_with_google_status)
 router.post("/users", response_model=AdminUserDirectoryItem, status_code=status.HTTP_201_CREATED, tags=["Admin Directory Management"])(create_admin_user)

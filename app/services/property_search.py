@@ -15,6 +15,7 @@ class PropertyFilterParams(BaseModel):
     websites: Optional[List[str]] = Field(None, description="Filter properties by authorized/selected websites")
     min_price: Optional[Decimal] = None
     max_price: Optional[Decimal] = None
+    max_price_exclusive: bool = False
     bedrooms: Optional[int] = None
     min_bedrooms: Optional[int] = None
     max_bedrooms: Optional[int] = None
@@ -130,7 +131,10 @@ def build_property_query(db: Session, filters: PropertyFilterParams):
         conditions.append(Property.price_numeric_min >= filters.min_price)
 
     if filters.max_price is not None:
-        conditions.append(Property.price_numeric_min <= filters.max_price)
+        if filters.max_price_exclusive:
+            conditions.append(Property.price_numeric_min < filters.max_price)
+        else:
+            conditions.append(Property.price_numeric_min <= filters.max_price)
 
     if filters.bedrooms is not None:
         conditions.append(

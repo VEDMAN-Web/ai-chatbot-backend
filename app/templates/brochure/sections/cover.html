@@ -1,84 +1,179 @@
 <section class="page cover-page" data-section="cover">
   <span class="section-marker">SECTION:cover</span>
-  <div class="cover-inner">
-    <p class="label-caps cover-the">{{ labels.the }}</p>
-    <h1 class="cover-title">{{ data.name or data.property_id }}</h1>
-    {% if data.location_text %}
-    <hr class="thin-rule"/>
-    <p class="cover-location">{{ data.location_text }}</p>
-    {% endif %}
-    <div class="cover-brand">
+
+  {% if theme_layout == 'sidebar' %}
+  <div class="cover-split">
+    <div class="cover-copy">
       {% if logo_data_uri %}
-      <img class="cover-logo" src="{{ logo_data_uri }}" alt=""/>
+      <img src="{{ logo_data_uri }}" alt="" style="max-height:14mm;max-width:40mm;object-fit:contain;margin-bottom:6mm;"/>
       {% endif %}
       {% if data.tenant and data.tenant.brand_name %}
-      <p class="cover-brand-name">{{ data.tenant.brand_name }}</p>
+      <p class="label-caps" style="color:rgba(255,255,255,0.7);margin-bottom:4mm;">{{ data.tenant.brand_name }}</p>
+      {% endif %}
+      {% if data.location_text %}
+      <span class="chip" style="margin-bottom:5mm;">{{ data.location_text }}</span>
+      {% endif %}
+      <h1 class="display" style="font-size:26pt;line-height:1.15;margin:5mm 0;">{{ prepared.headline or prepared.name or data.name or data.property_id }}</h1>
+      {% if prepared.subtitle or data.property_type %}
+      <p class="body-text" style="color:rgba(255,255,255,0.85);margin-bottom:6mm;">{{ prepared.subtitle or data.property_type }}</p>
+      {% endif %}
+      {% if data.price_display %}
+      <p class="display" style="font-size:14pt;color:var(--accent);margin-bottom:4mm;">{{ data.price_display }}</p>
+      {% endif %}
+      {% if prepared.date_label %}
+      <p class="label-caps" style="color:rgba(255,255,255,0.55);margin-bottom:8mm;">{{ prepared.date_label }}</p>
+      {% endif %}
+      {% if prepared.cta_url %}
+      <a class="btn-cta" href="{{ prepared.cta_url }}">{{ prepared.cta_text or labels.book_viewing }}</a>
+      {% else %}
+      <span class="btn-cta">{{ prepared.cta_text or labels.book_viewing }}</span>
       {% endif %}
     </div>
-    {% if data.contact %}
-    <p class="cover-footer">
-      {% if data.contact.email %}{{ data.contact.email }}{% endif %}
-      {% if data.contact.email and data.contact.website_url %} | {% endif %}
-      {% if data.contact.website_url %}{{ data.contact.website_url }}{% endif %}
-    </p>
-    {% endif %}
+    <div class="hero-frame" style="height:100%;">
+      {% if prepared.hero_image or data.hero_image %}
+      <img class="img-cover" src="{{ prepared.hero_image or data.hero_image }}" alt=""/>
+      {% endif %}
+    </div>
+  </div>
+
+  {% elif theme_layout == 'framed' %}
+  <div style="padding-top:10mm;">
+    <div style="padding:0 12mm;display:flex;justify-content:space-between;align-items:center;margin-bottom:4mm;">
+      <div>
+        {% if logo_data_uri %}<img src="{{ logo_data_uri }}" alt="" style="max-height:12mm;max-width:36mm;object-fit:contain;"/>{% endif %}
+        {% if data.tenant and data.tenant.brand_name %}<p class="label-caps" style="margin-top:2mm;">{{ data.tenant.brand_name }}</p>{% endif %}
+      </div>
+      {% if data.location_text %}<span class="chip">{{ data.location_text }}</span>{% endif %}
+    </div>
+    <div class="cover-framed hero-frame">
+      {% if prepared.hero_image or data.hero_image %}
+      <img class="img-cover" src="{{ prepared.hero_image or data.hero_image }}" alt=""/>
+      {% endif %}
+    </div>
+    <div class="cover-bottom-block">
+      <h1 class="display" style="font-size:22pt;line-height:1.2;margin-bottom:3mm;">{{ prepared.headline or prepared.name or data.name }}</h1>
+      {% if prepared.subtitle or data.property_type %}
+      <p style="opacity:0.9;margin-bottom:4mm;font-size:10pt;">{{ prepared.subtitle or data.property_type }}</p>
+      {% endif %}
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <div>
+          {% if data.price_display %}<p style="font-family:var(--serif);font-size:14pt;">{{ data.price_display }}</p>{% endif %}
+          {% if prepared.date_label %}<p style="font-size:8pt;opacity:0.8;margin-top:1mm;">{{ prepared.date_label }}</p>{% endif %}
+        </div>
+        {% if prepared.cta_url %}
+        <a class="btn-cta" href="{{ prepared.cta_url }}">{{ prepared.cta_text or labels.book_viewing }}</a>
+        {% else %}
+        <span class="btn-cta">{{ prepared.cta_text or labels.book_viewing }}</span>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+
+  {% elif theme_layout == 'split' %}
+  <div class="red-stripe"></div>
+  <div class="cover-split" style="height:calc(100% - 4mm);">
+    <div class="hero-frame" style="height:100%;">
+      {% if prepared.hero_image or data.hero_image %}
+      <img class="img-cover" src="{{ prepared.hero_image or data.hero_image }}" alt=""/>
+      {% endif %}
+    </div>
+    <div class="cover-copy" style="background:var(--paper);display:flex;flex-direction:column;justify-content:center;">
+      {% if logo_data_uri %}<img src="{{ logo_data_uri }}" alt="" style="max-height:12mm;max-width:36mm;object-fit:contain;margin-bottom:5mm;"/>{% endif %}
+      {% if data.tenant and data.tenant.brand_name %}<p class="label-caps" style="margin-bottom:3mm;">{{ data.tenant.brand_name }}</p>{% endif %}
+      {% if data.location_text %}<span class="chip" style="margin-bottom:5mm;">{{ data.location_text }}</span>{% endif %}
+      <h1 class="display" style="font-size:24pt;line-height:1.15;margin-bottom:4mm;">{{ prepared.headline or prepared.name or data.name }}</h1>
+      {% if prepared.subtitle or data.property_type %}<p class="body-text" style="margin-bottom:5mm;">{{ prepared.subtitle or data.property_type }}</p>{% endif %}
+      {% if data.price_display %}<div class="price-card" style="margin-bottom:6mm;"><div class="price-value">{{ data.price_display }}</div></div>{% endif %}
+      {% if prepared.date_label %}<p class="label-caps" style="margin-bottom:6mm;">{{ prepared.date_label }}</p>{% endif %}
+      <span class="btn-cta">{{ prepared.cta_text or labels.book_viewing }}</span>
+    </div>
+  </div>
+
+  {% elif theme_layout == 'cards' %}
+  <div style="padding:10mm 12mm 0;">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:5mm;">
+      <div style="display:flex;align-items:center;gap:4mm;">
+        {% if logo_data_uri %}<img src="{{ logo_data_uri }}" alt="" style="max-height:12mm;max-width:36mm;object-fit:contain;"/>{% endif %}
+        {% if data.tenant and data.tenant.brand_name %}<p class="label-caps">{{ data.tenant.brand_name }}</p>{% endif %}
+      </div>
+      {% if data.location_text %}<span class="chip">{{ data.location_text }}</span>{% endif %}
+    </div>
+    <div class="hero-frame" style="height:130mm;">
+      {% if prepared.hero_image or data.hero_image %}
+      <img class="img-cover frame-img" src="{{ prepared.hero_image or data.hero_image }}" alt=""/>
+      {% endif %}
+    </div>
+    <div class="cover-brown-card">
+      <h1 class="display" style="font-size:22pt;line-height:1.15;margin-bottom:3mm;">{{ prepared.headline or prepared.name or data.name }}</h1>
+      {% if prepared.subtitle or data.property_type %}<p style="opacity:0.85;margin-bottom:4mm;">{{ prepared.subtitle or data.property_type }}</p>{% endif %}
+      {% if data.price_display %}<p style="font-family:var(--serif);font-size:14pt;margin-bottom:4mm;">{{ data.price_display }}</p>{% endif %}
+      <span class="btn-cta">{{ prepared.cta_text or labels.book_viewing }}</span>
+    </div>
+  </div>
+
+  {% elif theme_layout == 'arch' %}
+  <div style="padding:14mm 14mm 0;text-align:center;color:#fff;">
+    {% if logo_data_uri %}<img src="{{ logo_data_uri }}" alt="" style="max-height:12mm;max-width:36mm;object-fit:contain;margin:0 auto 4mm;display:block;filter:brightness(10);"/>{% endif %}
+    {% if data.tenant and data.tenant.brand_name %}<p class="label-caps" style="color:rgba(255,255,255,0.7);margin-bottom:6mm;">{{ data.tenant.brand_name }}</p>{% endif %}
+    <div class="hero-frame" style="height:110mm;margin:0 auto 8mm;max-width:150mm;">
+      {% if prepared.hero_image or data.hero_image %}
+      <img class="img-cover frame-img arch" src="{{ prepared.hero_image or data.hero_image }}" alt=""/>
+      {% endif %}
+    </div>
+    {% if data.location_text %}<span class="chip" style="margin-bottom:4mm;">{{ data.location_text }}</span>{% endif %}
+    <h1 class="display" style="font-size:26pt;line-height:1.15;margin:4mm 0;color:var(--accent);">{{ prepared.headline or prepared.name or data.name }}</h1>
+    <div class="gold-rule" style="margin-left:auto;margin-right:auto;"></div>
+    {% if data.price_display %}<p style="font-family:var(--serif);font-size:14pt;margin:4mm 0;">{{ data.price_display }}</p>{% endif %}
+    <span class="btn-cta" style="margin-top:4mm;">{{ prepared.cta_text or labels.book_viewing }}</span>
+  </div>
+
+  {% elif theme_layout == 'pastel' %}
+  <div style="padding:12mm;">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6mm;">
+      <div>{% if logo_data_uri %}<img src="{{ logo_data_uri }}" alt="" style="max-height:12mm;max-width:36mm;object-fit:contain;"/>{% endif %}
+      {% if data.tenant and data.tenant.brand_name %}<p class="label-caps" style="margin-top:2mm;">{{ data.tenant.brand_name }}</p>{% endif %}</div>
+      {% if data.location_text %}<span class="chip">{{ data.location_text }}</span>{% endif %}
+    </div>
+    <div class="hero-frame" style="height:115mm;margin-bottom:6mm;">
+      {% if prepared.hero_image or data.hero_image %}
+      <img class="img-cover frame-img" src="{{ prepared.hero_image or data.hero_image }}" alt=""/>
+      {% endif %}
+    </div>
+    <h1 class="display" style="font-size:24pt;line-height:1.15;margin-bottom:3mm;">{{ prepared.headline or prepared.name or data.name }}</h1>
+    {% if prepared.subtitle or data.property_type %}<p class="body-text" style="margin-bottom:4mm;">{{ prepared.subtitle or data.property_type }}</p>{% endif %}
+    {% if data.price_display %}<div class="price-card pastel-price" style="margin-bottom:5mm;"><div class="price-value">{{ data.price_display }}</div></div>{% endif %}
+    <span class="btn-cta">{{ prepared.cta_text or labels.book_viewing }}</span>
+  </div>
+
+  {% else %}
+  {# Theme 1 band (default) #}
+  <div style="padding:10mm 12mm 0;">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6mm;">
+      <div style="display:flex;align-items:center;gap:4mm;">
+        {% if logo_data_uri %}<img src="{{ logo_data_uri }}" alt="" style="max-height:12mm;max-width:36mm;object-fit:contain;filter:brightness(10);"/>{% endif %}
+        {% if data.tenant and data.tenant.brand_name %}<p class="label-caps" style="color:rgba(255,255,255,0.75);">{{ data.tenant.brand_name }}</p>{% endif %}
+      </div>
+      {% if data.location_text %}<span class="chip">{{ data.location_text }}</span>{% endif %}
+    </div>
+    <div class="cover-band hero-frame" style="margin-bottom:8mm;">
+      {% if prepared.hero_image or data.hero_image %}
+      <img class="img-cover" src="{{ prepared.hero_image or data.hero_image }}" alt=""/>
+      {% endif %}
+    </div>
+    <h1 class="display" style="font-size:26pt;line-height:1.15;margin-bottom:3mm;color:#fff;">{{ prepared.headline or prepared.name or data.name }}</h1>
+    {% if prepared.subtitle or data.property_type %}<p class="body-text" style="color:rgba(255,255,255,0.85);margin-bottom:4mm;">{{ prepared.subtitle or data.property_type }}</p>{% endif %}
+    <div style="display:flex;justify-content:space-between;align-items:flex-end;margin-top:6mm;">
+      <div>
+        {% if data.price_display %}<p style="font-family:var(--serif);font-size:15pt;color:#fff;">{{ data.price_display }}</p>{% endif %}
+        {% if prepared.date_label %}<p class="label-caps" style="color:rgba(255,255,255,0.55);margin-top:2mm;">{{ prepared.date_label }}</p>{% endif %}
+      </div>
+      <span class="btn-cta">{{ prepared.cta_text or labels.book_viewing }}</span>
+    </div>
+  </div>
+  {% endif %}
+
+  <div class="page-chrome-footer" style="position:absolute;bottom:0;left:0;right:0;{% if theme_layout in ['band','sidebar','arch'] or theme_layout is none %}color:rgba(255,255,255,0.65);{% endif %}">
+    <span></span>
+    <span class="page-num">{{ page_label }}</span>
   </div>
 </section>
-<style>
-  .cover-page {
-    background: var(--sage);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
-  .cover-inner {
-    text-align: center;
-    padding: 28mm 24mm;
-    width: 100%;
-  }
-  .cover-the {
-    margin-bottom: 10mm;
-    color: var(--ink);
-  }
-  .cover-title {
-    font-size: 36pt;
-    line-height: 1.15;
-    text-transform: uppercase;
-    max-width: 220mm;
-    margin: 0 auto;
-    word-wrap: break-word;
-  }
-  .cover-location {
-    font-family: var(--serif);
-    font-size: 12pt;
-    color: var(--ink);
-    letter-spacing: 0.06em;
-  }
-  .cover-brand {
-    margin-top: 28mm;
-  }
-  .cover-logo {
-    max-height: 18mm;
-    max-width: 42mm;
-    object-fit: contain;
-    margin: 0 auto 4mm;
-    display: block;
-  }
-  .cover-brand-name {
-    font-family: var(--sans);
-    font-size: 9pt;
-    letter-spacing: 0.18em;
-    text-transform: uppercase;
-    color: var(--ink);
-  }
-  .cover-footer {
-    position: absolute;
-    bottom: 10mm;
-    left: 0;
-    right: 0;
-    text-align: center;
-    font-size: 7.5pt;
-    color: var(--muted);
-    letter-spacing: 0.04em;
-  }
-</style>

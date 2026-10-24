@@ -137,19 +137,62 @@ def _load_property_for_brochure(db: Session, property_id: str) -> Any:
     raise ValueError(f"Property with ID '{property_id}' not found.")
 
 
+def _write_brochure_copy_timed(data: Any, language: str) -> tuple:
+    """
+    Run write_brochure_copy in a daemon thread with a hard timeout.
+    Returns (copy_or_None, reason, elapsed_ms).
+    """
+    import threading
+    import time as _time
+    from app.core.config import settings as _settings
+    from app.services.brochure_copywriter import write_brochure_copy
+
+    timeout = float(getattr(_settings, "BROCHURE_LLM_TIMEOUT", 25) or 25)
+    box: Dict[str, Any] = {"copy": None, "reason": "ok", "error": None}
+
+    def _run() -> None:
+        try:
+            box["copy"] = write_brochure_copy(data, language)
+            if box["copy"] is None:
+                box["reason"] = "fallback"
+        except Exception as e:
+            box["error"] = e
+            box["reason"] = f"error:{type(e).__name__}"
+
+    t0 = _time.perf_counter()
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+    thread.join(timeout=timeout)
+    elapsed_ms = int((_time.perf_counter() - t0) * 1000)
+    if thread.is_alive():
+        return None, "timeout", elapsed_ms
+    if box["error"] is not None:
+        return None, box["reason"], elapsed_ms
+    if box["copy"] is None:
+        return None, box["reason"] if box["reason"] != "ok" else "fallback", elapsed_ms
+    return box["copy"], "sonnet", elapsed_ms
+
+
 def _generate_html_brochure_pdf(
     db: Session,
     property_id: str,
     site_origin: Optional[str] = None,
     language: str = "en",
     client_name: Optional[str] = None,
+    template: Optional[int] = None,
+    session_key: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Deterministic Jinja2 + WeasyPrint brochure. No LLM.
-    Returns the same dict shape as the ReportLab path.
+    Jinja2 + WeasyPrint brochure. Facts stay deterministic; optional Claude copy
+    fills prose slots. Visual theme is picked at random (or forced via template).
     """
+    import secrets
+
+    from app.core.config import settings as _settings
+    from app.services.brochure_copywriter import ai_footer_note
     from app.services.brochure_data import load_brochure_data
     from app.services.brochure_renderer import render_brochure_pdf
+    from app.services.brochure_themes import get_theme, pick_theme, remember_theme
 
     tenant = resolve_tenant(site_origin)
     lang = language if language in ["en", "pl", "th"] else "en"
@@ -159,11 +202,51 @@ def _generate_html_brochure_pdf(
         site_origin=site_origin,
         language=lang,
     )
-    pdf_bytes = render_brochure_pdf(data, use_cache=True)
 
-    safe_brand = re.sub(r"[^A-Za-z0-9_\-]+", "_", tenant.brand_name or "Brand")
-    safe_name = re.sub(r"[^A-Za-z0-9_\-]+", "_", str(data.property_id or property_id))
-    out_filename = f"{safe_brand}_Property_{safe_name}_brochure.pdf"
+    mem_key = session_key or f"prop:{data.property_id or property_id}"
+    theme_id = pick_theme(requested=template, session_key=mem_key)
+    theme_spec = get_theme(theme_id)
+    logger.info(
+        "brochure_theme id=%s name=%s property=%s lang=%s",
+        theme_id,
+        theme_spec.name,
+        data.property_id or property_id,
+        lang,
+    )
+
+    copy = None
+    reason = "disabled"
+    elapsed_ms = 0
+    try:
+        copy, reason, elapsed_ms = _write_brochure_copy_timed(data, lang)
+    except Exception as e:
+        reason = f"error:{type(e).__name__}"
+        copy = None
+    source = "sonnet" if copy is not None else "fallback"
+    logger.info(
+        "brochure_copy source=%s reason=%s ms=%s",
+        source,
+        reason,
+        elapsed_ms,
+    )
+
+    ai_footer = None
+    if copy is not None and bool(getattr(_settings, "BROCHURE_LLM_FOOTER_NOTE", True)):
+        ai_footer = ai_footer_note(lang)
+
+    # Always render fresh for unique filenames; disk cache still keyed by theme+hash inside renderer
+    pdf_bytes = render_brochure_pdf(
+        data,
+        use_cache=(copy is None),
+        copy=copy,
+        ai_footer=ai_footer,
+        theme_id=theme_id,
+    )
+    remember_theme(mem_key, theme_id)
+
+    safe_pid = re.sub(r"[^A-Za-z0-9_\-]+", "_", str(data.property_id or property_id))[:60]
+    rand = secrets.token_hex(3)
+    out_filename = f"brochure_{safe_pid}_t{theme_id}_{rand}.pdf"
 
     saved_url = default_storage_provider.save_file(
         filename=out_filename,
@@ -187,6 +270,9 @@ def _generate_html_brochure_pdf(
         "pdf_bytes": pdf_bytes,
         "file_size_bytes": len(pdf_bytes),
         "engine": "html",
+        "brochure_copy_source": source,
+        "theme_id": theme_id,
+        "theme_name": theme_spec.name,
     }
 
 
@@ -196,12 +282,15 @@ def generate_single_property_brochure_pdf(
     site_origin: Optional[str] = None,
     language: str = "en",
     client_name: Optional[str] = None,
-    template_variant: int = 2
+    template_variant: int = 2,
+    template: Optional[int] = None,
+    session_key: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Builds a property brochure PDF.
     Engine selected by settings.BROCHURE_ENGINE ("reportlab" default, or "html").
     On HTML failure, falls back to ReportLab when BROCHURE_FALLBACK_TO_REPORTLAB is true.
+    `template` selects HTML visual theme 1–7 when using the HTML engine.
     """
     from app.core.config import settings as _settings
 
@@ -214,6 +303,8 @@ def generate_single_property_brochure_pdf(
                 site_origin=site_origin,
                 language=language,
                 client_name=client_name,
+                template=template,
+                session_key=session_key,
             )
         except Exception as html_err:
             logger.error(
@@ -401,6 +492,13 @@ def _generate_reportlab_brochure_pdf(
     can.setFont(FONT_REGULAR, 9)
     can.setFillColor(colors.HexColor("#475569"))
     desc_clean = re.sub(r'<[^>]+>', '', prop.description or "")
+    try:
+        from app.services.instruction_store import get_active_instruction_block
+        _style_notes = get_active_instruction_block("brochure_pdf", site_origin, lang)
+    except Exception:
+        _style_notes = ""
+    if _style_notes:
+        desc_clean = (desc_clean + " " + _style_notes).strip()
     if not desc_clean:
         desc_clean = (
             "Ekskluzywna nieruchomość zaprojektowana z dbałością o najwyższe standardy wykończenia, łącząca tropikalny klimat z nowoczesną architekturą."

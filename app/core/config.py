@@ -141,6 +141,15 @@ class Settings(BaseSettings):
     BROCHURE_ENGINE: str = "reportlab"
     # If HTML engine fails, fall back to ReportLab when true
     BROCHURE_FALLBACK_TO_REPORTLAB: bool = True
+    # User-side brochure copy (Claude) — does not change OPENAI_MODEL / public chat
+    BROCHURE_LLM_ENABLED: bool = True
+    BROCHURE_LLM_MODEL: str = "claude-sonnet-5-5"
+    BROCHURE_LLM_TIMEOUT: float = 25.0
+    BROCHURE_LLM_MAX_TOKENS: int = 1200
+    BROCHURE_LLM_CACHE_TTL_HOURS: float = 24.0
+    BROCHURE_LLM_FOOTER_NOTE: bool = True
+    # Force a brochure visual theme 1–7 (None = random). Also overridable via BROCHURE_FORCE_THEME env.
+    BROCHURE_FORCE_THEME: Optional[int] = None
 
     # Persistent property context (reference memory separate from live facts)
     PROPERTY_CONTEXT_RECENT_MESSAGES: int = 20
@@ -167,6 +176,17 @@ class Settings(BaseSettings):
     SESSION_EXPIRE_HOURS: int = 168  # 7 days session validity
     # Admin batch/CRUD undo snapshots in Firestore admin_batch_operations
     ADMIN_SNAPSHOT_RETENTION_DAYS: int = 6
+
+    # Public property-page import (admin chatbot). Empty allow-list means any public domain.
+    INGEST_ALLOWED_DOMAINS: str = ""
+    INGEST_BLOCKED_DOMAINS: str = ""
+    INGEST_IGNORE_ROBOTS: bool = False
+    INGEST_MAX_BYTES: int = 3_000_000
+    INGEST_TIMEOUT_SEC: float = 10.0
+    INGEST_MAX_URLS_PER_HOUR: int = 10
+
+    # Super-admin instruction store. "user" is the public bot's Firestore project.
+    INSTRUCTIONS_FIRESTORE_TARGET: str = "user"
 
     # Google Workspace Integrations (OAuth2, Maps, SMTP)
     GOOGLE_CLIENT_ID: str = ""
@@ -388,6 +408,27 @@ def log_config_warnings() -> None:
         logger.debug("Could not evaluate report storage mode at startup: %s", e)
 
 
+def _csv_setting(name: str) -> list:
+    raw = getattr(settings, name, "") or ""
+    if isinstance(raw, (list, tuple)):
+        return [str(part).strip().lower() for part in raw if str(part).strip()]
+    return [part.strip().lower() for part in str(raw).split(",") if part.strip()]
+
+
+def _instruction_status() -> Dict[str, Any]:
+    try:
+        from app.services.instruction_store import instruction_config_status
+        return instruction_config_status()
+    except Exception:
+        return {
+            "instruction_store": "firestore",
+            "firestore_target": getattr(settings, "INSTRUCTIONS_FIRESTORE_TARGET", "user") or "user",
+            "cache_ttl_seconds": 60,
+            "active_count": {},
+            "last_error": None,
+        }
+
+
 def get_admin_config_status() -> Dict[str, Any]:
     """
     Labels/booleans only for admin system health. Never includes secrets or credentialed URLs.
@@ -421,4 +462,11 @@ def get_admin_config_status() -> Dict[str, Any]:
         "google_redirect_host": redirect_host,
         "database_configured": _database_url_is_configured(settings.DATABASE_URL),
         "report_storage": report_storage_label,
+        "ingest_allowed_domains": _csv_setting("INGEST_ALLOWED_DOMAINS"),
+        "ingest_blocked_domains": _csv_setting("INGEST_BLOCKED_DOMAINS"),
+        "ingest_ignore_robots": bool(getattr(settings, "INGEST_IGNORE_ROBOTS", False)),
+        "ingest_max_bytes": int(getattr(settings, "INGEST_MAX_BYTES", 3_000_000) or 3_000_000),
+        "ingest_timeout_sec": float(getattr(settings, "INGEST_TIMEOUT_SEC", 10.0) or 10.0),
+        "ingest_max_urls_per_hour": int(getattr(settings, "INGEST_MAX_URLS_PER_HOUR", 10) or 10),
+        **_instruction_status(),
     }

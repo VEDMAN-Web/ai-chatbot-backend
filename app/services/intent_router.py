@@ -98,6 +98,7 @@ _FUZZY_LOCATION_STOPWORDS = frozenset({
     "condo", "property", "properties", "budget", "under", "more", "other", "any",
     "something", "else", "instead", "like", "dont", "not", "in", "at", "on",
     "near", "around", "about", "how", "what", "where", "who", "can", "could", "would",
+    "new", "newest", "latest", "free", "current", "chat", "previous", "earlier", "shown",
 })
 
 
@@ -829,6 +830,20 @@ def _pl_ordinal_index(target_raw: str) -> Optional[int]:
     return None
 
 
+def _is_brochure_search_phrase(text: str) -> bool:
+    """True when the captured 'name' is a search description, not a project title."""
+    t = (text or "").strip().lower()
+    if not t:
+        return False
+    if re.search(
+        r"\b(?:listings?|properties|under|over|below|above|budget|cheaper|anything|everything)\b",
+        t,
+    ):
+        return True
+    if t.startswith("all ") and len(t.split()) >= 3:
+        return True
+    return False
+
 
 def detect_deterministic_intent(
     message: str,
@@ -1014,7 +1029,12 @@ def detect_deterministic_intent(
                     )
                     if named:
                         prop_name = named.group(1).strip(" .,?!")
-                        prop_id = prop_name  # resolve via Firestore/SQL by name
+                        # "brochure for all Phuket listings under 10M" is a search, not a name
+                        if _is_brochure_search_phrase(prop_name):
+                            prop_id = None
+                            prop_name = None
+                        else:
+                            prop_id = prop_name  # resolve via Firestore/SQL by name
                     elif len(last_result_ids) == 1:
                         prop_id = last_result_ids[0]
                     elif state.get("selected_property_ids"):
@@ -1808,14 +1828,21 @@ def _extract_search_filters_deterministic_impl(message: str) -> Dict[str, Any]:
     if "sea view" in msg_low or "widok na morze" in msg_low or "วิวทะเล" in msg_low:
         filters["sea_view"] = True
 
-    return filters
-_SORT_ASC_RE = re.compile(r"\b(?:cheapest|lowest[- ]priced?|lowest price|most affordable|least expensive|najta[nń]sz\w*|najmniej drog\w*)\b|ถูกที่สุด|ราคาต่ำสุด", re.I)
+    from app.services.conversation_controls import sanitize_extracted_filters
+    return sanitize_extracted_filters(message, filters)
+_SORT_ASC_RE = re.compile(
+    r"\b(?:cheapest|lowest[- ]priced?|lowest price|most affordable|least expensive|very cheap|"
+    r"free properties|free listings|najta[nń]sz\w*|najmniej drog\w*)\b|ถูกที่สุด|ราคาต่ำสุด",
+    re.I,
+)
 _SORT_DESC_RE = re.compile(r"\b(?:most expensive|priciest|highest[- ]priced?|highest price|najdro[zż]sz\w*)\b|แพงที่สุด|ราคาสูงสุด", re.I)
 
 
 def detect_price_sort(message: str) -> Optional[str]:
     """'asc' for 'cheapest / most affordable', 'desc' for 'most expensive'. Otherwise None (relevance order)."""
     msg = message or ""
+    if re.search(r"freehold", msg, re.I) and not re.search(r"\b(cheapest|lowest price|very cheap)\b", msg, re.I):
+        return None
     if _SORT_ASC_RE.search(msg) and not _SORT_DESC_RE.search(msg):
         return "asc"
     if _SORT_DESC_RE.search(msg) and not _SORT_ASC_RE.search(msg):

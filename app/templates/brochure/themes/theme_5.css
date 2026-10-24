@@ -1,0 +1,5 @@
+/* Theme 5 - Forest + gold */
+body.theme-5 .cover-page { background: var(--bg); color: #fff; }
+body.theme-5 .cover-page h1 { color: var(--accent); }
+body.theme-5 .gold-rule { width: 28mm; height: 1.5px; background: var(--accent); margin: 4mm 0; }
+body.theme-5 .price-card { border-top: 3px solid var(--accent); }

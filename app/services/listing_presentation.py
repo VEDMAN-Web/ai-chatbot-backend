@@ -368,6 +368,10 @@ def clean_highlights_for_display(
 
 def pool_display_label(prop: Optional[Dict[str, Any]], language: str = "en") -> Optional[str]:
     """Return Private pool / Shared pool / Pool, or None if no pool data."""
+    from app.services.conversation_controls import normalize_pool_label
+    conflict = normalize_pool_label(prop if isinstance(prop, dict) else None)
+    if conflict:
+        return conflict
     facts = collect_property_amenities(prop or {})
     if facts.get("pool_private") and facts["pool_private"].present:
         if language == "pl":

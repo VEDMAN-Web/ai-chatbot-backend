@@ -1,0 +1,158 @@
+<section class="page overview-page" data-section="overview">
+  <span class="section-marker">SECTION:overview</span>
+  <div class="page-top-bar"></div>
+  <div class="page-chrome-header">
+    <span class="hdr-left">{{ header_text }}</span>
+  </div>
+  <div class="page-chrome-body" style="position:relative;">
+    <p class="label-caps" style="margin-bottom:3mm;">{{ labels.overview }}</p>
+
+    {% if theme_layout == 'split' %}
+    <div class="overview-split" style="height:230mm;">
+      <div class="hero-frame" style="height:100%;">
+        {% if prepared.hero_image or data.hero_image %}
+        <img class="img-cover" src="{{ prepared.hero_image or data.hero_image }}" alt=""/>
+        {% endif %}
+      </div>
+      <div class="ov-copy">
+        {% if data.price_display %}
+        <div class="price-card" style="margin-bottom:4mm;">
+          <div class="price-label">{{ labels.price_from }}</div>
+          <div class="price-value">{{ data.price_display }}</div>
+        </div>
+        {% endif %}
+        {% if prepared.fact_cells %}
+        <div class="fact-strip" style="margin-bottom:4mm;">
+          {% for cell in prepared.fact_cells %}
+          <div class="fact-cell">
+            <div class="fact-label">{{ cell.label }}</div>
+            <div class="fact-value">{{ cell.value }}</div>
+          </div>
+          {% endfor %}
+        </div>
+        {% endif %}
+        {% if prepared.description %}
+        <p class="body-text max-prose">{{ prepared.description }}</p>
+        {% endif %}
+        <div style="margin-top:5mm;"><span class="btn-cta">{{ prepared.cta_text or labels.book_viewing }}</span></div>
+      </div>
+    </div>
+
+    {% elif theme_layout == 'sidebar' %}
+    <div class="overview-layout">
+      <div class="hero-frame" style="height:120mm;">
+        {% if prepared.hero_image or data.hero_image %}
+        <img class="img-cover" src="{{ prepared.hero_image or data.hero_image }}" alt=""/>
+        {% endif %}
+      </div>
+      <div>
+        {% if data.price_display %}
+        <div class="price-card" style="margin-bottom:4mm;display:block;">
+          <div class="price-label">{{ labels.price_from }}</div>
+          <div class="price-value">{{ data.price_display }}</div>
+        </div>
+        {% endif %}
+        <div class="fact-stack">
+          {% for cell in prepared.fact_cells or [] %}
+          <div class="fact-cell">
+            <div class="fact-label">{{ cell.label }}</div>
+            <div class="fact-value">{{ cell.value }}</div>
+          </div>
+          {% endfor %}
+        </div>
+      </div>
+    </div>
+    {% if prepared.description %}<p class="body-text max-prose" style="margin-top:5mm;">{{ prepared.description }}</p>{% endif %}
+    <div style="margin-top:5mm;"><span class="btn-cta">{{ prepared.cta_text or labels.book_viewing }}</span></div>
+
+    {% elif theme_layout == 'pastel' %}
+    <div class="hero-frame" style="height:95mm;margin-bottom:5mm;">
+      {% if prepared.hero_image or data.hero_image %}
+      <img class="img-cover frame-img" src="{{ prepared.hero_image or data.hero_image }}" alt=""/>
+      {% endif %}
+    </div>
+    {% if data.price_display %}
+    <div class="price-card pastel-price" style="margin-bottom:4mm;">
+      <div class="price-label">{{ labels.price_from }}</div>
+      <div class="price-value">{{ data.price_display }}</div>
+    </div>
+    {% endif %}
+    {% if prepared.fact_cells %}
+    <div class="pastel-facts" style="margin-bottom:4mm;">
+      <div class="fact-strip" style="border:none;">
+        {% for cell in prepared.fact_cells %}
+        <div class="fact-cell" style="border:none;">
+          <div class="fact-label">{{ cell.label }}</div>
+          <div class="fact-value">{{ cell.value }}</div>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+    {% endif %}
+    {% if prepared.description %}
+    <div class="pastel-desc body-text max-prose" style="margin-bottom:4mm;">{{ prepared.description }}</div>
+    {% endif %}
+    <span class="btn-cta">{{ prepared.cta_text or labels.book_viewing }}</span>
+
+    {% elif theme_layout == 'framed' %}
+    <div style="position:relative;">
+      <div class="hero-frame" style="height:110mm;border:2px solid var(--accent);overflow:hidden;">
+        {% if prepared.hero_image or data.hero_image %}
+        <img class="img-cover" src="{{ prepared.hero_image or data.hero_image }}" alt=""/>
+        {% endif %}
+      </div>
+      {% if data.price_display %}
+      <div class="price-card floating-price">
+        <div class="price-label">{{ labels.price_from }}</div>
+        <div class="price-value">{{ data.price_display }}</div>
+      </div>
+      {% endif %}
+    </div>
+    {% if prepared.fact_cells %}
+    <div class="fact-strip" style="margin:5mm 0;">
+      {% for cell in prepared.fact_cells %}
+      <div class="fact-cell">
+        <div class="fact-label">{{ cell.label }}</div>
+        <div class="fact-value">{{ cell.value }}</div>
+      </div>
+      {% endfor %}
+    </div>
+    {% endif %}
+    {% if prepared.description %}<p class="body-text max-prose">{{ prepared.description }}</p>{% endif %}
+    {% if prepared.notice %}<div class="notice-bar" style="margin-top:4mm;">{{ prepared.notice }}</div>{% endif %}
+    <div style="margin-top:5mm;"><span class="btn-cta">{{ prepared.cta_text or labels.book_viewing }}</span></div>
+
+    {% else %}
+    <div class="hero-frame" style="height:105mm;margin-bottom:5mm;">
+      {% if prepared.hero_image or data.hero_image %}
+      <img class="img-cover frame-img{% if theme_shape == 'arch' %} arch{% endif %}" src="{{ prepared.hero_image or data.hero_image }}" alt=""/>
+      {% endif %}
+    </div>
+    {% if data.price_display %}
+    <div class="price-card" style="margin-bottom:4mm;">
+      <div class="price-label">{{ labels.price_from }}</div>
+      <div class="price-value">{{ data.price_display }}</div>
+    </div>
+    {% endif %}
+    {% if prepared.fact_cells %}
+    <div class="fact-strip" style="margin-bottom:4mm;">
+      {% for cell in prepared.fact_cells %}
+      <div class="fact-cell">
+        <div class="fact-label">{{ cell.label }}</div>
+        <div class="fact-value">{{ cell.value }}</div>
+      </div>
+      {% endfor %}
+    </div>
+    {% endif %}
+    {% if prepared.description %}<p class="body-text max-prose" style="margin-bottom:4mm;">{{ prepared.description }}</p>{% endif %}
+    {% if theme_layout == 'cards' and prepared.notice %}
+    <div class="notice-bar" style="margin-bottom:4mm;">{{ prepared.notice }}</div>
+    {% endif %}
+    <span class="btn-cta">{{ prepared.cta_text or labels.book_viewing }}</span>
+    {% endif %}
+  </div>
+  <div class="page-chrome-footer">
+    <span></span>
+    <span class="page-num">{{ page_label }}</span>
+  </div>
+</section>
