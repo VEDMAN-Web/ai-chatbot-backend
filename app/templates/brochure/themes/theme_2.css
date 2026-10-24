@@ -1,0 +1,12 @@
+/* Theme 2 - Black + gold */
+body.theme-2 .cover-page { background: var(--bg); color: #fff; }
+body.theme-2 .cover-page h1 { color: var(--accent); }
+body.theme-2 .cover-split { display: grid; grid-template-columns: 48% 52%; height: 100%; }
+body.theme-2 .cover-copy { padding: 18mm 12mm; }
+body.theme-2 .inner-sidebar-title {
+  writing-mode: vertical-rl; transform: rotate(180deg);
+  font-family: var(--serif); font-size: 14pt; letter-spacing: 0.2em;
+  color: var(--ink); padding: 8mm 4mm;
+}
+body.theme-2 .overview-layout { display: grid; grid-template-columns: 46% 54%; gap: 6mm; }
+body.theme-2 .fact-stack .fact-cell { border: 1px solid rgba(0,0,0,0.15); margin-bottom: 3mm; border-right: none; }

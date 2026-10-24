@@ -1149,6 +1149,86 @@ from app.api.v1.auth import (
     UpdateUserRequest
 )
 
+@router.get("/system/config-status", tags=["Admin System"])
+def system_config_status(
+    staff: AuthenticatedStaff = Depends(require_admin_or_super_admin),
+):
+    """
+    Non-secret config labels for ops UI. Never returns API keys or secrets.
+    """
+    llm_on = bool(getattr(settings, "BROCHURE_LLM_ENABLED", False)) and bool(
+        (getattr(settings, "ANTHROPIC_API_KEY", None) or "").strip()
+    )
+    return {
+        "brochure_llm": "on" if llm_on else "off",
+        "brochure_llm_enabled": bool(getattr(settings, "BROCHURE_LLM_ENABLED", False)),
+        "brochure_llm_model": str(
+            getattr(settings, "BROCHURE_LLM_MODEL", "claude-sonnet-5-5") or "claude-sonnet-5-5"
+        ),
+        "brochure_engine": str(getattr(settings, "BROCHURE_ENGINE", "reportlab") or "reportlab"),
+        "openai_model_label": str(getattr(settings, "OPENAI_MODEL", "") or ""),
+    }
+
+
+@router.get("/brochure/preview", tags=["Admin Brochure"])
+def admin_brochure_preview(
+    property_id: str = Query(..., description="Property / project id"),
+    template: int = Query(1, ge=1, le=7, description="Visual theme 1–7"),
+    lang: str = Query("en", description="Language: en, pl, or th"),
+    site_origin: Optional[str] = Query(None, description="Tenant site origin"),
+    staff: AuthenticatedStaff = Depends(require_admin_or_employee),
+    db: Session = Depends(get_db),
+):
+    """
+    Admin-only design preview: return a single-property brochure PDF for a chosen theme.
+    Does not change the public chat / offer dossier paths.
+    """
+    from fastapi.responses import Response
+
+    from app.services.brochure_data import load_brochure_data
+    from app.services.brochure_renderer import render_brochure_pdf
+    from app.services.brochure_themes import get_theme
+
+    language = lang if lang in ("en", "pl", "th") else "en"
+    try:
+        data = load_brochure_data(
+            db=db,
+            property_id=property_id,
+            site_origin=site_origin,
+            language=language,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+
+    theme = get_theme(template)
+    logger.info(
+        "brochure_theme id=%s name=%s property=%s lang=%s preview=1",
+        theme.id,
+        theme.name,
+        data.property_id or property_id,
+        language,
+    )
+    try:
+        # Deterministic preview (no Sonnet) for fast design review
+        pdf_bytes = render_brochure_pdf(
+            data,
+            use_cache=False,
+            copy=None,
+            ai_footer=None,
+            theme_id=template,
+        )
+    except Exception as e:
+        logger.error("Admin brochure preview failed: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail="Brochure preview failed") from e
+
+    filename = f"brochure_preview_{property_id}_t{template}.pdf"
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'inline; filename="{filename}"'},
+    )
+
+
 router.get("/users", response_model=List[AdminUserDirectoryItem], tags=["Admin Directory Management"])(list_admin_users_with_google_status)
 router.post("/users", response_model=AdminUserDirectoryItem, status_code=status.HTTP_201_CREATED, tags=["Admin Directory Management"])(create_admin_user)
 router.get("/users/{user_id}", response_model=AdminUserDirectoryItem, tags=["Admin Directory Management"])(get_admin_user_details)

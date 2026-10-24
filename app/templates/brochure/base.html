@@ -140,5 +140,10 @@
   {% set prepared = page.prepared %}
   {% include page.template %}
 {% endfor %}
+{% if ai_footer %}
+<div class="ai-footer-note" style="position:fixed;bottom:3mm;left:0;right:0;text-align:center;font-size:6pt;color:var(--muted);letter-spacing:0.02em;">
+  {{ ai_footer }}
+</div>
+{% endif %}
 </body>
 </html>

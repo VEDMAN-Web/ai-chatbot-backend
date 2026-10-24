@@ -545,11 +545,18 @@ def download_property_brochure(
     site_origin: Optional[str] = Query(None, description="Tenant site origin domain"),
     session_id: Optional[str] = Query(None, description="Optional session ID to link lead to conversation"),
     format: Optional[str] = Query(None, description="Optional response format ('json' returns download link)"),
+    template: Optional[int] = Query(
+        None,
+        ge=1,
+        le=7,
+        description="Optional brochure visual theme 1–7 (default: random)",
+    ),
+    lang: Optional[str] = Query(None, description="Brochure language: en, pl, or th"),
     db: Session = Depends(get_db)
 ):
     """
-    Public endpoint — generates a branded 8-page luxury presentation property brochure PDF on-demand.
-    Modeled after Varsovia_Estate_Dariusz_Tajlandia 2.pdf.
+    Public endpoint — generates a branded single-property brochure PDF on-demand.
+    HTML engine picks one of 7 visual themes at random unless ?template=N is set.
     Stores buying signal against the conversation for staff follow-up.
     """
     try:
@@ -557,7 +564,14 @@ def download_property_brochure(
         from app.core.tenant import resolve_tenant
         tenant = resolve_tenant(site_origin)
 
-        res = generate_single_property_brochure_pdf(db=db, property_id=property_id, site_origin=site_origin)
+        res = generate_single_property_brochure_pdf(
+            db=db,
+            property_id=property_id,
+            site_origin=site_origin,
+            language=(lang or "en"),
+            template=template,
+            session_key=session_id or property_id,
+        )
         pdf_bytes = res["pdf_bytes"]
         file_url = res.get("file_url") or res.get("download_url")
 

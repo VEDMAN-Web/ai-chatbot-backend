@@ -73,7 +73,7 @@ TENANT_THEMES: Dict[str, Dict[str, str]] = {
 SECTION_LABELS = {
     "en": {
         "the": "THE",
-        "highlights_title": "Location highlights",
+        "highlights_title": "Key highlights",
         "facilities_label": "Premium facilities",
         "at_a_glance": "At a glance",
         "nearby_title": "Nearby places",
@@ -82,10 +82,27 @@ SECTION_LABELS = {
         "master_plan_title": "Master plan",
         "contact_note": "Start a new conversation with our advisory team",
         "beds": "beds",
+        "baths": "baths",
+        "units_label": "units",
+        "book_viewing": "Book a viewing",
+        "introduction": "Introduction",
+        "overview": "Property overview",
+        "gallery": "Gallery",
+        "location_title": "Location",
+        "investment_title": "Investment",
+        "investment_heading": "Investment & rental information",
+        "next_steps": "Next steps",
+        "how_to_proceed": "How to proceed",
+        "price_from": "Price from",
+        "default_next_steps": [
+            "Share your budget, timeline, and preferred ownership type.",
+            "We confirm availability and arrange a viewing or video tour.",
+            "Review contracts with our advisors before reservation.",
+        ],
     },
     "pl": {
         "the": "THE",
-        "highlights_title": "Atuty lokalizacji",
+        "highlights_title": "Najważniejsze atuty",
         "facilities_label": "Udogodnienia",
         "at_a_glance": "W skrócie",
         "nearby_title": "W pobliżu",
@@ -94,10 +111,27 @@ SECTION_LABELS = {
         "master_plan_title": "Plan zagospodarowania",
         "contact_note": "Skontaktuj się z naszym zespołem doradców",
         "beds": "sypialnie",
+        "baths": "łazienki",
+        "units_label": "lokale",
+        "book_viewing": "Umów oględziny",
+        "introduction": "Wprowadzenie",
+        "overview": "Przegląd nieruchomości",
+        "gallery": "Galeria",
+        "location_title": "Lokalizacja",
+        "investment_title": "Inwestycja",
+        "investment_heading": "Informacje inwestycyjne i wynajem",
+        "next_steps": "Kolejne kroki",
+        "how_to_proceed": "Jak zacząć",
+        "price_from": "Cena od",
+        "default_next_steps": [
+            "Podaj budżet, termin oraz preferowaną formę nabycia.",
+            "Potwierdzamy dostępność i umawiamy oględziny lub wideoturę.",
+            "Sprawdzamy umowę z doradcą przed rezerwacją.",
+        ],
     },
     "th": {
         "the": "THE",
-        "highlights_title": "จุดเด่นทำเล",
+        "highlights_title": "จุดเด่นสำคัญ",
         "facilities_label": "สิ่งอำนวยความสะดวก",
         "at_a_glance": "สรุปข้อมูล",
         "nearby_title": "สถานที่ใกล้เคียง",
@@ -106,6 +140,23 @@ SECTION_LABELS = {
         "master_plan_title": "แผนผังโครงการ",
         "contact_note": "ติดต่อทีมที่ปรึกษาของเรา",
         "beds": "ห้องนอน",
+        "baths": "ห้องน้ำ",
+        "units_label": "ยูนิต",
+        "book_viewing": "นัดชมโครงการ",
+        "introduction": "บทนำ",
+        "overview": "ภาพรวมโครงการ",
+        "gallery": "แกลเลอรี",
+        "location_title": "ทำเล",
+        "investment_title": "การลงทุน",
+        "investment_heading": "ข้อมูลการลงทุนและค่าเช่า",
+        "next_steps": "ขั้นตอนถัดไป",
+        "how_to_proceed": "วิธีดำเนินการ",
+        "price_from": "ราคาเริ่มต้น",
+        "default_next_steps": [
+            "แจ้งงบประมาณ ระยะเวลา และรูปแบบกรรมสิทธิ์ที่ต้องการ",
+            "เรายืนยันความพร้อมและนัดชมโครงการหรือทัวร์วิดีโอ",
+            "ตรวจสัญญาพร้อมที่ปรึกษาก่อนจอง",
+        ],
     },
 }
 
@@ -258,29 +309,28 @@ def _embed_images_in_data(data: BrochureData, theme: Dict[str, str]) -> Brochure
     return BrochureData.model_validate(payload)
 
 
-def brochure_cache_key(data: BrochureData) -> str:
-    """Stable cache key from identity + content hash (changes when data changes)."""
-    tenant_key = ""
-    if data.tenant:
-        tenant_key = data.tenant.site_origin or data.tenant.domain or ""
-    identity = {
-        "property_id": data.property_id,
-        "language": data.language,
-        "tenant": tenant_key,
-        "updated_at": data.updated_at,
-    }
-    # Hash of brochure-relevant fields (exclude volatile logo file paths that are local)
+def brochure_content_hash(data: BrochureData) -> str:
+    """Stable content digest for cache keys (excludes local logo paths)."""
     content = data.model_dump()
     if isinstance(content.get("tenant"), dict):
         content["tenant"].pop("logo_path", None)
     if isinstance(content.get("contact"), dict):
         content["contact"].pop("logo_path", None)
     blob = json.dumps(content, sort_keys=True, default=str)
-    digest = hashlib.sha256(blob.encode("utf-8")).hexdigest()[:20]
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:20]
+
+
+def brochure_cache_key(data: BrochureData, theme_id: Optional[int] = None) -> str:
+    """Cache key: property + language + theme + data hash."""
+    tenant_key = ""
+    if data.tenant:
+        tenant_key = data.tenant.site_origin or data.tenant.domain or ""
+    digest = brochure_content_hash(data)
     safe_pid = re.sub(r"[^a-zA-Z0-9_-]+", "-", str(data.property_id or "property"))[:80]
     lang = data.language or "en"
     tenant_slug = re.sub(r"[^a-zA-Z0-9_-]+", "-", tenant_key)[:40] or "tenant"
-    return f"brochure_{safe_pid}_{lang}_{tenant_slug}_{digest}.pdf"
+    theme_part = f"t{theme_id}" if theme_id else "t0"
+    return f"brochure_{safe_pid}_{lang}_{theme_part}_{tenant_slug}_{digest}.pdf"
 
 
 def _cache_dir() -> Path:
@@ -292,8 +342,10 @@ def _cache_dir() -> Path:
     return path
 
 
-def get_cached_brochure_pdf(data: BrochureData) -> Optional[Tuple[bytes, str]]:
-    key = brochure_cache_key(data)
+def get_cached_brochure_pdf(
+    data: BrochureData, theme_id: Optional[int] = None
+) -> Optional[Tuple[bytes, str]]:
+    key = brochure_cache_key(data, theme_id=theme_id)
     path = _cache_dir() / key
     if path.is_file():
         try:
@@ -303,26 +355,35 @@ def get_cached_brochure_pdf(data: BrochureData) -> Optional[Tuple[bytes, str]]:
     return None
 
 
-def store_cached_brochure_pdf(data: BrochureData, pdf_bytes: bytes) -> str:
-    key = brochure_cache_key(data)
+def store_cached_brochure_pdf(
+    data: BrochureData, pdf_bytes: bytes, theme_id: Optional[int] = None
+) -> str:
+    key = brochure_cache_key(data, theme_id=theme_id)
     path = _cache_dir() / key
     path.write_bytes(pdf_bytes)
     return str(path)
 
 
-def build_brochure_html(data: BrochureData, *, embed_remote_images: bool = True) -> str:
-    """Render the full HTML document for the brochure (useful for tests)."""
-    site_origin = None
-    if data.tenant:
-        site_origin = data.tenant.site_origin or data.tenant.domain
-    theme = _theme_for_origin(site_origin)
-    lang = (data.language or "en").lower()
-    if lang not in SECTION_LABELS:
-        lang = "en"
-    labels = SECTION_LABELS[lang]
+def _read_theme_css(filename: str) -> str:
+    path = TEMPLATES_DIR / "themes" / filename
+    if path.is_file():
+        return path.read_text(encoding="utf-8")
+    return ""
 
-    working = _embed_images_in_data(data, theme) if embed_remote_images else data
 
+def _header_text(data: BrochureData) -> str:
+    brand = ""
+    if data.tenant and data.tenant.brand_name:
+        brand = str(data.tenant.brand_name).strip()
+    elif data.contact and data.contact.brand_name:
+        brand = str(data.contact.brand_name).strip()
+    loc = (data.location_text or "").strip()
+    if brand and loc:
+        return f"{brand} | {loc}"
+    return brand or loc or "Brochure"
+
+
+def _resolve_logo_uri(working: BrochureData) -> Optional[str]:
     logo_path = None
     if working.tenant and working.tenant.logo_path:
         logo_path = working.tenant.logo_path
@@ -331,38 +392,65 @@ def build_brochure_html(data: BrochureData, *, embed_remote_images: bool = True)
     if not logo_path:
         try:
             from app.services.offer_dossier_service import resolve_logo_path
+
             brand = working.tenant.brand_name if working.tenant else None
             logo_path = resolve_logo_path(brand)
         except Exception:
             logo_path = None
-    logo_uri = _file_to_data_uri(logo_path, "image/png")
+    return _file_to_data_uri(logo_path, "image/png")
 
-    plan = build_brochure_page_plan(working)
+
+def build_brochure_html(
+    data: BrochureData,
+    *,
+    embed_remote_images: bool = True,
+    copy: Optional[Any] = None,
+    ai_footer: Optional[str] = None,
+    theme_id: Optional[int] = None,
+    use_legacy_base: bool = False,
+) -> str:
+    """Render the full HTML document for the brochure (useful for tests)."""
+    from app.services.brochure_themes import THEMES, get_theme, pick_theme
+
+    site_origin = None
+    if data.tenant:
+        site_origin = data.tenant.site_origin or data.tenant.domain
+
+    tid = theme_id if theme_id in THEMES else pick_theme(requested=theme_id)
+    spec = get_theme(tid)
+    # Merge theme palette; keep tenant accents only as soft fallbacks unused by themed CSS
+    tenant_fallback = _theme_for_origin(site_origin)
+    theme = {**tenant_fallback, **spec.css_vars()}
+
+    lang = (data.language or "en").lower()
+    if lang not in SECTION_LABELS:
+        lang = "en"
+    labels = SECTION_LABELS[lang]
+
+    working = _embed_images_in_data(data, theme) if embed_remote_images else data
+    logo_uri = _resolve_logo_uri(working)
+    header = _header_text(working)
+
+    plan = build_brochure_page_plan(working, copy=copy)
+    total = len(plan) or 1
     pages: List[Dict[str, Any]] = []
-    for page in plan:
-        # Re-derive prepared context for template convenience
+    for idx, page in enumerate(plan):
         from app.services.brochure_sections import BROCHURE_SECTIONS
 
         section = next((s for s in BROCHURE_SECTIONS if s.id == page["section_id"]), None)
-        prepared = prepare_section_context(section, working) if section else {}
+        prepared = prepare_section_context(section, working, copy=copy) if section else {}
         prepared = {k: v for k, v in prepared.items() if k not in ("section_id", "data", "property")}
-        # Facilities pagination: override list from page plan
-        if page.get("section_id") == "facilities" and page.get("facilities") is not None:
-            prepared["facilities"] = page["facilities"]
-        # Side image for highlights from gallery
-        if page.get("section_id") == "highlights" and working.images:
-            prepared["side_image"] = working.images[min(1, len(working.images) - 1)]
-        if page.get("section_id") == "facilities" and working.images:
-            prepared["facility_images"] = working.images[:3]
-        if page.get("section_id") in ("intro", "at_a_glance") and working.hero_image:
-            prepared["hero_image"] = working.hero_image
+        if page.get("section_id") in ("intro", "overview") and working.hero_image:
+            prepared.setdefault("hero_image", working.hero_image)
+        page_num = idx + 1
         pages.append(
             {
                 "template": page["template"],
                 "section_id": page["section_id"],
-                "page_index": page.get("page_index", 0),
-                "page_count": page.get("page_count", 1),
-                "facilities": page.get("facilities"),
+                "page_index": idx,
+                "page_count": total,
+                "page_label": f"{page_num:02d} / {total}",
+                "header_text": header,
                 "prepared": prepared,
             }
         )
@@ -371,7 +459,24 @@ def build_brochure_html(data: BrochureData, *, embed_remote_images: bool = True)
         loader=FileSystemLoader(str(TEMPLATES_DIR)),
         autoescape=select_autoescape(["html", "xml"]),
     )
-    template = env.get_template("base.html")
+
+    if use_legacy_base:
+        template = env.get_template("base.html")
+        return template.render(
+            data=working,
+            pages=pages,
+            theme=theme,
+            labels=labels,
+            font_urls=_font_file_urls(),
+            logo_data_uri=logo_uri,
+            copy=copy,
+            ai_footer=ai_footer,
+            theme_id=tid,
+            theme_shape=spec.shape,
+            theme_layout=spec.layout,
+        )
+
+    template = env.get_template("themes/themed_base.html")
     return template.render(
         data=working,
         pages=pages,
@@ -379,21 +484,17 @@ def build_brochure_html(data: BrochureData, *, embed_remote_images: bool = True)
         labels=labels,
         font_urls=_font_file_urls(),
         logo_data_uri=logo_uri,
+        copy=copy,
+        ai_footer=ai_footer,
+        theme_id=tid,
+        theme_shape=spec.shape,
+        theme_layout=spec.layout,
+        theme_common_css=_read_theme_css("theme_common.css"),
+        theme_css=_read_theme_css(spec.css_file),
     )
 
 
-def render_brochure_pdf(data: BrochureData, *, use_cache: bool = True) -> bytes:
-    """
-    Render BrochureData to PDF bytes via WeasyPrint.
-    Uses disk cache keyed by property/language/tenant/content hash.
-    """
-    if use_cache:
-        cached = get_cached_brochure_pdf(data)
-        if cached:
-            return cached[0]
-
-    html_str = build_brochure_html(data, embed_remote_images=True)
-
+def _weasyprint_html_to_pdf(html_str: str) -> bytes:
     try:
         from weasyprint import HTML
     except Exception as e:
@@ -403,7 +504,6 @@ def render_brochure_pdf(data: BrochureData, *, use_cache: bool = True) -> bytes:
             "installed via the project Dockerfile."
         ) from e
 
-    # base_url so relative font file:// URIs resolve
     base_url = TEMPLATES_DIR.as_uri() + "/"
     try:
         pdf_bytes = HTML(string=html_str, base_url=base_url).write_pdf()
@@ -411,22 +511,98 @@ def render_brochure_pdf(data: BrochureData, *, use_cache: bool = True) -> bytes:
         raise RuntimeError(f"WeasyPrint failed to render brochure PDF: {e}") from e
     if not pdf_bytes or not pdf_bytes.startswith(b"%PDF"):
         raise RuntimeError("WeasyPrint produced an empty or invalid PDF")
-
-    # Soft size check: if huge, still return but log
-    if len(pdf_bytes) > 8_000_000:
-        logger.warning(
-            "Brochure PDF exceeds 8MB target (%s bytes) for %s",
-            len(pdf_bytes),
-            data.property_id,
-        )
-
-    if use_cache:
-        try:
-            store_cached_brochure_pdf(data, pdf_bytes)
-        except Exception as e:
-            logger.warning("Failed to cache brochure PDF: %s", e)
-
     return pdf_bytes
+
+
+def render_brochure_pdf(
+    data: BrochureData,
+    *,
+    use_cache: bool = True,
+    copy: Optional[Any] = None,
+    ai_footer: Optional[str] = None,
+    theme_id: Optional[int] = None,
+) -> bytes:
+    """
+    Render BrochureData to PDF bytes via WeasyPrint.
+    Cache keyed by property / language / theme / data hash.
+    On theme template failure, tries other themes then legacy base.html.
+    """
+    from app.services.brochure_themes import THEMES, fallback_theme_order, pick_theme
+
+    tid = theme_id if theme_id in THEMES else pick_theme(requested=theme_id)
+
+    if use_cache and copy is None:
+        cached = get_cached_brochure_pdf(data, theme_id=tid)
+        if cached:
+            return cached[0]
+
+    tried: List[int] = []
+    last_err: Optional[Exception] = None
+    candidates = [tid] + [t for t in fallback_theme_order(tid) if t != tid]
+
+    for candidate in candidates:
+        tried.append(candidate)
+        try:
+            html_str = build_brochure_html(
+                data,
+                embed_remote_images=True,
+                copy=copy,
+                ai_footer=ai_footer,
+                theme_id=candidate,
+            )
+            pdf_bytes = _weasyprint_html_to_pdf(html_str)
+            if len(pdf_bytes) > 8_000_000:
+                logger.warning(
+                    "Brochure PDF exceeds 8MB target (%s bytes) for %s theme=%s",
+                    len(pdf_bytes),
+                    data.property_id,
+                    candidate,
+                )
+            if use_cache and copy is None:
+                try:
+                    store_cached_brochure_pdf(data, pdf_bytes, theme_id=candidate)
+                except Exception as e:
+                    logger.warning("Failed to cache brochure PDF: %s", e)
+            if candidate != tid:
+                logger.warning(
+                    "brochure_theme_fallback from=%s to=%s property=%s",
+                    tid,
+                    candidate,
+                    data.property_id,
+                )
+            return pdf_bytes
+        except Exception as e:
+            last_err = e
+            logger.warning(
+                "Brochure theme %s failed for %s: %s",
+                candidate,
+                data.property_id,
+                e,
+            )
+
+    # Final fallback: legacy landscape base.html
+    try:
+        html_str = build_brochure_html(
+            data,
+            embed_remote_images=True,
+            copy=copy,
+            ai_footer=ai_footer,
+            theme_id=tid,
+            use_legacy_base=True,
+        )
+        pdf_bytes = _weasyprint_html_to_pdf(html_str)
+        logger.warning(
+            "brochure_theme_fallback to legacy base.html property=%s tried=%s",
+            data.property_id,
+            tried,
+        )
+        return pdf_bytes
+    except Exception as e:
+        last_err = e
+
+    raise RuntimeError(
+        f"All brochure themes failed for {data.property_id}: {last_err}"
+    ) from last_err
 
 
 def count_section_markers(html: str) -> Dict[str, int]:

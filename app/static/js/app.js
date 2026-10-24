@@ -61,7 +61,7 @@ const UI_STRINGS = {
     addListing: "Add Listing",
     batchOps: "Bulk File Ops (6D Undo)",
     activeFocus: "Active Focus:",
-    whatWeFetched: "What We Fetched",
+    whatWeFetched: "Matching properties",
     tryAsking: "Try asking me:",
     resetPreferences: "🔄 Reset Preferences",
     disclaimer: "Tajlandia AI can make mistakes. Check important information.",
@@ -99,7 +99,7 @@ const UI_STRINGS = {
     addListing: "Dodaj Ofertę",
     batchOps: "Operacje Masowe (6D Undo)",
     activeFocus: "Aktywne Filtry:",
-    whatWeFetched: "Co Pobrano",
+    whatWeFetched: "Pasujące oferty",
     tryAsking: "Przykładowe pytania:",
     resetPreferences: "🔄 Zresetuj Preferencje",
     disclaimer: "Tajlandia AI może popełniać błędy. Sprawdź ważne informacje.",
@@ -138,7 +138,7 @@ const UI_STRINGS = {
     addListing: "เพิ่มรายการ",
     batchOps: "จัดการไฟล์ชุดใหญ่ (ย้อนกลับได้ 6 วัน)",
     activeFocus: "เงื่อนไขที่เลือก:",
-    whatWeFetched: "ข้อมูลที่ดึงมา",
+    whatWeFetched: "รายการที่ตรงกัน",
     tryAsking: "ลองสอบถาม:",
     resetPreferences: "🔄 รีเซ็ตเงื่อนไข",
     disclaimer: "Tajlandia AI อาจมีข้อผิดพลาดได้ กรุณาตรวจสอบข้อมูลสำคัญอีกครั้ง",
@@ -905,7 +905,7 @@ async function appendAssistantResponse(data, animate = false) {
 
   // If in Public User mode and property results were returned, display inline AI focus pill showing what was fetched
   const hasProperties = data.type === 'property_cards' || (data.properties && data.properties.length > 0);
-  if (currentMode === 'public' && hasProperties && data.preferences && data.preferences.focus_summary && data.preferences.what_we_fetched && data.preferences.what_we_fetched.length > 0) {
+  if (currentMode === 'public' && hasProperties && data.preferences && data.preferences.focus_validated && data.preferences.focus_summary && data.preferences.what_we_fetched && data.preferences.what_we_fetched.length > 0) {
     const focusPill = document.createElement('div');
     focusPill.className = 'inline-assistant-focus';
     focusPill.onclick = () => openFocusDrawer();
@@ -913,7 +913,7 @@ async function appendAssistantResponse(data, animate = false) {
       <span class="inline-focus-icon">🎯</span>
       <span class="inline-focus-label">AI Focus:</span>
       <span class="inline-focus-text">${escapeHtml(data.preferences.focus_summary)}</span>
-      <span class="inline-focus-action">What We Fetched 📋</span>
+      <span class="inline-focus-action">Matching properties</span>
     `;
     bubble.appendChild(focusPill);
   }
@@ -1042,7 +1042,9 @@ async function appendAssistantResponse(data, animate = false) {
       const name = p.name || p.property_name || 'Thailand Luxury Property';
       const price = p.price || p.price_display || 'Price on request';
       const loc = p.location || p.district || 'Thailand';
-      const beds = p.bedrooms ? `${p.bedrooms} Beds` : 'Villa';
+      const beds = (p.bedrooms && !/^beds:/i.test(String(p.bedrooms)))
+        ? `${p.bedrooms} Beds`
+        : (p.property_type || 'Beds: on request');
       const area = p.area || '';
       const photoCount = (p.images && p.images.length) ? `${p.images.length} Photos` : 'Verified';
       const propId = p.property_id || '';

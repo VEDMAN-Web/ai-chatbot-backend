@@ -190,6 +190,8 @@ class BrochureData(BaseModel):
     master_plan: List[str] = Field(default_factory=list)
     contact: Optional[BrochureContact] = None
     updated_at: Optional[str] = None
+    # Verified investment / rental notes from listing (never invented)
+    investment_info: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -243,6 +245,32 @@ def resolve_localized(
 
 def _slug_key(raw: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", str(raw).strip().lower()).strip("_")
+
+
+def _investment_info_from_raw(src: Any, language: str) -> Optional[str]:
+    """Join verified investmentHighlights / rental yield fields; never invent."""
+    if not isinstance(src, dict):
+        return None
+    lang = _normalize_lang(language)
+    parts: List[str] = []
+    inv = src.get("investmentHighlights") or src.get("investment_highlights")
+    if isinstance(inv, dict):
+        pts = inv.get(lang) or inv.get("en") or inv.get("pl") or inv.get("th")
+        if isinstance(pts, list):
+            parts.extend(str(p).strip() for p in pts if p)
+        elif pts:
+            parts.append(str(pts).strip())
+    elif isinstance(inv, list):
+        parts.extend(str(p).strip() for p in inv if p)
+    elif inv:
+        parts.append(str(inv).strip())
+    for key in ("rentalYield", "rental_yield", "yield", "expectedYield", "roi"):
+        val = src.get(key)
+        if val in (None, "", [], {}):
+            continue
+        parts.append(str(val).strip())
+    text = " ".join(p for p in parts if p).strip()
+    return text or None
 
 
 def _title_case_slug(raw: str) -> str:
@@ -660,6 +688,7 @@ def _from_postgres(prop: Any, language: str, site_origin: Optional[str]) -> Broc
         master_plan=master_plan,
         contact=contact,
         updated_at=updated_at,
+        investment_info=_investment_info_from_raw(meta, lang),
     )
 
 
@@ -919,6 +948,7 @@ def _from_firestore_card(card: Dict[str, Any], language: str, site_origin: Optio
         master_plan=master_plan,
         contact=contact,
         updated_at=updated_at,
+        investment_info=_investment_info_from_raw(src, lang),
     )
 
 

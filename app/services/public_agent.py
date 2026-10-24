@@ -366,7 +366,13 @@ def format_property_card(p: Property) -> Dict[str, Any]:
         "property_type": p.property_type or "Residential",
         "price": clean_price,
         "price_numeric_min": float(p.price_numeric_min) if p.price_numeric_min else None,
-        "bedrooms": p.bedrooms_display or (str(p.bedrooms_min) if p.bedrooms_min else "N/A"),
+        "bedrooms": (
+            p.bedrooms_display
+            if p.bedrooms_display and str(p.bedrooms_display).strip().lower() not in {
+                "villa", "condo", "condominium", "apartment", "penthouse", "townhouse", "n/a", "na"
+            }
+            else (str(p.bedrooms_min) if p.bedrooms_min else "Beds: on request")
+        ),
         "area": re.sub(r"^0\s*[-–]\s*", "", p.area_display or "") if p.area_display else "N/A",
         "location": loc_display,
         "address": getattr(p, "address", None) or "",
@@ -595,7 +601,11 @@ def ensure_structured_response(
                 "location": c.get("location"),
                 "price": c.get("price"),
                 "bedrooms": c.get("bedrooms"),
-                "amenities": "Private Pool" if c.get("has_pool") else ""
+                "amenities": (
+                    "Pool (type to be confirmed)"
+                    if c.get("pool_conflict")
+                    else ("Pool" if c.get("has_pool") else "")
+                )
             })
 
     card_sections = []
@@ -633,8 +643,11 @@ def ensure_structured_response(
         amenities = item.get("amenities") or ""
         if matched_card:
             amenities_list = []
-            if matched_card.get("has_pool"):
-                amenities_list.append("Private Pool" if language == "en" else ("Prywatny basen" if language == "pl" else "สระว่ายน้ำส่วนตัว"))
+            if matched_card.get("has_pool") or matched_card.get("pool_type"):
+                from app.services.listing_presentation import pool_display_label
+                pool_lab = pool_display_label(matched_card, language=language)
+                if pool_lab:
+                    amenities_list.append(pool_lab)
             if matched_card.get("beach_access"):
                 amenities_list.append("Beach Access" if language == "en" else ("Dostęp do plaży" if language == "pl" else "ติดชายหาด"))
             if matched_card.get("highlights"):
@@ -1064,6 +1077,8 @@ def search_properties_unified(
                 limit=lim + len(exclude_set),
                 exclude_property_ids=list(exclude_set),
                 sort_by_price=getattr(params, "sort_by_price", None),
+                max_price_exclusive=bool(getattr(params, "max_price_exclusive", False)),
+                status=getattr(params, "status", None),
             )
             if fs_cards:
                 for c in fs_cards:
@@ -1185,6 +1200,11 @@ def extract_user_preferences(
         if cand_tool.lower() not in foreign_locs_set:
             new_loc = cand_tool
 
+    from app.services.conversation_controls import is_known_location, is_recall_shown, project_status_from_message
+
+    if is_recall_shown(user_message):
+        new_loc = None
+
     if not new_loc:
         loc_match = re.search(r"(?:in|at|near|around)\s+([a-zA-Z\s]+)", u_lower)
         if loc_match:
@@ -1192,8 +1212,14 @@ def extract_user_preferences(
             if candidate.lower() not in foreign_locs_set and candidate not in ["a", "the", "my", "our", "thailand", "pool", "private pool", "villa", "condo", "budget", "area", "terms"]:
                 words = candidate.split()[:2]
                 clean_cand = " ".join(words).title()
-                if len(clean_cand) > 2 and clean_cand.lower() not in foreign_locs_set:
+                if len(clean_cand) > 2 and clean_cand.lower() not in foreign_locs_set and is_known_location(clean_cand):
                     new_loc = clean_cand
+
+    if new_loc and not is_known_location(new_loc):
+        new_loc = None
+
+    if project_status_from_message(user_message):
+        prefs["project_status"] = project_status_from_message(user_message)
 
     if new_loc:
         prefs["location"] = new_loc
@@ -1254,7 +1280,13 @@ def extract_user_preferences(
         thb_val = int(val * 1_000_000)
         prefs["budget_max"] = thb_val
         usd_approx = int(thb_val / 35)
-        prefs["budget_display"] = f"Up to {val:g}M THB (~${usd_approx:,} USD)"
+        from app.services.conversation_controls import price_is_exclusive
+        if price_is_exclusive(user_message):
+            prefs["max_price_exclusive"] = True
+            prefs["budget_display"] = f"Under {val:g}M THB (~${usd_approx:,} USD)"
+        else:
+            prefs["max_price_exclusive"] = False
+            prefs["budget_display"] = f"Up to {val:g}M THB (~${usd_approx:,} USD)"
     elif tool_args.get("max_price"):
         max_p = float(tool_args["max_price"])
         prefs["budget_max"] = max_p
@@ -1337,10 +1369,15 @@ def extract_user_preferences(
     if prefs.get("purpose"):
         focus_parts.append(f"tailored for {prefs['purpose'].lower()}")
 
+    if prefs.get("location") and not is_known_location(str(prefs.get("location"))):
+        prefs.pop("location", None)
+        focus_parts = [part for part in focus_parts if not str(part).lower().startswith("in ")]
+
     if focus_parts:
         prefs["focus_summary"] = f"Focusing on {' '.join(focus_parts)}."
     else:
         prefs["focus_summary"] = "Ready to discover your ideal Thailand property."
+    prefs["focus_validated"] = bool(prefs.get("location") or prefs.get("budget_display") or prefs.get("bedrooms") or prefs.get("property_type"))
 
     return prefs
 
@@ -2799,6 +2836,9 @@ class PublicAgentService:
         """Ensures all public chatbot text is checked for legal safety/anti-pressure, cleaned of long dashes, and formatted professionally."""
         if not isinstance(resp, dict):
             return resp
+        from app.services.conversation_controls import (
+            strip_unverified_marketing, align_cards_to_named_text, bedrooms_display_value,
+        )
         if "text" in resp and isinstance(resp["text"], str):
             lang = resp.get("language", "en")
             if user_message:
@@ -2810,6 +2850,12 @@ class PublicAgentService:
             resp["text"] = redact_sensitive_output(
                 _professionalize_chat_text(clean_response_text(resp["text"]))
             )
+            verified_blob = " ".join(
+                str((p or {}).get("description") or "") + " " + str((p or {}).get("location") or "")
+                for p in (resp.get("properties") or [])
+                if isinstance(p, dict)
+            )
+            resp["text"] = strip_unverified_marketing(resp["text"], verified_blob)
             # Never leave literal None in visitor-facing text
             resp["text"] = re.sub(r"\bNone\b", "not listed in our verified data", resp["text"])
         if "preferences" in resp and isinstance(resp["preferences"], dict):
@@ -2822,6 +2868,8 @@ class PublicAgentService:
         if "properties" in resp and isinstance(resp["properties"], list):
             for p in resp["properties"]:
                 if isinstance(p, dict):
+                    if p.get("bedrooms") is not None:
+                        p["bedrooms"] = bedrooms_display_value(p.get("bedrooms"), p.get("property_type"))
                     if p.get("bedrooms") and isinstance(p["bedrooms"], str):
                         p["bedrooms"] = clean_response_text(p["bedrooms"])
                     if p.get("area") and isinstance(p["area"], str):
@@ -2834,6 +2882,8 @@ class PublicAgentService:
                     for _k in ("location", "city", "district", "province"):
                         if isinstance(p.get(_k), str) and p[_k]:
                             p[_k] = humanize_location(p[_k]) or p[_k]
+            if isinstance(resp.get("text"), str):
+                resp["properties"] = align_cards_to_named_text(resp["text"], resp["properties"])
         return resp
 
     def run_conversation(
@@ -3035,10 +3085,122 @@ class PublicAgentService:
             }
 
         # 3. Deterministic intent routing (0-token fast path for real estate commands)
+        from app.services.conversation_controls import (
+            is_full_reset, is_fresh_topic, is_foreign_ownership_question,
+            is_recall_shown, is_free_or_cheapest, message_starts_new_search, clear_filter_keys,
+            clear_stale_for_fresh_topic, slots_to_clear, cleared_confirmation,
+            foreign_ownership_reply,
+        )
+
+        if is_full_reset(user_message):
+            conversation.preferences = clear_filter_keys(conversation.preferences, {"all"})
+            reply_text = cleared_confirmation({"all"}, language=active_lang)
+            append_conversation_turn(
+                db=db, conversation=conversation, user_message=user_message,
+                assistant_message=reply_text, new_preferences=conversation.preferences,
+            )
+            return {
+                "type": "text", "text": reply_text, "properties": [],
+                "quick_replies": ["Explore luxury properties in Thailand", "Show villas in Phuket"],
+                "lead_captured": False, "preferences": conversation.preferences or {},
+                "session_id": conversation.session_id, "conversation_id": str(conversation.id),
+                "language": active_lang,
+            }
+
+        single_clears = slots_to_clear(user_message)
+        if single_clears and not is_fresh_topic(user_message):
+            conversation.preferences = clear_filter_keys(conversation.preferences, single_clears)
+            if single_clears <= {"location", "budget", "bedrooms", "pool", "property_type"} and not message_starts_new_search(user_message):
+                reply_text = cleared_confirmation(single_clears, language=active_lang)
+                append_conversation_turn(
+                    db=db, conversation=conversation, user_message=user_message,
+                    assistant_message=reply_text, new_preferences=conversation.preferences,
+                )
+                return {
+                    "type": "text", "text": reply_text, "properties": [],
+                    "quick_replies": self._generate_quick_replies(user_message, [], language=active_lang),
+                    "lead_captured": False, "preferences": conversation.preferences or {},
+                    "session_id": conversation.session_id, "conversation_id": str(conversation.id),
+                    "language": active_lang,
+                }
+
+        if is_fresh_topic(user_message):
+            conversation.preferences = clear_stale_for_fresh_topic(conversation.preferences)
+            pctx = clear_active_if_new_conversation(pctx, "")
+            try:
+                from app.services.property_context_service import PropertyContext
+                pctx = PropertyContext()
+                save_property_context(conversation, pctx)
+            except Exception:
+                save_property_context(conversation, pctx)
+
+        if is_foreign_ownership_question(user_message):
+            own = ptype = pname = None
+            try:
+                from app.services.property_context_service import fetch_authorized_property
+                if pctx.active_property_id:
+                    _obj, card, _src = fetch_authorized_property(db, pctx.active_property_id)
+                    if isinstance(card, dict):
+                        pname = card.get("name") or card.get("property_name")
+                        own = card.get("ownership") or card.get("ownership_type")
+                        ptype = card.get("property_type")
+            except Exception:
+                card = None
+            reply_text = foreign_ownership_reply(
+                user_message, property_name=pname, ownership=own, property_type=ptype,
+            )
+            append_conversation_turn(
+                db=db, conversation=conversation, user_message=user_message,
+                assistant_message=reply_text, new_preferences=conversation.preferences,
+            )
+            return {
+                "type": "text", "text": reply_text, "properties": [],
+                "quick_replies": ["Talk to an advisor", "Request the brochure"],
+                "lead_captured": False, "preferences": conversation.preferences or {},
+                "session_id": conversation.session_id, "conversation_id": str(conversation.id),
+                "language": active_lang,
+            }
+
+        if is_recall_shown(user_message):
+            prefs = conversation.preferences or {}
+            names = list(prefs.get("last_shown_names") or [])
+            ids = list(prefs.get("last_result_ids") or [])
+            if names:
+                lines = "\n".join(f"• {n}" for n in names)
+                reply_text = "Here are the properties already shown in this chat:\n" + lines
+            elif ids:
+                reply_text = "Here are the properties already shown in this chat:\n" + "\n".join(f"• {i}" for i in ids)
+            else:
+                reply_text = "I have not shown any properties in this chat yet."
+            append_conversation_turn(
+                db=db, conversation=conversation, user_message=user_message,
+                assistant_message=reply_text, new_preferences=prefs,
+            )
+            return {
+                "type": "text", "text": reply_text, "properties": [],
+                "quick_replies": self._generate_quick_replies(user_message, [], language=active_lang),
+                "lead_captured": False, "preferences": prefs,
+                "session_id": conversation.session_id, "conversation_id": str(conversation.id),
+                "language": active_lang,
+            }
+
         intent, parsed_args = detect_deterministic_intent(
             message=user_message,
             stored_state=conversation.preferences or {}
         )
+        if is_fresh_topic(user_message) and "how does buying" not in user_message.lower() and "how does property ownership" not in user_message.lower():
+            intent = IntentType.PROPERTY_SEARCH
+            parsed_args = extract_search_filters_deterministic(user_message) or {}
+        if is_free_or_cheapest(user_message) and intent in (
+            None, IntentType.GENERAL_QUESTION, IntentType.PROPERTY_DETAILS,
+        ):
+            intent = IntentType.PROPERTY_SEARCH
+            parsed_args = extract_search_filters_deterministic(user_message) or {}
+        if message_starts_new_search(user_message) and intent in (
+            None, IntentType.GENERAL_QUESTION, IntentType.PROPERTY_DETAILS, IntentType.REFINE_FILTER,
+        ):
+            intent = IntentType.PROPERTY_SEARCH
+            parsed_args = extract_search_filters_deterministic(user_message) or {}
 
         # Resolve follow-up references via persistent context when intent is weak/general
         resolved = resolve_property_reference(user_message, pctx, language=active_lang)
@@ -3102,15 +3264,20 @@ class PublicAgentService:
                 "language": active_lang,
             }
 
+        if message_starts_new_search(user_message):
+            resolved_property_id_blocked = True
+        else:
+            resolved_property_id_blocked = False
+
         if intent in (None, IntentType.GENERAL_QUESTION) or intent == IntentType.GENERAL_QUESTION:
-            if resolved.property_id and is_property_followup_message(user_message, pctx):
+            if resolved.property_id and is_property_followup_message(user_message, pctx) and not resolved_property_id_blocked:
                 intent = IntentType.PROPERTY_DETAILS
                 parsed_args = {
                     "property_id": resolved.property_id,
                     "focus_question": user_message,
                     "from_property_context": True,
                 }
-            elif resolved.property_id and not parsed_args.get("property_id"):
+            elif resolved.property_id and not parsed_args.get("property_id") and not resolved_property_id_blocked:
                 # Bare pronoun / fact follow-up with active context
                 if resolved.used_active_context or resolved.source in ("active", "ordinal", "name"):
                     intent = IntentType.PROPERTY_DETAILS
@@ -3736,6 +3903,8 @@ class PublicAgentService:
             stored_prefs["max_price"] = float(max_p)
         if filters_changed:
             stored_prefs["pagination_offset"] = 0
+        else:
+            stored_prefs["pagination_offset"] = int(args.get("offset") or 0)
         conversation.preferences = stored_prefs
 
         # Exclude already-shown only when filters did not change (pure "show more").
@@ -3924,6 +4093,11 @@ class PublicAgentService:
         language: str = "en"
     ) -> Dict[str, Any]:
         """Resolve property reference, then fetch CURRENT authorized facts (never chat memory)."""
+        from app.services.conversation_controls import message_starts_new_search
+        if message_starts_new_search(user_message):
+            return self._handle_property_search(
+                db, conversation, user_message, start_time, language=language
+            )
         from app.services.intent_router import (
             is_valid_property_name_candidate,
             message_looks_like_filter_search,
@@ -4261,6 +4435,10 @@ class PublicAgentService:
             def _amenity_reply(canon: str, yes_en: str, no_en: str, yes_pl: str, no_pl: str, yes_th: str, no_th: str) -> str:
                 """Short fact answer only — never dump the full spec block."""
                 ok = _amenity_yes_no(canon)
+                if ok and language not in ("th", "pl"):
+                    from app.services.conversation_controls import natural_amenity_yes
+                    noun = re.sub(r"(?i)^yes\s*[—-]\s*verified data confirms\s+(?:a |an )?", "", yes_en).strip(" .")
+                    return natural_amenity_yes(p_name, noun or "facility")
                 if language == "th":
                     body = yes_th if ok else no_th
                 elif language == "pl":
@@ -4959,16 +5137,37 @@ class PublicAgentService:
         p_name = prop.property_name if prop else prop_id
         pref_loc = f"{prop.district}, {prop.province}" if prop and prop.district else (prop.province if prop else None)
         pref_type = prop.property_type if prop else None
+        fs_found = False
         if not prop and getattr(settings, "ENABLE_FIRESTORE_SYNC", True):
             try:
                 from app.services.firestore_service import get_property_by_id_from_firestore
                 fs_card = get_property_by_id_from_firestore(str(prop_id).strip())
                 if fs_card:
+                    fs_found = True
                     p_name = fs_card.get("name") or p_name
                     pref_loc = fs_card.get("location") or pref_loc
                     pref_type = fs_card.get("property_type") or pref_type
             except Exception:
                 pass
+
+        # A search sentence ("all Phuket listings under 10M") is not a property id.
+        if prop is None and not fs_found:
+            reply_text = clarification_msgs.get(language, clarification_msgs["en"])
+            append_conversation_turn(
+                db=db, conversation=conversation, user_message=user_message, assistant_message=reply_text
+            )
+            return {
+                "type": "text",
+                "text": reply_text,
+                "properties": [],
+                "quick_replies": ["Show me properties in Phuket", "Search villas under 15M THB"],
+                "lead_captured": False,
+                "preferences": stored_prefs,
+                "session_id": conversation.session_id,
+                "conversation_id": str(conversation.id),
+                "language": language,
+                "brochure_property_id": None,
+            }
 
         # Generate 8-page luxury presentation brochure and upload to S3 / storage
         from app.services.brochure_service import generate_and_upload_brochure
@@ -5090,10 +5289,16 @@ class PublicAgentService:
         language: str = "en"
     ) -> Dict[str, Any]:
         """Applies filter refinement deterministically, queries DB/cache, and synthesizes response with compact context."""
+        from app.services.conversation_controls import slots_to_clear, clear_filter_keys, is_known_location
         stored_prefs = dict(conversation.preferences or {})
+        cleared = slots_to_clear(user_message)
+        if cleared:
+            stored_prefs = clear_filter_keys(stored_prefs, cleared)
         active_filters = dict(stored_prefs.get("active_filters", {}))
 
         for k, v in refinements.items():
+            if k == "location" and v and not is_known_location(str(v)):
+                continue
             active_filters[k] = v
             if k == "max_price":
                 stored_prefs["budget_max"] = v
@@ -5151,9 +5356,9 @@ class PublicAgentService:
                             "name": c["name"],
                             "price": c["price"],
                             "location": c["location"],
-                            "type": c["property_type"],
-                            "bedrooms": c["bedrooms"],
-                            "pool": c["has_pool"]
+                            "type": c.get("property_type"),
+                            "bedrooms": c.get("bedrooms"),
+                            "pool": c.get("has_pool")
                         }
                         for c in cards
                     ]
@@ -5326,13 +5531,24 @@ class PublicAgentService:
         language: str = "en"
     ) -> Dict[str, Any]:
         """Directly executes search in DB/cache, then synthesizes recommendations with a single compact LLM call without tool schemas."""
+        from app.services.conversation_controls import (
+            is_fresh_topic, clear_stale_for_fresh_topic, slots_to_clear, clear_filter_keys,
+            is_free_or_cheapest,
+        )
         stored_prefs = dict(conversation.preferences or {})
+        if is_fresh_topic(user_message):
+            stored_prefs = clear_stale_for_fresh_topic(stored_prefs)
+        cleared = slots_to_clear(user_message)
+        if cleared:
+            stored_prefs = clear_filter_keys(stored_prefs, cleared)
         extracted = extract_search_filters_deterministic(user_message)
         cache_hit = False
         search_relaxed_filter = None
         search_relaxed_alts = None
         loc = None
         p_type = None
+        seen_ids = []
+        catalogue_floor_facts = ""
         bedrooms = None
         min_bedrooms = None
         max_bedrooms = None
@@ -5397,6 +5613,10 @@ class PublicAgentService:
                 min_bedrooms = None
                 max_bedrooms = None
             max_p = Decimal(str(extracted["max_price"])) if extracted.get("max_price") else (Decimal(str(stored_prefs["budget_max"])) if stored_prefs.get("budget_max") else None)
+            if max_p is not None:
+                stored_prefs["budget_max"] = float(max_p)
+                if extracted.get("max_price") is not None:
+                    stored_prefs["max_price_exclusive"] = bool(extracted.get("max_price_exclusive"))
             has_pool = extracted.get("has_pool", stored_prefs.get("has_pool"))
             beach_access = extracted.get("beach_access", stored_prefs.get("beach_access"))
             required_amenities = list(
@@ -5431,10 +5651,16 @@ class PublicAgentService:
                 min_bedrooms=min_bedrooms,
                 max_bedrooms=max_bedrooms,
                 max_price=max_p,
+                max_price_exclusive=bool(
+                    extracted.get("max_price_exclusive")
+                    if extracted.get("max_price") is not None
+                    else stored_prefs.get("max_price_exclusive")
+                ),
+                status=extracted.get("status") or stored_prefs.get("project_status"),
                 has_pool=has_pool,
                 beach_access=beach_access,
                 required_amenities=required_amenities or None,
-                sort_by_price=detect_price_sort(user_message),
+                sort_by_price=extracted.get("sort_by_price") or detect_price_sort(user_message),
                 offset=0,
                 limit=4
             )
@@ -5607,6 +5833,10 @@ class PublicAgentService:
         if cards and not amenity_none_match:
             stored_prefs["seen_property_ids"] = list(set(seen_ids + [c["property_id"] for c in cards]))
             stored_prefs["last_result_ids"] = [c["property_id"] for c in cards]
+            stored_prefs["last_shown_names"] = [
+                str(c.get("name") or c.get("property_name") or c.get("property_id"))
+                for c in cards if c.get("property_id") or c.get("name")
+            ]
             # Persistent property context: ordinals for follow-ups; single-result => active focus
             _pctx = load_property_context(conversation)
             names = {
@@ -5657,12 +5887,19 @@ class PublicAgentService:
                     site_origin=conversation.site_origin,
                 )
             if is_sparse:
+                asked = set(stored_prefs.get("asked_slots") or [])
                 followups = build_consultative_followup_questions(
                     language=language,
                     location=loc,
                     budget=max_p,
                     bedrooms=bedrooms,
-                )[:2]
+                    asked_slots=asked,
+                )[:1]
+                if followups:
+                    slot = "budget" if "budget" in followups[0].lower() else (
+                        "bedrooms" if "bedroom" in followups[0].lower() else "location"
+                    )
+                    stored_prefs["asked_slots"] = list(asked | {slot})
                 if followups:
                     if language == "pl":
                         q_hdr = "Aby dopasować oferty precyzyjniej, powiedz proszę:"
@@ -5735,14 +5972,46 @@ class PublicAgentService:
                 elif bedrooms:
                     criteria_bits.append(f"{bedrooms} bed")
                 if max_p is not None:
-                    criteria_bits.append(f"budget <= {max_p}")
+                    if extracted.get("max_price_exclusive") or stored_prefs.get("max_price_exclusive"):
+                        criteria_bits.append(f"under {max_p}")
+                    else:
+                        criteria_bits.append(f"up to {max_p}")
+                lowest = None
+                cheap = []
+                # Quote the cheapest verified price inside the same place or type.
+                # Never run a fully unfiltered catalogue scan.
+                if loc or p_type:
+                    try:
+                        cheap = search_properties_unified(
+                            db,
+                            PropertyFilterParams(
+                                location=loc,
+                                property_type=p_type,
+                                sort_by_price="asc",
+                                limit=1,
+                            ),
+                            limit=1,
+                        ) or []
+                        if cheap:
+                            lowest = cheap[0].get("price_thb_min") or cheap[0].get("price_numeric_min")
+                    except Exception:
+                        lowest = None
+                        cheap = []
                 reply_text = build_no_match_reply(
                     language=language,
                     site_origin=getattr(conversation, "site_origin", None),
                     criteria_summary=", ".join(criteria_bits) if criteria_bits else (
                         user_message[:120] if user_message else None
                     ),
+                    lowest_price_thb=float(lowest) if lowest else None,
+                    previous_reply=stored_prefs.get("last_no_match_text"),
                 )
+                stored_prefs["last_no_match_text"] = reply_text
+                if lowest:
+                    catalogue_floor_facts = (
+                        f"Lowest verified catalogue price: {int(float(lowest))} THB. "
+                        "This figure is the minimum from verified listings and is not a match for the current filters."
+                    )
 
         updated_prefs = extract_user_preferences(
             user_message=user_message,
@@ -5763,6 +6032,13 @@ class PublicAgentService:
                 updated_prefs["max_bedrooms"] = search_filters["max_bedrooms"]
 
         reply_text = ensure_structured_response(reply_text, cards=cards, user_message=user_message, language=language)
+        if is_free_or_cheapest(user_message) and extracted.get("explain_not_free"):
+            preface = (
+                "Properties in our verified catalogue are not free. "
+                "Here are the lowest verified prices instead."
+            )
+            if preface not in (reply_text or ""):
+                reply_text = preface + "\n\n" + (reply_text or "")
         reply_text = ThaiPropertyLegalGuardrail.sanitize_response(
             user_message=user_message,
             response_text=reply_text,
@@ -5790,6 +6066,7 @@ class PublicAgentService:
             site_origin=getattr(conversation, "site_origin", None),
             applied_filters=search_filters if isinstance(search_filters, dict) else {},
             criteria_summary=", ".join(criteria_bits) if criteria_bits else None,
+            facts_text=catalogue_floor_facts,
         )
         if cards:
             self._clear_pending_name_candidates(conversation)
@@ -6811,7 +7088,16 @@ class PublicAgentService:
         properties: List[Dict[str, Any]],
         language: str = "en"
     ) -> List[str]:
-        return get_quick_replies(language=language, has_properties=bool(properties), user_message=user_msg)
+        loc = ""
+        if properties:
+            loc = str((properties[0] or {}).get("location") or "")
+        return get_quick_replies(
+            language=language,
+            has_properties=bool(properties),
+            user_message=user_msg,
+            location=loc,
+            focused=len(properties) == 1,
+        )
 
 
 public_agent = PublicAgentService()

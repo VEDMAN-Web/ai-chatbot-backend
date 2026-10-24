@@ -939,7 +939,9 @@ def search_properties_firestore(
     target: str = "user",
     limit: int = 6,
     exclude_property_ids: Optional[List[str]] = None,
-    sort_by_price: Optional[str] = None
+    sort_by_price: Optional[str] = None,
+    max_price_exclusive: bool = False,
+    status: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """
     Searches properties in Firestore projects collection using structured criteria.
@@ -1140,8 +1142,14 @@ def search_properties_firestore(
             continue
         if min_price is not None and p_thb < min_price:
             continue
-        if max_price is not None and p_thb > max_price:
+        if max_price is not None and max_price_exclusive and p_thb >= max_price:
             continue
+        if max_price is not None and not max_price_exclusive and p_thb > max_price:
+            continue
+        if status:
+            p_status = str(p.get("status") or p.get("project_status") or "").lower()
+            if p_status and status.lower().split()[0] not in p_status and status.lower() not in p_status:
+                continue
 
         # Amenities filter (legacy flags + canonical amenity keys)
         if has_pool is True and not p.get("has_pool"):

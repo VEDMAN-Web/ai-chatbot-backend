@@ -85,6 +85,7 @@ def startup_db_init():
         engines_to_verify = {admin_engine, user_engine}
         for eng in engines_to_verify:
             try:
+                Base.metadata.create_all(bind=eng)
                 with eng.begin() as conn:
                     conn.execute(sa.text("""
                         ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE;
@@ -97,7 +98,6 @@ def startup_db_init():
                         ALTER TABLE users ADD COLUMN IF NOT EXISTS preferences JSONB DEFAULT '{}'::jsonb;
                         ALTER TABLE properties ADD COLUMN IF NOT EXISTS websites JSONB DEFAULT '[]'::jsonb;
                     """))
-                Base.metadata.create_all(bind=eng)
             except Exception as eng_e:
                 print(f"Startup notice for engine {eng}: {eng_e}")
         print("FastAPI Startup: Verified all admin and user database tables and columns.")

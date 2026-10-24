@@ -27,7 +27,9 @@ def init_database():
                     except Exception as ve:
                         print(f"    [NOTICE] pgvector extension: {ve}")
 
-                # 1. Safe DDL synchronization for existing tables
+                # Create tables first. A fresh Railway Postgres has no users/properties
+                # rows, and ALTER before CREATE aborts the whole boot.
+                Base.metadata.create_all(bind=eng)
                 with eng.begin() as conn:
                     conn.execute(sa.text("""
                         ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE;
@@ -40,9 +42,6 @@ def init_database():
                         ALTER TABLE users ADD COLUMN IF NOT EXISTS preferences JSONB DEFAULT '{}'::jsonb;
                         ALTER TABLE properties ADD COLUMN IF NOT EXISTS websites JSONB DEFAULT '[]'::jsonb;
                     """))
-
-                # 2. Ensure all tables exist
-                Base.metadata.create_all(bind=eng)
             print("    [OK] All database tables successfully created for admin and user databases.")
 
             # 3. Upgrade alembic migrations to head
@@ -94,18 +93,12 @@ def main():
     else:
         print("--> [NOTICE] Skipping local PostgreSQL seeding (PostgreSQL not reachable or using remote Firestore).")
 
-    # Determine port from Railway environment
+    # Railway injects PORT and routes the public domain to that port only.
     raw_port = os.environ.get("PORT", "8000")
     try:
         port = int(raw_port)
     except ValueError:
         port = 8000
-
-    #print(f"--> 3. Starting Uvicorn server on host 0.0.0.0 port {port}...")
-    #uvicorn.run("app.main:app", host="0.0.0.0", port=port, proxy_headers=True, forwarded_allow_ips="*")
-
-    # Start Uvicorn on port 8000
-    port = 8000
 
     print(f"--> 3. Starting Uvicorn server on host 0.0.0.0 port {port}...")
     uvicorn.run(

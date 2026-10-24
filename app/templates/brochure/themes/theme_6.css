@@ -1,0 +1,7 @@
+/* Theme 6 - Green + brown cards */
+body.theme-6 .cover-page { background: var(--cream); }
+body.theme-6 .cover-brown-card {
+  background: var(--card); color: #fff; padding: 8mm; margin: -28mm 14mm 0; position: relative; z-index: 2;
+}
+body.theme-6 .cover-brown-card h1 { color: #fff; }
+body.theme-6 .notice-bar { background: var(--notice); color: #fff; }

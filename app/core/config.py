@@ -141,6 +141,15 @@ class Settings(BaseSettings):
     BROCHURE_ENGINE: str = "reportlab"
     # If HTML engine fails, fall back to ReportLab when true
     BROCHURE_FALLBACK_TO_REPORTLAB: bool = True
+    # User-side brochure copy (Claude) — does not change OPENAI_MODEL / public chat
+    BROCHURE_LLM_ENABLED: bool = True
+    BROCHURE_LLM_MODEL: str = "claude-sonnet-5-5"
+    BROCHURE_LLM_TIMEOUT: float = 25.0
+    BROCHURE_LLM_MAX_TOKENS: int = 1200
+    BROCHURE_LLM_CACHE_TTL_HOURS: float = 24.0
+    BROCHURE_LLM_FOOTER_NOTE: bool = True
+    # Force a brochure visual theme 1–7 (None = random). Also overridable via BROCHURE_FORCE_THEME env.
+    BROCHURE_FORCE_THEME: Optional[int] = None
 
     # Persistent property context (reference memory separate from live facts)
     PROPERTY_CONTEXT_RECENT_MESSAGES: int = 20
