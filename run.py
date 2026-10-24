@@ -27,22 +27,8 @@ def init_database():
                     except Exception as ve:
                         print(f"    [NOTICE] pgvector extension: {ve}")
 
-                # 1. Safe DDL synchronization for existing tables
-                with eng.begin() as conn:
-                    conn.execute(sa.text("""
-                        ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE;
-                        ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash VARCHAR(255);
-                        ALTER TABLE users ADD COLUMN IF NOT EXISTS google_email VARCHAR(255);
-                        ALTER TABLE users ADD COLUMN IF NOT EXISTS google_refresh_token TEXT;
-                        ALTER TABLE users ADD COLUMN IF NOT EXISTS allowed_websites JSONB DEFAULT '[]'::jsonb;
-                        ALTER TABLE users ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT 'active';
-                        ALTER TABLE users ADD COLUMN IF NOT EXISTS domain VARCHAR(100) DEFAULT 'tajlandia.com';
-                        ALTER TABLE users ADD COLUMN IF NOT EXISTS preferences JSONB DEFAULT '{}'::jsonb;
-                        ALTER TABLE properties ADD COLUMN IF NOT EXISTS websites JSONB DEFAULT '[]'::jsonb;
-                    """))
-
-                # 2. Ensure all tables exist
-                Base.metadata.create_all(bind=eng)
+            from app.db.schema_sync import ensure_postgres_schema
+            ensure_postgres_schema((admin_engine, user_engine))
             print("    [OK] All database tables successfully created for admin and user databases.")
 
             # 3. Upgrade alembic migrations to head
