@@ -89,9 +89,9 @@ class TestAdminDataCompletenessValidation:
     """Tests strict validation on property data so missing/null fields are never written to the database."""
 
     def test_validate_new_property_missing_core_fields(self):
-        # Missing price, bedrooms, and location
+        # Missing price and location. Bedrooms are optional on create.
         incomplete_payload = {
-            "property_id": "PROP-TEST-999",
+            "property_id": "prop-test-999",
             "mode": "create",
             "fields": {
                 "property_name": "Incomplete Villa",
@@ -106,7 +106,7 @@ class TestAdminDataCompletenessValidation:
         assert is_valid is False
         assert "location" in missing
         assert "price" in missing
-        assert "bedrooms" in missing
+        assert "bedrooms" not in missing
         assert "Without proper information I am not able to complete this task" in err_msg
 
     def test_validate_new_property_missing_property_id(self):
@@ -146,7 +146,7 @@ class TestAdminDataCompletenessValidation:
 
     def test_validate_complete_new_property_passes(self):
         complete_payload = {
-            "property_id": "PROP-PHK-VALID",
+            "property_id": "prop-phk-valid",
             "mode": "create",
             "fields": {
                 "property_name": "Villa Serenity Layan",
@@ -182,7 +182,7 @@ class TestAdminDataCompletenessValidation:
                 tool_name="create_or_update_listing",
                 action_payload=invalid_payload
             )
-        assert exc_info.value.status_code == 400
+        assert exc_info.value.status_code == 422
         assert "Without proper information I am not able to complete this task" in exc_info.value.detail
 
     def test_execute_update_listing_rejects_missing_fields(self, db_session):
@@ -195,7 +195,7 @@ class TestAdminDataCompletenessValidation:
         }
         with pytest.raises(HTTPException) as exc_info:
             _execute_update_listing(db_session, invalid_payload)
-        assert exc_info.value.status_code == 400
+        assert exc_info.value.status_code == 422
         assert "Without proper information I am not able to complete this task" in exc_info.value.detail
 
     def test_admin_tool_create_or_update_listing_returns_validation_failed(self, db_session):

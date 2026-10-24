@@ -717,7 +717,15 @@ def generate_offer_dossier_pdf(
             # Description snippet
             desc_short = safe_text(
                 p_item.description, "Luksusowa willa z basenem i prywatnym ogrodem."
-            )[:140]
+            )
+            try:
+                from app.services.instruction_store import get_active_instruction_block
+                _style_notes = get_active_instruction_block("offer_dossier", None, language)
+            except Exception:
+                _style_notes = ""
+            if _style_notes:
+                desc_short = (desc_short + " " + _style_notes).strip()
+            desc_short = desc_short[:140]
             _draw_text_box(can, desc_short, c["x"] + 12, c["y"] + 46, c["w"] - 24, 75,
                            font_name=FONT_REGULAR, font_size=7.5, leading=11,
                            text_color=colors.HexColor("#475569"))
