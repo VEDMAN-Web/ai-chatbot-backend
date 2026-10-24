@@ -3,7 +3,6 @@ import logging
 import os
 import threading
 from fastapi import FastAPI, Depends, Query, HTTPException, status, Request
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
@@ -60,6 +59,8 @@ def startup_db_init():
         from app.core.config import assert_database_configured_or_exit, log_config_warnings
         assert_database_configured_or_exit()
         log_config_warnings()
+        from app.services.report_service import log_storage_backend_on_startup
+        log_storage_backend_on_startup()
     except RuntimeError:
         raise
     except Exception as e:
@@ -189,14 +190,46 @@ def serve_admin_frontend():
         return FileResponse(index_path)
     return {"message": "Tajlandia AI Backend Active"}
 
-# Robust CORS Configuration: allows all frontend ports (Vite 5173, Next 3000, etc.) and deployed domains
-app.add_middleware(
-    CORSMiddleware,
-    allow_origin_regex=r".*",
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import JSONResponse, Response as StarletteResponse
+from app.core.config import cors_allow_credentials, cors_allowed_origins, is_production_env
+
+
+class OriginAllowlistMiddleware(BaseHTTPMiddleware):
+    """Reflect only listed origins. Credentials are never paired with a wildcard."""
+
+    async def dispatch(self, request, call_next):
+        path = request.url.path
+        if path in ("/docs", "/redoc", "/openapi.json"):
+            if is_production_env() and not bool(getattr(settings, "ENABLE_API_DOCS", False)):
+                return JSONResponse(status_code=404, content={"detail": "Not found"})
+
+        origin = request.headers.get("origin")
+        allowed = set(cors_allowed_origins())
+        origin_ok = bool(origin) and origin in allowed
+        if request.method == "OPTIONS" and origin:
+            if not origin_ok:
+                return StarletteResponse(status_code=400)
+            headers = {
+                "Access-Control-Allow-Origin": origin,
+                "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
+                "Access-Control-Allow-Headers": request.headers.get("access-control-request-headers", "*"),
+                "Vary": "Origin",
+            }
+            if cors_allow_credentials():
+                headers["Access-Control-Allow-Credentials"] = "true"
+            return StarletteResponse(status_code=204, headers=headers)
+
+        response = await call_next(request)
+        if origin_ok:
+            response.headers["Access-Control-Allow-Origin"] = origin
+            response.headers["Vary"] = "Origin"
+            if cors_allow_credentials():
+                response.headers["Access-Control-Allow-Credentials"] = "true"
+        return response
+
+
+app.add_middleware(OriginAllowlistMiddleware)
 
 # Register Public Chatbot & Admin Agent Routers
 app.include_router(chat_router, prefix="/api/v1")

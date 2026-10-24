@@ -47,6 +47,7 @@ class AdminChatRequest(BaseModel):
     language: Optional[str] = Field("en", description="Language code for conversation ('en' or 'pl'). Default is 'en'", example="en")
     action: Optional[str] = Field(None, description="Direct action trigger ('confirm' or 'reject')", example="confirm")
     pending_action_id: Optional[str] = Field(None, description="Target action ID to confirm or reject", example="act_550e8400-...")
+    confirmation_token: Optional[str] = Field(None, description="Required when action is confirm")
 
 
 class AdminChatResponse(BaseModel):
@@ -81,6 +82,7 @@ def _sse_pack(event: str, data: Dict[str, Any]) -> str:
 @router.post("/chat", response_model=None)
 def admin_chat_endpoint(
     req: AdminChatRequest,
+    request: Request,
     stream: bool = Query(False, description="If true, return Server-Sent Events (status then final verified text)"),
     staff: AuthenticatedStaff = Depends(require_admin_or_employee_with_sites),
     db: Session = Depends(get_db)
@@ -95,7 +97,26 @@ def admin_chat_endpoint(
     With ?stream=true: SSE — status events while working, then a final
     verified text event (never streams unverified claim text mid-flight).
     """
+    from app.core.rate_limit import enforce_rate_limit
+
     user_msg = (req.message or "").strip()
+    enforce_rate_limit(
+        request,
+        scope="admin_chat",
+        identities=[staff.email],
+        limit=int(settings.RATE_LIMIT_ADMIN_CHAT),
+        window_seconds=int(settings.RATE_LIMIT_ADMIN_CHAT_WINDOW_SEC),
+        message="Too many admin chat requests. Try again later.",
+    )
+    if "http://" in user_msg.lower() or "https://" in user_msg.lower():
+        enforce_rate_limit(
+            request,
+            scope="url_import",
+            identities=[staff.email],
+            limit=int(settings.RATE_LIMIT_IMPORT_AND_SUPERADMIN),
+            window_seconds=int(settings.RATE_LIMIT_IMPORT_WINDOW_SEC),
+            message="Too many URL import requests. Try again later.",
+        )
     if not user_msg and not req.action:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -124,7 +145,8 @@ def admin_chat_endpoint(
             site_origin=active_origin,
             requested_language=req.language,
             action=req.action,
-            pending_action_id=req.pending_action_id
+            pending_action_id=req.pending_action_id,
+            confirmation_token=req.confirmation_token,
         )
 
     if not stream:
@@ -213,18 +235,32 @@ def inspect_pending_action_endpoint(
     }
 
 
-# 4. Pending Action Confirmation & Execution
+def _limit_admin_write(request: Optional[Request], staff: AuthenticatedStaff) -> None:
+    from app.core.rate_limit import enforce_rate_limit
+
+    enforce_rate_limit(
+        request,
+        scope="admin_write",
+        identities=[getattr(staff, "email", None)],
+        limit=int(settings.RATE_LIMIT_ADMIN_WRITE),
+        window_seconds=int(settings.RATE_LIMIT_ADMIN_WRITE_WINDOW_SEC),
+        message="Too many admin write requests. Try again later.",
+    )
+
+
 @router.post("/actions/{pending_action_id}/confirm")
 def confirm_pending_action_endpoint(
     pending_action_id: str,
+    request: Request,
     body: Optional[ActionConfirmRequest] = None,
     staff: AuthenticatedStaff = Depends(require_admin_or_employee),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
     """
     Explicit Two-Step Confirmation endpoint for write actions.
     Validates token, server-side expiration, and permissions, then executes the action.
     """
+    _limit_admin_write(request, staff)
     token = body.confirmation_token if body else None
     return confirm_and_execute_action(
         db=db,
@@ -439,13 +475,15 @@ async def execute_batch_file_endpoint(
 @router.post("/operations/{operation_id}/undo")
 def undo_batch_operation_endpoint(
     operation_id: str,
+    request: Request,
     staff: AuthenticatedStaff = Depends(require_admin_or_super_admin),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
     """
     Instantly rolls back a previous batch operation within its 6-day retention window.
     Restores the exact document states from the saved snapshot.
     """
+    _limit_admin_write(request, staff)
     from app.services.admin_batch_service import (
         undo_batch_property_operation,
         BatchOperationError
@@ -805,15 +843,17 @@ def _property_scope_target(property_id: str, db: Session):
 @router.post("/properties", status_code=status.HTTP_201_CREATED)
 def create_property_endpoint(
     req: PropertyCreateRequest,
+    request: Request,
     overwrite: Optional[bool] = Query(None, description="Not supported. Use PUT to update an existing property."),
     allow_without_undo: bool = Query(False, description="Admin only: write even if the undo snapshot cannot be saved."),
     staff: AuthenticatedStaff = Depends(require_admin_or_super_admin_with_sites),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
     """
     Create a property in Postgres and Firestore after validation.
     Workers are read-only. A duplicate id or name returns 409.
     """
+    _limit_admin_write(request, staff)
     import uuid
     from app.services.action_service import rest_create_property
 
@@ -888,14 +928,16 @@ def property_consistency_endpoint(
 def update_property_endpoint(
     property_id: str,
     req: PropertyUpdateRequest,
+    request: Request,
     allow_without_undo: bool = Query(False),
     staff: AuthenticatedStaff = Depends(require_admin_or_super_admin_with_sites),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
     """
     Update a property that already exists in Firestore, Postgres, or both.
     A Postgres-only row is not given a nameless Firestore stub.
     """
+    _limit_admin_write(request, staff)
     from app.services.action_service import rest_update_property
 
     raw, prop = _property_scope_target(property_id, db)
@@ -948,6 +990,7 @@ def update_property_endpoint(
 @router.delete("/properties/{property_id}")
 def delete_property_endpoint(
     property_id: str,
+    request: Request,
     hard_delete: bool = False,
     confirm_property_id: Optional[str] = Query(
         None,
@@ -955,12 +998,13 @@ def delete_property_endpoint(
     ),
     allow_without_undo: bool = Query(False),
     staff: AuthenticatedStaff = Depends(require_admin_or_super_admin_with_sites),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
     """
     Soft-delete (archive) a property, or permanently delete it when hard_delete=true
     and confirm_property_id matches the property id.
     """
+    _limit_admin_write(request, staff)
     from app.services.action_service import rest_delete_property
 
     raw, prop = _property_scope_target(property_id, db)

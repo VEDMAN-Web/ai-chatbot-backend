@@ -102,7 +102,7 @@ def test_confirmed_chat_update_creates_snapshot_returns_operation_id(staff):
         "app.core.config.settings.ENABLE_FIRESTORE_SYNC", False
     ):
         out = action_service.confirm_and_execute_action(
-            db=db, pending_action_id=str(action.id), authenticated_staff=staff
+            db=db, pending_action_id=str(action.id), authenticated_staff=staff, confirmation_token=action.confirmation_token
         )
 
     assert snapshots, "snapshot must be saved on confirmed update"
@@ -367,7 +367,7 @@ def test_audit_chain_propose_confirm_execute_undo(staff):
         "app.core.config.settings.ENABLE_FIRESTORE_SYNC", False
     ):
         action_service.confirm_and_execute_action(
-            db=db, pending_action_id=str(action.id), authenticated_staff=staff
+            db=db, pending_action_id=str(action.id), authenticated_staff=staff, confirmation_token=action.confirmation_token
         )
 
     assert any(a.get("confirmed_by_staff") is True and a.get("status") == "SUCCESS" for a in audits)
@@ -448,7 +448,7 @@ def test_batch_confirm_goes_through_execute_batch(staff):
         "app.services.admin_batch_service.execute_batch_property_operation", side_effect=fake_batch
     ):
         out = action_service.confirm_and_execute_action(
-            db=MagicMock(), pending_action_id=str(action.id), authenticated_staff=staff
+            db=MagicMock(), pending_action_id=str(action.id), authenticated_staff=staff, confirmation_token=action.confirmation_token
         )
     assert called
     assert out["execution_result"]["operation_id"] == "batch_xyz"

@@ -213,7 +213,7 @@ def test_confirm_refuses_stale_and_reproposes(staff):
         "app.services.action_service._execute_update_listing"
     ) as exe:
         out = action_service.confirm_and_execute_action(
-            db=db, pending_action_id=str(action.id), authenticated_staff=staff
+            db=db, pending_action_id=str(action.id), authenticated_staff=staff, confirmation_token=action.confirmation_token
         )
 
     assert out["status"] == "STALE_REFUSED"
@@ -272,7 +272,7 @@ def test_confirm_applies_only_previewed_fields(staff):
         "app.core.config.settings.ENABLE_FIRESTORE_SYNC", False
     ):
         out = action_service.confirm_and_execute_action(
-            db=db, pending_action_id=str(action.id), authenticated_staff=staff
+            db=db, pending_action_id=str(action.id), authenticated_staff=staff, confirmation_token=action.confirmation_token
         )
 
     assert out["status"] == action_service.ACTION_STATUS_EXECUTED
@@ -464,7 +464,7 @@ def test_confirm_right_after_proposal_succeeds_no_stale(staff):
         "app.core.config.settings.ENABLE_FIRESTORE_SYNC", False
     ):
         out = action_service.confirm_and_execute_action(
-            db=db, pending_action_id=str(action.id), authenticated_staff=staff
+            db=db, pending_action_id=str(action.id), authenticated_staff=staff, confirmation_token=action.confirmation_token
         )
 
     assert out["status"] == action_service.ACTION_STATUS_EXECUTED
@@ -519,7 +519,7 @@ def test_real_stale_refused_once_then_fresh_confirmable(staff):
         "app.services.action_service._execute_update_listing"
     ) as exe:
         out = action_service.confirm_and_execute_action(
-            db=MagicMock(), pending_action_id=str(action.id), authenticated_staff=staff
+            db=MagicMock(), pending_action_id=str(action.id), authenticated_staff=staff, confirmation_token=action.confirmation_token
         )
 
     assert out["status"] == "STALE_REFUSED"

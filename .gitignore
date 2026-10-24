@@ -3,6 +3,8 @@
 # ==========================================
 
 # 1. Environment & Secrets
+.cursorrules
+pytest_report.txt
 .env
 .env.*
 .env.local

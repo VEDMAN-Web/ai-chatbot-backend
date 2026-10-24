@@ -289,64 +289,121 @@ def update_admin_password_in_firestore(email: str, new_password: str) -> bool:
         return False
 
 
+import threading as _reset_threading
+
+_reset_lock = _reset_threading.Lock()
+_password_epoch: dict = {}
+_used_reset_jti: set = set()
+_test_reset_tokens: dict = {}
+_RESET_TOKEN_MAX_SECONDS = 1800
+
+
+def invalidate_password_reset_tokens(email: str) -> None:
+    """Outstanding reset tokens for this email stop working after a password change."""
+    email_clean = (email or "").strip().lower()
+    if not email_clean:
+        return
+    with _reset_lock:
+        _password_epoch[email_clean] = int(_password_epoch.get(email_clean, 0)) + 1
+
+
+def get_test_reset_token(email: str) -> Optional[str]:
+    """Test hook. Always empty in production, including when the expose flag is set."""
+    from app.core.config import is_production_env
+
+    if is_production_env():
+        return None
+    return _test_reset_tokens.get((email or "").strip().lower())
+
+
+def remember_reset_token_for_tests(email: str, token: str) -> None:
+    from app.core.config import is_production_env
+
+    email_clean = (email or "").strip().lower()
+    if not email_clean:
+        return
+    with _reset_lock:
+        if is_production_env():
+            _test_reset_tokens.pop(email_clean, None)
+            return
+        _test_reset_tokens[email_clean] = token
+
+
+def _reset_secret() -> str:
+    from app.core.config import settings
+
+    return settings.INTERNAL_API_SECRET or settings.SECRET_KEY or "tajlandia-reset-secret"
+
+
 def generate_password_reset_token(email: str, expires_in_seconds: int = 1800) -> str:
     """
-    Generates a cryptographically signed HMAC token for admin password reset.
-    Valid for the specified duration (default: 30 minutes).
+    Signed single-use reset token. Lifetime is capped at 30 minutes.
     """
     import hmac
     import hashlib
+    import secrets
     import time
     import urllib.parse
-    from app.core.config import settings
 
-    secret = settings.INTERNAL_API_SECRET or settings.SECRET_KEY or "tajlandia-reset-secret"
-    exp = int(time.time()) + expires_in_seconds
+    lifetime = min(int(expires_in_seconds or _RESET_TOKEN_MAX_SECONDS), _RESET_TOKEN_MAX_SECONDS)
+    lifetime = max(1, lifetime)
     email_clean = (email or "").strip().lower()
-    payload = f"reset:{email_clean}:{exp}"
-    signature = hmac.new(secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
-    raw = f"{payload}:{signature}"
-    return urllib.parse.quote(raw)
+    exp = int(time.time()) + lifetime
+    with _reset_lock:
+        epoch = int(_password_epoch.get(email_clean, 0))
+    jti = secrets.token_hex(16)
+    payload = f"reset:{email_clean}:{exp}:{epoch}:{jti}"
+    signature = hmac.new(_reset_secret().encode(), payload.encode(), hashlib.sha256).hexdigest()
+    return urllib.parse.quote(f"{payload}:{signature}")
 
 
-def verify_password_reset_token(token: str, expected_email: Optional[str] = None) -> Optional[str]:
+def verify_password_reset_token(
+    token: str,
+    expected_email: Optional[str] = None,
+    *,
+    consume: bool = False,
+) -> Optional[str]:
     """
-    Verifies the HMAC signature and timestamp of a password reset token.
-    Returns the verified email address if valid, or None if invalid/expired.
+    Check signature, expiry, password epoch, and single use.
+    Expired, used, and tampered tokens all return None.
     """
     import hmac
     import hashlib
     import time
     import urllib.parse
-    from app.core.config import settings
 
     if not token:
         return None
 
     try:
-        secret = settings.INTERNAL_API_SECRET or settings.SECRET_KEY or "tajlandia-reset-secret"
         decoded = urllib.parse.unquote(token.strip())
         parts = decoded.split(":")
-        if len(parts) != 4 or parts[0] != "reset":
+        if len(parts) != 6 or parts[0] != "reset":
             return None
 
-        _, token_email, exp_str, sig = parts
+        _, token_email, exp_str, epoch_str, jti, sig = parts
         exp = int(exp_str)
+        epoch = int(epoch_str)
         if time.time() > exp:
-            logger.warning(f"Password reset token expired for '{token_email}'.")
             return None
 
-        payload = f"reset:{token_email}:{exp_str}"
-        expected_sig = hmac.new(secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
+        payload = f"reset:{token_email}:{exp_str}:{epoch_str}:{jti}"
+        expected_sig = hmac.new(_reset_secret().encode(), payload.encode(), hashlib.sha256).hexdigest()
         if not hmac.compare_digest(sig, expected_sig):
-            logger.warning(f"Invalid reset token signature for '{token_email}'.")
             return None
 
-        if expected_email and expected_email.strip().lower() != token_email.lower():
-            logger.warning(f"Reset token email mismatch: expected '{expected_email}', got '{token_email}'.")
+        email_clean = token_email.lower()
+        if expected_email and expected_email.strip().lower() != email_clean:
             return None
 
-        return token_email.lower()
+        with _reset_lock:
+            if epoch != int(_password_epoch.get(email_clean, 0)):
+                return None
+            if jti in _used_reset_jti:
+                return None
+            if consume:
+                _used_reset_jti.add(jti)
+        return email_clean
     except Exception as e:
         logger.warning(f"Error parsing reset token: {e}")
         return None

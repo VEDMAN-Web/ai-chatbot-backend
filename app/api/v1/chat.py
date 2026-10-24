@@ -2,13 +2,14 @@ import os
 import logging
 import time
 from decimal import Decimal
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse, FileResponse
 from sqlalchemy.orm import Session
 from pydantic import BaseModel, Field, EmailStr, field_validator
 import io
 from typing import Optional, List, Dict, Any
 from app.core.config import settings
+from app.core.rate_limit import enforce_rate_limit, injected_request
 from app.db.session import get_user_db as get_db
 from app.services.conversation_service import (
     get_or_create_conversation,
@@ -164,8 +165,17 @@ class LeadSubmitResponse(BaseModel):
 )
 def handle_public_chat(
     req: PublicChatRequest,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    request: Request = Depends(injected_request),
 ):
+    enforce_rate_limit(
+        request,
+        scope="public_chat",
+        identities=[req.session_id],
+        limit=int(settings.RATE_LIMIT_PUBLIC_CHAT),
+        window_seconds=int(settings.RATE_LIMIT_PUBLIC_CHAT_WINDOW_SEC),
+        message="Too many chat requests. Try again later.",
+    )
     req_t0 = time.monotonic()
     has_contact = bool(
         (req.contact_name and req.contact_name.strip()) or

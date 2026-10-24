@@ -15,29 +15,37 @@ client = TestClient(app)
 
 
 def test_forgot_password_generates_token_and_rejects_invalid_email():
-    """Verifies that forgot-password generates a valid reset token for existing admin and rejects unknown emails."""
-    # 1. Non-existent email -> 404
-    resp = client.post(
-        "/api/v1/auth/forgot-password",
-        json={"email": f"nonexistent_{uuid.uuid4().hex[:8]}@tajlandia.com"}
-    )
-    assert resp.status_code == 404
+    """Known and unknown emails share one response. The token is only on the test hook."""
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock, patch
+    from app.db.session import get_db
+    from app.services.firestore_auth_service import get_test_reset_token
 
-    # 2. Existing admin -> 200 with reset token
-    resp = client.post(
-        "/api/v1/auth/forgot-password",
-        json={"email": "admin@tajlandia.com"}
-    )
-    assert resp.status_code == 200
-    data = resp.json()
-    assert data["success"] is True
-    assert "reset_token" in data
-    assert data["email"] == "admin@tajlandia.com"
-    assert data["expires_in"] == 1800
+    unknown = f"nonexistent_{uuid.uuid4().hex[:8]}@tajlandia.com"
+    known = "admin@tajlandia.com"
+    db = MagicMock()
 
-    # Verify the token is cryptographically valid
-    verified_email = verify_password_reset_token(data["reset_token"], expected_email="admin@tajlandia.com")
-    assert verified_email == "admin@tajlandia.com"
+    def _db():
+        yield db
+
+    app.dependency_overrides[get_db] = _db
+    try:
+        db.query.return_value.filter.return_value.first.return_value = None
+        with patch("app.services.firestore_auth_service.get_admin_from_firestore", return_value=None):
+            unknown_resp = client.post("/api/v1/auth/forgot-password", json={"email": unknown})
+
+        db.query.return_value.filter.return_value.first.return_value = SimpleNamespace(email=known)
+        with patch("app.services.firestore_auth_service.get_admin_from_firestore", return_value={"email": known}):
+            known_resp = client.post("/api/v1/auth/forgot-password", json={"email": known})
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+
+    assert unknown_resp.status_code == known_resp.status_code == 200
+    assert unknown_resp.json() == known_resp.json()
+    assert "reset_token" not in known_resp.json()
+    token = get_test_reset_token(known)
+    assert token
+    assert verify_password_reset_token(token, expected_email=known) == known
 
 
 def test_reset_password_flow_and_tamper_rejection():
@@ -49,63 +57,63 @@ def test_reset_password_flow_and_tamper_rejection():
     init_pass = "InitialPass123!"
     new_pass = "BrandNewPass456!"
 
-    # Create test admin
-    add_or_update_admin_in_firestore(
-        email=test_email,
-        password=init_pass,
-        role="employee",
-        name="Reset Test User"
-    )
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock, patch
+    from app.db.session import get_db
+    from app.services.firestore_auth_service import get_test_reset_token
 
-    # 1. Request reset token
-    forgot_resp = client.post(
-        "/api/v1/auth/forgot-password",
-        json={"email": test_email}
-    )
-    assert forgot_resp.status_code == 200
-    reset_token = forgot_resp.json()["reset_token"]
+    user = SimpleNamespace(id=uuid.uuid4(), email=test_email, password_hash="old")
+    db = MagicMock()
+    db.query.return_value.filter.return_value.first.return_value = user
+    db.query.return_value.filter.return_value.update.return_value = 1
 
-    # 2. Attempt reset with tampered/invalid token -> 400
-    bad_resp = client.post(
-        "/api/v1/auth/reset-password",
-        json={
-            "email": test_email,
-            "reset_token": "tampered_fake_token_abc123",
-            "new_password": new_pass
-        }
-    )
-    assert bad_resp.status_code == 400
+    def _db():
+        yield db
 
-    # 3. Attempt reset with too short password -> 422 or 400
-    short_resp = client.post(
-        "/api/v1/auth/reset-password",
-        json={
-            "email": test_email,
-            "reset_token": reset_token,
-            "new_password": "123"
-        }
-    )
-    assert short_resp.status_code in [400, 422]
+    app.dependency_overrides[get_db] = _db
+    try:
+        with patch("app.services.firestore_auth_service.get_admin_from_firestore", return_value={"email": test_email}), patch(
+            "app.services.firestore_auth_service.update_admin_password_in_firestore", return_value=True
+        ):
+            forgot_resp = client.post("/api/v1/auth/forgot-password", json={"email": test_email})
+            assert forgot_resp.status_code == 200
+            assert "reset_token" not in forgot_resp.json()
+            reset_token = get_test_reset_token(test_email)
+            assert reset_token
 
-    # 4. Successful reset with valid token
-    ok_resp = client.post(
-        "/api/v1/auth/reset-password",
-        json={
-            "email": test_email,
-            "reset_token": reset_token,
-            "new_password": new_pass
-        }
-    )
-    assert ok_resp.status_code == 200
-    assert ok_resp.json()["success"] is True
+            bad_resp = client.post(
+                "/api/v1/auth/reset-password",
+                json={
+                    "email": test_email,
+                    "reset_token": "tampered_fake_token_abc123",
+                    "new_password": new_pass,
+                },
+            )
+            assert bad_resp.status_code == 400
 
-    # 5. Verify login succeeds with new password
-    login_resp = client.post(
-        "/api/v1/auth/login",
-        json={"email": test_email, "password": new_pass}
-    )
-    assert login_resp.status_code == 200
-    assert "access_token" in login_resp.json()
+            short_resp = client.post(
+                "/api/v1/auth/reset-password",
+                json={
+                    "email": test_email,
+                    "reset_token": reset_token,
+                    "new_password": "123",
+                },
+            )
+            assert short_resp.status_code in [400, 422]
+
+            ok_resp = client.post(
+                "/api/v1/auth/reset-password",
+                json={
+                    "email": test_email,
+                    "reset_token": reset_token,
+                    "new_password": new_pass,
+                },
+            )
+            assert ok_resp.status_code == 200
+            assert ok_resp.json()["success"] is True
+            assert user.password_hash != "old"
+    finally:
+        app.dependency_overrides.pop(get_db, None)
 
 
 def test_change_password_endpoint():

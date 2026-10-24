@@ -167,6 +167,31 @@ class Settings(BaseSettings):
     # Super-admin instruction store. "user" is the public bot's Firestore project.
     INSTRUCTIONS_FIRESTORE_TARGET: str = "user"
 
+    # Runtime environment. ENV wins when set; otherwise ENVIRONMENT is used.
+    ENV: str = ""
+    # Comma-separated browser origins. Empty means localhost only in development/test.
+    CORS_ALLOWED_ORIGINS: str = ""
+    # Production hides /docs unless this is true.
+    ENABLE_API_DOCS: bool = False
+    # Honour X-Forwarded-For. Railway sits behind a proxy, so set this true there.
+    TRUST_PROXY_HEADERS: bool = False
+    # Dev/test only. Ignored when the runtime environment is production.
+    EXPOSE_RESET_TOKEN_IN_RESPONSE: bool = False
+
+    # Sliding-window limits. Windows are seconds.
+    RATE_LIMIT_LOGIN_ATTEMPTS: int = 10
+    RATE_LIMIT_LOGIN_WINDOW_SEC: int = 900
+    RATE_LIMIT_RESET_ATTEMPTS: int = 5
+    RATE_LIMIT_RESET_WINDOW_SEC: int = 3600
+    RATE_LIMIT_PUBLIC_CHAT: int = 60
+    RATE_LIMIT_PUBLIC_CHAT_WINDOW_SEC: int = 60
+    RATE_LIMIT_ADMIN_CHAT: int = 30
+    RATE_LIMIT_ADMIN_CHAT_WINDOW_SEC: int = 60
+    RATE_LIMIT_ADMIN_WRITE: int = 30
+    RATE_LIMIT_ADMIN_WRITE_WINDOW_SEC: int = 60
+    RATE_LIMIT_IMPORT_AND_SUPERADMIN: int = 20
+    RATE_LIMIT_IMPORT_WINDOW_SEC: int = 60
+
     # Google Workspace Integrations (OAuth2, Maps, SMTP)
     GOOGLE_CLIENT_ID: str = ""
     GOOGLE_CLIENT_SECRET: str = ""
@@ -299,6 +324,44 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+def runtime_env() -> str:
+    """ENV when set, otherwise ENVIRONMENT. Lowercased."""
+    explicit = (getattr(settings, "ENV", None) or "").strip().lower()
+    if explicit:
+        return explicit
+    return (getattr(settings, "ENVIRONMENT", None) or "development").strip().lower()
+
+
+def is_production_env() -> bool:
+    return runtime_env() in ("production", "prod")
+
+
+def cors_allowed_origins() -> list:
+    """Explicit allow-list. Empty CORS_ALLOWED_ORIGINS yields localhost only outside production."""
+    raw = (getattr(settings, "CORS_ALLOWED_ORIGINS", None) or "").strip()
+    if raw:
+        return [item.strip() for item in raw.split(",") if item.strip() and item.strip() != "*"]
+    if is_production_env():
+        return []
+    env = runtime_env()
+    if env in ("development", "dev", "test", "testing") or is_test_environment():
+        return [
+            "http://localhost:3000",
+            "http://localhost:5173",
+            "http://localhost:8000",
+            "http://127.0.0.1:3000",
+            "http://127.0.0.1:5173",
+            "http://127.0.0.1:8000",
+        ]
+    return []
+
+
+def cors_allow_credentials() -> bool:
+    """Credentials are sent only with an explicit non-wildcard list."""
+    origins = cors_allowed_origins()
+    return bool(origins) and "*" not in origins
 
 
 def is_test_environment() -> bool:

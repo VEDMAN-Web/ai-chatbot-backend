@@ -529,12 +529,14 @@ class ForgotPasswordRequest(BaseModel):
     email: str = Field(..., example="advisor@varsoviaestate.com", description="User email address requesting password reset")
 
 
+_RESET_GENERIC_MESSAGE = "If an account exists for this email, a reset link has been sent."
+_RESET_GENERIC_ERROR = "Invalid or expired password reset token."
+
+
 class ForgotPasswordResponse(BaseModel):
     success: bool = True
     message: str
-    email: str
     reset_token: Optional[str] = None
-    expires_in: int = 1800
 
 
 class ResetPasswordRequest(BaseModel):
@@ -561,7 +563,7 @@ class ChangePasswordResponse(BaseModel):
 @router.post("/login", response_model=UserLoginResponse, tags=["Authentication"])
 def user_login(
     req: UserLoginRequest,
-    request: Request = None,
+    request: Request,
     db: Session = Depends(get_db)
 ):
     """
@@ -574,6 +576,15 @@ def user_login(
     if not raw_ident:
         raise HTTPException(status_code=400, detail="Email is required.")
     email_clean = raw_ident.lower()
+    from app.core.rate_limit import enforce_rate_limit
+    enforce_rate_limit(
+        request,
+        scope="login",
+        identities=[email_clean],
+        limit=int(settings.RATE_LIMIT_LOGIN_ATTEMPTS),
+        window_seconds=int(settings.RATE_LIMIT_LOGIN_WINDOW_SEC),
+        message="Too many login attempts. Try again later.",
+    )
 
     # 1. Look up & authenticate user dynamically in Cloud Firestore `admin_authentication` (Live Firebase Data)
     from app.services.firestore_auth_service import verify_firestore_admin_credentials, sync_firestore_admin_to_local_db
@@ -1571,59 +1582,109 @@ def register_user(
     )
 
 
-@router.post("/forgot-password", response_model=ForgotPasswordResponse, tags=["Authentication"])
+def _deliver_password_reset(email: str, token: str) -> None:
+    """Email the token when SMTP is configured. Never log it in production."""
+    from app.core.config import is_production_env
+    from app.services.firestore_auth_service import remember_reset_token_for_tests
+
+    remember_reset_token_for_tests(email, token)
+    host = (settings.SMTP_HOST or "").strip()
+    user = (settings.SMTP_USER or "").strip()
+    if host and user:
+        try:
+            import smtplib
+            from email.mime.text import MIMEText
+
+            msg = MIMEText(
+                f"Use this link token to reset your password. It expires in 30 minutes and works once.\n\n{token}\n"
+            )
+            msg["Subject"] = "Password reset"
+            msg["From"] = user
+            msg["To"] = email
+            with smtplib.SMTP(host, int(settings.SMTP_PORT or 587), timeout=10) as server:
+                if settings.SMTP_PASSWORD:
+                    server.starttls()
+                    server.login(user, settings.SMTP_PASSWORD)
+                server.send_message(msg)
+            return
+        except Exception as exc:
+            logger.warning("Password reset email could not be sent: %s", exc)
+    if not is_production_env():
+        logger.debug("Password reset token for %s: %s", email, token)
+
+
+@router.post(
+    "/forgot-password",
+    response_model=ForgotPasswordResponse,
+    response_model_exclude_none=True,
+    tags=["Authentication"],
+)
 def forgot_password_endpoint(
     req: ForgotPasswordRequest,
+    request: Request,
     db: Session = Depends(get_db)
 ):
     """
-    Generates a secure password reset token for an administrator account.
-    Validates account existence in both Cloud Firestore `admin_authentication` and local DB.
+    Always returns the same body. The reset token is emailed, never returned in production.
     """
+    from app.core.config import is_production_env
+    from app.core.rate_limit import enforce_rate_limit
     from app.services.firestore_auth_service import get_admin_from_firestore, generate_password_reset_token
 
     email_clean = req.email.strip().lower()
     if not email_clean or "@" not in email_clean:
         raise HTTPException(status_code=400, detail="Invalid email format.")
 
-    fs_admin = get_admin_from_firestore(email_clean)
-    db_user = db.query(User).filter(func.lower(User.email) == email_clean).first()
+    enforce_rate_limit(
+        request,
+        scope="forgot_password",
+        identities=[email_clean],
+        limit=int(settings.RATE_LIMIT_RESET_ATTEMPTS),
+        window_seconds=int(settings.RATE_LIMIT_RESET_WINDOW_SEC),
+        message="Too many password reset requests. Try again later.",
+    )
 
-    if not fs_admin and not db_user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"No administrative account found for '{email_clean}'."
-        )
-
-    expires_in_secs = 1800  # 30 minutes
-    reset_token = generate_password_reset_token(email_clean, expires_in_seconds=expires_in_secs)
-
+    account_exists = False
     try:
-        record_audit_log(
-            db=db,
-            tool_name="auth:forgot_password",
-            staff_user_id=email_clean,
-            tool_arguments={"email": email_clean},
-            proposed_payload={"action": "forgot_password_request", "email": email_clean},
-            confirmed_by_staff=True,
-            status="SUCCESS",
-            execution_result=f"Password reset token generated for {email_clean}"
-        )
-    except Exception as e:
-        logger.warning(f"Audit log failed for forgot-password: {e}")
+        account_exists = bool(get_admin_from_firestore(email_clean))
+    except Exception as exc:
+        logger.warning("Forgot-password lookup failed: %s", exc)
+    try:
+        db_user = db.query(User).filter(func.lower(User.email) == email_clean).first()
+        account_exists = account_exists or bool(db_user)
+    except Exception as exc:
+        logger.warning("Forgot-password database lookup failed: %s", exc)
 
+    # Same cryptographic work either way so the response timing stays close.
+    reset_token = generate_password_reset_token(email_clean, expires_in_seconds=1800)
+    if account_exists:
+        _deliver_password_reset(email_clean, reset_token)
+        try:
+            record_audit_log(
+                db=db,
+                tool_name="auth:forgot_password",
+                staff_user_id=email_clean,
+                tool_arguments={"email": email_clean},
+                proposed_payload={"action": "forgot_password_request", "email": email_clean},
+                confirmed_by_staff=True,
+                status="SUCCESS",
+                execution_result=f"Password reset requested for {email_clean}"
+            )
+        except Exception as e:
+            logger.warning(f"Audit log failed for forgot-password: {e}")
+
+    expose = bool(settings.EXPOSE_RESET_TOKEN_IN_RESPONSE) and not is_production_env() and account_exists
     return ForgotPasswordResponse(
         success=True,
-        message=f"Password reset token has been successfully generated for {email_clean}.",
-        email=email_clean,
-        reset_token=reset_token,
-        expires_in=expires_in_secs
+        message=_RESET_GENERIC_MESSAGE,
+        reset_token=reset_token if expose else None,
     )
 
 
 @router.post("/reset-password", response_model=ResetPasswordResponse, tags=["Authentication"])
 def reset_password_endpoint(
     req: ResetPasswordRequest,
+    request: Request,
     db: Session = Depends(get_db)
 ):
     """
@@ -1631,19 +1692,32 @@ def reset_password_endpoint(
     Updates password in Cloud Firestore `admin_authentication` and PostgreSQL.
     Revokes any active user sessions to force a fresh login.
     """
-    from app.services.firestore_auth_service import verify_password_reset_token, update_admin_password_in_firestore
+    from app.core.rate_limit import enforce_rate_limit
+    from app.services.firestore_auth_service import (
+        invalidate_password_reset_tokens,
+        update_admin_password_in_firestore,
+        verify_password_reset_token,
+    )
 
     email_clean = req.email.strip().lower()
     new_pw = req.new_password.strip()
+    enforce_rate_limit(
+        request,
+        scope="reset_password",
+        identities=[email_clean],
+        limit=int(settings.RATE_LIMIT_RESET_ATTEMPTS),
+        window_seconds=int(settings.RATE_LIMIT_RESET_WINDOW_SEC),
+        message="Too many password reset requests. Try again later.",
+    )
 
     if len(new_pw) < 6:
         raise HTTPException(status_code=400, detail="New password must be at least 6 characters long.")
 
-    verified_email = verify_password_reset_token(req.reset_token, expected_email=email_clean)
+    verified_email = verify_password_reset_token(req.reset_token, expected_email=email_clean, consume=True)
     if not verified_email:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid or expired password reset token."
+            detail=_RESET_GENERIC_ERROR,
         )
 
     # 1. Update in Cloud Firestore admin_authentication
@@ -1663,6 +1737,8 @@ def reset_password_endpoint(
         db.commit()
     elif not fs_updated:
         raise HTTPException(status_code=404, detail="User account not found.")
+
+    invalidate_password_reset_tokens(email_clean)
 
     try:
         record_audit_log(
@@ -1732,6 +1808,9 @@ def change_password_endpoint(
     if user:
         user.password_hash = hash_password(new_pw)
         db.commit()
+
+    from app.services.firestore_auth_service import invalidate_password_reset_tokens
+    invalidate_password_reset_tokens(staff.email)
 
     try:
         record_audit_log(

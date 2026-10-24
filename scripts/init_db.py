@@ -5,7 +5,7 @@ conn = psycopg2.connect(
     host='127.0.0.1',
     port=5432,
     user='postgres',
-    password='xyz123@24',
+    password='CHANGE_ME',
     dbname='postgres'
 )
 conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)

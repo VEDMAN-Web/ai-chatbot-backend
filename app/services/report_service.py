@@ -168,6 +168,47 @@ class LocalStorageProvider(StorageProvider):
 
 class S3StorageProvider(StorageProvider):
     mode = "s3"
+    _boto3_probed = False
+    _boto3_error: Optional[str] = None
+    _missing_boto3_logged = False
+
+    @classmethod
+    def reset_boto3_probe(cls) -> None:
+        """Clear the cached import result (tests)."""
+        cls._boto3_probed = False
+        cls._boto3_error = None
+        cls._missing_boto3_logged = False
+
+    @classmethod
+    def boto3_import_error(cls) -> Optional[str]:
+        """Import boto3 lazily. Returns an error string when the package is missing."""
+        if cls._boto3_probed:
+            return cls._boto3_error
+        cls._boto3_probed = True
+        try:
+            import boto3  # noqa: F401
+            cls._boto3_error = None
+        except ImportError as exc:
+            cls._boto3_error = str(exc) or "boto3 is not installed"
+        return cls._boto3_error
+
+    @classmethod
+    def log_missing_boto3_once(cls) -> None:
+        """One ERROR plus one WARNING. Safe to call from startup and from provider selection."""
+        if cls._missing_boto3_logged:
+            return
+        err = cls.boto3_import_error()
+        if err is None:
+            return
+        cls._missing_boto3_logged = True
+        logger.error(
+            "S3 storage is configured but boto3 cannot be imported (%s). "
+            "Reports and brochures will not use S3.",
+            err,
+        )
+        logger.warning(
+            "Falling back to LocalStorageProvider. Files are not persistent and will disappear on redeploy."
+        )
 
     def __init__(
         self,
@@ -177,7 +218,7 @@ class S3StorageProvider(StorageProvider):
         profile_name: Optional[str] = None,
         folder: str = "brochures"
     ):
-        self.endpoint_url = endpoint_url or os.getenv("HF_S3_ENDPOINT_URL") or os.getenv("S3_ENDPOINT_URL") or "https://s3.hf.co/itisha249"
+        self.endpoint_url = endpoint_url or os.getenv("HF_S3_ENDPOINT_URL") or os.getenv("S3_ENDPOINT_URL") or "https://s3.example.com"
         self.bucket_name = bucket_name or os.getenv("HF_S3_BUCKET") or os.getenv("AWS_S3_BUCKET") or "tajlandia"
         self.region_name = region_name or os.getenv("AWS_DEFAULT_REGION") or "us-east-1"
         self.profile_name = profile_name or os.getenv("AWS_PROFILE") or "hf"
@@ -343,14 +384,33 @@ def get_report_storage_mode() -> str:
 
 
 def get_storage_provider() -> StorageProvider:
-    """S3 is primary when configured; otherwise local disk (may be ephemeral)."""
+    """S3 is primary when configured and boto3 imports; otherwise local disk (may be ephemeral)."""
     if is_s3_configured():
+        if S3StorageProvider.boto3_import_error() is not None:
+            S3StorageProvider.log_missing_boto3_once()
+            return LocalStorageProvider()
         return S3StorageProvider()
     return LocalStorageProvider()
 
 
-# Default storage provider instance (resolved lazily via get_storage_provider in generate_report)
-default_storage_provider = get_storage_provider()
+def log_storage_backend_on_startup() -> None:
+    """Log the missing-boto3 ERROR once at process start. Never raises."""
+    try:
+        if is_s3_configured() and S3StorageProvider.boto3_import_error() is not None:
+            S3StorageProvider.log_missing_boto3_once()
+    except Exception as exc:
+        logger.warning("Storage backend startup check failed: %s", exc)
+
+
+class _LazyDefaultStorage:
+    """Brochure and dossier code keep this name; the real provider is chosen per call."""
+
+    def __getattr__(self, name: str):
+        return getattr(get_storage_provider(), name)
+
+
+# Resolved on each use so a missing boto3 falls back instead of failing every PDF.
+default_storage_provider = _LazyDefaultStorage()
 
 
 def validate_report_filename(filename: str) -> str:
@@ -484,6 +544,9 @@ def _delete_report_metadata(filename: str) -> None:
 
 def _provider_for_storage_mode(mode: Optional[str]) -> StorageProvider:
     if mode == "s3":
+        if S3StorageProvider.boto3_import_error() is not None:
+            S3StorageProvider.log_missing_boto3_once()
+            return LocalStorageProvider()
         return S3StorageProvider()
     if mode == "memory":
         return InMemoryStorageProvider()

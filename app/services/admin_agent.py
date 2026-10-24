@@ -1317,7 +1317,8 @@ def process_admin_chat(
     site_origin: str = "admin",
     requested_language: Optional[str] = "en",
     action: Optional[str] = None,
-    pending_action_id: Optional[str] = None
+    pending_action_id: Optional[str] = None,
+    confirmation_token: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Main processing entrypoint for Admin / Internal AI Agent.
@@ -1615,10 +1616,16 @@ def process_admin_chat(
                 }
 
         try:
+            typed_token = confirmation_token
+            if not typed_token and clean_message:
+                token_match = re.search(r"\bact_[A-Za-z0-9]+\b", clean_message)
+                if token_match:
+                    typed_token = token_match.group(0)
             exec_res = confirm_and_execute_action(
                 db=db,
                 pending_action_id=str(target_action.id),
-                authenticated_staff=staff_user
+                authenticated_staff=staff_user,
+                confirmation_token=typed_token,
             )
             # Stale Current values: refuse apply, show fresh proposal
             if isinstance(exec_res, dict) and exec_res.get("status") == "STALE_REFUSED":

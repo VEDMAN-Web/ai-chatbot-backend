@@ -160,6 +160,7 @@ def test_confirm_batch_applies_listed_items_only(staff, monkeypatch):
             db=db,
             pending_action_id=str(action.id),
             authenticated_staff=staff,
+            confirmation_token=action.confirmation_token,
         )
     assert out["status"] in ("EXECUTED", action_service.ACTION_STATUS_EXECUTED)
     assert applied and len(applied[0]["records"]) == 2
@@ -320,7 +321,7 @@ def test_confirm_logs_success_confirmed(staff):
         return_value={"success": True, "affected_ids": ["p1"], "operation_id": "op"},
     ):
         action_service.confirm_and_execute_action(
-            db=MagicMock(), pending_action_id=str(action.id), authenticated_staff=staff
+            db=MagicMock(), pending_action_id=str(action.id), authenticated_staff=staff, confirmation_token=action.confirmation_token
         )
     assert audits
     assert audits[-1]["confirmed_by_staff"] is True
@@ -363,7 +364,7 @@ def test_failed_tool_logs_failed(staff):
     ):
         with pytest.raises(Exception):
             action_service.confirm_and_execute_action(
-                db=MagicMock(), pending_action_id=str(action.id), authenticated_staff=staff
+                db=MagicMock(), pending_action_id=str(action.id), authenticated_staff=staff, confirmation_token=action.confirmation_token
             )
     failed = [a for a in audits if a.get("status") == "FAILED"]
     assert failed

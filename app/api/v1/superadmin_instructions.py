@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -19,6 +19,20 @@ from app.services.instruction_store import (
 )
 
 router = APIRouter(prefix="/admin/superadmin", tags=["Super Admin Instructions"])
+
+
+def _limit_superadmin_write(request: Optional[Request], staff: AuthenticatedStaff) -> None:
+    from app.core.config import settings
+    from app.core.rate_limit import enforce_rate_limit
+
+    enforce_rate_limit(
+        request,
+        scope="superadmin_write",
+        identities=[getattr(staff, "email", None)],
+        limit=int(settings.RATE_LIMIT_IMPORT_AND_SUPERADMIN),
+        window_seconds=int(settings.RATE_LIMIT_IMPORT_WINDOW_SEC),
+        message="Too many super-admin write requests. Try again later.",
+    )
 
 
 class InstructionBody(BaseModel):
@@ -85,8 +99,10 @@ def export_instructions(staff: AuthenticatedStaff = Depends(require_super_admin)
 @router.post("/instructions/import")
 def import_instructions(
     body: ImportBody,
+    request: Request,
     staff: AuthenticatedStaff = Depends(require_super_admin),
 ):
+    _limit_superadmin_write(request, staff)
     saved = _call(lambda: get_store().import_bundle(body.model_dump(), _actor(staff)))
     return {"saved": len(saved), "instructions": saved}
 
@@ -94,8 +110,10 @@ def import_instructions(
 @router.post("/instructions")
 def create_instruction(
     body: InstructionBody,
+    request: Request,
     staff: AuthenticatedStaff = Depends(require_super_admin),
 ):
+    _limit_superadmin_write(request, staff)
     doc = _call(lambda: get_store().create(body.model_dump(exclude_unset=True), _actor(staff)))
     return doc
 
@@ -122,24 +140,30 @@ def get_instruction(
 def update_instruction(
     instruction_id: str,
     body: InstructionBody,
+    request: Request,
     staff: AuthenticatedStaff = Depends(require_super_admin),
 ):
+    _limit_superadmin_write(request, staff)
     return _call(lambda: get_store().update(instruction_id, body.model_dump(exclude_unset=True), _actor(staff)))
 
 
 @router.post("/instructions/{instruction_id}/activate")
 def activate_instruction(
     instruction_id: str,
+    request: Request,
     staff: AuthenticatedStaff = Depends(require_super_admin),
 ):
+    _limit_superadmin_write(request, staff)
     return _call(lambda: get_store().activate(instruction_id, _actor(staff)))
 
 
 @router.post("/instructions/{instruction_id}/archive")
 def archive_instruction(
     instruction_id: str,
+    request: Request,
     staff: AuthenticatedStaff = Depends(require_super_admin),
 ):
+    _limit_superadmin_write(request, staff)
     return _call(lambda: get_store().archive(instruction_id, _actor(staff)))
 
 
@@ -147,17 +171,21 @@ def archive_instruction(
 def rollback_instruction(
     instruction_id: str,
     body: RollbackBody,
+    request: Request,
     staff: AuthenticatedStaff = Depends(require_super_admin),
 ):
+    _limit_superadmin_write(request, staff)
     return _call(lambda: get_store().rollback(instruction_id, body.version, _actor(staff)))
 
 
 @router.post("/remarks")
 def create_remark(
     body: RemarkBody,
+    request: Request,
     staff: AuthenticatedStaff = Depends(require_super_admin),
     db: Session = Depends(get_db),
 ):
+    _limit_superadmin_write(request, staff)
     saved = _call(lambda: get_store().add_remark(body.model_dump(), _actor(staff)))
     return _with_excerpt(db, saved)
 
@@ -175,10 +203,12 @@ def list_remarks(
 @router.post("/remarks/{remark_id}/convert")
 def convert_remark(
     remark_id: str,
+    request: Request,
     body: Optional[InstructionBody] = None,
     staff: AuthenticatedStaff = Depends(require_super_admin),
     db: Session = Depends(get_db),
 ):
+    _limit_superadmin_write(request, staff)
     fields = body.model_dump(exclude_unset=True) if body else {}
     result = _call(lambda: get_store().convert_remark(remark_id, _actor(staff), fields))
     result["remark"] = _with_excerpt(db, result["remark"])
@@ -188,8 +218,10 @@ def convert_remark(
 @router.post("/remarks/{remark_id}/dismiss")
 def dismiss_remark(
     remark_id: str,
+    request: Request,
     staff: AuthenticatedStaff = Depends(require_super_admin),
 ):
+    _limit_superadmin_write(request, staff)
     return _call(lambda: get_store().dismiss_remark(remark_id, _actor(staff)))
 
 

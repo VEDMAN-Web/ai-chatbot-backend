@@ -17,7 +17,7 @@ from app.services.report_service import S3StorageProvider
 
 def test_s3_storage_provider_defaults():
     provider = S3StorageProvider()
-    assert "s3.hf.co/itisha249" in provider.endpoint_url
+    assert "s3.example.com" in provider.endpoint_url
     assert provider.bucket_name == "tajlandia"
     assert provider.region_name == "us-east-1"
     assert provider.profile_name == "hf"

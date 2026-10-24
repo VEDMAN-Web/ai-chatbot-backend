@@ -20,6 +20,7 @@ openai>=1.40.0
 anthropic>=0.34.0
 
 # Report Generation & Documents
+boto3>=1.34
 reportlab>=4.2.0
 weasyprint>=62.0
 Pillow>=10.0.0

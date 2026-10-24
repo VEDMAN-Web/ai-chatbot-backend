@@ -546,6 +546,68 @@ def _append_action_lifecycle_note(
             pass
 
 
+def _action_target_websites(payload: Optional[Dict[str, Any]]) -> list:
+    from app.core.tenant import normalize_website_list
+
+    raw = []
+    if not isinstance(payload, dict):
+        return []
+    for key in ("websites", "selected_websites", "website", "site_origin"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            raw.append(value)
+        elif isinstance(value, list):
+            raw.extend(value)
+    fields = payload.get("fields_to_update") or payload.get("fields") or {}
+    if isinstance(fields, dict):
+        sites = fields.get("websites")
+        if isinstance(sites, str) and sites.strip():
+            raw.append(sites)
+        elif isinstance(sites, list):
+            raw.extend(sites)
+    return normalize_website_list(raw)
+
+
+def _assert_confirm_authorized(action, staff: AuthenticatedStaff, confirmation_token: Optional[str]) -> None:
+    """Token is mandatory. Only the proposer or a super admin may confirm, and only on allowed websites."""
+    token = (confirmation_token or "").strip()
+    expected = (getattr(action, "confirmation_token", None) or "").strip()
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Confirmation token is required. Nothing was executed.",
+        )
+    if token != expected:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid confirmation token. Nothing was executed.",
+        )
+
+    role = (getattr(staff, "role", None) or "").strip().lower()
+    actor = (getattr(staff, "email", None) or "").strip().lower()
+    proposer = (getattr(action, "staff_user_id", None) or "").strip().lower()
+    if role != "super_admin" and proposer and actor != proposer:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the staff member who proposed this action, or a super admin, can confirm it.",
+        )
+    if role == "super_admin":
+        return
+
+    sites = _action_target_websites(getattr(action, "action_payload", None) or {})
+    if not sites:
+        return
+    from app.core.tenant import normalize_website_list
+
+    allowed = set(normalize_website_list(getattr(staff, "allowed_websites", None) or []))
+    denied = [site for site in sites if site not in allowed]
+    if denied:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"You cannot confirm an action for website(s) outside your access: {denied}.",
+        )
+
+
 def confirm_and_execute_action(
     db: Session,
     pending_action_id: str,
@@ -557,6 +619,20 @@ def confirm_and_execute_action(
     Updates lifecycle states: PENDING -> CONFIRMED -> EXECUTED (or FAILED).
     """
     action = get_pending_action(db, pending_action_id)
+    _assert_confirm_authorized(action, authenticated_staff, confirmation_token)
+
+    # Already executed: return the first result and do not run the tool again.
+    if action.status == ACTION_STATUS_EXECUTED:
+        stored = action.execution_result if isinstance(action.execution_result, dict) else {}
+        return {
+            "status": ACTION_STATUS_EXECUTED,
+            "pending_action_id": str(action.id),
+            "tool_name": action.tool_name,
+            "execution_result": stored,
+            "operation_id": stored.get("operation_id"),
+            "idempotent": True,
+            "message": "This action was already confirmed. Returning the original result.",
+        }
 
     # 1. Check expiration
     if action.status == ACTION_STATUS_EXPIRED:
@@ -572,12 +648,7 @@ def confirm_and_execute_action(
             detail=f"Action cannot be executed. Current status is '{action.status}'."
         )
 
-    # 3. Check token if provided
-    if confirmation_token and confirmation_token != action.confirmation_token:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid confirmation token."
-        )
+    # Token and proposer checks already ran in _assert_confirm_authorized.
 
     # 3b. Stale-value guard: re-check stored "Current" vs live record before any write
     payload = dict(action.action_payload or {})
