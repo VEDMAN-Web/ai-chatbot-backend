@@ -72,8 +72,10 @@ def startup_db_init():
 
         # Safe DDL synchronization for existing users & properties tables across both database instances
         engines_to_verify = {admin_engine, user_engine}
+        schema_ok = True
         for eng in engines_to_verify:
             try:
+                Base.metadata.create_all(bind=eng)
                 with eng.begin() as conn:
                     conn.execute(sa.text("""
                         ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE;
@@ -86,10 +88,13 @@ def startup_db_init():
                         ALTER TABLE users ADD COLUMN IF NOT EXISTS preferences JSONB DEFAULT '{}'::jsonb;
                         ALTER TABLE properties ADD COLUMN IF NOT EXISTS websites JSONB DEFAULT '[]'::jsonb;
                     """))
-                Base.metadata.create_all(bind=eng)
             except Exception as eng_e:
+                schema_ok = False
                 print(f"Startup notice for engine {eng}: {eng_e}")
-        print("FastAPI Startup: Verified all admin and user database tables and columns.")
+        if schema_ok:
+            print("FastAPI Startup: Verified all admin and user database tables and columns.")
+        else:
+            print("FastAPI Startup: Database schema was not fully applied.")
     except Exception as e:
         print(f"FastAPI Startup DB Notice: {e}")
 
