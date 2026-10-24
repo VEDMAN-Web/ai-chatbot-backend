@@ -503,11 +503,63 @@ def read_pg_canonical(prop: Any, keys: Sequence[str]) -> Dict[str, Any]:
     return out
 
 
+def firestore_identity(doc: Dict[str, Any]) -> Dict[str, Any]:
+    """Name, place, bedrooms and status from the document fields, not the id."""
+    if not isinstance(doc, dict):
+        return {}
+
+    def text(*names: str) -> Optional[str]:
+        for key in names:
+            value = doc.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+            if isinstance(value, dict):
+                for item in value.values():
+                    if isinstance(item, str) and item.strip() and len(item.strip()) <= 120:
+                        return item.strip()
+        return None
+
+    name = text("name", "propertyName", "projectName", "title", "property_name")
+    place = text("province", "city", "district", "area", "location")
+    status = text("status", "saleStatus", "completionStatus")
+    if not status and "isActive" in doc:
+        status = "Available" if doc.get("isActive") else "Sold Out"
+    bedrooms = doc.get("bedroomsMin")
+    if bedrooms is None:
+        bedrooms = doc.get("bedrooms_min")
+    if bedrooms is None and isinstance(doc.get("bedrooms"), (int, float)):
+        bedrooms = doc.get("bedrooms")
+    bedrooms_max = doc.get("bedroomsMax") if doc.get("bedroomsMax") is not None else doc.get("bedrooms_max")
+    out: Dict[str, Any] = {}
+    if name:
+        out["name"] = name
+        out["property_name"] = name
+    if place:
+        out["province"] = place
+        out["location"] = place
+    if status:
+        out["status"] = status
+    if bedrooms is not None:
+        out["bedrooms"] = bedrooms
+        out["bedrooms_min"] = bedrooms
+    if bedrooms_max is not None:
+        out["bedrooms_max"] = bedrooms_max
+    return out
+
+
 def read_firestore_canonical(doc: Dict[str, Any], keys: Sequence[str]) -> Dict[str, Any]:
     out: Dict[str, Any] = {}
     if not doc:
         return out
-    name = localize_name(doc.get("name") or doc.get("title") or doc.get("property_name"))
+    identity = firestore_identity(doc)
+    name = localize_name(
+        identity.get("name")
+        or doc.get("name")
+        or doc.get("propertyName")
+        or doc.get("projectName")
+        or doc.get("title")
+        or doc.get("property_name")
+    )
     price_from = doc.get("priceFrom") or doc.get("price_numeric_min") or doc.get("price")
     price_to = doc.get("priceTo") or doc.get("price_numeric_max")
     if isinstance(price_from, dict):
@@ -517,19 +569,19 @@ def read_firestore_canonical(doc: Dict[str, Any], keys: Sequence[str]) -> Dict[s
 
     mapping = {
         "property_name": name,
-        "status": doc.get("status") or doc.get("saleStatus"),
+        "status": identity.get("status") or doc.get("status") or doc.get("saleStatus"),
         "price_numeric_min": parsed_min if parsed_min is not None else price_from,
         "price_numeric_max": parsed_max if parsed_max is not None else price_to,
         "price_display": doc.get("price_display")
         or (f"{parsed_min:,.0f} THB" if parsed_min is not None else localize_name(doc.get("price"))),
         "currency": doc.get("currency") or "THB",
-        "province": doc.get("province") or localize_name(doc.get("location")),
+        "province": identity.get("province") or doc.get("province") or localize_name(doc.get("location")),
         "district": doc.get("district") or doc.get("area"),
         "area": doc.get("area") or localize_name(doc.get("location")),
-        "location": localize_name(doc.get("location")) or doc.get("province"),
+        "location": identity.get("location") or localize_name(doc.get("location")) or doc.get("province"),
         "property_type": doc.get("property_type") or doc.get("type"),
-        "bedrooms_min": doc.get("bedrooms_min") or doc.get("bedrooms"),
-        "bedrooms_max": doc.get("bedrooms_max"),
+        "bedrooms_min": identity.get("bedrooms_min") or doc.get("bedrooms_min") or doc.get("bedroomsMin") or doc.get("bedrooms"),
+        "bedrooms_max": identity.get("bedrooms_max") or doc.get("bedrooms_max") or doc.get("bedroomsMax"),
         "bedrooms_display": doc.get("bedrooms_display") or (
             str(doc.get("bedrooms")) if doc.get("bedrooms") is not None else None
         ),
@@ -665,6 +717,7 @@ def resolve_existing_property(
             raw_fs = fs_prop.get("raw_firestore_data") if isinstance(fs_prop.get("raw_firestore_data"), dict) else {}
             doc = dict(raw_fs or {})
             doc.update({k: v for k, v in fs_prop.items() if k != "raw_firestore_data" and v is not None})
+            doc.update(firestore_identity(raw_fs or {}))
         else:
             for target in ("admin", "user"):
                 fs = get_firestore_client(target=target) or (

@@ -168,6 +168,7 @@ def admin_chat_endpoint(
             "conversation_id": res.get("conversation_id"),
             "requires_confirmation": bool(res.get("requires_confirmation")),
             "pending_action_id": res.get("pending_action_id"),
+            "confirmation_token": res.get("confirmation_token"),
             "action_status": res.get("action_status"),
             "tools_used": res.get("tools_used") or [],
             "download_link": res.get("download_link"),
@@ -222,13 +223,17 @@ def inspect_pending_action_endpoint(
 ):
     """Retrieves current status and payload details of a staged pending action."""
     action = get_pending_action(db, pending_action_id)
+    role = (getattr(staff, "role", None) or "").strip().lower()
+    actor = (getattr(staff, "email", None) or "").strip().lower()
+    proposer = (getattr(action, "staff_user_id", None) or "").strip().lower()
+    token = action.confirmation_token if role == "super_admin" or (actor and actor == proposer) else None
     return {
         "pending_action_id": str(action.id),
         "tool_name": action.tool_name,
         "status": action.status,
         "action_payload": action.action_payload,
         "staff_user_id": action.staff_user_id,
-        "confirmation_token": action.confirmation_token,
+        "confirmation_token": token,
         "expires_at": action.expires_at.isoformat(),
         "created_at": action.created_at.isoformat(),
         "execution_result": action.execution_result

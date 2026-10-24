@@ -282,11 +282,18 @@ const API_ROUTES = {
   publicHistory: (id) => `/api/v1/chat/history/${id}`,
   adminHistory: (id) => `/api/v1/admin/chat/history/${id}`,
   confirmAction: (id) => `/api/v1/admin/actions/${id}/confirm`,
+  inspectAction: (id) => `/api/v1/admin/actions/${id}`,
   rejectAction: (id) => `/api/v1/admin/actions/${id}/reject`,
   properties: '/api/v1/properties',
   login: '/api/v1/auth/login',
   logout: '/api/v1/auth/logout',
 };
+
+const confirmationTokens = {};
+
+function rememberConfirmationToken(actionId, token) {
+  if (actionId && token) confirmationTokens[actionId] = token;
+}
 
 const ADMIN_TOKEN_KEY = 'tajlandia_admin_access_token';
 const ADMIN_USER_KEY = 'tajlandia_admin_user';
@@ -819,6 +826,14 @@ async function handleSendMessage() {
     site_origin: activeTenantOrigin,
     language: currentLanguage
   };
+  const pendingIds = Object.keys(confirmationTokens);
+  const shortConfirm = /^(yes|ok|okay|confirm|apply)(\s+(confirm|yes|ok|apply))?$/i.test((text || '').trim());
+  if (currentMode !== 'public' && shortConfirm && pendingIds.length) {
+    const pendingId = pendingIds[pendingIds.length - 1];
+    payload.action = 'confirm';
+    payload.pending_action_id = pendingId;
+    payload.confirmation_token = confirmationTokens[pendingId];
+  }
 
   // Long client timeout (10 min) so multi-turn LLM + Firestore never shows premature "unavailable"
   const CHAT_TIMEOUT_MS = 600000;
@@ -884,7 +899,9 @@ async function appendAssistantResponse(data, animate = false) {
   const quickReplies = data.quick_replies || [];
   const requiresConfirm = data.requires_confirmation || false;
   const pendingActionId = data.pending_action_id || null;
+  const confirmationToken = data.confirmation_token || '';
   const confirmViaChatOnly = data.confirm_via_chat_only === true;
+  if (pendingActionId && confirmationToken) rememberConfirmationToken(pendingActionId, confirmationToken);
 
   // Sync active language if backend changed or confirmed language
   if (data.language && data.language !== currentLanguage) {
@@ -1087,6 +1104,7 @@ async function appendAssistantResponse(data, animate = false) {
     const actionCard = document.createElement('div');
     actionCard.className = 'action-confirmation-card';
     actionCard.id = `action-card-${pendingActionId}`;
+    if (confirmationToken) actionCard.dataset.confirmationToken = confirmationToken;
 
     actionCard.innerHTML = `
       <div class="action-card-header">
@@ -1175,10 +1193,21 @@ async function confirmAction(actionId) {
   }
 
   try {
+    let token = confirmationTokens[actionId] || (card && card.dataset.confirmationToken) || '';
+    if (!token) {
+      const inspect = await fetch(API_ROUTES.inspectAction(actionId), {
+        headers: adminAuthHeaders()
+      });
+      if (inspect.ok) {
+        const inspected = await inspect.json();
+        token = inspected.confirmation_token || '';
+        if (token) rememberConfirmationToken(actionId, token);
+      }
+    }
     const res = await fetch(API_ROUTES.confirmAction(actionId), {
       method: 'POST',
       headers: adminAuthHeaders({ 'Content-Type': 'application/json' }),
-      body: JSON.stringify({})
+      body: JSON.stringify({ confirmation_token: token })
     });
 
     const data = await res.json();

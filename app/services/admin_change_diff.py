@@ -246,8 +246,10 @@ def format_single_diff_markdown(
                 cur_s = "(unreadable at proposal)"
             else:
                 cur_s = _norm(cur) or "—"
+            from app.services.admin_chat_quality import human_field_label
+
             lines.append(
-                f"| `{r['field']}` | {cur_s} | {_norm(r['new']) or '—'} |"
+                f"| {human_field_label(str(r['field']))} | {cur_s} | {_norm(r['new']) or '—'} |"
             )
     return "\n".join(lines)
 
@@ -278,7 +280,9 @@ def format_batch_diff_markdown(
         bits = []
         for r in rows[:4]:
             cur = "(unreadable)" if r.get("current") == UNREADABLE else _norm(r["current"])
-            bits.append(f"`{r['field']}` {cur} → {_norm(r['new'])}")
+            from app.services.admin_chat_quality import human_field_label
+
+            bits.append(f"{human_field_label(str(r['field']))} {cur} → {_norm(r['new'])}")
         lines.append(f"- `{pid}` **{name}**: " + "; ".join(bits))
     remaining = n - len(shown)
     if remaining > 0:
@@ -615,10 +619,19 @@ def substitute_real_pending_id(text: Optional[str], real_id: Optional[str]) -> s
 
 def format_provenance_table(rows: List[Dict[str, Any]]) -> str:
     """Markdown table Field | Value | Source for an ingest draft. Does not write anything."""
+    from app.services.admin_chat_quality import human_field_label
+
     lines = ["| Field | Value | Source |", "| --- | --- | --- |"]
+    seen: Dict[str, int] = {}
     for row in rows or []:
-        field = str(row.get("field") or "").replace("|", "/")
+        field = human_field_label(str(row.get("field") or "")).replace("|", "/")
         value = str(row.get("value") if row.get("value") not in (None, "") else "—").replace("|", "/")
         source = str(row.get("source") or "").replace("|", "/")
+        if field in seen and value not in {"", "—"}:
+            previous = lines[seen[field]]
+            if "THB" in value or (previous.endswith("| — |") or "| — |" in previous):
+                lines[seen[field]] = f"| {field} | {value} | {source} |"
+            continue
+        seen[field] = len(lines)
         lines.append(f"| {field} | {value} | {source} |")
     return "\n".join(lines)

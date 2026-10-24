@@ -431,7 +431,7 @@ def test_yes_show_me_leads_does_not_confirm(monkeypatch, staff):
     monkeypatch.setattr(
         "app.services.admin_agent.get_or_create_conversation",
         lambda **kw: SimpleNamespace(
-            id="c1", session_id="s1", preferences={"language": "en"}, message_history=[], site_origin="admin"
+            id="conv-1", session_id="s1", preferences={"language": "en"}, message_history=[], site_origin="admin"
         ),
     )
     monkeypatch.setattr("app.services.admin_agent.append_conversation_turn", lambda *a, **k: None)
@@ -490,7 +490,7 @@ def test_bare_yes_confirms_single_pending(monkeypatch, staff):
     monkeypatch.setattr(
         "app.services.admin_agent.get_or_create_conversation",
         lambda **kw: SimpleNamespace(
-            id="c1", session_id="s1", preferences={"language": "en"}, message_history=[], site_origin="admin"
+            id="conv-1", session_id="s1", preferences={"language": "en"}, message_history=[], site_origin="admin"
         ),
     )
     monkeypatch.setattr("app.services.admin_agent.append_conversation_turn", lambda *a, **k: None)
@@ -518,7 +518,7 @@ def test_two_pending_yes_asks_which(monkeypatch, staff):
     monkeypatch.setattr(
         "app.services.admin_agent.get_or_create_conversation",
         lambda **kw: SimpleNamespace(
-            id="c1", session_id="s1", preferences={"language": "en"}, message_history=[], site_origin="admin"
+            id="conv-1", session_id="s1", preferences={"language": "en"}, message_history=[], site_origin="admin"
         ),
     )
     monkeypatch.setattr("app.services.admin_agent.append_conversation_turn", lambda *a, **k: None)
@@ -543,7 +543,7 @@ def test_dont_confirm_rejects(monkeypatch, staff):
     monkeypatch.setattr(
         "app.services.admin_agent.get_or_create_conversation",
         lambda **kw: SimpleNamespace(
-            id="c1", session_id="s1", preferences={"language": "en"}, message_history=[], site_origin="admin"
+            id="conv-1", session_id="s1", preferences={"language": "en"}, message_history=[], site_origin="admin"
         ),
     )
     monkeypatch.setattr("app.services.admin_agent.append_conversation_turn", lambda *a, **k: None)
@@ -569,7 +569,7 @@ def test_action_confirm_button_parameter_works(monkeypatch, staff):
     monkeypatch.setattr(
         "app.services.admin_agent.get_or_create_conversation",
         lambda **kw: SimpleNamespace(
-            id="c1", session_id="s1", preferences={"language": "en"}, message_history=[], site_origin="admin"
+            id="conv-1", session_id="s1", preferences={"language": "en"}, message_history=[], site_origin="admin"
         ),
     )
     monkeypatch.setattr("app.services.admin_agent.append_conversation_turn", lambda *a, **k: None)

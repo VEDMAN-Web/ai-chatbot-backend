@@ -251,6 +251,12 @@ def normalize_firestore_project(doc_id: str, data: Dict[str, Any]) -> Dict[str, 
     else:
         country_id = str(country_raw) if country_raw else "Thailand"
 
+    place_name = ""
+    for place_key in ("province", "city", "district", "area", "location"):
+        place_val = data.get(place_key)
+        if isinstance(place_val, str) and place_val.strip():
+            place_name = place_val.strip()
+            break
     location_str = shorten_location(
         district=city_id,
         city=city_id,
@@ -276,9 +282,25 @@ def normalize_firestore_project(doc_id: str, data: Dict[str, Any]) -> Dict[str, 
         bed_nums = [l.get("bedrooms") for l in layouts if isinstance(l, dict) and l.get("bedrooms") is not None]
         if bed_nums:
             layout_min, layout_max = min(bed_nums), max(bed_nums)
+    bedrooms_min = data.get("bedrooms_min") if data.get("bedrooms_min") is not None else data.get("bedroomsMin")
+    bedrooms_max = data.get("bedrooms_max") if data.get("bedrooms_max") is not None else data.get("bedroomsMax")
+    if bedrooms_min is None and isinstance(data.get("bedrooms"), (int, float)):
+        bedrooms_min = data.get("bedrooms")
+    if layout_min is not None and bedrooms_min is None:
+        bedrooms_min = layout_min
+    if layout_max is not None and bedrooms_max is None:
+        bedrooms_max = layout_max
+    if isinstance(data.get("status"), str) and data.get("status").strip():
+        status_value = data.get("status").strip()
+    elif isinstance(data.get("completionStatus"), str) and data.get("completionStatus").strip():
+        status_value = data.get("completionStatus").strip()
+    elif "isActive" in data:
+        status_value = "Available" if data.get("isActive") else "Sold Out"
+    else:
+        status_value = "Available"
     bedrooms_str = format_bedrooms_label(
-        bedrooms_min=data.get("bedrooms_min") or data.get("bedroomsMin") or layout_min,
-        bedrooms_max=data.get("bedrooms_max") or data.get("bedroomsMax") or layout_max,
+        bedrooms_min=bedrooms_min,
+        bedrooms_max=bedrooms_max,
         bedrooms_display=data.get("bedrooms_display") or data.get("bedroomsDisplay"),
         bedrooms=data.get("bedrooms"),
     )
@@ -367,14 +389,16 @@ def normalize_firestore_project(doc_id: str, data: Dict[str, Any]) -> Dict[str, 
         "price_numeric_max": price_num_max,
         "currency": currency,
         "bedrooms": bedrooms_str,
+        "bedrooms_min": bedrooms_min,
+        "bedrooms_max": bedrooms_max,
         "area": area_str,
-        "location": location_str,
+        "location": place_name or location_str,
         "address": address,
         "district": city_id,
-        "province": country_id,
+        "province": place_name or country_id,
         "latitude": lat,
         "longitude": lng,
-        "status": data.get("completionStatus") or ("Available" if data.get("isActive", True) else "Sold Out"),
+        "status": status_value,
         "has_pool": False,
         "beach_access": False,
         "images": images,

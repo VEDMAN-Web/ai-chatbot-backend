@@ -54,6 +54,58 @@ _NEGATION_MARKERS = (
 )
 
 
+def _token_from_tool_results(tool_results: Any) -> Optional[str]:
+    for item in tool_results or []:
+        if not isinstance(item, dict):
+            continue
+        if item.get("confirmation_token"):
+            return str(item["confirmation_token"])
+        nested = item.get("result") if isinstance(item.get("result"), dict) else None
+        if nested and nested.get("confirmation_token"):
+            return str(nested["confirmation_token"])
+    return None
+
+
+def _expose_confirmation_token(db: Any, staff: Any, res: Any) -> Any:
+    if not isinstance(res, dict) or not res.get("requires_confirmation") or not res.get("pending_action_id"):
+        return res
+    if res.get("confirmation_token"):
+        return res
+    try:
+        from app.services.action_service import get_pending_action
+        action = get_pending_action(db, str(res["pending_action_id"]))
+    except Exception:
+        return res
+    role = (getattr(staff, "role", None) or "").strip().lower()
+    actor = (getattr(staff, "email", None) or "").strip().lower()
+    proposer = (getattr(action, "staff_user_id", None) or "").strip().lower()
+    if role == "super_admin" or (actor and actor == proposer):
+        res["confirmation_token"] = action.confirmation_token
+    return res
+
+
+def _session_confirmation_token(action: Any, conv: Any, staff: Any) -> Optional[str]:
+    """
+    Use the stored token only when this authenticated session owns the proposal.
+    The token is never guessed. A mismatch returns None so the caller refuses.
+    """
+    if action is None or staff is None:
+        return None
+    role = (getattr(staff, "role", None) or "").strip().lower()
+    actor = (getattr(staff, "email", None) or "").strip().lower()
+    proposer = (getattr(action, "staff_user_id", None) or "").strip().lower()
+    action_conv = str(getattr(action, "conversation_id", "") or "")
+    conv_id = str(getattr(conv, "id", "") or "")
+    same_conversation = bool(action_conv) and action_conv == conv_id
+    same_staff = bool(proposer) and actor == proposer
+    if not same_conversation:
+        return None
+    if role != "super_admin" and not same_staff:
+        return None
+    token = (getattr(action, "confirmation_token", None) or "").strip()
+    return token or None
+
+
 def is_strict_confirm_message(message: Optional[str]) -> bool:
     """True only for short, unambiguous confirmation phrases (≤~4 words, no other request)."""
     if not message or not str(message).strip():
@@ -1531,6 +1583,24 @@ def process_admin_chat(
         if ingest_turn is not None:
             return ingest_turn
 
+    if clean_message and action not in ("confirm", "reject"):
+        from app.services.admin_turn_rules import safety_refusal_text
+        refused = safety_refusal_text(clean_message)
+        if refused:
+            append_conversation_turn(db, conv, clean_message, refused)
+            return _attach_timing_debug({
+                "type": "text",
+                "text": refused,
+                "session_id": conv.session_id,
+                "conversation_id": str(conv.id),
+                "requires_confirmation": False,
+                "pending_action_id": None,
+                "action_status": None,
+                "tools_used": [],
+                "download_link": None,
+                "language": active_lang,
+            }, timer)
+
     # Explicit UI button/parameter OR short free-text only — never substring matches in long messages
     has_confirm_intent = (action == "confirm") or (
         bool(clean_message) and is_strict_confirm_message(clean_message)
@@ -1626,6 +1696,25 @@ def process_admin_chat(
                 token_match = re.search(r"\bact_[A-Za-z0-9]+\b", clean_message)
                 if token_match:
                     typed_token = token_match.group(0)
+            if not typed_token:
+                typed_token = _session_confirmation_token(target_action, conv, staff_user)
+            if not typed_token:
+                refused = (
+                    "I cannot confirm that action. It belongs to a different conversation or a different staff member. Nothing was executed."
+                )
+                append_conversation_turn(db, conv, clean_message or "Confirm", refused)
+                return _attach_timing_debug({
+                    "type": "text",
+                    "text": refused,
+                    "session_id": conv.session_id,
+                    "conversation_id": str(conv.id),
+                    "requires_confirmation": True,
+                    "pending_action_id": str(target_action.id),
+                    "action_status": "pending",
+                    "tools_used": [],
+                    "download_link": None,
+                    "language": active_lang,
+                }, timer)
             exec_res = confirm_and_execute_action(
                 db=db,
                 pending_action_id=str(target_action.id),
@@ -1880,10 +1969,12 @@ def process_admin_chat(
                 authenticated_staff=staff_user,
                 reason=clean_message or "Admin cancelled action via unified chat API"
             )
+            from app.services.admin_chat_quality import human_tool_label
+            label = human_tool_label(target_action.tool_name).lower()
             if active_lang == "pl":
-                reply_text = f"❌ **Propozycja akcji anulowana.**\n\nOperacja `{target_action.tool_name}` została odrzucona. Żadne zmiany nie zostały wprowadzone do bazy danych."
+                reply_text = f"Anulowano: {label}. Nic nie zostało zmienione."
             else:
-                reply_text = f"❌ **Action proposal cancelled.**\n\nThe proposed `{target_action.tool_name}` was rejected. No changes have been made to the database."
+                reply_text = f"The {label} was cancelled. Nothing was changed."
 
             append_conversation_turn(
                 db=db,
@@ -2007,6 +2098,17 @@ def process_admin_chat(
             fast_res["text"] = scrub_user_reply(fast_res.get("text"))
             fast_res["suggestions"] = [] if fast_res.get("direct_answer") else fast_res.get("suggestions") or []
             return _attach_timing_debug(fast_res, timer)
+
+    if clean_message and staff_user is not None and action not in ("confirm", "reject"):
+        from app.services.admin_turn_rules import try_rule_based_write
+        ruled = try_rule_based_write(db, conv, clean_message, staff_user, active_lang)
+        if ruled is not None:
+            if draft_reminder and "still open" not in (ruled.get("text") or "").lower():
+                ruled["text"] = ((ruled.get("text") or "").rstrip() + "\n\n" + draft_reminder).strip()
+            from app.services.admin_chat_quality import scrub_user_reply
+            ruled["text"] = scrub_user_reply(ruled.get("text"))
+            append_conversation_turn(db, conv, clean_message, ruled.get("text") or "")
+            return _attach_timing_debug(ruled, timer)
 
     # 4. AI Model Intent Classification & Safety Evaluation
     client = None
@@ -2502,6 +2604,7 @@ def _call_anthropic_claude(
                 "conversation_id": str(conv.id),
                 "requires_confirmation": True,
                 "pending_action_id": pending_action_id,
+                "confirmation_token": _token_from_tool_results(tool_results),
                 "action_status": "awaiting_confirmation",
                 "tools_used": tool_calls,
                 "language": language
@@ -4314,14 +4417,11 @@ def _run_deterministic_admin(
             for p in (t_res or [])[:10]:
                 p_id = p.get("property_id") or p.get("id") or "N/A"
                 p_name = p.get("property_name") or p.get("name") or p.get("title") or "Property"
-                from app.services.admin_property_fields import format_bedrooms_label, format_place_name
-                p_loc = format_place_name(p.get("province") or p.get("location") or "Thailand")
-                p_beds = format_bedrooms_label(
-                    bedrooms_min=p.get("bedrooms_min"),
-                    bedrooms_max=p.get("bedrooms_max"),
-                    bedrooms_display=p.get("bedrooms_display"),
-                    bedrooms=p.get("bedrooms"),
-                )
+                from app.services.admin_chat_quality import listing_bed_label
+                from app.services.admin_property_fields import format_place_name
+                place = p.get("province") or p.get("location") or ""
+                p_loc = format_place_name(place) or "Thailand"
+                p_beds = listing_bed_label(p)
                 p_price = p.get("price_display") or p.get("price") or "Price on request"
                 prop_lines.append(
                     f"- **{p_name}** ({p_id}) | {p_loc} | {p_beds} | {p_price}"
@@ -4423,15 +4523,11 @@ def _clean_property_for_admin_tool(fp: Dict[str, Any]) -> Dict[str, Any]:
             price_display = f"from {float(p_min) / 1_000_000:.2f} million THB"
         else:
             price_display = "Price on request"
-    from app.services.admin_property_fields import format_bedrooms_label
-    bedrooms_display = format_bedrooms_label(
-        bedrooms_min=fp.get("bedrooms_min"),
-        bedrooms_max=fp.get("bedrooms_max"),
-        bedrooms_display=fp.get("bedrooms_display"),
-        bedrooms=fp.get("bedrooms"),
-    )
+    from app.services.admin_chat_quality import listing_bed_label
+    from app.services.admin_property_fields import format_place_name
+    bedrooms_display = listing_bed_label(fp)
+    place = format_place_name(fp.get("province") or fp.get("location") or "") or "Thailand"
     area_display = fp.get("area_display") or (f"{fp.get('area')} sqm" if fp.get("area") else "N/A")
-    location = fp.get("location") or "Thailand"
     status = fp.get("status") or "Available"
 
     return {
@@ -4440,10 +4536,13 @@ def _clean_property_for_admin_tool(fp: Dict[str, Any]) -> Dict[str, Any]:
         "name": name,
         "property_type": fp.get("property_type") or "Villa / Condo",
         "status": status,
-        "location": location,
+        "location": place,
+        "province": fp.get("province") or place,
         "price_display": price_display,
         "price": price_display,
         "price_numeric_min": fp.get("price_numeric_min"),
+        "bedrooms_min": fp.get("bedrooms_min") or fp.get("bedroomsMin"),
+        "bedrooms_max": fp.get("bedrooms_max") or fp.get("bedroomsMax"),
         "bedrooms_display": bedrooms_display,
         "bedrooms": bedrooms_display,
         "bathrooms": fp.get("bathrooms", 0),
@@ -4458,7 +4557,12 @@ def _clean_property_for_admin_tool(fp: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _prop_to_dict(p: Any) -> Dict[str, Any]:
-    loc = f"{p.district or ''}, {p.province or ''}".strip(", ") or "Thailand"
+    from app.services.admin_chat_quality import listing_bed_label
+    from app.services.admin_property_fields import format_place_name
+    loc = format_place_name(getattr(p, "province", None) or "") or (
+        f"{p.district or ''}, {p.province or ''}".strip(", ") or "Thailand"
+    )
+    bed_label = listing_bed_label(p)
     area_d = re.sub(r"^0\s*[-–]\s*", "", p.area_display or "") if p.area_display else "N/A"
     p_price = p.price_display or "Price on request"
     if ".xx" in str(p_price):
@@ -4474,11 +4578,14 @@ def _prop_to_dict(p: Any) -> Dict[str, Any]:
         "property_type": p.property_type,
         "status": p.status,
         "location": loc,
+        "province": getattr(p, "province", None),
         "price_display": p_price,
         "price": p_price,
         "price_numeric_min": float(p.price_numeric_min) if p.price_numeric_min else None,
-        "bedrooms_display": p.bedrooms_display,
-        "bedrooms": p.bedrooms_display,
+        "bedrooms_min": getattr(p, "bedrooms_min", None),
+        "bedrooms_max": getattr(p, "bedrooms_max", None),
+        "bedrooms_display": bed_label,
+        "bedrooms": bed_label,
         "bathrooms": p.bathrooms,
         "area_display": area_d,
         "area": area_d,
@@ -5467,3 +5574,18 @@ def _execute_admin_tool_uncached(
 
     else:
         raise ValueError(f"Unknown admin tool: {tool_name}")
+
+
+_process_admin_chat_impl = process_admin_chat
+
+
+def process_admin_chat(*args, **kwargs):
+    """Attach the stored confirmation token for the proposer or a super admin."""
+    res = _process_admin_chat_impl(*args, **kwargs)
+    db = kwargs.get("db", args[0] if args else None)
+    staff = kwargs.get("staff_user", args[3] if len(args) > 3 else None)
+    res = _expose_confirmation_token(db, staff, res)
+    if isinstance(res, dict) and res.get("text"):
+        from app.services.admin_chat_quality import scrub_user_reply
+        res["text"] = scrub_user_reply(res.get("text"))
+    return res

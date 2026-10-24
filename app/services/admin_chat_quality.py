@@ -52,6 +52,10 @@ _HYGIENE_MARKERS = (
     "[UPDATE SUCCESS]",
     "audit_ephemeral_",
     "(do not run an action by themselves)",
+    "price_numeric_min",
+    "price_display",
+    "create_or_update_listing",
+    "Your the",
     *_INTERNAL_KEYS,
 )
 
@@ -106,6 +110,83 @@ def _is_price_change(payload: Dict[str, Any]) -> bool:
     return False
 
 
+_FIELD_LABELS = {
+    "price": "Price",
+    "price_display": "Price",
+    "price_numeric_min": "Price",
+    "price_numeric_max": "Price",
+    "currency": "Currency",
+    "status": "Status",
+    "bedrooms": "Bedrooms",
+    "bedrooms_min": "Bedrooms",
+    "bedrooms_max": "Bedrooms",
+    "bedrooms_display": "Bedrooms",
+    "bathrooms": "Bathrooms",
+    "province": "Province",
+    "property_name": "Name",
+    "name": "Name",
+    "title": "Name",
+    "property_type": "Type",
+    "location": "Location",
+    "district": "District",
+    "area": "Area",
+    "address": "Address",
+    "developer_name": "Developer",
+    "ownership_type": "Ownership",
+    "has_pool": "Pool",
+    "parking_spaces": "Parking",
+    "parking": "Parking",
+    "websites": "Websites",
+    "website": "Website",
+    "description": "Description",
+    "area_sqm_min": "Size",
+    "area_sqm_max": "Size",
+    "area_display": "Size",
+}
+
+
+def human_field_label(field_name: str) -> str:
+    key = (field_name or "").strip()
+    if key in _FIELD_LABELS:
+        return _FIELD_LABELS[key]
+    lowered = key.lower().replace(" ", "_")
+    if lowered in _FIELD_LABELS:
+        return _FIELD_LABELS[lowered]
+    words = key.replace("_", " ").strip()
+    return words[:1].upper() + words[1:] if words else "Field"
+
+
+def listing_bed_label(source: Any) -> str:
+    """Bed label from display, then min/max. 'beds not listed' only when all are empty."""
+    from app.services.admin_property_fields import format_bedrooms_label
+
+    def _get(key: str) -> Any:
+        if isinstance(source, dict):
+            return source.get(key)
+        return getattr(source, key, None)
+
+    label = format_bedrooms_label(
+        bedrooms_min=_get("bedrooms_min"),
+        bedrooms_max=_get("bedrooms_max"),
+        bedrooms_display=_get("bedrooms_display"),
+        bedrooms=_get("bedrooms"),
+    )
+    text = re.sub(r"\bbeds?\s+beds?\b", "beds", str(label or ""), flags=re.I).strip()
+    return text or "beds not listed"
+
+
+def humanise_field_list(fields: Any) -> str:
+    labels: List[str] = []
+    seen = set()
+    for field in fields or []:
+        label = human_field_label(str(field))
+        if label in seen:
+            continue
+        seen.add(label)
+        labels.append(label)
+    return ", ".join(labels)
+
+
 def open_work_label(pending_action: Any) -> str:
     tool = str(getattr(pending_action, "tool_name", "") or "")
     payload = getattr(pending_action, "action_payload", None) or {}
@@ -113,17 +194,21 @@ def open_work_label(pending_action: Any) -> str:
         payload = {}
     name = _listing_name(payload)
     if tool in {"ingest_property_from_url", "ingest_property_from_drive"} or payload.get("source_url") or payload.get("provenance"):
-        return f"the draft for {name}" if name else "the property import draft"
+        return f"property import draft for {name}" if name else "property import draft"
     if tool == "create_or_update_listing" and _is_price_change(payload):
-        return f"the price change for {name}" if name else "the price change"
+        return f"price change for {name}" if name else "price change"
     if tool == "create_or_update_listing":
-        return f"the property change for {name}" if name else "the property change"
+        return f"property change for {name}" if name else "property change"
+    if tool == "create_calendar_event":
+        return f"calendar event for {name}" if name else "calendar event"
     plain = human_tool_label(tool).lower()
-    return f"the {plain} for {name}" if name else f"the {plain}"
+    return f"{plain} for {name}" if name else plain
 
 
 def draft_still_open_note(label: str) -> str:
     clean = (label or "draft").strip() or "draft"
+    if clean.lower().startswith("the "):
+        clean = clean[4:]
     return f"Your {clean} is still open. Say confirm or cancel when ready."
 
 
@@ -352,6 +437,7 @@ def format_saved_listing_reply(
 
 _FACT_PATTERNS = (
     ("price", re.compile(r"^(?:what(?:'s| is) the price of|how much is|how much does)\s+(.+?)(?:\s+cost)?$", re.I)),
+    ("price", re.compile(r"^(?!set\b|change\b|increase\b|decrease\b|raise\b|lower\b|update\b|delete\b)(.+?)\s+price$", re.I)),
     ("bedrooms", re.compile(r"^how many bedrooms does\s+(.+?)\s+have$", re.I)),
     ("location", re.compile(r"^where is\s+(.+?)$", re.I)),
     ("active", re.compile(r"^is\s+(.+?)\s+(?:active|inactive)$", re.I)),
@@ -413,6 +499,34 @@ def _usable_record(record: Any) -> bool:
     return bool(_record_name(record) or _record_id(record))
 
 
+def _property_name_rows(db: Any) -> List[Any]:
+    try:
+        from app.db.models import Property
+
+        rows = db.query(Property).all()
+    except Exception:
+        return []
+    if not isinstance(rows, list):
+        return []
+    return [row for row in rows if isinstance(getattr(row, "property_name", None), str)]
+
+
+def _closest_property_names(db: Any, query: str, limit: int = 3) -> List[str]:
+    import difflib
+
+    names = [str(row.property_name) for row in _property_name_rows(db)]
+    if not names:
+        return []
+    folded = {name.casefold(): name for name in names}
+    close = difflib.get_close_matches(query.casefold(), list(folded), n=limit, cutoff=0.55)
+    picked = [folded[item] for item in close]
+    if picked:
+        return picked
+    needle = query.casefold()
+    contained = [name for name in names if needle in name.casefold() or name.casefold() in needle]
+    return contained[:limit]
+
+
 def _name_matches(db: Any, name: str) -> List[Any]:
     try:
         from app.db.models import Property
@@ -434,8 +548,19 @@ def _name_matches(db: Any, name: str) -> List[Any]:
             .all()
         )
         if not isinstance(contains, list):
-            return []
-        return [row for row in contains if _usable_record(row)]
+            contains = []
+        else:
+            contains = [row for row in contains if _usable_record(row)]
+        if contains:
+            return contains
+        import difflib
+
+        rows = _property_name_rows(db)
+        folded = {str(row.property_name).casefold(): row for row in rows}
+        close = difflib.get_close_matches(name.casefold(), list(folded), n=1, cutoff=0.82)
+        if len(close) == 1:
+            return [folded[close[0]]]
+        return []
     except Exception:
         return []
 
@@ -568,7 +693,22 @@ def try_direct_property_answer(db: Any, message: str) -> Optional[dict]:
         except Exception:
             record = None
     if not _usable_record(record):
-        return None
+        real_query = False
+        try:
+            from app.db.models import Property
+
+            real_query = isinstance(db.query(Property).all(), list)
+        except Exception:
+            real_query = False
+        if not real_query:
+            return None
+        suggestions = _closest_property_names(db, name)
+        shown = ", ".join(suggestions[:3])
+        if shown:
+            text = f"I could not find a property named '{name}'. Did you mean: {shown}?"
+        else:
+            text = f"I could not find a property named '{name}'."
+        return {"text": text, "tools_used": [], "direct_answer": True}
     property_id = _record_id(record)
     return {
         "text": _fact_sentence(kind, record),
@@ -589,8 +729,16 @@ def scrub_user_reply(text: Optional[str]) -> str:
     cleaned = re.sub(r"\[UPDATE SUCCESS\]", "", cleaned, flags=re.I)
     cleaned = re.sub(r"audit_ephemeral_\S+", "", cleaned, flags=re.I)
     cleaned = re.sub(r"\(do not run an action by themselves\)", "", cleaned, flags=re.I)
+    for key, label in _FIELD_LABELS.items():
+        if "_" not in key:
+            cleaned = cleaned.replace(f"`{key}`", label)
+            continue
+        cleaned = re.sub(rf"`{re.escape(key)}`", label, cleaned)
+        cleaned = re.sub(rf"\b{re.escape(key)}\b", label, cleaned)
     for key in _INTERNAL_KEYS:
         cleaned = re.sub(rf"\b{key}\b\s*[:=]?\s*\S*", "", cleaned)
+    cleaned = re.sub(r"\bYour the\b", "Your", cleaned, flags=re.I)
+    cleaned = re.sub(r"\bcreate_or_update_listing\b", "property change", cleaned)
     for tool in sorted(_TOOL_NAMES, key=len, reverse=True):
         cleaned = cleaned.replace(f"`{tool}`", "")
     cleaned = re.sub(r"`[a-z][a-z0-9]*(?:_[a-z0-9]+)+`", "", cleaned)

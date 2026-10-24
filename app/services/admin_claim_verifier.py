@@ -999,16 +999,11 @@ def build_deterministic_reply_from_tools(
             else "Tool returned data but no readable fields were available to display."
         ]
 
-    header = (
-        "Oto zweryfikowane dane wyłącznie z wyników narzędzi tej tury:"
-        if pl
-        else "Here are verified figures taken only from this turn's tool results:"
-    )
     body = "\n".join(cleaned)
     # Safety: never emit internal redacted keys even if model left them in strings
     for banned in ("internal_notes", "developer_contact", "raw_firestore_data"):
         body = re.sub(rf"{banned}\s*[:=]\s*.*", f"{banned}: [redacted]", body, flags=re.I)
-    return header + "\n\n" + body
+    return body
 
 
 def _log_verifier_intervention(

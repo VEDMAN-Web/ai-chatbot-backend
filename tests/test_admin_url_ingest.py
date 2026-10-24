@@ -79,18 +79,50 @@ class _Doc:
         self.store.delete(self.collection_name, self.id)
 
 
+def _where_filters(args, kwargs):
+    filters = []
+    if len(args) >= 3:
+        filters.append((args[0], args[2]))
+    filt = kwargs.get("filter")
+    if filt is not None:
+        field = getattr(filt, "field_path", None) or getattr(filt, "field", None)
+        value = getattr(filt, "value", None)
+        if field is not None:
+            filters.append((str(field), value))
+    return filters
+
+
 class _Query:
-    def __init__(self, collection):
+    def __init__(self, collection, filters=None, limit_n=None):
         self.collection = collection
+        self.filters = list(filters or [])
+        self.limit_n = limit_n
 
-    def limit(self, _n):
-        return self
-
-    def stream(self):
-        return self.collection.stream()
+    def limit(self, count):
+        return _Query(self.collection, self.filters, count)
 
     def where(self, *args, **kwargs):
-        return self
+        filters = list(self.filters)
+        filters.extend(_where_filters(args, kwargs))
+        return _Query(self.collection, filters, self.limit_n)
+
+    def stream(self):
+        found = []
+        for snap in self.collection.stream():
+            data = snap.to_dict() or {}
+            matched = True
+            for field, expected in self.filters:
+                current = data
+                for part in str(field).split("."):
+                    current = current.get(part) if isinstance(current, dict) else None
+                if current != expected:
+                    matched = False
+                    break
+            if matched:
+                found.append(snap)
+            if self.limit_n is not None and len(found) >= self.limit_n:
+                break
+        return found
 
 
 class _Collection:
@@ -107,11 +139,11 @@ class _Collection:
         for doc_id, data in self.store.items(self.name):
             yield _Snap(doc_id, data)
 
-    def limit(self, _n):
-        return _Query(self)
+    def limit(self, count):
+        return _Query(self, limit_n=count)
 
     def where(self, *args, **kwargs):
-        return _Query(self)
+        return _Query(self, _where_filters(args, kwargs))
 
 
 class FakeFirestore:
@@ -398,7 +430,7 @@ def test_chat_edits_confirm_and_guesses(world, monkeypatch):
     assert "Confirm & Execute" not in preview["text"]
 
     edited = _chat(world, "set price 12M")
-    assert "price_numeric_min" in edited["text"]
+    assert "Price" in edited["text"]
     assert "provided by admin" in edited["text"]
     assert "property_name" not in edited["text"].split("Updated", 1)[-1]
 
@@ -572,8 +604,9 @@ def test_incomplete_confirm_lists_required_fields(world, monkeypatch):
     _chat(world, "https://example.com/bare")
     refused = _chat(world, "confirm")
     assert "Nothing was saved" in refused["text"] or "cannot save" in refused["text"].lower()
-    for field in ("property_type", "location", "price", "status"):
+    for field in ("Type", "location", "price", "status"):
         assert field in refused["text"]
+    assert "property_type" not in refused["text"]
     assert save_ingested_listing  # the save path stays unused until the draft is complete
 
 

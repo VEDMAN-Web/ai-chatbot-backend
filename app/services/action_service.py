@@ -1316,9 +1316,15 @@ def _execute_update_listing(
     if getattr(settings, "ENABLE_FIRESTORE_SYNC", True):
         try:
             from app.services.firestore_service import save_or_update_property_firestore
+            mirror = {**fields, **updated_fields}
+            if prop is not None:
+                mirror.setdefault("property_name", prop.property_name)
+                mirror.setdefault("province", prop.province)
+                mirror.setdefault("status", prop.status)
+                mirror.setdefault("property_type", prop.property_type)
             save_or_update_property_firestore(
                 property_id=prop.property_id,
-                fields={**fields, **updated_fields},
+                fields=mirror,
                 images=input_images,
                 cover_image=cover_image
             )
@@ -2226,9 +2232,13 @@ def save_ingested_listing(
 
     notes = []
     if guessed:
-        notes.append("guessed: " + ", ".join(guessed))
+        from app.services.admin_chat_quality import humanise_field_list
+
+        notes.append("guessed: " + humanise_field_list(guessed))
     if provided:
-        notes.append("provided by admin: " + ", ".join(provided))
+        from app.services.admin_chat_quality import humanise_field_list
+
+        notes.append("provided by admin: " + humanise_field_list(provided))
     note = (". ".join(notes) + ". ") if notes else ""
     message = (
         f"Saved: {stored_name} ({property_id}) - verified in database. "
