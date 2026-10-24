@@ -884,6 +884,7 @@ async function appendAssistantResponse(data, animate = false) {
   const quickReplies = data.quick_replies || [];
   const requiresConfirm = data.requires_confirmation || false;
   const pendingActionId = data.pending_action_id || null;
+  const confirmViaChatOnly = data.confirm_via_chat_only === true;
 
   // Sync active language if backend changed or confirmed language
   if (data.language && data.language !== currentLanguage) {
@@ -1082,7 +1083,7 @@ async function appendAssistantResponse(data, animate = false) {
   }
 
   // If two-step confirmation required (Admin Agent)
-  if (requiresConfirm && pendingActionId) {
+  if (requiresConfirm && pendingActionId && !confirmViaChatOnly) {
     const actionCard = document.createElement('div');
     actionCard.className = 'action-confirmation-card';
     actionCard.id = `action-card-${pendingActionId}`;

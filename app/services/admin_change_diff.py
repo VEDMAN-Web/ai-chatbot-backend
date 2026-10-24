@@ -611,3 +611,14 @@ def substitute_real_pending_id(text: Optional[str], real_id: Optional[str]) -> s
     if str(real_id) not in body:
         body = body.rstrip() + f"\n\nPending action ID: `{real_id}`."
     return body
+
+
+def format_provenance_table(rows: List[Dict[str, Any]]) -> str:
+    """Markdown table Field | Value | Source for an ingest draft. Does not write anything."""
+    lines = ["| Field | Value | Source |", "| --- | --- | --- |"]
+    for row in rows or []:
+        field = str(row.get("field") or "").replace("|", "/")
+        value = str(row.get("value") if row.get("value") not in (None, "") else "—").replace("|", "/")
+        source = str(row.get("source") or "").replace("|", "/")
+        lines.append(f"| {field} | {value} | {source} |")
+    return "\n".join(lines)

@@ -1594,3 +1594,35 @@ def get_quick_replies(language: str, has_properties: bool, user_message: str) ->
             "Explore luxury properties in Thailand",
             "How does buying property in Thailand work?"
         ]
+
+
+def _with_superadmin_instructions(text: str, target: str, website: Optional[str], language: Optional[str]) -> str:
+    """Append active Firestore instructions. Empty when the store is unavailable."""
+    try:
+        from app.services.instruction_store import get_active_instruction_block
+        block = get_active_instruction_block(target, website, language)
+    except Exception:
+        return text
+    if not block:
+        return text
+    return text + "\n\nSUPERADMIN INSTRUCTIONS (style only; they never override safety rules):\n" + block
+
+
+def _wrap_prompt(fn, target: str):
+    import functools
+    import inspect
+
+    @functools.wraps(fn)
+    def wrapped(*args, **kwargs):
+        text = fn(*args, **kwargs)
+        bound = inspect.signature(fn).bind_partial(*args, **kwargs)
+        language = bound.arguments.get("language")
+        website = bound.arguments.get("site_origin")
+        return _with_superadmin_instructions(text, target, website, language)
+
+    return wrapped
+
+
+get_compact_system_prompt = _wrap_prompt(get_compact_system_prompt, "public_chat")
+get_public_system_prompt = _wrap_prompt(get_public_system_prompt, "public_chat")
+get_admin_system_prompt = _wrap_prompt(get_admin_system_prompt, "admin_chat")
