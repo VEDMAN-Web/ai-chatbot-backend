@@ -401,6 +401,13 @@ def _generate_reportlab_brochure_pdf(
     can.setFont(FONT_REGULAR, 9)
     can.setFillColor(colors.HexColor("#475569"))
     desc_clean = re.sub(r'<[^>]+>', '', prop.description or "")
+    try:
+        from app.services.instruction_store import get_active_instruction_block
+        _style_notes = get_active_instruction_block("brochure_pdf", site_origin, lang)
+    except Exception:
+        _style_notes = ""
+    if _style_notes:
+        desc_clean = (desc_clean + " " + _style_notes).strip()
     if not desc_clean:
         desc_clean = (
             "Ekskluzywna nieruchomość zaprojektowana z dbałością o najwyższe standardy wykończenia, łącząca tropikalny klimat z nowoczesną architekturą."

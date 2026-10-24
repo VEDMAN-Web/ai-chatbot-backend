@@ -1168,6 +1168,11 @@ def generate_report(
     days=0/None with no lead_ids → all-time. Empty period → offer wider window, no empty PDF.
     """
     storage = storage or get_storage_provider()
+    try:
+        from app.services.instruction_store import get_active_instruction_block
+        _style_notes = get_active_instruction_block("reports", None, "en")
+    except Exception:
+        _style_notes = ""
     fmt = format_type.strip().lower()
     timestamp_str = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
 
@@ -1259,6 +1264,8 @@ def generate_report(
                 }
 
         report_title = title or f"Tajlandia AI - Buyer Lead Intelligence ({period_subtitle})"
+        if _style_notes:
+            report_title = f"{report_title}\n{_style_notes[:400]}"
         leads_data = []
         for l in leads:
             row = serialize_lead_row(l)
@@ -1323,6 +1330,8 @@ def generate_report(
 
     # Property Report Generation
     report_title = title or "Tajlandia AI Property Intelligence Inventory Report"
+    if _style_notes:
+        report_title = f"{report_title}\n{_style_notes[:400]}"
     from app.services.property_search import build_property_query, PropertyFilterParams
 
     # build_property_query expects a Session (not an existing Query)

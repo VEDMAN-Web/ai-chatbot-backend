@@ -16,6 +16,7 @@ from app.db.models import Property
 from app.api.v1.chat import router as chat_router
 from app.api.v1.admin import router as admin_router
 from app.api.v1.auth import router as auth_router
+from app.api.v1.superadmin_instructions import router as superadmin_instructions_router
 
 logger = logging.getLogger(__name__)
 
@@ -216,6 +217,7 @@ app.add_middleware(
 # Register Public Chatbot & Admin Agent Routers
 app.include_router(chat_router, prefix="/api/v1")
 app.include_router(admin_router, prefix="/api/v1")
+app.include_router(superadmin_instructions_router, prefix="/api/v1")
 app.include_router(auth_router, prefix="/api/v1")
 
 # Convenience route aliases for authentication and user management
