@@ -388,6 +388,8 @@ def build_no_match_reply(
     criteria_summary: Optional[str] = None,
     relaxed_filter: Optional[str] = None,
     alternatives: Optional[List[Dict[str, Any]]] = None,
+    lowest_price_thb: Optional[float] = None,
+    previous_reply: Optional[str] = None,
 ) -> str:
     """
     Honest zero-result reply. Never invents listings.
@@ -444,6 +446,13 @@ def build_no_match_reply(
     head = "No verified listing matches your criteria."
     if criteria:
         head = f"No verified listing matches your criteria: {criteria}."
+    price_note = ""
+    if lowest_price_thb:
+        millions = float(lowest_price_thb) / 1_000_000
+        price_note = (
+            f" The lowest verified price is about {millions:.2f}M THB. "
+            "Want me to show the cheapest options? I can also clear these filters."
+        )
     if alt_block and relaxed_filter:
         mid = (
             f"\n\nThis does not match your criteria, but it is the closest option "
@@ -451,11 +460,14 @@ def build_no_match_reply(
         )
     else:
         mid = ""
-    return (
-        f"{head}{mid}\n\n"
+    reply = (
+        f"{head}{price_note}{mid}\n\n"
         f"Our advisory team ({advisor}) can help further. "
         "You can also share a location, budget, or property type to search among verified listings only."
     )
+    if previous_reply and reply.strip() == str(previous_reply).strip():
+        reply = reply + "\n\nSay 'clear my filters' and I will start a wider search."
+    return reply
 
 LANGUAGE_ALIASES = {
     "pl": "pl",
@@ -1205,16 +1217,18 @@ def build_consultative_followup_questions(
     language: str = "en",
     location: Optional[str] = None,
     budget: Optional[Any] = None,
-    bedrooms: Optional[Any] = None
+    bedrooms: Optional[Any] = None,
+    asked_slots: Optional[Any] = None,
 ) -> List[str]:
     """
     Constructs at most 2-3 targeted, consultative follow-up questions when inquiry details
     are sparse or when alternative properties are recommended.
     """
     questions: List[str] = []
+    asked = {str(s).lower() for s in (asked_slots or [])}
 
     # 1. Budget question if missing
-    if not budget:
+    if not budget and "budget" not in asked:
         if language == "pl":
             questions.append("Jaki orientacyjny budżet inwestycyjny przewidujesz (w PLN, EUR lub THB)?")
         elif language == "th":
@@ -1223,7 +1237,7 @@ def build_consultative_followup_questions(
             questions.append("What target budget or investment range are you envisioning (in THB, USD, or EUR)?")
 
     # 2. Bedrooms question if missing
-    if not bedrooms:
+    if not bedrooms and "bedrooms" not in asked:
         if language == "pl":
             questions.append("Ile sypialni powinna posiadać Twoja wymarzona nieruchomość?")
         elif language == "th":
@@ -1232,7 +1246,7 @@ def build_consultative_followup_questions(
             questions.append("How many bedrooms are you envisioning for yourself or your family?")
 
     # 3. Location / setting question if missing or broad
-    if not location or location.lower() in ["thailand", "tajlandia", "ไทย", "ประเทศไทย"]:
+    if ("location" not in asked) and (not location or location.lower() in ["thailand", "tajlandia", "ไทย", "ประเทศไทย"]):
         if language == "pl":
             questions.append("Preferujesz willę przy plaży na wyspach (Phuket, Koh Samui), czy nowoczesny apartament w Bangkoku?")
         elif language == "th":
@@ -1252,7 +1266,9 @@ def build_consultative_followup_questions(
             questions.append("Is your primary focus a private holiday home or a rental property?")
             questions.append("Would you like floor plans or an official PDF brochure for any of these listings?")
 
-    # Return at most 2 to 3 questions
+    # One new question when we already know which slots were asked. Otherwise at most 3.
+    if asked_slots is not None:
+        return questions[:1]
     return questions[:3]
 
 
@@ -1492,8 +1508,29 @@ def get_zero_match_text(
     return get_data_unavailable_fallback(language=language, site_origin=site_origin, detail=detail)
 
 
-def get_quick_replies(language: str, has_properties: bool, user_message: str) -> List[str]:
-    u_low = user_message.lower()
+def get_quick_replies(
+    language: str,
+    has_properties: bool,
+    user_message: str,
+    location: str = "",
+    zero_results: bool = False,
+    focused: bool = False,
+) -> List[str]:
+    u_low = (user_message or "").lower()
+    loc_low = (location or "").lower()
+    if zero_results or (not has_properties and re.search(r"\b(under|below|no match)\b", u_low)):
+        if language == "pl":
+            return ["Pokaż najtańsze opcje", "Wyczyść filtry", "Pokaż Phuket zamiast tego"]
+        if language == "th":
+            return ["แสดงตัวเลือกที่ถูกที่สุด", "ล้างตัวกรอง", "แสดงภูเก็ตแทน"]
+        return ["Show cheapest options", "Clear my filters", "Show Phuket instead"]
+    if focused and has_properties:
+        if language == "pl":
+            return ["Czy jest blisko plaży?", "Czy cudzoziemiec może to kupić?", "Poproś o broszurę"]
+        if language == "th":
+            return ["ใกล้ชายหาดไหม?", "ชาวต่างชาติซื้อได้ไหม?", "ขอโบรชัวร์"]
+        return ["Is it near the beach?", "Can a foreigner buy this?", "Request the brochure"]
+    bangkok_only = "bangkok" in loc_low or "bangkok" in u_low
     if language == "th":
         if has_properties:
             return [
@@ -1554,6 +1591,12 @@ def get_quick_replies(language: str, has_properties: bool, user_message: str) ->
         ]
     else:
         if has_properties:
+            if bangkok_only and "phuket" not in u_low and "beach" not in u_low:
+                return [
+                    "Which of these has a pool?",
+                    "Can a foreigner buy these?",
+                    "Show something cheaper",
+                ]
             return [
                 "Which ones are closest to the beach?",
                 "Can a foreigner buy these with freehold?",

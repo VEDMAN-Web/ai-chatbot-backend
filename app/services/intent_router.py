@@ -98,6 +98,7 @@ _FUZZY_LOCATION_STOPWORDS = frozenset({
     "condo", "property", "properties", "budget", "under", "more", "other", "any",
     "something", "else", "instead", "like", "dont", "not", "in", "at", "on",
     "near", "around", "about", "how", "what", "where", "who", "can", "could", "would",
+    "new", "newest", "latest", "free", "current", "chat", "previous", "earlier", "shown",
 })
 
 
@@ -1770,14 +1771,21 @@ def _extract_search_filters_deterministic_impl(message: str) -> Dict[str, Any]:
     if "sea view" in msg_low or "widok na morze" in msg_low or "วิวทะเล" in msg_low:
         filters["sea_view"] = True
 
-    return filters
-_SORT_ASC_RE = re.compile(r"\b(?:cheapest|lowest[- ]priced?|lowest price|most affordable|least expensive|najta[nń]sz\w*|najmniej drog\w*)\b|ถูกที่สุด|ราคาต่ำสุด", re.I)
+    from app.services.conversation_controls import sanitize_extracted_filters
+    return sanitize_extracted_filters(message, filters)
+_SORT_ASC_RE = re.compile(
+    r"\b(?:cheapest|lowest[- ]priced?|lowest price|most affordable|least expensive|very cheap|"
+    r"free properties|free listings|najta[nń]sz\w*|najmniej drog\w*)\b|ถูกที่สุด|ราคาต่ำสุด",
+    re.I,
+)
 _SORT_DESC_RE = re.compile(r"\b(?:most expensive|priciest|highest[- ]priced?|highest price|najdro[zż]sz\w*)\b|แพงที่สุด|ราคาสูงสุด", re.I)
 
 
 def detect_price_sort(message: str) -> Optional[str]:
     """'asc' for 'cheapest / most affordable', 'desc' for 'most expensive'. Otherwise None (relevance order)."""
     msg = message or ""
+    if re.search(r"freehold", msg, re.I) and not re.search(r"\b(cheapest|lowest price|very cheap)\b", msg, re.I):
+        return None
     if _SORT_ASC_RE.search(msg) and not _SORT_DESC_RE.search(msg):
         return "asc"
     if _SORT_DESC_RE.search(msg) and not _SORT_ASC_RE.search(msg):
