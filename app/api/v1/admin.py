@@ -525,7 +525,7 @@ def admin_config_status_endpoint(
     """
     from app.core.config import get_admin_config_status
 
-    return get_admin_config_status()
+    return {**get_admin_config_status(), **_brochure_config_labels()}
 
 
 # ==============================================================================
@@ -1064,12 +1064,10 @@ from app.api.v1.auth import (
     UpdateUserRequest
 )
 
-@router.get("/system/config-status", tags=["Admin System"])
-def system_config_status(
-    staff: AuthenticatedStaff = Depends(require_admin_or_super_admin),
-):
+def _brochure_config_labels() -> Dict[str, Any]:
     """
-    Non-secret config labels for ops UI. Never returns API keys or secrets.
+    Non-secret brochure config labels, merged into /system/config-status.
+    Never returns API keys or secrets.
     """
     llm_on = bool(getattr(settings, "BROCHURE_LLM_ENABLED", False)) and bool(
         (getattr(settings, "ANTHROPIC_API_KEY", None) or "").strip()
