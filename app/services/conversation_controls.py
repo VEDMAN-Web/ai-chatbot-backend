@@ -239,6 +239,15 @@ def price_is_exclusive(message: str) -> bool:
     return False
 
 
+def _money_short(amount_thb: float) -> str:
+    """'20M' or '4.00M' without a comparison word."""
+    millions = float(amount_thb or 0) / 1_000_000
+    if millions >= 1:
+        text = f"{millions:.2f}".rstrip("0").rstrip(".")
+        return f"{text}M"
+    return f"{int(amount_thb):,}"
+
+
 def format_budget_phrase(amount_thb: float, exclusive: bool = False, with_usd: bool = True) -> str:
     """One budget phrase for the whole chat. 'under' is strict; 'up to' includes the cap."""
     amount = float(amount_thb or 0)
@@ -611,7 +620,10 @@ def is_cheaper_request(message: str) -> bool:
 
 def is_sort_only_request(message: str) -> bool:
     low = _low(normalize_command_text(message))
-    sort_word = bool(re.search(r"\b(cheapest|lowest price|show cheapest|most expensive|luxury)\b", low))
+    sort_word = bool(re.search(
+        r"\b(cheapest|lowest price|show cheapest|most expensive|highest price|top end|luxury)\b",
+        low,
+    ))
     if not sort_word:
         return False
     if re.search(
@@ -620,6 +632,20 @@ def is_sort_only_request(message: str) -> bool:
     ):
         return False
     return True
+
+
+def is_search_amenity_refinement(message: str) -> bool:
+    """'with private pool' refines the search. 'does it have a pool' asks about one listing."""
+    low = _low(normalize_command_text(message))
+    if re.search(r"\b(does|do|has|have|is there)\b", low):
+        return False
+    if re.search(r"\b(it|this one|that one|this property|that property)\b", low):
+        return False
+    return bool(re.search(
+        r"\b(?:with|add)\s+(?:a\s+)?(?:private\s+)?(?:pool|beach(?:\s+access)?|sea\s*view)\b"
+        r"|\bpet[- ]friendly\b|\bfurnished\b",
+        low,
+    ))
 
 
 def opens_any_budget_search(message: str) -> bool:
@@ -679,7 +705,10 @@ def merge_applied_filters(
     mentions_type = bool(ext.get("property_type")) or bool(ext.get("is_multiple_types"))
     mentions_beds = any(ext.get(k) is not None for k in ("bedrooms", "min_bedrooms", "max_bedrooms"))
     mentions_budget = ext.get("max_price") is not None or ext.get("min_price") is not None
-    mentions_amenity = bool(ext.get("has_pool") or ext.get("beach_access") or ext.get("required_amenities"))
+    mentions_amenity = bool(
+        ext.get("has_pool") or ext.get("beach_access") or ext.get("sea_view")
+        or ext.get("pet_friendly") or ext.get("furnished") or ext.get("required_amenities")
+    )
     mentions_status = bool(ext.get("status"))
     sort_value = ext.get("sort_by_price")
 
@@ -705,19 +734,29 @@ def merge_applied_filters(
         return out
 
     if opens_any_budget_search(message):
+        # Drop filters carried over from earlier turns, then keep every filter this message states.
         out = {k: None for k in base}
-        out["required_amenities"] = []
-        out["max_price"] = ext.get("max_price")
-        out["min_price"] = ext.get("min_price")
+        out["required_amenities"] = list(ext.get("required_amenities") or [])
+        for key in (
+            "location", "property_type", "bedrooms", "min_bedrooms", "max_bedrooms",
+            "max_price", "min_price", "has_pool", "beach_access", "sea_view",
+            "pet_friendly", "furnished", "status", "sort_by_price",
+        ):
+            if ext.get(key) is not None:
+                out[key] = ext.get(key)
+        if ext.get("is_broad_thailand"):
+            out["location"] = None
+            out["broad_thailand"] = True
         out["max_price_exclusive"] = bool(ext.get("max_price_exclusive"))
-        out["sort_by_price"] = sort_value
+        if sort_value and not out.get("sort_by_price"):
+            out["sort_by_price"] = sort_value
         return out
 
     if is_sort_only_request(message) or (
         sort_value and not any((mentions_location, mentions_type, mentions_beds, mentions_budget, mentions_amenity, mentions_status))
     ):
         out = dict(base)
-        if "expensive" in low:
+        if re.search(r"\b(most expensive|highest price|top end|luxury)\b", low) or "expensive" in low:
             out["sort_by_price"] = "desc"
         elif re.search(r"\b(cheapest|lowest price|show cheapest)\b", low):
             out["sort_by_price"] = "asc"
@@ -768,6 +807,8 @@ def merge_applied_filters(
             out["broad_thailand"] = True
         else:
             out["location"] = ext.get("location")
+        if sort_value:
+            out["sort_by_price"] = sort_value
         return out
 
     if single_amenity:
@@ -778,6 +819,9 @@ def merge_applied_filters(
             out["beach_access"] = True
         if ext.get("required_amenities"):
             out["required_amenities"] = list(ext.get("required_amenities") or [])
+        for key in ("sea_view", "pet_friendly", "furnished"):
+            if ext.get(key):
+                out[key] = True
         return out
 
     # New combination. Drop slots the message does not name.
@@ -848,10 +892,7 @@ def describe_applied_filters(filters: Optional[Dict[str, Any]]) -> str:
     elif src.get("bedrooms") is not None:
         bits.append(f"{src['bedrooms']} bedrooms")
     if src.get("min_price") is not None and src.get("max_price") is not None:
-        bits.append(
-            f"{format_budget_phrase(float(src['min_price']), exclusive=False, with_usd=False).replace('up to ', '')}"
-            f" to {format_budget_phrase(float(src['max_price']), exclusive=False, with_usd=False).replace('up to ', '')}"
-        )
+        bits.append(f"{_money_short(src['min_price'])}-{_money_short(src['max_price'])} THB")
     elif src.get("max_price") is not None:
         bits.append(format_budget_phrase(
             float(src["max_price"]),

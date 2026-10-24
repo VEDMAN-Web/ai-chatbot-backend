@@ -1117,8 +1117,17 @@ def detect_deterministic_intent(
                         if _is_brochure_search_phrase(prop_name):
                             prop_id = None
                             prop_name = None
+                        elif prop_name.lower() in {"it", "this", "that", "this one", "that one", "the property"}:
+                            prop_name = None
+                            prop_id = (
+                                (pctx.get("active_property_id") if pctx else None)
+                                or (selected_ids[0] if selected_ids else None)
+                                or (last_result_ids[0] if len(last_result_ids) == 1 else None)
+                            )
                         else:
                             prop_id = prop_name  # resolve via Firestore/SQL by name
+                    elif pctx.get("active_property_id"):
+                        prop_id = pctx.get("active_property_id")
                     elif len(last_result_ids) == 1:
                         prop_id = last_result_ids[0]
                     elif state.get("selected_property_ids"):
@@ -1851,7 +1860,7 @@ def _extract_search_filters_deterministic_impl(message: str) -> Dict[str, Any]:
     # "between 3 and 5", "3-5 bedrooms", "5-6 beds"
     # PL: "co najmniej 4 sypialnie", "4 lub więcej", "od 3 do 5"
     # TH: "4 ห้องนอนขึ้นไป", "อย่างน้อย 4 ห้องนอน"
-    _bed_unit = r"(?:bedrooms?|beds?|br|sypialni[aeę]?|sypialn|pokoj(?:e|i)?|ห้องนอน|ห้อง)?"
+    _bed_unit = r"(?:bedrooms?|beds?|br|sypialni[aeę]?|sypialn|pokoj(?:e|i)?|ห้องนอน|ห้อง)"
     _min_bed = (
         re.search(rf"(\d+)\s*\+\s*{_bed_unit}", msg_low)
         or re.search(rf"(\d+)\s+(?:or\s+more|bedrooms?\s+or\s+more|beds?\s+or\s+more)\b", msg_low)
@@ -1871,11 +1880,20 @@ def _extract_search_filters_deterministic_impl(message: str) -> Dict[str, Any]:
 
     _max_bed = (
         re.search(rf"(\d+)\s+or\s+fewer\b", msg_low)
-        or re.search(rf"(?:up\s+to|at\s+most|maximum|max\.?|no\s+more\s+than)\s+(\d+)\s*{_bed_unit}", msg_low)
-        or re.search(rf"(?:nie\s+wi[eę]cej\s+ni[zż]|maksymalnie)\s+(\d+)\s*{_bed_unit}", msg_low)
+        or re.search(rf"(?:up\s+to|at\s+most|maximum|max\.?|no\s+more\s+than)\s+(\d+)\s+{_bed_unit}\b", msg_low)
+        or re.search(rf"(?:nie\s+wi[eę]cej\s+ni[zż]|maksymalnie)\s+(\d+)\s+{_bed_unit}\b", msg_low)
     )
     if _max_bed and "min_bedrooms" not in filters:
         filters["max_bedrooms"] = int(_max_bed.group(1))
+    if filters.get("max_bedrooms") is not None:
+        n_beds = int(filters["max_bedrooms"])
+        price_same_number = re.search(
+            rf"\b{n_beds}\s*(?:m|million|mln|k|thb|baht|usd)\b",
+            msg_low,
+        )
+        bed_same_number = re.search(rf"\b{n_beds}\s+(?:bedrooms?|beds?|br|sypialn\w*)\b", msg_low)
+        if price_same_number and not bed_same_number:
+            filters.pop("max_bedrooms", None)
 
     _range_bed = (
         re.search(rf"between\s+(\d+)\s+and\s+(\d+)\s*{_bed_unit}", msg_low)
@@ -1945,8 +1963,12 @@ def _extract_search_filters_deterministic_impl(message: str) -> Dict[str, Any]:
 
     # C. Keyword-based budget without explicit currency (defaults to THB)
     if "max_price" not in filters and "min_price" not in filters:
-        p_match = re.search(r"(?:under|below|max|budget|up to|poniżej|ponizej|do|maksymalnie|budżet|budzet|ไม่เกิน|ต่ำกว่า|งบ|สูงสุด|ไม่เกินงบ)\s*(?:is|\s*[:=]|\s+around|\s+about)?\s*([0-9][0-9,.]*)\s*(tys\.?|tysi[eę]cy|tysiecy|thousand|m|million|mln|milionów|ล้าน|ล้านบาท|k)?\s*(?:thb|baht|บาท)?", msg_low)
-        if p_match and "bed" not in p_match.group(0) and "ห้อง" not in p_match.group(0):
+        for p_match in re.finditer(r"(?:under|below|max|budget|up to|poniżej|ponizej|do|maksymalnie|budżet|budzet|ไม่เกิน|ต่ำกว่า|งบ|สูงสุด|ไม่เกินงบ)\s*(?:is|\s*[:=]|\s+around|\s+about)?\s*([0-9][0-9,.]*)\s*(tys\.?|tysi[eę]cy|tysiecy|thousand|m|million|mln|milionów|ล้าน|ล้านบาท|k)?\s*(?:thb|baht|บาท)?", msg_low):
+            tail = msg_low[p_match.end():]
+            if re.match(r"\s*(?:bedrooms?|beds?|br\b|sypialn|ห้อง)", tail):
+                continue
+            if "bed" in p_match.group(0) or "ห้อง" in p_match.group(0):
+                continue
             val = float(p_match.group(1).replace(",", ""))
             unit = (p_match.group(2) or "").lower()
             if _is_thousand_unit(unit):
@@ -1956,6 +1978,7 @@ def _extract_search_filters_deterministic_impl(message: str) -> Dict[str, Any]:
             elif unit == "k":
                 val *= 1_000
             filters["max_price"] = val
+            break
 
     # Min Price
     min_match = re.search(r"(?:from|above|minimum|min|od|powyżej|powyzej|ตั้งแต่|มากกว่า|เริ่มต้น)\s*(?:is|\s*[:=])?\s*([0-9][0-9,.]*)\s*(tys\.?|tysi[eę]cy|tysiecy|thousand|m|million|mln|milionów|ล้าน|ล้านบาท|k)?\s*(?:thb|baht|บาท)?", msg_low)
@@ -1977,15 +2000,26 @@ def _extract_search_filters_deterministic_impl(message: str) -> Dict[str, Any]:
         filters["beach_access"] = True
     if "sea view" in msg_low or "widok na morze" in msg_low or "วิวทะเล" in msg_low:
         filters["sea_view"] = True
+    if re.search(r"\bpet[- ]friendly\b", msg_low):
+        filters["pet_friendly"] = True
+    if re.search(r"\bfurnished\b", msg_low) and "unfurnished" not in msg_low:
+        filters["furnished"] = True
 
     from app.services.conversation_controls import sanitize_extracted_filters
-    return sanitize_extracted_filters(message, filters)
+    out = sanitize_extracted_filters(message, filters)
+    sort = detect_price_sort(message)
+    if sort:
+        out["sort_by_price"] = sort
+    return out
 _SORT_ASC_RE = re.compile(
     r"\b(?:cheapest|lowest[- ]priced?|lowest price|most affordable|least expensive|very cheap|"
     r"free properties|free listings|najta[nń]sz\w*|najmniej drog\w*)\b|ถูกที่สุด|ราคาต่ำสุด",
     re.I,
 )
-_SORT_DESC_RE = re.compile(r"\b(?:most expensive|priciest|highest[- ]priced?|highest price|najdro[zż]sz\w*)\b|แพงที่สุด|ราคาสูงสุด", re.I)
+_SORT_DESC_RE = re.compile(
+    r"\b(?:most expensive|priciest|highest[- ]priced?|highest price|top end|luxury|najdro[zż]sz\w*)\b|แพงที่สุด|ราคาสูงสุด",
+    re.I,
+)
 
 
 def detect_price_sort(message: str) -> Optional[str]:

@@ -299,6 +299,17 @@ def _build_add_to_calendar_url(
     return f"https://calendar.google.com/calendar/render?{urllib.parse.urlencode(params)}"
 
 
+def _beds_area_phrase(beds: Any, area: Any) -> str:
+    """'Bedrooms: on request | Area: 92 sqm' — never 'Beds: on request' twice."""
+    bed = re.sub(r"(?i)^beds:\s*", "", str(beds or "").strip())
+    if not bed or bed.lower() in {"n/a", "na", "none", "null"}:
+        bed = "on request"
+    area_txt = str(area or "").strip()
+    if not area_txt or area_txt.lower() in {"n/a", "na", "none", "null"}:
+        area_txt = "on request"
+    return f"Bedrooms: {bed} | Area: {area_txt}"
+
+
 def format_property_card(p: Property) -> Dict[str, Any]:
     """Formats a Property ORM object into the frontend-expected card structure with Maps and Calendar integration."""
     img_urls = [img.image_url for img in p.images] if p.images else []
@@ -3353,6 +3364,10 @@ class PublicAgentService:
         ):
             intent = IntentType.PROPERTY_SEARCH
             parsed_args = extract_search_filters_deterministic(user_message) or {}
+        from app.services.conversation_controls import is_cheaper_request, is_search_amenity_refinement
+        if is_search_amenity_refinement(user_message) or is_cheaper_request(user_message):
+            intent = IntentType.PROPERTY_SEARCH
+            parsed_args = extract_search_filters_deterministic(user_message) or {}
         if message_starts_new_search(user_message) and intent in (
             None, IntentType.GENERAL_QUESTION, IntentType.PROPERTY_DETAILS, IntentType.REFINE_FILTER,
         ):
@@ -4256,7 +4271,33 @@ class PublicAgentService:
                 ))
             where = ", ".join(bits) if bits else "these filters"
             widen = "another area" if str(loc or "").lower().find("samui") >= 0 else "Koh Samui"
-            shown_n = len(seen_ids) or len(stored_prefs.get("seen_property_ids") or [])
+            has_count_filter = any((
+                loc, p_type, bedrooms,
+                min_bedrooms is not None, max_bedrooms is not None, max_p is not None, has_pool,
+            ))
+            matched_now = []
+            if has_count_filter:
+                matched_now = search_properties_unified(
+                    db,
+                    PropertyFilterParams(
+                        location=loc,
+                        property_type=p_type,
+                        bedrooms=bedrooms,
+                        min_bedrooms=min_bedrooms,
+                        max_bedrooms=max_bedrooms,
+                        max_price=max_p,
+                        has_pool=has_pool,
+                        limit=100,
+                    ),
+                    limit=100,
+                ) or []
+            seen_here = {str(s).strip().lower() for s in seen_ids if s}
+            shown_n = sum(
+                1 for card in matched_now
+                if str(card.get("property_id") or "").strip().lower() in seen_here
+            )
+            if not shown_n:
+                shown_n = len(stored_prefs.get("last_result_ids") or [])
 
             def _count(extra):
                 try:
@@ -4666,6 +4707,20 @@ class PublicAgentService:
             p_beds = _clean_field(p_beds)
             p_area = _clean_field(p_area)
             _ba = " | ".join(x for x in (p_beds, p_area) if x)  # "Bedrooms / Area" value, only what exists
+            if isinstance(card, dict) and db is not None and (p_id or pid):
+                try:
+                    sql_row = get_property_by_id(db, str(p_id or pid))
+                    if sql_row is not None:
+                        if getattr(sql_row, "has_pool", None):
+                            card["has_pool"] = True
+                        if getattr(sql_row, "beach_access", None):
+                            card["beach_access"] = True
+                        for field in ("amenities", "features", "pool_type"):
+                            value = getattr(sql_row, field, None)
+                            if value and not card.get(field):
+                                card[field] = value
+                except Exception:
+                    pass
             amenity_facts = collect_property_amenities(card if isinstance(card, dict) else {})
             has_pool = bool(amenity_facts.get("pool") and amenity_facts["pool"].present) or bool(
                 amenity_facts.get("pool_private") and amenity_facts["pool_private"].present
@@ -4675,7 +4730,24 @@ class PublicAgentService:
             pool_lab = pool_display_label(card if isinstance(card, dict) else {}, language=language)
 
             def _amenity_yes_no(canon: str) -> bool:
-                return property_has_amenity(card if isinstance(card, dict) else {}, canon)
+                prop_card = card if isinstance(card, dict) else {}
+                if property_has_amenity(prop_card, canon):
+                    return True
+                if canon in ("pool", "pool_private") and prop_card.get("has_pool") in (True, 1, "true", "True", "1"):
+                    return True
+                blob_bits = []
+                for key in ("pool_type", "amenities", "features", "description"):
+                    value = prop_card.get(key)
+                    if isinstance(value, list):
+                        blob_bits.extend(str(item) for item in value)
+                    elif value:
+                        blob_bits.append(str(value))
+                blob = " ".join(blob_bits).lower()
+                if canon in ("pool", "pool_private") and "pool" in blob:
+                    return True
+                if canon == "beach_access" and ("beach" in blob or prop_card.get("beach_access") in (True, 1)):
+                    return True
+                return False
 
             def _amenity_reply(canon: str, yes_en: str, no_en: str, yes_pl: str, no_pl: str, yes_th: str, no_th: str) -> str:
                 """Short fact answer only — never dump the full spec block."""
@@ -4877,7 +4949,11 @@ class PublicAgentService:
                 elif language == "pl":
                     reply_text = f"**{p_name}** cena: **{price_out}**\n\n• **Lokalizacja:** {p_loc or 'Brak w bazie'}\n• **Sypialnie / Powierzchnia:** {p_beds or 'Brak w bazie'} | {p_area or 'Brak w bazie'}"
                 else:
-                    reply_text = f"**{p_name}** verified price: **{price_out}**\n\n• **Location:** {p_loc or 'Not documented in verified database'}\n• **Bedrooms / Area:** {p_beds or 'Not documented in verified database'} | {p_area or 'Not documented in verified database'}"
+                    reply_text = (
+                        f"**{p_name}** verified price: **{price_out}**\n\n"
+                        f"• **Location:** {p_loc or 'Not documented in verified database'}\n"
+                        f"• **{_beds_area_phrase(p_beds, p_area)}**"
+                    )
             elif language == "th":
                 lines_th = [
                     f"ข้อมูลจำเพาะที่ผ่านการตรวจสอบสำหรับ **{p_name}** ({p_id}):",
@@ -4922,7 +4998,7 @@ class PublicAgentService:
                     "",
                     f"• **Location:** {humanize_location(p_loc)}",
                     f"• **Price:** {p_price}",
-                    *([f"• **Bedrooms / Area:** {_ba}"] if _ba else []),
+                    f"• **{_beds_area_phrase(p_beds, p_area)}**",
                     f"• **Status:** {humanize_status(p_status, 'en')}",
                 ]
                 if pool_lab:
@@ -5340,10 +5416,18 @@ class PublicAgentService:
                         explicit_prop_id = fs_match.get("property_id")
                         break
 
+        if str(prop_id or "").strip().lower() in {"it", "this", "that", "this one", "that one"}:
+            prop_id = None
         if explicit_prop_id:
             prop_id = explicit_prop_id
             needs_clarification = False
         elif not prop_id:
+            from app.services.property_context_service import load_property_context
+            focused = load_property_context(conversation)
+            if focused.active_property_id:
+                prop_id = focused.active_property_id
+                needs_clarification = False
+        if not prop_id:
             selected_ids = stored_prefs.get("selected_property_ids", [])
             last_ids = stored_prefs.get("last_result_ids", [])
             if len(selected_ids) == 1:
@@ -5375,8 +5459,12 @@ class PublicAgentService:
 
         prop = None
         try:
-            if db is not None:
-                prop = db.query(Property).filter(Property.property_id == prop_id.upper()).first()
+            if db is not None and prop_id:
+                prop = db.query(Property).filter(Property.property_id == str(prop_id)).first()
+                if prop is None:
+                    prop = db.query(Property).filter(Property.property_id.ilike(str(prop_id))).first()
+                if prop is not None:
+                    prop_id = prop.property_id
         except Exception:
             prop = None
         p_name = prop.property_name if prop else prop_id
@@ -5800,6 +5888,7 @@ class PublicAgentService:
         min_bedrooms = None
         max_bedrooms = None
         max_p = None
+        min_p = None
         has_pool = None
         beach_access = None
         required_amenities: List[str] = []
@@ -5832,12 +5921,24 @@ class PublicAgentService:
             from app.services.conversation_controls import merge_applied_filters, is_cheaper_request
             applied = merge_applied_filters(stored_prefs, extracted, user_message)
             if applied.get("cheaper"):
-                shown_prices = [float(p) for p in (stored_prefs.get("last_shown_prices") or []) if p]
-                if shown_prices:
-                    applied["max_price"] = min(shown_prices) - 1
+                shown_pairs = [p for p in (stored_prefs.get("last_shown_priced") or []) if p.get("price")]
+                if not shown_pairs:
+                    prices = [float(p) for p in (stored_prefs.get("last_shown_prices") or []) if p]
+                    names = list(stored_prefs.get("last_shown_names") or [])
+                    shown_pairs = [
+                        {"name": names[i] if i < len(names) else "This listing", "price": price}
+                        for i, price in enumerate(prices)
+                    ]
+                if shown_pairs:
+                    cheapest = min(shown_pairs, key=lambda item: float(item["price"]))
+                    applied["max_price"] = float(cheapest["price"])
                     applied["max_price_exclusive"] = True
+                    applied["cheaper_than_name"] = cheapest.get("name")
+                    applied["cheaper_than_price"] = float(cheapest["price"])
+                    applied["cheaper_than_type"] = cheapest.get("property_type")
+                    applied["cheaper_than_location"] = cheapest.get("location")
                 elif applied.get("max_price"):
-                    applied["max_price"] = float(applied["max_price"]) - 1
+                    applied["max_price"] = float(applied["max_price"])
                     applied["max_price_exclusive"] = True
             loc = applied.get("location")
             p_type = applied.get("property_type")
@@ -5863,6 +5964,13 @@ class PublicAgentService:
                 "status": applied.get("status"),
                 "max_price_exclusive": bool(applied.get("max_price_exclusive")),
                 "sort_by_price": applied.get("sort_by_price"),
+                "sea_view": applied.get("sea_view"),
+                "pet_friendly": applied.get("pet_friendly"),
+                "furnished": applied.get("furnished"),
+                "cheaper_than_name": applied.get("cheaper_than_name"),
+                "cheaper_than_price": applied.get("cheaper_than_price"),
+                "cheaper_than_type": applied.get("cheaper_than_type"),
+                "cheaper_than_location": applied.get("cheaper_than_location"),
             }
             stored_prefs["active_filters"] = dict(search_filters)
             for key, pref_key in (
@@ -5905,6 +6013,7 @@ class PublicAgentService:
                 status=applied.get("status"),
                 has_pool=has_pool,
                 beach_access=beach_access,
+                sea_view=True if applied.get("sea_view") else None,
                 required_amenities=required_amenities or None,
                 sort_by_price=applied.get("sort_by_price") or detect_price_sort(user_message),
                 offset=0,
@@ -5913,6 +6022,30 @@ class PublicAgentService:
             # Fresh searches must NOT exclude previously seen IDs — exclusion is only for "show more".
             # Excluding on every search caused unrelated new listings and felt like hallucination.
             cards = search_properties_unified(db, params, limit=4, exclude_property_ids=None)
+
+            def _card_blob(card: dict) -> str:
+                bits = []
+                for key in ("amenities", "features", "description", "name"):
+                    value = card.get(key)
+                    if isinstance(value, list):
+                        bits.extend(str(item) for item in value)
+                    elif value:
+                        bits.append(str(value))
+                return " ".join(bits).lower()
+
+            if applied.get("pet_friendly"):
+                cards = [c for c in (cards or []) if "pet" in _card_blob(c)]
+            if applied.get("furnished"):
+                cards = [c for c in (cards or []) if "furnished" in _card_blob(c)]
+            sort_name = applied.get("sort_by_price") or detect_price_sort(user_message)
+            if sort_name in ("asc", "desc") and cards:
+                cards = sorted(
+                    cards,
+                    key=lambda c: float(c.get("price_thb_min") or c.get("price_numeric_min") or 0),
+                    reverse=sort_name == "desc",
+                )
+                applied["sort_by_price"] = sort_name
+                search_filters["sort_by_price"] = sort_name
 
             # Smart fresh criteria recovery: If merged search yielded 0 results because of stale constraints
             # from earlier turns, retry with ONLY the fresh criteria specified in this turn.
@@ -6090,6 +6223,16 @@ class PublicAgentService:
                 for c in cards
                 if c.get("price_thb_min") or c.get("price_numeric_min")
             ]
+            stored_prefs["last_shown_priced"] = [
+                {
+                    "name": str(c.get("name") or c.get("property_name") or c.get("property_id")),
+                    "price": float(c.get("price_thb_min") or c.get("price_numeric_min")),
+                    "property_type": c.get("property_type"),
+                    "location": c.get("location"),
+                }
+                for c in cards
+                if c.get("price_thb_min") or c.get("price_numeric_min")
+            ]
             group_label = describe_applied_filters(search_filters if isinstance(search_filters, dict) else {}) or "this search"
             groups = list(stored_prefs.get("shown_searches") or [])
             groups.append({
@@ -6138,7 +6281,11 @@ class PublicAgentService:
                 reply_text = f"{intro}\n\n{body}" if body else intro
             else:
                 order_note = None
-                if max_p is not None and "luxury" not in user_message.lower() and "most expensive" not in user_message.lower():
+                if (
+                    max_p is not None
+                    and (search_filters or {}).get("sort_by_price") != "desc"
+                    and not re.search(r"\b(luxury|most expensive|highest price|top end)\b", user_message.lower())
+                ):
                     order_note = "Cheapest first."
                 reply_text = build_rich_property_recommendation_text(
                     cards=cards,
@@ -6238,7 +6385,12 @@ class PublicAgentService:
                     criteria_bits.append(f"up to {max_bedrooms} bedrooms")
                 elif bedrooms:
                     criteria_bits.append(f"{bedrooms} bed")
-                if max_p is not None:
+                if min_p is not None and max_p is not None:
+                    from app.services.conversation_controls import _money_short
+                    criteria_bits.append(
+                        f"between {_money_short(min_p)} and {_money_short(max_p)}"
+                    )
+                elif max_p is not None:
                     criteria_bits.append(format_budget_phrase(
                         float(max_p),
                         exclusive=bool(extracted.get("max_price_exclusive") or stored_prefs.get("max_price_exclusive")),
@@ -6324,16 +6476,30 @@ class PublicAgentService:
                 headline = "Cheapest across all Thailand:"
             elif sort_name == "asc":
                 headline = f"Cheapest in {filter_line}:"
+            elif sort_name == "desc" and not filter_line:
+                headline = "Most expensive across all Thailand:"
             elif sort_name == "desc":
                 headline = f"Most expensive in {filter_line}:"
             else:
                 headline = f"Searching: {filter_line}"
             reply_text = headline + "\n\n" + (reply_text or "")
-        if is_cheaper_request(user_message) and not cards and max_p is not None:
-            reply_text = (
-                f"Nothing in this search is cheaper than {format_budget_phrase(float(max_p) + 1, exclusive=False, with_usd=False)}. "
-                + (reply_text or "")
-            )
+        if is_cheaper_request(user_message) and not cards:
+            cheap_name = (search_filters or {}).get("cheaper_than_name") or "This listing"
+            cheap_price = (search_filters or {}).get("cheaper_than_price")
+            cheap_place = (search_filters or {}).get("location") or (search_filters or {}).get("cheaper_than_location") or "Thailand"
+            cheap_kind = str((search_filters or {}).get("property_type") or (search_filters or {}).get("cheaper_than_type") or "listing").lower()
+            if cheap_kind == "condominium":
+                cheap_kind = "condo"
+            if cheap_price:
+                price_label = f"{float(cheap_price) / 1_000_000:.2f}M THB" if float(cheap_price) >= 1_000_000 else f"{int(cheap_price):,} THB"
+                reply_text = (
+                    f"{cheap_name} at {price_label} is already the cheapest {cheap_place} {cheap_kind} I have. "
+                    "Want me to look at condos or other areas?"
+                )
+            elif max_p is not None:
+                reply_text = (
+                    f"Nothing in this search is cheaper than {format_budget_phrase(float(max_p), exclusive=True, with_usd=False)}."
+                )
         reply_text = ThaiPropertyLegalGuardrail.sanitize_response(
             user_message=user_message,
             response_text=reply_text,
@@ -6352,7 +6518,10 @@ class PublicAgentService:
             criteria_bits.append(f"up to {max_bedrooms} bedrooms")
         elif bedrooms:
             criteria_bits.append(f"{bedrooms} bed")
-        if max_p is not None:
+        if min_p is not None and max_p is not None:
+            from app.services.conversation_controls import _money_short
+            criteria_bits.append(f"between {_money_short(min_p)} and {_money_short(max_p)}")
+        elif max_p is not None:
             criteria_bits.append(format_budget_phrase(float(max_p), exclusive=bool(stored_prefs.get("max_price_exclusive")), with_usd=False))
         reply_text, cards = self._validate_or_fallback(
             reply_text,

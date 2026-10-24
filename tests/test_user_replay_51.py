@@ -115,6 +115,9 @@ def test_session_a_filters_reset_and_recall(replay_client):
     assert explore.get("properties") or "Searching" in explore["text"] or explore["text"]
     budget = _post(replay_client, sid, "i want under 50million any under 50million and wants 3 bedroom")
     assert "50" in budget["text"]
+    budget_filters = (budget.get("preferences") or {}).get("active_filters") or {}
+    assert budget_filters.get("bedrooms") == 3
+    assert budget_filters.get("max_price") == 50_000_000
     phuket = _post(replay_client, sid, "i want in Phuket")
     assert "Phuket" in phuket["text"]
     more = _post(replay_client, sid, "no show me more")
@@ -151,7 +154,8 @@ def test_session_b_property_and_advisor(replay_client):
     beach = _post(replay_client, sid, "okay is it near to beach ?")
     assert "not in our verified database" not in beach["text"].lower()
     pdf = _post(replay_client, sid, "give me pdf of it")
-    assert pdf["text"]
+    assert "which property" not in pdf["text"].lower()
+    assert "15 Suite Sukhumvit 15" in pdf["text"] or pdf.get("brochure_property_id") == "replay-bk-2"
     beds = _post(replay_client, sid, "i want 4 bedroom and i want in phuket")
     assert "Phuket" in beds["text"]
     other = _post(replay_client, sid, "any other ?")
@@ -177,7 +181,8 @@ def test_session_c_ranges_and_cheapest(replay_client):
     under = _post(replay_client, sid, "under 5 million")
     assert "under 5M" in under["text"] or "5" in under["text"]
     upto = _post(replay_client, sid, "up to 5 million")
-    assert "up to 5M" in upto["text"] or "5" in upto["text"]
+    assert "up to 5M" in upto["text"]
+    assert ((upto.get("preferences") or {}).get("active_filters") or {}).get("max_bedrooms") is None
     pattaya = _post(replay_client, sid, "2 bedroom condo in Pattaya under 8 million")
     assert "Pattaya" in pattaya["text"]
     beach = _post(replay_client, sid, "properties with beach access in Phuket")
@@ -186,7 +191,10 @@ def test_session_c_ranges_and_cheapest(replay_client):
     assert "beach access" not in ready["text"].lower()
     assert "Bangkok" in ready["text"]
     ranged = _post(replay_client, sid, "budget 20M to 30M")
-    assert "20" in ranged["text"] and "30" in ranged["text"]
+    assert "20M-30M THB" in ranged["text"] or "between 20M and 30M" in ranged["text"]
+    ranged_filters = (ranged.get("preferences") or {}).get("active_filters") or {}
+    assert ranged_filters.get("min_price") == 20_000_000
+    assert ranged_filters.get("max_price") == 30_000_000
     villa4 = _post(replay_client, sid, "4 bedroom villa")
     assert "4" in villa4["text"]
     something = _post(replay_client, sid, "something in Bangkok")
@@ -231,6 +239,23 @@ def test_session_d_off_topic_and_contact(replay_client):
     call = _post(replay_client, sid, "my email is test.user@example.com please call me")
     assert "test.user@example.com" in call["text"]
     assert "advisor@" in call["text"]
+
+
+def test_pool_refinement_and_attribute_answer(replay_client):
+    sid = "replay-pool"
+    listed = _post(replay_client, sid, "villas in Phuket")
+    assert listed.get("properties")
+    refined = _post(replay_client, sid, "with private pool")
+    filters = (refined.get("preferences") or {}).get("active_filters") or {}
+    assert filters.get("has_pool") is True
+    assert "Phuket" in refined["text"]
+    assert "A pool is not in our verified data" not in refined["text"]
+    named = _post(replay_client, sid, "does Kamala Pool Villa have a pool")
+    assert "not in our verified data" not in named["text"].lower()
+    assert "pool" in named["text"].lower()
+    pronoun = _post(replay_client, sid, "does it have a pool")
+    assert "not in our verified data" not in pronoun["text"].lower()
+    assert "pool" in pronoun["text"].lower()
 
 
 def test_memory_survives_forty_neutral_turns(replay_client):

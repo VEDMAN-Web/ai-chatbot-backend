@@ -400,8 +400,13 @@ def verify_claims(
     ):
         chunk = m.group(0)
         window = text[max(0, m.start() - 24): m.end() + 12].lower()
-        # Budget / filter phrasing ("under 5M", "below 10M") is not a listing price claim
+        # Budget / filter phrasing ("under 5M", "below 10M", "20M-30M") is not a listing price claim
         if re.search(r"\b(?:under|below|up to|max(?:imum)?|budget|less than|poniżej|do)\b", window):
+            continue
+        around = text[max(0, m.start() - 48): m.end() + 48].lower()
+        if re.search(r"\bbetween\b", around) or re.search(r"\d+(?:\.\d+)?\s*m\s*-\s*\d+(?:\.\d+)?\s*m", around):
+            continue
+        if "already the cheapest" in around:
             continue
         claim_nums = _normalize_number_tokens(chunk)
         if not claim_nums:
