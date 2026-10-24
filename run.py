@@ -80,18 +80,12 @@ def main():
     else:
         print("--> [NOTICE] Skipping local PostgreSQL seeding (PostgreSQL not reachable or using remote Firestore).")
 
-    # Determine port from Railway environment
+    # Railway injects PORT and routes the public URL to that port.
     raw_port = os.environ.get("PORT", "8000")
     try:
         port = int(raw_port)
     except ValueError:
         port = 8000
-
-    #print(f"--> 3. Starting Uvicorn server on host 0.0.0.0 port {port}...")
-    #uvicorn.run("app.main:app", host="0.0.0.0", port=port, proxy_headers=True, forwarded_allow_ips="*")
-
-    # Start Uvicorn on port 8000
-    port = 8000
 
     print(f"--> 3. Starting Uvicorn server on host 0.0.0.0 port {port}...")
     uvicorn.run(
