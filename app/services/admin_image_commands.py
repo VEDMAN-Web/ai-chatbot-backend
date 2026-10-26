@@ -514,6 +514,8 @@ def _continuing_upload(message: str, pending: Dict[str, Any]) -> bool:
     parsed = _parse_attachment_message(message)
     if pending.get("stage") == "action":
         return parsed.get("op") in {"add", "replace", "cover"}
+    if pending.get("stage") == "urls":
+        return bool(_urls_in(message))
     if pending.get("stage") == "property":
         return bool(parsed.get("name"))
     return False
@@ -554,27 +556,32 @@ def _propose_image_change(
         lines.append("Confirm to apply, or cancel. Nothing has been changed.")
     from app.services.action_service import create_pending_action
 
+    payload = {
+        "property_id": property_id,
+        "property_name": property_name,
+        "op": command["op"],
+        "urls": urls,
+        "index": command.get("index"),
+        "previous_images": [
+            {"image_url": row["image_url"], "image_type": row.get("image_type") or "exterior"}
+            for row in current
+        ],
+    }
+    if command.get("smart_intent"):
+        payload["smart_intent"] = command["smart_intent"]
     action = create_pending_action(
         db=db,
         staff_user_id=getattr(staff, "email", None) or "admin",
         tool_name="manage_property_images",
-        action_payload={
-            "property_id": property_id,
-            "property_name": property_name,
-            "op": command["op"],
-            "urls": urls,
-            "index": command.get("index"),
-            "previous_images": [
-                {"image_url": row["image_url"], "image_type": row.get("image_type") or "exterior"}
-                for row in current
-            ],
-        },
+        action_payload=payload,
         conversation_id=str(getattr(conv, "id", "") or ""),
     )
     _remember_images(db, conv, None)
+    if command.get("smart_intent"):
+        _audit_smart_intent(db, staff, conv, command["smart_intent"], str(action.id))
     return _reply(
         conv,
-        "\n".join(lines),
+        _confirm_line("\n".join(lines), command.get("language"), removing=command["op"] in {"remove_url", "remove_index", "remove_all"}),
         requires=True,
         pending_id=str(action.id),
         token=action.confirmation_token,
@@ -594,15 +601,26 @@ def _resolve_named(db: Any, name: str) -> Tuple[Optional[str], Optional[str], Op
     return property_id, property_name, None
 
 
-def _ask_for_property(db: Any, conv: Any, urls: List[str], op: Optional[str]) -> Dict[str, Any]:
+def _ask_for_property(
+    db: Any,
+    conv: Any,
+    urls: List[str],
+    op: Optional[str],
+    *,
+    language: Optional[str] = None,
+    smart_intent: Optional[Dict[str, Any]] = None,
+    question: Optional[str] = None,
+) -> Dict[str, Any]:
     _remember_images(db, conv, {
         "urls": urls,
         "op": op,
         "stage": "property",
         "property_id": None,
         "property_name": None,
+        "language": language,
+        "smart_intent": smart_intent,
     })
-    return _reply(conv, "Which property should these images go to?")
+    return _reply(conv, question or _question("property", language))
 
 
 def _ask_for_action(db: Any, conv: Any, urls: List[str], property_id: str, property_name: str) -> Dict[str, Any]:
@@ -627,10 +645,13 @@ def _finish_attached(
     *,
     property_id: Optional[str] = None,
     property_name: Optional[str] = None,
+    language: Optional[str] = None,
+    smart_intent: Optional[Dict[str, Any]] = None,
+    image_index: Optional[int] = None,
 ) -> Dict[str, Any]:
     if not property_id:
         if not name:
-            return _ask_for_property(db, conv, urls, op)
+            return _ask_for_property(db, conv, urls, op, language=language, smart_intent=smart_intent)
         property_id, property_name, problem = _resolve_named(db, name)
         if problem:
             _remember_images(db, conv, {
@@ -639,15 +660,21 @@ def _finish_attached(
                 "stage": "property",
                 "property_id": None,
                 "property_name": None,
+                "language": language,
+                "smart_intent": smart_intent,
+                "index": image_index,
             })
             return _reply(conv, problem)
     if not op:
         return _ask_for_action(db, conv, urls, property_id, property_name or name or "this property")
+    command = {"op": op, "urls": urls, "name": property_name, "language": language, "index": image_index}
+    if smart_intent:
+        command["smart_intent"] = smart_intent
     return _propose_image_change(
         db,
         conv,
         staff,
-        {"op": op, "urls": urls, "name": property_name},
+        command,
         property_id,
         property_name or name or "this property",
     )
@@ -667,6 +694,20 @@ def _handle_attached(db: Any, conv: Any, message: str, staff: Any, urls: List[st
 def _continue_upload(db: Any, conv: Any, message: str, staff: Any, pending: Dict[str, Any]) -> Dict[str, Any]:
     parsed = _parse_attachment_message(message)
     op = parsed.get("op") or pending.get("op")
+    if pending.get("stage") == "urls":
+        urls = _urls_in(message)
+        return _finish_attached(
+            db,
+            conv,
+            staff,
+            op,
+            pending.get("property_name") or pending.get("property_text"),
+            urls,
+            property_id=pending.get("property_id"),
+            property_name=pending.get("property_name"),
+            language=pending.get("language"),
+            smart_intent=pending.get("smart_intent"),
+        )
     name = parsed.get("name") or pending.get("property_name")
     return _finish_attached(
         db,
@@ -677,7 +718,208 @@ def _continue_upload(db: Any, conv: Any, message: str, staff: Any, pending: Dict
         list(pending.get("urls") or []),
         property_id=pending.get("property_id") if not parsed.get("name") else None,
         property_name=pending.get("property_name") if not parsed.get("name") else None,
+        language=pending.get("language"),
+        smart_intent=pending.get("smart_intent"),
+        image_index=pending.get("index"),
     )
+
+
+_CONFIRM = {
+    "pl": {
+        "apply": "Potwierdź, aby zastosować, albo anuluj. Nic jeszcze nie zostało zmienione.",
+        "remove": "Potwierdź, aby usunąć, albo anuluj. Nic jeszcze nie zostało usunięte.",
+    },
+    "hi": {
+        "apply": "लागू करने के लिए पुष्टि करें, या रद्द करें। अभी कुछ नहीं बदला गया।",
+        "remove": "हटाने के लिए पुष्टि करें, या रद्द करें। अभी कुछ नहीं हटाया गया।",
+    },
+    "gu": {
+        "apply": "લાગુ કરવા માટે પુષ્ટિ કરો, અથવા રદ કરો. હજુ કંઈ બદલાયું નથી.",
+        "remove": "દૂર કરવા માટે પુષ્ટિ કરો, અથવા રદ કરો. હજુ કંઈ દૂર થયું નથી.",
+    },
+}
+_QUESTIONS = {
+    "en": {
+        "property": "Which property should these images go to?",
+        "urls": "Which image link should I use?",
+        "howto": "To change images, say 'add image <url> to <property>', 'replace the image of <property>', 'make image 2 the cover of <property>', or 'remove image 1 from <property>'. You can also attach a file. Nothing was changed.",
+    },
+    "pl": {
+        "property": "Do której nieruchomości mają trafić te zdjęcia?",
+        "urls": "Którego linku do zdjęcia mam użyć?",
+        "howto": "Aby zmienić zdjęcia, napisz 'dodaj zdjecie <url> do <nieruchomość>', 'zmien zdjecie <nieruchomość> na <url>' albo 'usun wszystkie zdjecia <nieruchomość>'. Możesz też załączyć plik. Nic nie zostało zmienione.",
+    },
+    "hi": {
+        "property": "ये तस्वीरें किस प्रॉपर्टी में लगानी हैं?",
+        "urls": "कौन सा इमेज लिंक इस्तेमाल करूँ?",
+        "howto": "इमेज बदलने के लिए लिखें 'add image <url> to <property>' या फाइल अटैच करें। अभी कुछ नहीं बदला गया।",
+    },
+    "gu": {
+        "property": "આ ફોટા કઈ પ્રોપર્ટીમાં મૂકવા છે?",
+        "urls": "કઈ ઇમેજ લિંક વાપરું?",
+        "howto": "ફોટો બદલવા માટે 'add image <url> to <property>' લખો અથવા ફાઇલ જોડો. હજુ કંઈ બદલાયું નથી.",
+    },
+}
+
+
+def _lang(language: Optional[str]) -> str:
+    code = (language or "en").split("-")[0].lower()
+    return code if code in _QUESTIONS else "en"
+
+
+def _question(kind: str, language: Optional[str]) -> str:
+    return _QUESTIONS[_lang(language)][kind]
+
+
+def _confirm_line(text: str, language: Optional[str], *, removing: bool = False) -> str:
+    code = _lang(language)
+    if code == "en":
+        return text
+    line = _CONFIRM[code]["remove" if removing else "apply"]
+    return text.rstrip() + "\n\n" + line
+
+
+def _audit_smart_intent(db: Any, staff: Any, conv: Any, intent: Dict[str, Any], pending_id: str) -> None:
+    try:
+        from app.services.admin_intent_parser import scrub_intent
+        from app.services.audit_service import record_audit_log
+
+        safe = scrub_intent(intent)
+        record_audit_log(
+            db=db,
+            tool_name="admin_smart_intent",
+            staff_user_id=getattr(staff, "email", None),
+            tool_arguments=safe,
+            proposed_payload=safe,
+            confirmed_by_staff=False,
+            status="PROPOSED",
+            conversation_id=str(getattr(conv, "id", "") or ""),
+            pending_action_id=pending_id,
+        )
+    except Exception:
+        return None
+
+
+def _recent_turns(conv: Any) -> List[Dict[str, Any]]:
+    history = getattr(conv, "message_history", None) or []
+    turns = []
+    for turn in list(history)[-6:]:
+        if isinstance(turn, dict):
+            turns.append({"role": turn.get("role"), "content": str(turn.get("content") or "")[:500]})
+    return turns
+
+
+def _is_howto(message: str) -> bool:
+    text = re.sub(r"\s+", " ", (message or "").strip())
+    if "?" not in text and not re.match(r"^(how|what|why|jak|kaise|kese|shu)\b", text, re.I):
+        return False
+    return bool(re.match(r"^(how|what|why|jak|kaise|kese|shu)\b", text, re.I))
+
+
+def _howto_language(message: str) -> str:
+    if re.search(r"[઀-૿]", message or ""):
+        return "gu"
+    if re.search(r"[\u0900-\u097F]", message or ""):
+        return "hi"
+    if re.search(r"\b(jak|zdj[eę]ci|nieruchomo)", message or "", re.I):
+        return "pl"
+    return "en"
+
+
+def _image_op(intent: Dict[str, Any]) -> Optional[str]:
+    name = intent.get("intent")
+    index = intent.get("image_index")
+    urls = intent.get("urls") or []
+    if name == "image_add":
+        return "add"
+    if name == "image_replace":
+        return "replace"
+    if name == "image_set_cover":
+        return "cover_index" if index and not urls else "cover"
+    if name == "image_remove":
+        return "remove_index" if index and not urls else "remove_url"
+    if name == "image_remove_all":
+        return "remove_all"
+    return None
+
+
+def _apply_image_intent(db: Any, conv: Any, staff: Any, message: str, intent: Dict[str, Any], owned: Optional[List[str]]) -> Dict[str, Any]:
+    language = intent.get("language")
+    op = _image_op(intent)
+    urls = list(owned or intent.get("urls") or [])
+    names = list(intent.get("property_texts") or [])
+    if len(names) >= 2:
+        _remember_images(db, conv, {
+            "urls": urls,
+            "op": op,
+            "stage": "property",
+            "property_id": None,
+            "property_name": None,
+            "language": language,
+            "smart_intent": intent,
+            "index": intent.get("image_index"),
+        })
+        shown = " or ".join(names[:4])
+        return _reply(conv, f"Which property: {shown}?")
+    if op is None or "action" in (intent.get("missing") or []):
+        return _reply(conv, _question("howto", language))
+    if not intent.get("property_text"):
+        return _ask_for_property(db, conv, urls, op, language=language, smart_intent=intent)
+    if op in {"add", "replace", "cover", "remove_url"} and not urls:
+        _remember_images(db, conv, {
+            "urls": [],
+            "op": op,
+            "stage": "urls",
+            "property_text": intent.get("property_text"),
+            "property_name": None,
+            "property_id": None,
+            "language": language,
+            "smart_intent": intent,
+            "index": intent.get("image_index"),
+        })
+        property_id, property_name, problem = _resolve_named(db, intent["property_text"])
+        if problem:
+            return _reply(conv, problem)
+        _remember_images(db, conv, {
+            "urls": [],
+            "op": op,
+            "stage": "urls",
+            "property_id": property_id,
+            "property_name": property_name,
+            "language": language,
+            "smart_intent": intent,
+            "index": intent.get("image_index"),
+        })
+        return _reply(conv, _question("urls", language))
+    return _finish_attached(
+        db,
+        conv,
+        staff,
+        op,
+        intent.get("property_text"),
+        urls,
+        language=language,
+        smart_intent=intent,
+        image_index=intent.get("image_index"),
+    )
+
+
+def _smart_image_reply(db: Any, conv: Any, message: str, staff: Any, owned: Optional[List[str]]) -> Optional[Dict[str, Any]]:
+    from app.services.admin_intent_parser import parse_admin_write_intent, smart_intent_kind
+
+    if smart_intent_kind(message, owned) != "image":
+        return None
+    if _is_howto(message):
+        return _reply(conv, _question("howto", _howto_language(message)))
+    intent = parse_admin_write_intent(
+        message,
+        list(owned or []),
+        _recent_turns(conv),
+        _load_pending(conv),
+    )
+    if not intent or not str(intent.get("intent") or "").startswith("image_"):
+        return None
+    return _apply_image_intent(db, conv, staff, message, intent, owned)
 
 
 def try_image_command(
@@ -690,6 +932,9 @@ def try_image_command(
     owned, rejected = _accepted_attachments(attached_images)
     if rejected:
         return _reply(conv, rejected)
+    smart = _smart_image_reply(db, conv, message, staff, owned)
+    if smart is not None:
+        return smart
     if owned:
         return _handle_attached(db, conv, message, staff, owned)
     pending = _load_pending(conv)

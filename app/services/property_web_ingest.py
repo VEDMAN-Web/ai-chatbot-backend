@@ -1329,8 +1329,9 @@ def try_handle_property_url_turn(
     """
     from app.services.conversation_service import append_conversation_turn
     from app.services.admin_image_commands import looks_like_image_command
+    from app.services.admin_intent_parser import smart_intent_kind
 
-    if looks_like_image_command(message):
+    if looks_like_image_command(message) or smart_intent_kind(message) == "image":
         return None
 
     drafts = [item for item in (open_pending or []) if getattr(item, "tool_name", None) == INGEST_TOOL and getattr(item, "status", None) == "PENDING"]

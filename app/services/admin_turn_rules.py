@@ -248,6 +248,126 @@ def _undo_last(db: Any, conv: Any, staff: Any) -> Dict[str, Any]:
     return _text(conv, f"Undone. The last change ({label}) was restored in both databases.")
 
 
+_STATUS_WORDS = (
+    ("sold out", "Sold Out"),
+    ("sprzedane", "Sold Out"),
+    ("sprzedany", "Sold Out"),
+    ("sold", "Sold Out"),
+    ("dostepne", "Available"),
+    ("dostępne", "Available"),
+    ("available", "Available"),
+    ("reserved", "Reserved"),
+    ("archived", "Archived"),
+    ("off-plan", "Off-plan"),
+    ("off plan", "Off-plan"),
+)
+
+
+def _status_in_text(message: str) -> Optional[str]:
+    lowered = (message or "").casefold()
+    for needle, canonical in _STATUS_WORDS:
+        if needle.casefold() in lowered:
+            return canonical
+    return None
+
+
+def _confirm_in_language(text: str, language: Optional[str]) -> str:
+    code = (language or "en").split("-")[0].lower()
+    extra = {
+        "pl": "Potwierdź, aby zastosować, albo anuluj. Nic jeszcze nie zostało zapisane.",
+        "hi": "लागू करने के लिए पुष्टि करें, या रद्द करें। अभी कुछ नहीं बदला गया।",
+        "gu": "લાગુ કરવા માટે પુષ્ટિ કરો, અથવા રદ કરો. હજુ કંઈ બદલાયું નથી.",
+    }.get(code)
+    if not extra:
+        return text
+    return text.rstrip() + "\n\n" + extra
+
+
+def _audit_smart_intent(db: Any, staff: Any, conv: Any, intent: Dict[str, Any], pending_id: Optional[str]) -> None:
+    try:
+        from app.services.admin_intent_parser import scrub_intent
+        from app.services.audit_service import record_audit_log
+
+        safe = scrub_intent(intent)
+        record_audit_log(
+            db=db,
+            tool_name="admin_smart_intent",
+            staff_user_id=getattr(staff, "email", None),
+            tool_arguments=safe,
+            proposed_payload=safe,
+            confirmed_by_staff=False,
+            status="PROPOSED",
+            conversation_id=str(getattr(conv, "id", "") or ""),
+            pending_action_id=pending_id,
+        )
+    except Exception:
+        return None
+
+
+def _smart_price_or_status(db: Any, conv: Any, staff: Any, message: str) -> Optional[Dict[str, Any]]:
+    """Price and status wording the regex missed. The amount is always re-parsed in code."""
+    from app.services.admin_intent_parser import parse_admin_write_intent
+    from app.services.admin_property_fields import describe_money, money_phrase, price_sanity_message
+
+    history = []
+    for turn in list(getattr(conv, "message_history", None) or [])[-6:]:
+        if isinstance(turn, dict):
+            history.append({"role": turn.get("role"), "content": str(turn.get("content") or "")[:500]})
+    intent = parse_admin_write_intent(message, None, history, {})
+    if not intent or intent.get("intent") not in {"price_change", "status_change"}:
+        return None
+    names = list(intent.get("property_texts") or [])
+    if len(names) >= 2:
+        return _text(conv, "Which property: " + " or ".join(names[:4]) + "? Nothing was changed.")
+    property_text = intent.get("property_text")
+    if not property_text:
+        return _text(conv, "Which property should I change? Nothing was changed.")
+    target, problem = resolve_write_target(db, property_text)
+    if problem:
+        return _text(conv, problem)
+    language = intent.get("language")
+    if intent["intent"] == "status_change":
+        from app.services.action_service import ALLOWED_STATUSES
+
+        coded = _status_in_text(message)
+        llm_status = ALLOWED_STATUSES.get(str(intent.get("status") or "").strip().lower())
+        if coded and llm_status and coded != llm_status:
+            return _text(conv, "The status in your message does not match what I understood. Please say the status again. Nothing was changed.")
+        status = coded or llm_status
+        if not status:
+            return _text(conv, "Which status should I set? Nothing was changed.")
+        proposal = _propose_listing(db, conv, staff, message, target, {"status": status})
+        if proposal.get("requires_confirmation"):
+            proposal["text"] = _confirm_in_language(proposal.get("text") or "", language)
+            _audit_smart_intent(db, staff, conv, intent, proposal.get("pending_action_id"))
+        return proposal
+    coded = describe_money(message)
+    llm_amount = describe_money(intent.get("amount_text")) if intent.get("amount_text") else None
+    if coded and llm_amount and abs(float(coded["thb"]) - float(llm_amount["thb"])) > max(1.0, abs(float(coded["thb"])) * 0.01):
+        return _text(conv, "The amount in your message does not match what I understood. Please repeat the price. Nothing was changed.")
+    if coded is None:
+        return _text(conv, "I could not read that price from your message. Nothing was changed.")
+    new_price = _round_money(float(coded["thb"]))
+    current = _current_price(db, target)
+    refusal = price_sanity_message(new_price, current)
+    if refusal:
+        return _text(conv, refusal)
+    proposal = _propose_listing(
+        db,
+        conv,
+        staff,
+        message,
+        target,
+        {"price_numeric_min": new_price, "price_display": f"{new_price:,.0f} THB"},
+    )
+    if proposal.get("text"):
+        proposal["text"] = f"New price {money_phrase(new_price, coded)}.\n\n" + proposal["text"]
+        proposal["text"] = _confirm_in_language(proposal["text"], language)
+    if proposal.get("requires_confirmation"):
+        _audit_smart_intent(db, staff, conv, intent, proposal.get("pending_action_id"))
+    return proposal
+
+
 def try_rule_based_write(
     db: Any,
     conv: Any,
@@ -615,7 +735,19 @@ def try_rule_based_write(
             proposal["text"] = f"New price {shown}{percent_note}.\n\n" + proposal["text"]
         return proposal
 
+    from app.services.admin_intent_parser import smart_intent_kind
+
+    if smart_intent_kind(text) in {"price", "status"}:
+        smart_change = _smart_price_or_status(db, conv, staff, text)
+        if smart_change is not None:
+            return smart_change
+
     delete_match = re.search(r"^(?:please\s+)?delete\s+(.+)$", text, re.I)
+    if delete_match and smart_intent_kind(text) == "image":
+        return _text(
+            conv,
+            "I could not read that image request. Name the property and the image. Nothing was changed.",
+        )
     if delete_match and not re.search(r"\b(all|every|entire)\b", delete_match.group(1), re.I):
         target, problem = resolve_write_target(db, delete_match.group(1))
         if problem:

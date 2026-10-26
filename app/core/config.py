@@ -109,6 +109,11 @@ class Settings(BaseSettings):
 
     # Admin chatbot performance (speed without losing accuracy)
     ADMIN_FAST_MODEL: str = "claude-haiku-4-5"  # classifier + guardrail judge
+    # Cheap write-intent classifier. Off, or a parser failure, falls back to the regex rules.
+    ADMIN_SMART_INTENT_ENABLED: bool = True
+    ADMIN_SMART_INTENT_PER_MINUTE: int = 20
+    ADMIN_SMART_INTENT_TIMEOUT_SEC: float = 5.0
+    ADMIN_SMART_INTENT_MIN_CONFIDENCE: float = 0.6
     ADMIN_MAIN_MODEL: str = ""  # empty → use ANTHROPIC_MODEL; set e.g. claude-sonnet-4-5 via env
     ADMIN_HELPER_TIMEOUT: float = 30.0
     ADMIN_MAIN_TIMEOUT: float = 60.0
