@@ -703,6 +703,239 @@ def test_confirm_missing_price_skip_required_and_preview_match(world, monkeypatc
     assert int(row.price_numeric_min) == 18500000
 
 
+DHOLERA_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Residential Plot for Sale in Dholera (REI1500895) | RealEstateIndia</title>
+</head>
+<body>
+  <nav class="menu"><img src="https://cdn.example.com/menu-sprite.png" alt="menu"></nav>
+  <img src="https://cdn.example.com/avatar.jpg" class="avatar" alt="avatar">
+  <img src="https://cdn.example.com/tracking-pixel.gif" alt="tracking" width="1" height="1">
+  <h1>Residential Plot for Sale in Dholera (REI1500895)</h1>
+  <div class="property-information">
+    <p>Price: ₹ 45 Lac</p>
+    <p>Property Type: Residential Plot(s)</p>
+    <p>Area: 1000 Sq. Yards</p>
+    <p>Location: Dholera, Gujarat</p>
+    <p>Status: Available</p>
+    <p>Developer: Dholera SIR</p>
+  </div>
+  <img src="https://cdn.example.com/dholera-plot.jpg" alt="plot photo" width="800" height="600">
+  <footer>Also see Phuket villas and Kata beach homes. Agent Surinder. Office in Kolkata and Kathua.</footer>
+</body>
+</html>
+"""
+
+
+def _draft_from_html(url, html, monkeypatch):
+    monkeypatch.setattr("app.services.property_extractor.extract_property_data_with_llm", lambda *a, **k: None)
+    return extract_draft(FetchedPage(url, url, "text/html", html, html.encode("utf-8")))
+
+
+def test_clean_listing_name_strips_ids_and_site_suffix():
+    from app.services.property_web_ingest import _clean_listing_name
+
+    assert _clean_listing_name("Residential Plot for Sale in Dholera (REI1500895)") == "Residential Plot for Sale in Dholera"
+    assert _clean_listing_name("Palm Listing ID : 123 | RealEstateIndia") == "Palm"
+
+
+def test_location_matches_whole_words_and_ignores_footer(monkeypatch):
+    thai = _draft_from_html(
+        "https://example.com/surin-house",
+        "<title>Beach House</title><body><p>Address: Surin Beach Road, Phuket</p>"
+        "<footer>Offices in Kolkata and Kathua. Agent Surinder Shah. Visit Kata.</footer></body>",
+        monkeypatch,
+    )
+    assert thai["provenance"]["province"]["value"] == "Phuket"
+    assert thai["provenance"]["province"]["status"] == "inferred"
+    assert thai["provenance"]["district"]["value"] == "Surin"
+    assert thai["foreign_place"] is None
+
+    surinder = _draft_from_html(
+        "https://example.com/surinder",
+        "<title>Surinder</title><body><p>Owner: Surinder</p>"
+        "<footer>Phuket Kata Kolkata Kathua</footer></body>",
+        monkeypatch,
+    )
+    assert "province" not in surinder["provenance"]
+    assert "district" not in surinder["provenance"]
+
+    for place, html in (
+        ("Kolkata", "<title>Flat in Kolkata</title><body><p>Location: Kolkata</p></body>"),
+        ("Kathua", "<title>House in Kathua</title><body><p>Location: Kathua</p></body>"),
+    ):
+        draft = _draft_from_html(f"https://example.com/{place.lower()}", html, monkeypatch)
+        assert "province" not in draft["provenance"]
+        assert draft.get("foreign_place") == place
+
+
+def test_dholera_page_warns_and_waits_for_continue_anyway(world, monkeypatch):
+    url = "https://www.realestateindia.com/residential-plot-dholera-45-lac"
+    draft = _draft_from_html(url, DHOLERA_HTML, monkeypatch)
+    assert draft["provenance"]["property_name"]["value"] == "Residential Plot for Sale in Dholera"
+    assert "REI1500895" not in draft["provenance"]["property_name"]["value"]
+    assert draft["provenance"]["property_name"]["evidence"] == "h1"
+    assert draft["provenance"]["property_type"]["value"] == "Land"
+    assert draft["provenance"]["price_display"]["needs_decision"] is True
+    assert "45 Lac" in draft["provenance"]["price_display"]["value"]
+    assert "price_numeric_min" not in draft["provenance"]
+    assert "province" not in draft["provenance"]
+    assert draft["foreign_place"] in {"Dholera", "Gujarat", "India"}
+    assert draft["images"] == ["https://cdn.example.com/dholera-plot.jpg"]
+    preview = render_preview(draft)
+    assert preview.lower().count("| price |") == 1
+    assert "page shows ₹ 45 Lac, not THB" in preview
+    assert "outside Thailand" in preview
+    assert "continue anyway" in preview
+
+    world["routes"]({url: _page(url, DHOLERA_HTML)})
+    monkeypatch.setattr("app.services.property_extractor.extract_property_data_with_llm", lambda *a, **k: None)
+    opened = _chat(world, url)
+    assert "outside Thailand" in opened["text"]
+    blocked = _chat(world, "confirm")
+    assert "outside Thailand" in blocked["text"]
+    assert "nothing was saved" in blocked["text"].lower()
+    assert world["db"].query(Property).count() == 0
+    continued = _chat(world, "continue anyway")
+    assert "outside Thailand" not in continued["text"]
+    still = _chat(world, "confirm")
+    assert "outside Thailand" not in still["text"]
+    assert "i still need" in still["text"].lower()
+    assert "price" in still["text"].lower()
+    assert "nothing was saved" in still["text"].lower()
+    assert "property_type" not in still["text"]
+    _chat(world, "price 5 million thb")
+    saved = _chat(world, "confirm")
+    assert "nothing was saved" not in saved["text"].lower()
+    row = world["db"].query(Property).filter(Property.property_name == "Residential Plot for Sale in Dholera").one()
+    assert int(row.price_numeric_min) == 5_000_000
+
+    polish = render_preview({**draft, "reply_language": "pl"})
+    assert "spoza Tajlandii" in polish
+    hindi = render_preview({**draft, "reply_language": "hi"})
+    assert "bahar" in hindi
+    gujarati = render_preview({**draft, "reply_language": "gu"})
+    assert "bahaar" in gujarati
+
+
+def test_thai_location_allows_confirm_without_continue_anyway(world, monkeypatch):
+    url = "https://www.realestateindia.com/dholera-plot-45-lac"
+    world["routes"]({url: _page(url, DHOLERA_HTML)})
+    monkeypatch.setattr("app.services.property_extractor.extract_property_data_with_llm", lambda *a, **k: None)
+    _chat(world, url)
+    _chat(world, "location Phuket")
+    _chat(world, "price 6 million thb")
+    saved = _chat(world, "confirm")
+    assert "outside Thailand" not in saved["text"]
+    assert "nothing was saved" not in saved["text"].lower()
+    assert world["db"].query(Property).count() == 1
+
+
+@pytest.mark.parametrize(
+    ("message", "name", "kind", "status_value", "price"),
+    [
+        (
+            "Name : itisha_test, Type : villa, price :50million thb, status= ready to move.",
+            "itisha_test",
+            "Villa",
+            "Ready to move in",
+            50_000_000,
+        ),
+        (
+            "name itisha_test, type villa, price 50 million, status ready to move",
+            "itisha_test",
+            "Villa",
+            "Ready to move in",
+            50_000_000,
+        ),
+        (
+            "Name = Sea Villa; Type = Condo; Status = Ready to move in",
+            "Sea Villa",
+            "Condominium",
+            "Ready to move in",
+            12_000_000,
+        ),
+        (
+            "naam itisha_test, kimat 50 million, type villa, status ready",
+            "itisha_test",
+            "Villa",
+            "Ready to move in",
+            50_000_000,
+        ),
+    ],
+)
+def test_multi_field_edit_then_confirm(world, monkeypatch, message, name, kind, status_value, price):
+    world["routes"]({
+        "https://example.com/edit-me": _page(
+            "https://example.com/edit-me",
+            "<table><tr><th>Name</th><td>Old Villa</td></tr><tr><th>Price</th><td>12,000,000 THB</td></tr>"
+            "<tr><th>Type</th><td>Villa</td></tr><tr><th>Status</th><td>Available</td></tr>"
+            "<tr><th>Province</th><td>Phuket</td></tr></table>",
+        )
+    })
+    monkeypatch.setattr("app.services.property_extractor.extract_property_data_with_llm", lambda *a, **k: None)
+    _chat(world, "https://example.com/edit-me")
+    edited = _chat(world, message)
+    assert "Applied" in edited["text"]
+    assert "Not understood" in edited["text"]
+    assert name in edited["text"]
+    pending = world["db"].query(PendingAction).filter(PendingAction.status == "PENDING").one()
+    prov = pending.action_payload["provenance"]
+    assert prov["property_name"]["value"] == name
+    assert prov["property_type"]["value"] == kind
+    assert prov["status"]["value"] == status_value
+    assert prov["price_numeric_min"]["value"] == price
+    saved = _chat(world, "confirm")
+    assert "nothing was saved" not in saved["text"].lower()
+    row = world["db"].query(Property).filter(Property.property_name == name).one()
+    assert row.property_type == kind
+    assert row.status == status_value
+    assert int(row.price_numeric_min) == price
+
+
+def test_invalid_edit_lists_allowed_values_and_confirm_lists_only_what_is_missing(world, monkeypatch):
+    from app.services.admin_chat_quality import parse_natural_edit_commands
+
+    assert parse_natural_edit_commands("type plot")[0]["value"] == "Land"
+    assert parse_natural_edit_commands("status sold out")[0]["value"] == "Sold Out"
+    assert parse_natural_edit_commands("status under construction")[0]["value"] == "Under construction"
+    assert parse_natural_edit_commands("status off plan")[0]["value"] == "Off-plan"
+    assert parse_natural_edit_commands("status ready")[0]["value"] == "Ready to move in"
+
+    world["routes"]({
+        "https://example.com/partial": _page(
+            "https://example.com/partial",
+            "<table><tr><th>Name</th><td>Old Villa</td></tr><tr><th>Province</th><td>Phuket</td></tr></table>",
+        )
+    })
+    monkeypatch.setattr("app.services.property_extractor.extract_property_data_with_llm", lambda *a, **k: None)
+    _chat(world, "https://example.com/partial")
+    edited = _chat(world, "Name: Kept_Name_1, type: castle, status: banana")
+    assert "Not understood" in edited["text"]
+    assert "Villa" in edited["text"]
+    assert "Sold Out" in edited["text"]
+    pending = world["db"].query(PendingAction).filter(PendingAction.status == "PENDING").one()
+    prov = pending.action_payload["provenance"]
+    assert prov["property_name"]["value"] == "Kept_Name_1"
+    assert "property_type" not in prov or prov.get("property_type", {}).get("value") != "castle"
+    assert prov.get("status", {}).get("value") != "banana"
+    missing = _chat(world, "confirm")
+    lowered = missing["text"].lower()
+    assert "nothing was saved" in lowered
+    assert "price" in lowered
+    assert "status" in lowered
+    assert "type" in lowered
+    assert "location" not in lowered
+    assert "kept_name_1" not in lowered
+    _chat(world, "type villa, price 20 million thb, status available")
+    saved = _chat(world, "confirm")
+    assert "nothing was saved" not in saved["text"].lower()
+    row = world["db"].query(Property).filter(Property.property_name == "Kept_Name_1").one()
+    assert int(row.price_numeric_min) == 20_000_000
+
+
 def test_config_status_lists_ingest_limits():
     status = __import__("app.core.config", fromlist=["get_admin_config_status"]).get_admin_config_status()
     assert "ingest_ignore_robots" in status

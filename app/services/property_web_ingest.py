@@ -52,7 +52,48 @@ _DISTRICTS = {
     "chaweng": ("Surat Thani", "Chaweng", "Samui"),
     "lamai": ("Surat Thani", "Lamai", "Samui"),
 }
-_IMAGE_SKIP = ("logo", "icon", "pixel", "favicon", "sprite", "spacer", "tracking", "1x1", "badge", "analytics")
+_IMAGE_SKIP = (
+    "logo", "icon", "pixel", "favicon", "sprite", "spacer", "tracking", "1x1",
+    "badge", "analytics", "menu", "avatar",
+)
+_FOREIGN_DOMAINS = (
+    ("realestateindia", "India"),
+    ("99acres", "India"),
+    ("magicbricks", "India"),
+    ("zameen", "Pakistan"),
+)
+_FOREIGN_PLACES = (
+    ("dholera", "Dholera"),
+    ("gujarat", "Gujarat"),
+    ("ahmedabad", "Ahmedabad"),
+    ("mumbai", "Mumbai"),
+    ("delhi", "Delhi"),
+    ("bangalore", "Bangalore"),
+    ("bengaluru", "Bangalore"),
+    ("kolkata", "Kolkata"),
+    ("calcutta", "Kolkata"),
+    ("kathua", "Kathua"),
+    ("dubai", "Dubai"),
+    ("poland", "Poland"),
+    ("polska", "Poland"),
+    ("warsaw", "Warsaw"),
+    ("warszawa", "Warsaw"),
+    ("pakistan", "Pakistan"),
+    ("india", "India"),
+)
+_LAND_ALIASES = {
+    "residential plot": "land",
+    "residential plots": "land",
+    "plot": "land",
+    "plots": "land",
+    "land": "land",
+}
+_THAI_PLACE_RE = re.compile(
+    r"\b(phuket|bangkok|krabi|pattaya|chiang mai|chiangmai|samui|koh samui|surat thani|"
+    r"chonburi|phang nga|hua hin|rawai|patong|karon|kata|kamala|layan|bang tao|surin|"
+    r"chalong|chaweng|lamai|bophut|maenam)\b",
+    re.IGNORECASE,
+)
 _URL_RE = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
 _FETCH_CACHE: Dict[str, Tuple[float, "FetchedPage"]] = {}
 _RATE: Dict[str, List[float]] = {}
@@ -402,14 +443,44 @@ class _PageParser(HTMLParser):
         self.alternate_json: List[str] = []
         self.tables: List[Tuple[str, str]] = []
         self.images: List[Tuple[str, str]] = []
+        self.lines: List[str] = []
+        self.h1 = ""
+        self.title = ""
         self._capture = ""
         self._mode = ""
         self._cell = ""
         self._cells: List[str] = []
         self._in_cell = False
+        self._skip_tag = ""
+        self._skip_depth = 0
+        self._in_title = False
+        self._in_h1 = False
+        self._title_buf = ""
+        self._h1_buf = ""
+        self._buf: List[str] = []
+
+    def _region_skip(self, tag: str, attr: Dict[str, str]) -> bool:
+        if tag in {"nav", "footer", "style", "noscript", "svg"}:
+            return True
+        role = (attr.get("role") or "").lower()
+        if role in {"navigation", "contentinfo"}:
+            return True
+        blob = f"{attr.get('class', '')} {attr.get('id', '')}".lower()
+        tokens = set(re.split(r"[^a-z0-9]+", blob))
+        return bool(tokens & {"menu", "navbar", "nav", "footer", "breadcrumb", "cookie"})
+
+    def _flush_line(self) -> None:
+        text = re.sub(r"\s+", " ", "".join(self._buf)).strip()
+        self._buf = []
+        if text:
+            self.lines.append(text)
 
     def handle_starttag(self, tag, attrs):
         attr = {k.lower(): v or "" for k, v in attrs}
+        if self._skip_depth:
+            if tag == self._skip_tag:
+                self._skip_depth += 1
+            return
         if tag == "script":
             kind = attr.get("type", "").lower()
             if "ld+json" in kind:
@@ -417,14 +488,27 @@ class _PageParser(HTMLParser):
             elif attr.get("id") == "__NEXT_DATA__":
                 self._mode = "next"
             else:
-                self._mode = ""
+                self._mode = "ignore"
             self._capture = ""
-        elif tag == "meta":
+            return
+        if self._region_skip(tag, attr):
+            self._skip_tag = tag
+            self._skip_depth = 1
+            return
+        if tag in {"div", "p", "li", "br", "h1", "h2", "h3", "tr", "section", "article"}:
+            self._flush_line()
+        if tag == "meta":
             key = attr.get("property") or attr.get("name") or ""
             if key and attr.get("content"):
                 self.meta[key.lower()] = attr["content"]
         elif tag == "link" and "json" in attr.get("type", "").lower() and attr.get("href"):
             self.alternate_json.append(attr["href"])
+        elif tag == "title":
+            self._in_title = True
+            self._title_buf = ""
+        elif tag == "h1":
+            self._in_h1 = True
+            self._h1_buf = ""
         elif tag in {"td", "th", "dt", "dd"}:
             self._in_cell = True
             self._cell = ""
@@ -433,31 +517,62 @@ class _PageParser(HTMLParser):
             self.images.append((attr.get("src", ""), hint))
 
     def handle_data(self, data):
-        if self._mode:
-            self._capture += data
-        if self._in_cell:
-            self._cell += data
         if "window.__NUXT__" in data and not self.nuxt:
             self.nuxt = data
+        if self._mode:
+            self._capture += data
+            return
+        if self._skip_depth:
+            return
+        if self._in_title:
+            self._title_buf += data
+            return
+        if self._in_h1:
+            self._h1_buf += data
+        if self._in_cell:
+            self._cell += data
+        self._buf.append(data)
 
     def handle_endtag(self, tag):
+        if self._skip_depth:
+            if tag == self._skip_tag:
+                self._skip_depth -= 1
+                if self._skip_depth <= 0:
+                    self._skip_depth = 0
+                    self._skip_tag = ""
+            return
         if tag == "script" and self._mode:
             if self._mode == "ld":
                 self.ldjson.append(self._capture)
             elif self._mode == "next":
                 self.next_data = self._capture
             self._mode = ""
+            return
+        if tag == "title" and self._in_title:
+            self.title = re.sub(r"\s+", " ", self._title_buf).strip()
+            self._in_title = False
+        elif tag == "h1" and self._in_h1:
+            self.h1 = re.sub(r"\s+", " ", self._h1_buf).strip()
+            self._in_h1 = False
+            self._flush_line()
         elif tag in {"td", "th", "dt", "dd"} and self._in_cell:
             self._cells.append(re.sub(r"\s+", " ", self._cell).strip())
             self._in_cell = False
             if len(self._cells) >= 2:
                 self.tables.append((self._cells[-2], self._cells[-1]))
+        elif tag in {"div", "p", "li", "h2", "h3", "tr", "section", "article"}:
+            self._flush_line()
+
+    def main_text(self) -> str:
+        self._flush_line()
+        return "\n".join(self.lines)
 
 
 def _parse_html(text: str) -> _PageParser:
     parser = _PageParser()
     try:
         parser.feed(text or "")
+        parser.main_text()
     except Exception:
         logger.debug("HTML parse failed", exc_info=True)
     return parser
@@ -474,14 +589,33 @@ def _enough(fields: Dict[str, Dict[str, Any]]) -> bool:
     return len(extras) >= 3
 
 
+def _canon_property_type(value: str) -> Optional[str]:
+    from app.services.action_service import ALLOWED_PROPERTY_TYPES
+
+    token = re.sub(r"\s+", " ", (value or "").strip().lower()).replace("(s)", "s")
+    token = re.sub(r"\s+", " ", token)
+    token = _LAND_ALIASES.get(token, token)
+    return ALLOWED_PROPERTY_TYPES.get(token)
+
+
+def _is_land_phrase(value: str) -> bool:
+    token = re.sub(r"\s+", " ", (value or "").strip().lower()).replace("(s)", "s")
+    token = re.sub(r"\s+", " ", token)
+    return token in _LAND_ALIASES
+
+
 def _normalize_type_status(fields: Dict[str, Dict[str, Any]]) -> None:
     from app.services.action_service import ALLOWED_PROPERTY_TYPES, ALLOWED_STATUSES
 
     kind = fields.get("property_type")
     if kind and isinstance(kind.get("value"), str):
-        canon = ALLOWED_PROPERTY_TYPES.get(kind["value"].strip().lower())
+        canon = _canon_property_type(kind["value"])
         if canon:
             kind["value"] = canon
+        elif _is_land_phrase(kind["value"]):
+            allowed = ", ".join(sorted(set(ALLOWED_PROPERTY_TYPES.values())))
+            kind["needs_decision"] = True
+            kind["reason"] = f"Type must be one of: {allowed}"
     status = fields.get("status")
     if status and isinstance(status.get("value"), str):
         canon = ALLOWED_STATUSES.get(status["value"].strip().lower())
@@ -489,24 +623,106 @@ def _normalize_type_status(fields: Dict[str, Dict[str, Any]]) -> None:
             status["value"] = canon
 
 
-def _apply_inferences(fields: Dict[str, Dict[str, Any]], page_text: str) -> None:
-    address = (fields.get("address") or {}).get("value") or ""
-    blob = f"{address}\n{page_text}".lower()
-    if "province" not in fields:
-        for key, (province, district, area) in _DISTRICTS.items():
-            if key in blob:
-                if "province" not in fields:
-                    fields["province"] = _prov(province, "inferred", "rule", reason=f"province taken from '{key}' in the address or page")
-                if "district" not in fields:
-                    fields["district"] = _prov(district, "inferred", "rule", reason=f"district taken from '{key}'")
-                if "area" not in fields:
-                    fields["area"] = _prov(area, "inferred", "rule", reason=f"area taken from the {province} address")
-                break
+def _district_hit(text: str) -> Optional[Tuple[str, Tuple[str, str, str]]]:
+    """Whole-word district match. 'Surinder' and 'Kolkata' do not match."""
+    blob = text or ""
+    for key, triple in _DISTRICTS.items():
+        if re.search(r"\b" + re.escape(key) + r"\b", blob, re.IGNORECASE):
+            return key, triple
+    return None
+
+
+def _location_scope(fields: Dict[str, Dict[str, Any]], main_text: str, title: str = "") -> str:
+    parts = [title or ""]
+    for key in ("address", "location", "property_name"):
+        value = (fields.get(key) or {}).get("value")
+        if value:
+            parts.append(str(value))
+    parts.append((main_text or "")[:2000])
+    return "\n".join(part for part in parts if part)
+
+
+def _foreign_place(fields: Dict[str, Dict[str, Any]], main_text: str, url: str, title: str = "") -> Optional[str]:
+    host = (urlparse(url or "").hostname or "").lower()
+    scope = _location_scope(fields, main_text, title)
+    price = str((fields.get("price_display") or {}).get("value") or "")
+    currency = str((fields.get("currency") or {}).get("value") or "")
+    blob = f"{scope}\n{price}\n{currency}"
+    for needle, place in _FOREIGN_PLACES:
+        if re.search(r"\b" + re.escape(needle) + r"\b", blob, re.IGNORECASE):
+            return place
+    if re.search(r"₹|\bINR\b|\bRs\.?\b|\bLacs?\b|\bLakhs?\b|\bCrores?\b|\d(?:\.\d+)?\s*[-_]?\s*cr\b", blob, re.I):
+        return "India"
+    for needle, place in _FOREIGN_DOMAINS:
+        if needle in host:
+            return place
+    return None
+
+
+def foreign_listing_warning(place: str, language: str = "en") -> str:
+    shown = place or "another country"
+    lang = (language or "en").split("-")[0].lower()
+    if lang == "pl":
+        return (
+            f"To wygląda na ofertę spoza Tajlandii ({shown}). "
+            "Strony Tajlandia publikują nieruchomości z Tajlandii. "
+            "Odpowiedz 'continue anyway', aby ją zostawić, albo 'cancel'."
+        )
+    if lang == "hi":
+        return (
+            f"Yeh Thailand ke bahar ki listing lagti hai ({shown}). "
+            "Tajlandia sites Thailand ki properties dikhati hain. "
+            "'continue anyway' likho taaki yeh rahe, ya 'cancel'."
+        )
+    if lang == "gu":
+        return (
+            f"Aa Thailand bahaar ni listing lage che ({shown}). "
+            "Tajlandia sites Thailand ni properties list kare che. "
+            "'continue anyway' lakho, athva 'cancel'."
+        )
+    return (
+        f"This looks like a listing outside Thailand ({shown}). "
+        "Tajlandia sites list Thailand properties. "
+        "Reply 'continue anyway' to keep it, or 'cancel'."
+    )
+
+
+def _foreign_blocks(draft: Dict[str, Any]) -> bool:
+    if not draft.get("foreign_place") or draft.get("foreign_acknowledged"):
+        return False
+    return not _admin_thai_location(draft)
+
+
+def _admin_thai_location(draft: Dict[str, Any]) -> bool:
+    provenance = draft.get("provenance") or {}
+    for key in ("province", "district", "area", "address", "location"):
+        item = provenance.get(key) or {}
+        if item.get("status") == "provided" and _THAI_PLACE_RE.search(str(item.get("value") or "")):
+            return True
+    return False
+
+
+def _apply_inferences(fields: Dict[str, Dict[str, Any]], page_text: str, main_text: str = "", title: str = "", allow_location: bool = True) -> None:
+    if allow_location and "province" not in fields:
+        hit = _district_hit(_location_scope(fields, main_text, title))
+        if hit:
+            key, (province, district, area) = hit
+            fields["province"] = _prov(province, "inferred", "rule", reason=f"province taken from '{key}' in the address or page")
+            if "district" not in fields:
+                fields["district"] = _prov(district, "inferred", "rule", reason=f"district taken from '{key}'")
+            if "area" not in fields:
+                fields["area"] = _prov(area, "inferred", "rule", reason=f"area taken from the {province} address")
     display = fields.get("price_display")
     currency = str((fields.get("currency") or {}).get("value") or "")
-    if display and "price_numeric_min" not in fields:
+    if display and "price_numeric_min" not in fields and not display.get("needs_decision"):
         text = str(display.get("value"))
-        if re.search(r"\b(THB|baht)\b", text, re.I) or currency.upper() == "THB" or re.search(r"[฿$€]", text):
+        foreign_money = _money_currency(f"{text} {currency}") not in {None, "THB"}
+        is_thb = (
+            re.search(r"\b(THB|baht)\b", text, re.I)
+            or currency.upper() == "THB"
+            or "฿" in text
+        )
+        if is_thb and not foreign_money:
             from app.services.admin_property_fields import parse_money
             number = parse_money(text)
             if number and number > 0:
@@ -547,11 +763,26 @@ def _apply_guesses(fields: Dict[str, Dict[str, Any]], page_text: str) -> None:
     # Price, size, beds, baths, ownership, ROI and coordinates are never guessed.
 
 
+def _money_currency(text: str) -> Optional[str]:
+    blob = text or ""
+    if re.search(r"₹|\bINR\b|\bRs\.?\b|\bLacs?\b|\bLakhs?\b|\bCrores?\b|\d(?:\.\d+)?\s*[-_]?\s*cr\b", blob, re.I):
+        return "INR"
+    if re.search(r"฿|\bTHB\b|\bbaht\b", blob, re.I):
+        return "THB"
+    if "$" in blob or re.search(r"\bUSD\b", blob, re.I):
+        return "USD"
+    if re.search(r"€|\bEUR\b", blob, re.I):
+        return "EUR"
+    if re.search(r"\bPLN\b|zł", blob, re.I):
+        return "PLN"
+    return None
+
+
 def _foreign_price_needs_decision(fields: Dict[str, Dict[str, Any]]) -> None:
     currency = str((fields.get("currency") or {}).get("value") or "")
     display = str((fields.get("price_display") or {}).get("value") or "")
-    blob = f"{currency} {display}".upper()
-    if re.search(r"\b(USD|EUR|GBP|PLN|\$|€|£)\b", blob) and "THB" not in blob and "BAHT" not in blob:
+    detected = _money_currency(f"{currency} {display}")
+    if detected and detected != "THB":
         if "price_display" in fields:
             fields["price_display"]["needs_decision"] = True
             fields["price_display"]["reason"] = "the page shows a non-THB price and no THB amount"
@@ -659,6 +890,113 @@ def _llm_fields(page_text: str) -> Dict[str, Dict[str, Any]]:
     return out
 
 
+_VISIBLE_LABELS = (
+    ("property information", None),
+    ("property type", "property_type"),
+    ("property name", "property_name"),
+    ("bedrooms", "bedrooms_display"),
+    ("bedroom", "bedrooms_display"),
+    ("bathrooms", "bathrooms"),
+    ("bathroom", "bathrooms"),
+    ("location", "address"),
+    ("address", "address"),
+    ("developer", "developer_name"),
+    ("status", "status"),
+    ("price", "price_display"),
+    ("type", "property_type"),
+    ("area", "area_display"),
+    ("name", "property_name"),
+)
+_LABEL_ALT = "|".join(re.escape(label) for label, _field in _VISIBLE_LABELS)
+_LABEL_LINE = re.compile(rf"(?i)^({_LABEL_ALT})\s*(?:[:=-]\s*|\s+)(.+)$")
+_PRICE_VALUE = re.compile(
+    r"(?i)(₹\s*[0-9][0-9,.]*(?:\s*(?:lac|lakh|lacs|lakhs|cr|crore|crores))?|"
+    r"\brs\.?\s*[0-9][0-9,.]*(?:\s*(?:lac|lakh|lacs|lakhs|cr|crore|crores))?|"
+    r"\b[0-9][0-9,.]*(?:\s+|-)(?:lac|lakh|lacs|lakhs|cr|crore|crores)\b|"
+    r"\b[0-9][0-9,.]*\s*(?:million|mn|mil)\s*(?:thb|baht)\b|"
+    r"\b[0-9][0-9,.]*(?:\s*thb|\s*baht|฿))"
+)
+_SLUG_PRICE = re.compile(r"(\d+(?:\.\d+)?)[-_](lac|lakh|lacs|lakhs|cr|crore|crores|million|mn|mil)\b", re.I)
+_SITE_SUFFIX = re.compile(
+    r"\s*[\|\-–—]\s*(?:real\s*estate\s*india|realestateindia|99acres|magicbricks|zameen|housing\.com).*$",
+    re.IGNORECASE,
+)
+
+
+def _clean_listing_name(text: str) -> str:
+    name = re.sub(r"\s+", " ", text or "").strip()
+    name = _SITE_SUFFIX.sub("", name)
+    name = re.sub(r"\s*\((?:[A-Za-z]{0,8}\d{4,}|listing\s*id[^)]*)\)", "", name, flags=re.I)
+    name = re.sub(r"\s*listing\s*id\s*[:#-]?\s*[A-Za-z0-9-]+", "", name, flags=re.I)
+    return name.strip(" |-–—")
+
+
+def _single_label_line(line: str) -> Optional[Tuple[str, str]]:
+    match = _LABEL_LINE.match((line or "").strip())
+    if not match:
+        return None
+    label = re.sub(r"\s+", " ", match.group(1).strip().lower())
+    value = match.group(2).strip().rstrip(".").strip()
+    if not value or label == "property information":
+        return None
+    other_labels = [item for item, _field in _VISIBLE_LABELS if item != label and item != "property information"]
+    if any(re.search(r"\b" + re.escape(item) + r"\b", value, re.I) for item in other_labels):
+        return None
+    field = dict(_VISIBLE_LABELS).get(label)
+    if not field:
+        return None
+    return field, value
+
+
+def _price_phrase(main_text: str, url: str) -> Optional[Tuple[str, Optional[str]]]:
+    for line in (main_text or "").splitlines():
+        labeled = _single_label_line(line)
+        if labeled and labeled[0] == "price_display":
+            return labeled[1], _money_currency(labeled[1])
+        found = _PRICE_VALUE.search(line)
+        if found:
+            phrase = found.group(0).strip()
+            return phrase, _money_currency(phrase)
+    slug = _SLUG_PRICE.search(url or "")
+    if slug:
+        phrase = slug.group(0)
+        unit = slug.group(2).lower()
+        currency = "INR" if unit in {"lac", "lakh", "lacs", "lakhs", "cr", "crore", "crores"} else _money_currency(phrase)
+        return phrase, currency
+    return None
+
+
+def _apply_visible_fallbacks(fields: Dict[str, Dict[str, Any]], parser: _PageParser, page: FetchedPage) -> None:
+    """Fill gaps after JSON-LD, Open Graph and table cells. Does not overwrite them."""
+    if "property_name" not in fields:
+        name = _clean_listing_name(parser.h1) or _clean_listing_name(parser.title)
+        if name:
+            source = "h1" if parser.h1 else "title"
+            fields["property_name"] = _prov(name, "found", "html", evidence=source)
+    for line in parser.lines:
+        pair = _single_label_line(line)
+        if not pair:
+            continue
+        field, value = pair
+        if field not in fields and value:
+            fields[field] = _prov(value, "found", "html", evidence=f"{field}: {value[:80]}")
+    if "price_display" not in fields and "price_numeric_min" not in fields:
+        found = _price_phrase(parser.main_text(), page.final_url or page.url)
+        if found:
+            phrase, currency = found
+            needs = currency not in {None, "THB"}
+            fields["price_display"] = _prov(
+                phrase,
+                "found",
+                "html",
+                evidence=phrase[:80],
+                needs_decision=needs,
+                reason="" if not needs else "the page shows a non-THB price and no THB amount",
+            )
+            if currency and "currency" not in fields:
+                fields["currency"] = _prov(currency, "found", "html", evidence="currency marker")
+
+
 def extract_draft(page: FetchedPage) -> Dict[str, Any]:
     """Build a provenance draft. Invented model values stay missing."""
     from app.services.property_extractor import prepare_untrusted_page_text
@@ -686,12 +1024,15 @@ def extract_draft(page: FetchedPage) -> Dict[str, Any]:
         for key, prov in _labeled_pairs(parser).items():
             fields.setdefault(key, prov)
     if not _enough(fields):
+        _apply_visible_fallbacks(fields, parser, page)
+    if not _enough(fields):
         for key, prov in _llm_fields(text).items():
             fields.setdefault(key, prov)
 
     images = _images_from(parser, page.final_url)
+    outside = _foreign_place(fields, parser.main_text(), page.final_url, parser.title or parser.h1)
     _normalize_type_status(fields)
-    _apply_inferences(fields, text)
+    _apply_inferences(fields, text, main_text=parser.main_text(), title=parser.title or parser.h1, allow_location=not outside)
     _foreign_price_needs_decision(fields)
     _apply_guesses(fields, text)
     _normalize_type_status(fields)
@@ -715,6 +1056,8 @@ def extract_draft(page: FetchedPage) -> Dict[str, Any]:
         "injection_warning": injection,
         "mode": "create",
         "guesses_accepted": [],
+        "foreign_place": outside,
+        "foreign_acknowledged": False,
     }
 
 
@@ -741,18 +1084,55 @@ def _row(field: str, prov: Optional[Dict[str, Any]]) -> Dict[str, str]:
     return {"field": field, "value": "" if value is None else value, "source": _source_label(prov)}
 
 
+def _price_note(shown: str) -> str:
+    detail = (shown or "").strip()
+    if detail:
+        return f"missing (page shows {detail}, not THB. Tell me the price in THB)"
+    return "missing (tell me the price in THB)"
+
+
+def _price_preview_row(provenance: Dict[str, Dict[str, Any]]) -> Dict[str, str]:
+    """One Price row. price, price_display and price_numeric_min are not listed separately."""
+    display = provenance.get("price_display") or {}
+    numeric = provenance.get("price_numeric_min") or {}
+    shown = str(display.get("value") or "").strip()
+    if display.get("needs_decision") or numeric.get("needs_decision"):
+        return {"field": "price", "value": _price_note(shown or str(numeric.get("value") or "")), "source": "Missing"}
+    ready_number = (
+        numeric.get("status") in {"found", "inferred", "provided"}
+        and not _blank(numeric.get("value"))
+    )
+    ready_text = display.get("status") in {"found", "inferred", "provided"} and bool(shown)
+    if ready_text and _money_currency(shown) not in {None, "THB"}:
+        return {"field": "price", "value": _price_note(shown), "source": "Missing"}
+    if ready_number or ready_text:
+        if ready_text:
+            return {"field": "price", "value": shown, "source": _source_label(display)}
+        return {"field": "price", "value": numeric.get("value"), "source": _source_label(numeric)}
+    return {"field": "price", "value": _price_note(""), "source": "Missing"}
+
+
+def _include_field(field: str, only_fields: Optional[List[str]]) -> bool:
+    if only_fields is None:
+        return True
+    if field in only_fields:
+        return True
+    if field == "price" and any(item in only_fields for item in ("price", "price_display", "price_numeric_min", "price_numeric_max", "currency")):
+        return True
+    return False
+
+
 def preview_rows(draft: Dict[str, Any], *, only_fields: Optional[List[str]] = None) -> Tuple[List[Dict[str, str]], List[Dict[str, str]]]:
     provenance = draft.get("provenance") or {}
     decision_fields = []
     other_fields = []
     interesting = [
         "property_name", "property_type", "status", "province", "district", "area", "address",
-        "price_display", "price_numeric_min", "price_numeric_max", "currency",
         "bedrooms_display", "bedrooms_min", "bedrooms_max", "bathrooms",
         "area_sqm_min", "area_sqm_max", "description", "developer_name", "ownership_type",
     ]
     for field in interesting:
-        if only_fields is not None and field not in only_fields:
+        if not _include_field(field, only_fields):
             continue
         prov = provenance.get(field)
         row = _row(field, prov)
@@ -762,36 +1142,23 @@ def preview_rows(draft: Dict[str, Any], *, only_fields: Optional[List[str]] = No
             or prov.get("needs_decision")
             or (prov.get("status") == "guess" and prov.get("confidence") == "low")
         )
-        if field in {"property_name", "property_type", "status", "province", "price_display", "price_numeric_min"} and needs:
+        if field in {"property_name", "property_type", "status", "province"} and needs:
             decision_fields.append(row)
         elif needs and prov and prov.get("status") == "guess":
             decision_fields.append(row)
-        elif prov is None and field in {"property_name", "property_type", "status", "province", "price_display", "price_numeric_min"}:
+        elif prov is None and field in {"property_name", "property_type", "status", "province"}:
             decision_fields.append(row)
         elif prov:
             other_fields.append(row)
-    if "province" not in provenance and "area" not in provenance and (only_fields is None or "location" in (only_fields or [])):
+    if "province" not in provenance and "area" not in provenance and _include_field("location", only_fields):
         if not any(row["field"] == "province" for row in decision_fields):
             decision_fields.append({"field": "location", "value": "", "source": "Missing"})
-    visible_price = any(
-        row["field"] in {"price_display", "price_numeric_min"} and row["source"] != "Missing" and row.get("value") not in (None, "")
-        for row in decision_fields + other_fields
-    )
-    numeric = provenance.get("price_numeric_min") or {}
-    if (
-        not visible_price
-        and numeric.get("status") in {"found", "inferred", "provided"}
-        and not numeric.get("needs_decision")
-        and not _blank(numeric.get("value"))
-    ):
-        other_fields.append({
-            "field": "price_numeric_min",
-            "value": numeric.get("value"),
-            "source": _source_label(numeric),
-        })
-        visible_price = True
-    if not visible_price and not any(row["field"] == "price" for row in decision_fields):
-        decision_fields.append({"field": "price", "value": "", "source": "Missing"})
+    if _include_field("price", only_fields):
+        price_row = _price_preview_row(provenance)
+        if price_row["source"] == "Missing":
+            decision_fields.append(price_row)
+        else:
+            other_fields.append(price_row)
     return decision_fields, other_fields
 
 
@@ -861,6 +1228,7 @@ def savable_fields(draft: Dict[str, Any]) -> Dict[str, Any]:
             out[field] = value
     if "province" not in out and out.get("address"):
         out["location"] = out["address"]
+        out["province"] = out["address"]
     if out.get("bedrooms_min") is not None and "bedrooms" not in out:
         out["bedrooms"] = out["bedrooms_min"]
     previewed = draft.get("previewed_values")
@@ -897,6 +1265,9 @@ def render_preview(draft: Dict[str, Any], *, changed_only: Optional[List[str]] =
     _record_previewed(draft, full_decision + full_other)
     decision, other = preview_rows(draft, only_fields=changed_only)
     lines = []
+    if _foreign_blocks(draft):
+        lines.append(foreign_listing_warning(str(draft.get("foreign_place") or ""), str(draft.get("reply_language") or "en")))
+        lines.append("")
     if superseded:
         lines.append(f"The previous draft for {superseded} was discarded.")
         lines.append("")
@@ -955,6 +1326,8 @@ def parse_draft_command(message: Optional[str]) -> Optional[Dict[str, Any]]:
         return {"op": "cancel"}
     if is_strict_confirm_message(raw) or low in {"yes save it", "yes save"}:
         return {"op": "confirm"}
+    if low.rstrip(".") == "continue anyway":
+        return {"op": "continue_anyway"}
     skip = re.fullmatch(r"skip ([a-z_ ]+)", low)
     if skip:
         return {"op": "skip", "field": skip.group(1).strip().replace(" ", "_")}
@@ -962,7 +1335,9 @@ def parse_draft_command(message: Optional[str]) -> Optional[Dict[str, Any]]:
 
     natural = parse_natural_edit_commands(raw)
     if natural:
-        return {"op": "multi", "commands": natural}
+        sets = [item for item in natural if item.get("op") == "set"]
+        rejected = [item for item in natural if item.get("op") != "set"]
+        return {"op": "multi", "commands": sets, "rejected": rejected, "report": len(natural) > 1 or bool(rejected)}
     if low in {"use your guesses", "accept guesses", "accept all guesses"}:
         return {"op": "accept_guesses"}
     accept = re.fullmatch(r"accept ([a-z_ ]+)", low)
@@ -1059,14 +1434,32 @@ def apply_command(draft: Dict[str, Any], command: Dict[str, Any]) -> List[str]:
         _set_provided(draft, "bathrooms", int(command["value"]))
         changed.append("bathrooms")
     elif op == "set" and command.get("field") == "status":
+        from app.services.admin_chat_quality import _canon_status_value
         from app.services.action_service import ALLOWED_STATUSES
-        token = str(command.get("value") or "").strip().lower()
-        canon = ALLOWED_STATUSES.get(token) or ALLOWED_STATUSES.get(token.replace("-", " ")) or command.get("value")
-        _set_provided(draft, "status", canon)
-        changed.append("status")
+
+        canon = _canon_status_value(str(command.get("value") or ""))
+        if not canon:
+            draft.setdefault("apply_rejected", []).append({
+                "field": "status",
+                "value": command.get("value"),
+                "reason": "Status must be one of: " + ", ".join(sorted(set(ALLOWED_STATUSES.values()))),
+            })
+        else:
+            _set_provided(draft, "status", canon)
+            changed.append("status")
     elif op == "set" and command.get("field") == "property_type":
-        _set_provided(draft, "property_type", command.get("value"))
-        changed.append("property_type")
+        from app.services.action_service import ALLOWED_PROPERTY_TYPES
+
+        canon = _canon_property_type(str(command.get("value") or ""))
+        if not canon:
+            draft.setdefault("apply_rejected", []).append({
+                "field": "property_type",
+                "value": command.get("value"),
+                "reason": "Type must be one of: " + ", ".join(sorted(set(ALLOWED_PROPERTY_TYPES.values()))),
+            })
+        else:
+            _set_provided(draft, "property_type", canon)
+            changed.append("property_type")
     elif op == "set" and command.get("field") == "province":
         text = str(command.get("value") or "").strip()
         if text:
@@ -1103,14 +1496,13 @@ def apply_command(draft: Dict[str, Any], command: Dict[str, Any]) -> List[str]:
         text = str(command.get("value") or "")
         _set_provided(draft, "address", text)
         changed.append("address")
-        low = text.lower()
-        for key, (province, district, area) in _DISTRICTS.items():
-            if key in low:
-                _set_provided(draft, "province", province)
-                _set_provided(draft, "district", district)
-                _set_provided(draft, "area", area)
-                changed.extend(["province", "district", "area"])
-                break
+        hit = _district_hit(text)
+        if hit:
+            _key, (province, district, area) = hit
+            _set_provided(draft, "province", province)
+            _set_provided(draft, "district", district)
+            _set_provided(draft, "area", area)
+            changed.extend(["province", "district", "area"])
         else:
             _set_provided(draft, "province", text)
             changed.append("province")
@@ -1154,6 +1546,9 @@ def apply_command(draft: Dict[str, Any], command: Dict[str, Any]) -> List[str]:
         draft["mode"] = "create"
         draft["duplicate"] = None
         changed.append("mode")
+    elif op == "continue_anyway":
+        draft["foreign_acknowledged"] = True
+        changed.append("foreign_listing")
     return changed
 
 
@@ -1247,10 +1642,62 @@ def _stage(db: Any, staff: Any, conversation_id: str, draft: Dict[str, Any]):
     )
 
 
+def _missing_phrase(draft: Dict[str, Any], field: str) -> str:
+    if field != "price":
+        return field
+    display = ((draft.get("provenance") or {}).get("price_display") or {})
+    shown = str(display.get("value") or "").strip()
+    if display.get("needs_decision") and shown:
+        return f"price (page shows {shown}, not THB. Tell me the price in THB)"
+    return "price (the page showed no price)"
+
+
+def _edit_report(draft: Dict[str, Any], changed: List[str], rejected: List[Dict[str, Any]]) -> str:
+    from app.services.admin_chat_quality import human_field_label
+
+    lines = ["Applied", "| Field | Value |", "| --- | --- |"]
+    provenance = draft.get("provenance") or {}
+    seen = set()
+    for field in changed:
+        if field in {"currency", "foreign_listing"}:
+            continue
+        label = human_field_label(field if field != "price_numeric_min" else "price")
+        if label in seen:
+            continue
+        seen.add(label)
+        if field in {"price_display", "price_numeric_min", "price"}:
+            value = (provenance.get("price_display") or {}).get("value") or (provenance.get("price_numeric_min") or {}).get("value")
+        else:
+            value = (provenance.get(field) or {}).get("value")
+        lines.append(f"| {label} | {'' if value is None else value} |")
+    if not seen:
+        lines.append("| — | nothing applied |")
+    lines.append("")
+    lines.append("Not understood")
+    lines.append("| Text | Reason |")
+    lines.append("| --- | --- |")
+    if not rejected:
+        lines.append("| — | none |")
+    else:
+        for item in rejected:
+            text = str(item.get("value") or item.get("field") or "").replace("|", "/")
+            reason = str(item.get("reason") or "I could not tell which field this is.").replace("|", "/")
+            lines.append(f"| {text} | {reason} |")
+    return "\n".join(lines)
+
+
 def _save_one(db: Any, staff: Any, action: Any) -> str:
     from app.services.action_service import ACTION_STATUS_EXECUTED, save_ingested_listing
 
     draft = dict(action.action_payload or {})
+    if _foreign_blocks(draft):
+        missing = missing_requirements(draft)
+        if not draft.get("websites"):
+            missing.append("website")
+        text = foreign_listing_warning(str(draft.get("foreign_place") or ""), str(draft.get("reply_language") or "en"))
+        if missing:
+            text += "\n\nI still need: " + ", ".join(_missing_phrase(draft, field) for field in missing) + "."
+        return text + "\n\nNothing was saved.\n\n" + CONFIRM_FOOTER
     missing = missing_requirements(draft)
     if not draft.get("websites"):
         missing.append("website")
@@ -1259,12 +1706,7 @@ def _save_one(db: Any, staff: Any, action: Any) -> str:
         if isinstance(prov, dict) and prov.get("needs_decision") and prov.get("status") != "provided"
     ]
     if missing or unresolved:
-        parts = []
-        for field in missing:
-            if field == "price":
-                parts.append("price (the page showed no price)")
-            else:
-                parts.append(field)
+        parts = [_missing_phrase(draft, field) for field in missing]
         for field in unresolved:
             if field not in parts:
                 parts.append(field)
@@ -1360,6 +1802,7 @@ def try_handle_property_url_turn(
         for url in urls:
             try:
                 draft = draft_from_url(db, staff, url)
+                draft["reply_language"] = (language or "en").split("-")[0].lower()
                 action = _stage(db, staff, str(getattr(conv, "id", "")), draft)
                 last_id = str(action.id)
                 texts.append(render_preview(draft, superseded=superseded if url == urls[0] else None))
@@ -1446,6 +1889,7 @@ def try_handle_property_url_turn(
     # tracked objects. An in-place append looks unchanged and is not written.
     payload = copy.deepcopy(dict(latest.action_payload or {}))
     changed = apply_command(payload, command or {})
+    rejected = list((command or {}).get("rejected") or []) + list(payload.pop("apply_rejected", None) or [])
     price_warning = payload.pop("price_warning", None)
     if price_warning:
         text = price_warning
@@ -1453,7 +1897,7 @@ def try_handle_property_url_turn(
         return _chat_response(conv, text, str(latest.id), language)
     if payload.get("keep_page_missing"):
         text = "The page has no price to keep. Tell me the price. Nothing was invented."
-    elif not changed and command and command.get("op") not in {"confirm", "cancel", "confirm_all"}:
+    elif not changed and not rejected and command and command.get("op") not in {"confirm", "cancel", "confirm_all"}:
         text = "I did not change the draft. " + CONFIRM_FOOTER
     else:
         from sqlalchemy.orm.attributes import flag_modified
@@ -1464,6 +1908,9 @@ def try_handle_property_url_turn(
             db.commit()
         except Exception:
             pass
-        text = render_preview(payload, changed_only=changed or None)
+        visible_changed = [field for field in changed if field != "foreign_listing"]
+        text = render_preview(payload, changed_only=visible_changed or None)
+        if (command or {}).get("report") or rejected:
+            text = _edit_report(payload, visible_changed, rejected) + "\n\n" + text
     append_conversation_turn(db, conv, message or "", text)
     return _chat_response(conv, text, str(latest.id), language)

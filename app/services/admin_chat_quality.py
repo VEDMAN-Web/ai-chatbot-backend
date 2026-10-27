@@ -809,50 +809,154 @@ def classify_draft_question(message: Optional[str]) -> bool:
     return any(re.search(pattern, text) for pattern in patterns)
 
 
+_EDIT_LABELS = (
+    ("nu naam", "property_name"),
+    ("property name", "property_name"),
+    ("property type", "property_type"),
+    ("naam", "property_name"),
+    ("kimat", "price"),
+    ("keemat", "price"),
+    ("name", "property_name"),
+    ("type", "property_type"),
+    ("price", "price"),
+    ("status", "status"),
+    ("bedrooms", "bedrooms"),
+    ("bedroom", "bedrooms"),
+    ("bathrooms", "bathrooms"),
+    ("bathroom", "bathrooms"),
+    ("location", "location"),
+    ("province", "province"),
+    ("parking", "parking"),
+)
+_STATUS_ALIASES = {
+    "ready": "ready to move in",
+    "ready to move": "ready to move in",
+    "ready to move in": "ready to move in",
+    "off plan": "off plan",
+    "off-plan": "off-plan",
+    "under construction": "under construction",
+    "sold out": "sold out",
+    "soldout": "sold out",
+}
+_TYPE_ALIASES = {
+    "residential plot": "land",
+    "residential plots": "land",
+    "plot": "land",
+    "plots": "land",
+    "land": "land",
+}
+
+
+def _clean_edit_value(value: str) -> str:
+    text = (value or "").strip()
+    text = text.rstrip(".").strip()
+    text = re.sub(r"^[\s:=-]+", "", text).strip()
+    return text.rstrip(".").strip()
+
+
+def _allowed_values(mapping: Dict[str, str]) -> str:
+    return ", ".join(sorted(set(mapping.values())))
+
+
+def _canon_status_value(value: str) -> Optional[str]:
+    from app.services.action_service import ALLOWED_STATUSES
+
+    token = re.sub(r"\s+", " ", (value or "").strip().lower())
+    token = _STATUS_ALIASES.get(token, token)
+    return ALLOWED_STATUSES.get(token) or ALLOWED_STATUSES.get(token.replace("-", " "))
+
+
+def _canon_type_value(value: str) -> Optional[str]:
+    from app.services.action_service import ALLOWED_PROPERTY_TYPES
+
+    token = re.sub(r"\s+", " ", (value or "").strip().lower()).replace("(s)", "s")
+    token = re.sub(r"\s+", " ", token)
+    token = _TYPE_ALIASES.get(token, token)
+    return ALLOWED_PROPERTY_TYPES.get(token)
+
+
+def _reject_clause(clause: str, reason: str, field: str = "") -> Dict[str, Any]:
+    return {"op": "reject", "field": field or clause, "value": clause, "reason": reason}
+
+
+def _finish_edit(field: str, value: Any, clause: str) -> Optional[Dict[str, Any]]:
+    from app.services.action_service import ALLOWED_PROPERTY_TYPES, ALLOWED_STATUSES
+
+    if field == "price":
+        if not re.search(r"\d", str(value)):
+            return _reject_clause(clause, "I could not read that price.", "price")
+        from app.services.admin_property_fields import parse_money
+
+        if parse_money(str(value)) is None:
+            return _reject_clause(clause, "I could not read that price.", "price")
+        return {"op": "set", "field": "price", "value": str(value).strip()}
+    if field == "status":
+        canon = _canon_status_value(str(value))
+        if not canon:
+            allowed = _allowed_values(ALLOWED_STATUSES)
+            return _reject_clause(clause, f"Status must be one of: {allowed}", "status")
+        return {"op": "set", "field": "status", "value": canon}
+    if field == "property_type":
+        canon = _canon_type_value(str(value))
+        if not canon:
+            allowed = _allowed_values(ALLOWED_PROPERTY_TYPES)
+            return _reject_clause(clause, f"Type must be one of: {allowed}", "property_type")
+        return {"op": "set", "field": "property_type", "value": canon}
+    if field in {"bedrooms", "bathrooms", "parking"}:
+        if not re.fullmatch(r"\d+", str(value).strip()):
+            return _reject_clause(clause, "I could not read that number.", field)
+        return {"op": "set", "field": field, "value": int(str(value).strip())}
+    text = str(value).strip()
+    if not text:
+        return _reject_clause(clause, "That value is empty.", field)
+    return {"op": "set", "field": field, "value": text}
+
+
 def _edit_clause(clause: str) -> Optional[Dict[str, Any]]:
     text = clause.strip().strip(".")
     if not text:
         return None
     matchers = (
-        ("price", re.compile(r"(?i)^(?:use\s+|set\s+)?price(?:\s+to|\s+of)?\s+(.+)$"), False),
-        ("bedrooms", re.compile(r"(?i)^(?:use\s+|set\s+)?bedrooms?(?:\s+to)?\s+(\d+)$"), True),
-        ("bathrooms", re.compile(r"(?i)^(?:use\s+|set\s+)?bathrooms?(?:\s+to)?\s+(\d+)$"), True),
-        ("status", re.compile(r"(?i)^(?:change\s+the\s+|set\s+|change\s+)?status(?:\s+to)?\s+(.+)$"), False),
-        ("province", re.compile(r"(?i)^(?:add\s+|set\s+)?(.+?)\s+as\s+province$"), False),
-        ("province", re.compile(r"(?i)^(?:set\s+)?province(?:\s+to|\s+is)?\s+(.+)$"), False),
-        ("property_name", re.compile(r"(?i)^(?:name\s+it|call\s+it|rename(?:\s+it)?\s+to|set\s+(?:the\s+)?name\s+to)\s+(.+)$"), False),
-        ("property_type", re.compile(r"(?i)^(?:set\s+)?type(?:\s+to)?\s+(.+)$"), False),
-        ("location", re.compile(r"(?i)^(?:use\s+|set\s+)?location(?:\s+to)?\s+(.+)$"), False),
-        ("parking", re.compile(r"(?i)^(?:set\s+)?parking(?:\s+to)?\s+(\d+)$"), True),
+        ("price", re.compile(r"(?i)^(?:use\s+|set\s+)?price(?:\s+to|\s+of)?\s+(.+)$")),
+        ("bedrooms", re.compile(r"(?i)^(?:use\s+|set\s+)?bedrooms?(?:\s+to)?\s+(.+)$")),
+        ("bathrooms", re.compile(r"(?i)^(?:use\s+|set\s+)?bathrooms?(?:\s+to)?\s+(.+)$")),
+        ("status", re.compile(r"(?i)^(?:change\s+the\s+|set\s+|change\s+)?status(?:\s+to)?\s+(.+)$")),
+        ("province", re.compile(r"(?i)^(?:add\s+|set\s+)?(.+?)\s+as\s+province$")),
+        ("province", re.compile(r"(?i)^(?:set\s+)?province(?:\s+to|\s+is)?\s+(.+)$")),
+        ("property_name", re.compile(r"(?i)^(?:name\s+it|call\s+it|rename(?:\s+it)?\s+to|set\s+(?:the\s+)?name\s+to)\s+(.+)$")),
+        ("property_type", re.compile(r"(?i)^(?:set\s+)?type(?:\s+to)?\s+(.+)$")),
+        ("location", re.compile(r"(?i)^(?:use\s+|set\s+)?location(?:\s+to)?\s+(.+)$")),
+        ("parking", re.compile(r"(?i)^(?:set\s+)?parking(?:\s+to)?\s+(.+)$")),
     )
-    for field, pattern, numeric in matchers:
+    for field, pattern in matchers:
         match = pattern.match(text)
         if not match:
             continue
-        value: Any = match.group(1).strip()
-        if field == "price":
-            if not re.search(r"\d", value):
-                return None
-            from app.services.admin_property_fields import parse_money
-
-            if parse_money(value) is None:
-                return None
-        if field == "status" and (len(value) > 40 or not re.search(r"[a-z]", value, re.I)):
-            return None
-        if numeric:
-            value = int(value)
-        return {"op": "set", "field": field, "value": value}
-    return None
+        return _finish_edit(field, _clean_edit_value(match.group(1)), text)
+    label_pattern = "|".join(re.escape(label) for label, _field in _EDIT_LABELS)
+    labeled = re.match(rf"(?i)^({label_pattern})\s*(?:[:=-]\s*|\s+)(.+)$", text)
+    if not labeled:
+        return None
+    label = re.sub(r"\s+", " ", labeled.group(1).strip().lower())
+    field = dict(_EDIT_LABELS).get(label)
+    if not field:
+        return None
+    return _finish_edit(field, _clean_edit_value(labeled.group(2)), text)
 
 
 def parse_natural_edit_commands(text: str) -> list[dict]:
     raw = (text or "").strip()
     if not raw or re.search(r"https?://", raw, re.I):
         return []
-    parts = re.split(r"\s*,\s*|\s+\band\b\s+", raw)
+    raw = raw.rstrip(".").strip()
+    parts = [part.strip() for part in re.split(r"\s*(?:,|;|\n+|\band\b)\s*", raw) if part.strip()]
+    parsed = [_edit_clause(part) for part in parts]
+    if not any(parsed):
+        return []
     commands: List[Dict[str, Any]] = []
-    for part in parts:
-        command = _edit_clause(part)
+    for part, command in zip(parts, parsed):
         if command:
             commands.append(command)
+        else:
+            commands.append(_reject_clause(part, "I could not tell which field this is."))
     return commands
