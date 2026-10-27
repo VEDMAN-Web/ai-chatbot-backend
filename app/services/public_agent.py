@@ -2159,6 +2159,61 @@ def _clean_field(v: Any) -> str:
     return "" if t.lower() in ("", "none", "n/a", "null", "nan") else t
 
 
+_COMPARISON_TEXT = {
+    "en": {
+        "intro": "Here is a side-by-side comparison between {names}:",
+        "feature": "Feature",
+        "rows": ["Property ID", "Location", "Starting Price", "Property Type", "Bedrooms", "Built Area", "Private Pool", "Status", "Ownership"],
+        "price": "On Request", "na": "N/A", "yes": "Yes", "no": "No", "available": "Available", "ownership": "Confirm with advisor",
+        "close": "Would you like to examine the architectural floor plans or schedule a viewing tour?",
+    },
+    "pl": {
+        "intro": "Oto zestawienie porównawcze dla {names}:",
+        "feature": "Parametr",
+        "rows": ["Identyfikator", "Lokalizacja", "Cena wyjściowa", "Typ nieruchomości", "Sypialnie", "Powierzchnia", "Prywatny basen", "Status", "Forma własności"],
+        "price": "Cena na zapytanie", "na": "Brak danych", "yes": "Tak", "no": "Nie", "available": "Dostępne", "ownership": "Potwierdź z doradcą",
+        "close": "Czy chciałbyś zapoznać się ze szczegółowymi rzutami architektonicznymi lub umówić prezentację?",
+    },
+    "th": {
+        "intro": "ตารางเปรียบเทียบระหว่าง {names}:",
+        "feature": "หัวข้อ",
+        "rows": ["รหัสอสังหาริมทรัพย์", "ทำเล", "ราคาเริ่มต้น", "ประเภท", "ห้องนอน", "พื้นที่ใช้สอย", "สระว่ายน้ำส่วนตัว", "สถานะ", "รูปแบบกรรมสิทธิ์"],
+        "price": "ราคาตามสอบถาม", "na": "ไม่ระบุ", "yes": "มี", "no": "ไม่มี", "available": "พร้อมขาย", "ownership": "ยืนยันกับที่ปรึกษา",
+        "close": "คุณต้องการดูผังอาคารเพิ่มเติมหรือนัดหมายเข้าชมโครงการไหมครับ?",
+    },
+}
+
+
+def _comparison_table_text(props: List[Any], language: str) -> str:
+    """Side-by-side table for 2-3 listings built only from their stored fields (no model text, no claims)."""
+    t = _COMPARISON_TEXT.get(language) or _COMPARISON_TEXT["en"]
+    lang = language if language in _COMPARISON_TEXT else "en"
+    names = " / ".join(f"**{p.property_name}**" for p in props)
+    columns = [
+        [
+            f"`{p.property_id}`",
+            p.district or p.province,
+            p.price_display or t["price"],
+            p.property_type,
+            p.bedrooms_display or t["na"],
+            p.area_display or t["na"],
+            t["yes"] if p.has_pool else t["no"],
+            display_status(p.status, lang) or t["available"],
+            p.ownership_type or t["ownership"],
+        ]
+        for p in props
+    ]
+    lines = [
+        t["intro"].format(names=names),
+        "",
+        "| " + t["feature"] + " | " + " | ".join(str(p.property_name) for p in props) + " |",
+        "| :--- |" + " :--- |" * len(props),
+    ]
+    for i, label in enumerate(t["rows"]):
+        lines.append("| **" + label + "** | " + " | ".join(str(col[i]) for col in columns) + " |")
+    return "\n".join(lines) + "\n\n" + t["close"]
+
+
 class PublicAgentService:
     def __init__(self):
         self.model = settings.OPENAI_MODEL
@@ -2898,6 +2953,9 @@ class PublicAgentService:
         from app.core.tenant import set_request_site, reset_request_site
         _site_token = set_request_site(getattr(conversation, "site_origin", None))
         try:
+            corrected = self._answer_from_approved_correction(db, conversation, user_message, requested_language)
+            if corrected is not None:
+                return self._post_process_response(corrected, user_message=user_message)
             res = self._run_conversation_internal(
                 db=db,
                 conversation=conversation,
@@ -2912,6 +2970,49 @@ class PublicAgentService:
                 time.time() - t0,
                 getattr(conversation, "session_id", "?"),
             )
+
+    def _answer_from_approved_correction(
+        self,
+        db: Session,
+        conversation: Conversation,
+        user_message: str,
+        requested_language: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """If an administrator approved a correction for this question (even worded differently), give that answer."""
+        try:
+            if not (user_message or "").strip() or looks_like_prompt_injection(user_message) or is_greeting_or_chit_chat(user_message):
+                return None
+            from app.core.tenant import normalize_website_domain
+            from app.services import correction_retrieval
+
+            language = (requested_language or (conversation.preferences or {}).get("language") or "en")
+            context = load_property_context(conversation)
+            property_ids = [p for p in (getattr(context, "active_property_id", None),) if p]
+            match = correction_retrieval.find_applicable(
+                user_message, normalize_website_domain(getattr(conversation, "site_origin", None)), language, property_ids
+            )
+            if not match:
+                return None
+            text = match["corrected_answer"]
+            append_conversation_turn(
+                db=db, conversation=conversation, user_message=user_message, assistant_message=text,
+                structured_data={"correction_id": match["correction_id"], "correction_version": match["version"]},
+            )
+            return {
+                "type": "text",
+                "text": text,
+                "properties": [],
+                "quick_replies": [],
+                "lead_captured": False,
+                "preferences": conversation.preferences or {},
+                "session_id": conversation.session_id,
+                "conversation_id": str(conversation.id),
+                "language": language if language in ("en", "pl", "th") else "en",
+                "answer_source": {"type": "approved_correction", "correction_id": match["correction_id"], "version": match["version"]},
+            }
+        except Exception as exc:
+            logger.warning("Approved-correction lookup failed (answering normally): %s", exc)
+            return None
 
     def _run_conversation_internal(
         self,
@@ -4816,7 +4917,7 @@ class PublicAgentService:
                     _resolved_ids.append(_x)
             prop_ids = _resolved_ids
 
-        props = get_properties_by_ids(db, prop_ids)
+        props = get_properties_by_ids(db, prop_ids)[:3]
         if len(props) < 2:
             if language == "th":
                 reply_text = "สำหรับการเปรียบเทียบ กรุณาระบุชื่ออสังหาริมทรัพย์อย่างน้อย 2 รายการ (เช่น 'เปรียบเทียบ 15 Sukhumvit Residences กับ Sea Heaven') หรือค้นหารายการที่สนใจก่อนได้ครับ"
@@ -4895,58 +4996,7 @@ class PublicAgentService:
                 reply_text = ""
 
         if not reply_text:
-            p1, p2 = props[0], props[1]
-            if language == "th":
-                reply_text = (
-                    f"ตารางเปรียบเทียบระหว่าง **{p1.property_name}** และ **{p2.property_name}**:\n\n"
-                    f"| หัวข้อ | {p1.property_name} | {p2.property_name} |\n"
-                    f"| :--- | :--- | :--- |\n"
-                    f"| **รหัสอสังหาริมทรัพย์** | `{p1.property_id}` | `{p2.property_id}` |\n"
-                    f"| **ทำเล** | {p1.district or p1.province} | {p2.district or p2.province} |\n"
-                    f"| **ราคาเริ่มต้น** | {p1.price_display or 'ราคาตามสอบถาม'} | {p2.price_display or 'ราคาตามสอบถาม'} |\n"
-                    f"| **ประเภท** | {p1.property_type} | {p2.property_type} |\n"
-                    f"| **ห้องนอน** | {p1.bedrooms_display or 'ไม่ระบุ'} | {p2.bedrooms_display or 'ไม่ระบุ'} |\n"
-                    f"| **พื้นที่ใช้สอย** | {p1.area_display or 'ไม่ระบุ'} | {p2.area_display or 'ไม่ระบุ'} |\n"
-                    f"| **สระว่ายน้ำส่วนตัว** | {'มี' if p1.has_pool else 'ไม่มี'} | {'มี' if p2.has_pool else 'ไม่มี'} |\n"
-                    f"| **สถานะ** | {display_status(p1.status, 'th') or 'พร้อมขาย'} | {display_status(p2.status, 'th') or 'พร้อมขาย'} |\n"
-                    f"| **รูปแบบกรรมสิทธิ์** | {p1.ownership_type or 'ยืนยันกับที่ปรึกษา'} | {p2.ownership_type or 'ยืนยันกับที่ปรึกษา'} |\n\n"
-                    f"ทั้งสองโครงการสร้างตามมาตรฐานคุณภาพในทำเลยอดนิยม "
-                    f"คุณต้องการดูผังอาคารเพิ่มเติมหรือนัดหมายเข้าชมโครงการไหมครับ?"
-                )
-            elif language == "pl":
-                reply_text = (
-                    f"Oto zestawienie porównawcze dla **{p1.property_name}** oraz **{p2.property_name}**:\n\n"
-                    f"| Parametr | {p1.property_name} | {p2.property_name} |\n"
-                    f"| :--- | :--- | :--- |\n"
-                    f"| **Identyfikator** | `{p1.property_id}` | `{p2.property_id}` |\n"
-                    f"| **Lokalizacja** | {p1.district or p1.province} | {p2.district or p2.province} |\n"
-                    f"| **Cena wyjściowa** | {p1.price_display or 'Cena na zapytanie'} | {p2.price_display or 'Cena na zapytanie'} |\n"
-                    f"| **Typ nieruchomości** | {p1.property_type} | {p2.property_type} |\n"
-                    f"| **Sypialnie** | {p1.bedrooms_display or 'Brak danych'} | {p2.bedrooms_display or 'Brak danych'} |\n"
-                    f"| **Powierzchnia** | {p1.area_display or 'Brak danych'} | {p2.area_display or 'Brak danych'} |\n"
-                    f"| **Prywatny basen** | {'Tak' if p1.has_pool else 'Nie'} | {'Tak' if p2.has_pool else 'Nie'} |\n"
-                    f"| **Status** | {display_status(p1.status, 'pl') or 'Dostępne'} | {display_status(p2.status, 'pl') or 'Dostępne'} |\n"
-                    f"| **Forma własności** | {p1.ownership_type or 'Potwierdź z doradcą'} | {p2.ownership_type or 'Potwierdź z doradcą'} |\n\n"
-                    f"Obie inwestycje reprezentują zweryfikowane standardy budowlane w prestiżowych lokalizacjach. "
-                    f"Czy chciałbyś zapoznać się ze szczegółowymi rzutami architektonicznymi lub umówić prezentację?"
-                )
-            else:
-                reply_text = (
-                    f"Here is a side-by-side comparison between **{p1.property_name}** and **{p2.property_name}**:\n\n"
-                    f"| Feature | {p1.property_name} | {p2.property_name} |\n"
-                    f"| :--- | :--- | :--- |\n"
-                    f"| **Property ID** | `{p1.property_id}` | `{p2.property_id}` |\n"
-                    f"| **Location** | {p1.district or p1.province} | {p2.district or p2.province} |\n"
-                    f"| **Starting Price** | {p1.price_display or 'On Request'} | {p2.price_display or 'On Request'} |\n"
-                    f"| **Property Type** | {p1.property_type} | {p2.property_type} |\n"
-                    f"| **Bedrooms** | {p1.bedrooms_display or 'N/A'} | {p2.bedrooms_display or 'N/A'} |\n"
-                    f"| **Built Area** | {p1.area_display or 'N/A'} | {p2.area_display or 'N/A'} |\n"
-                    f"| **Private Pool** | {'Yes' if p1.has_pool else 'No'} | {'Yes' if p2.has_pool else 'No'} |\n"
-                    f"| **Status** | {display_status(p1.status, 'en') or 'Available'} | {display_status(p2.status, 'en') or 'Available'} |\n"
-                    f"| **Ownership** | {p1.ownership_type or 'Confirm with advisor'} | {p2.ownership_type or 'Confirm with advisor'} |\n\n"
-                    f"Both developments offer verified construction quality in high-demand investment locations. "
-                    f"Would you like to examine the architectural floor plans or schedule a viewing tour?"
-                )
+            reply_text = _comparison_table_text(props, language)
 
         stored_prefs["selected_property_ids"] = [p.property_id for p in props]
         _pctx = load_property_context(conversation)

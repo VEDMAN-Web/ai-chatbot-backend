@@ -193,6 +193,7 @@ def test_send_email_workspace_disconnected_did_not_complete(staff):
     pending = SimpleNamespace(
         id=uuid4(),
         confirmation_token="act_x",
+        staff_user_id=staff.email,
         tool_name="send_email",
         action_payload={"to": "client@example.com", "subject": "Hi", "body": "Hello"},
         status="PENDING",
@@ -227,6 +228,7 @@ def test_confirm_email_mock_reported_as_incomplete(monkeypatch, staff):
     pending = SimpleNamespace(
         id=uuid4(),
         confirmation_token="act_x",
+        staff_user_id=staff.email,
         tool_name="send_email",
         action_payload={"to": "a@b.com", "subject": "S", "body": "B"},
         status="PENDING",

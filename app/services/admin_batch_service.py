@@ -240,6 +240,9 @@ class BatchOperationError(Exception):
     pass
 
 
+MAX_BATCH_RECORDS = 500
+
+
 def get_snapshot_retention_days() -> int:
     """Configurable retention window (UTC days) for admin undo snapshots."""
     try:
@@ -375,6 +378,10 @@ def parse_property_batch_file(file_bytes: bytes, filename: str) -> List[Dict[str
 
     if not records:
         raise BatchOperationError(f"No property identifiers or records could be detected in '{filename}'. Please ensure property IDs or names are present.")
+    if len(records) > MAX_BATCH_RECORDS:
+        raise BatchOperationError(
+            f"'{filename}' lists {len(records)} properties; one batch is limited to {MAX_BATCH_RECORDS}. Split the file."
+        )
 
     return records
 
@@ -558,7 +565,7 @@ def execute_batch_property_operation(
             if doc_id and current_doc:
                 if selected_sites:
                     doc_sites = current_doc.get("websites") or current_doc.get("allowed_websites")
-                    if doc_sites and not any(s in selected_websites for s in doc_sites):
+                    if doc_sites and not any(s in selected_sites for s in doc_sites):
                         logger.warning(f"Batch update skipping {doc_id} as it is outside selected websites: {selected_sites}")
                         continue
 

@@ -1,13 +1,12 @@
 from datetime import datetime
 from typing import List, Optional, Dict
 from fastapi import Depends, HTTPException, Security, status, Request
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials, APIKeyHeader
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
 from app.db.models import User, UserSession
-from app.core.config import settings
 from app.core.tenant import (
     get_user_domain_key,
     get_current_env_domain,
@@ -18,8 +17,6 @@ from app.core.tenant import (
 )
 
 security_bearer = HTTPBearer(auto_error=False)
-header_staff_email = APIKeyHeader(name="X-Staff-Email", auto_error=False)
-header_staff_token = APIKeyHeader(name="X-Staff-Token", auto_error=False)
 
 
 def get_role_permissions(role: Optional[str]) -> Dict[str, bool]:
@@ -125,16 +122,12 @@ def resolve_user_allowed_websites(user: Optional[User], role: Optional[str]) -> 
 def get_current_user_from_db(
     db: Session = Depends(get_db),
     bearer_creds: Optional[HTTPAuthorizationCredentials] = Security(security_bearer),
-    staff_email_hdr: Optional[str] = Security(header_staff_email),
-    staff_token_hdr: Optional[str] = Security(header_staff_token)
 ) -> AuthenticatedStaff:
     """
     Backend-verified authentication dependency.
     Identity and role are ALWAYS resolved from PostgreSQL database (UserSession or users table).
     Never trusts client-supplied role or staff_id fields.
     """
-    resolved_email: Optional[str] = None
-
     if bearer_creds and bearer_creds.credentials:
         token = bearer_creds.credentials.strip()
 
@@ -182,75 +175,18 @@ def get_current_user_from_db(
                 selected_websites=list(allowed_sites)
             )
 
-        # 2. Support standard dev tokens and service secrets
-        if token.startswith("dev-token-"):
-            resolved_email = token.replace("dev-token-", "").strip().lower()
-        elif settings.INTERNAL_API_SECRET and token == settings.INTERNAL_API_SECRET:
-            # Service token authenticated: select an active super admin dynamically from DB
-            admin_user = db.query(User).filter(User.role == "super_admin", User.is_active == True).first()
-            if not admin_user:
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="No active administrator account found in database.",
-                    headers={"WWW-Authenticate": "Bearer"}
-                )
-            resolved_email = admin_user.email
-        else:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid or unrecognized authentication token.",
-                headers={"WWW-Authenticate": "Bearer"}
-            )
-
-    elif staff_email_hdr:
-        resolved_email = staff_email_hdr.strip().lower()
-    else:
+        # Only a server-issued session token authenticates staff. Header-only, dev-token and
+        # shared-secret logins were removed: they let a caller act as any staff member.
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authentication required. Please provide a valid Authorization Bearer token.",
+            detail="Invalid or unrecognized authentication token.",
             headers={"WWW-Authenticate": "Bearer"}
         )
 
-    # Verify user and role dynamically from PostgreSQL database or Cloud Firestore
-    user = db.query(User).filter(func.lower(User.email) == resolved_email).first()
-    if not user:
-        try:
-            from app.services.firestore_auth_service import get_admin_from_firestore, sync_firestore_admin_to_local_db
-            fs_admin = get_admin_from_firestore(resolved_email)
-            if fs_admin:
-                user = sync_firestore_admin_to_local_db(db, fs_admin)
-        except Exception:
-            pass
-
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"User account '{resolved_email}' does not exist in database.",
-            headers={"WWW-Authenticate": "Bearer"}
-        )
-
-    user_status = getattr(user, "status", None) or ("blocked" if not getattr(user, "is_active", True) else "active")
-    if not getattr(user, "is_active", True) or user_status == "blocked":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Account is blocked. Access denied."
-        )
-
-    resolved_role = user.role or "worker"
-    resolved_domain = getattr(user, "domain", None) or (user.preferences.get("domain") if isinstance(user.preferences, dict) else None) or get_current_env_domain()
-    resolved_domain_key = get_user_domain_key(user, resolved_domain)
-    allowed_sites = resolve_user_allowed_websites(user, resolved_role)
-    return AuthenticatedStaff(
-        user_id=str(user.id),
-        email=user.email,
-        name=user.name or user.email,
-        role=resolved_role,
-        domain=resolved_domain,
-        domain_key=resolved_domain_key,
-        status=user_status,
-        permissions=get_role_permissions(resolved_role),
-        allowed_websites=allowed_sites,
-        selected_websites=list(allowed_sites)
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Authentication required. Please provide a valid Authorization Bearer token.",
+        headers={"WWW-Authenticate": "Bearer"}
     )
 
 

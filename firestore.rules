@@ -16,5 +16,12 @@ service cloud.firestore {
     match /superadmin_meta/{docId} {
       allow read, write: if false;
     }
+    // Chat logs (and their messages) are backend-only; reviewers read them through the API.
+    match /chat_logs/{logId} {
+      allow read, write: if false;
+      match /{document=**} {
+        allow read, write: if false;
+      }
+    }
   }
 }

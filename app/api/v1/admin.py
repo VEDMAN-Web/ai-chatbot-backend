@@ -32,7 +32,8 @@ from app.services.admin_agent import process_admin_chat
 from app.services.action_service import (
     get_pending_action,
     confirm_and_execute_action,
-    reject_pending_action
+    reject_pending_action,
+    staff_owns_action,
 )
 
 router = APIRouter(prefix="/admin", tags=["Admin Agent"])
@@ -200,13 +201,16 @@ def inspect_pending_action_endpoint(
 ):
     """Retrieves current status and payload details of a staged pending action."""
     action = get_pending_action(db, pending_action_id)
+    is_owner = staff_owns_action(action, staff)
+    if not is_owner and staff.role not in ("admin", "super_admin"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You can only view actions you proposed.")
     return {
         "pending_action_id": str(action.id),
         "tool_name": action.tool_name,
         "status": action.status,
         "action_payload": action.action_payload,
         "staff_user_id": action.staff_user_id,
-        "confirmation_token": action.confirmation_token,
+        "confirmation_token": action.confirmation_token if is_owner else None,
         "expires_at": action.expires_at.isoformat(),
         "created_at": action.created_at.isoformat(),
         "execution_result": action.execution_result
@@ -388,52 +392,59 @@ def download_report_endpoint(
 # 7. Admin Bulk Property Operations (Excel/PDF/DOCX/CSV) with 6-Day Undo
 # ==============================================================================
 
-@router.post("/properties/batch-file")
-async def execute_batch_file_endpoint(
+MAX_BATCH_FILE_BYTES = 5 * 1024 * 1024
+
+
+@router.post("/properties/batch-file", status_code=status.HTTP_202_ACCEPTED)
+async def propose_batch_file_endpoint(
     file: UploadFile = File(..., description="Uploaded Excel (.xlsx/.xls), CSV, PDF, or Word (.docx) file containing property list"),
     action: str = Form(..., description="Action to perform on target properties: 'delete', 'update', or 'create'"),
     staff: AuthenticatedStaff = Depends(require_admin_or_super_admin),
     db: Session = Depends(get_db)
 ):
     """
-    Instantly applies bulk property mutations (delete, update, or create) from an uploaded file.
-    Automatically captures a full pre-modification snapshot stored for exactly 6 days,
-    enabling instant rollback via the Undo API.
+    Parses the uploaded file and STAGES the bulk change as a pending action with a preview of every row.
+    Nothing is written until the staff member who uploaded the file confirms through
+    POST /admin/actions/{pending_action_id}/confirm. A pre-change snapshot (6 days) is saved on confirm,
+    so the Undo API still applies.
     """
-    from app.services.admin_batch_service import (
-        parse_property_batch_file,
-        execute_batch_property_operation,
-        BatchOperationError
-    )
+    import tempfile
+    from app.services.admin_agent import _execute_admin_tool
+    from app.services.admin_batch_service import BatchOperationError
 
+    operation = (action or "").lower().strip()
+    if operation not in ("delete", "remove", "update", "create", "write"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="action must be 'delete', 'update' or 'create'.")
+
+    content = await file.read(MAX_BATCH_FILE_BYTES + 1)
+    if not content:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Uploaded file is empty.")
+    if len(content) > MAX_BATCH_FILE_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"The file is larger than {MAX_BATCH_FILE_BYTES // (1024 * 1024)} MB.",
+        )
+
+    filename = os.path.basename(file.filename or "") or "uploaded_file"
     try:
-        content = await file.read()
-        if not content:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Uploaded file is empty."
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = os.path.join(tmp_dir, filename)
+            with open(path, "wb") as fh:
+                fh.write(content)
+            result, _needs_confirmation, pending_id = _execute_admin_tool(
+                db,
+                "execute_batch_property_action",
+                {"operation_type": operation, "file_path": path, "notes": f"Uploaded file {filename}"},
+                staff,
+                None,
             )
-
-        records = parse_property_batch_file(content, file.filename or "uploaded_file")
-        result = execute_batch_property_operation(
-            action_type=action,
-            records=records,
-            staff_user=staff,
-            source_filename=file.filename or "uploaded_file",
-            db_session=db
-        )
-        return result
-
     except BatchOperationError as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e)
-        )
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error executing batch operation: {str(e)}"
-        )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+    if not pending_id:
+        detail = (result or {}).get("message") or (result or {}).get("error") or "The batch could not be proposed."
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=detail)
+    return result
 
 
 @router.post("/operations/{operation_id}/undo")

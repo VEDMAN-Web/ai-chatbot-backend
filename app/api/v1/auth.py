@@ -1,4 +1,5 @@
 import os
+import html
 import hmac
 import hashlib
 import json
@@ -16,7 +17,7 @@ from sqlalchemy import func
 
 from app.db.session import get_db
 from app.db.models import User, UserSession
-from app.core.config import settings
+from app.core.config import settings, is_weak_secret
 from app.core.auth import (
     AuthenticatedStaff,
     get_current_user_from_db,
@@ -150,7 +151,7 @@ def google_oauth_callback(
             content=f"""
             <html><body style="font-family:sans-serif; text-align:center; padding:50px;">
                 <h2 style="color:#d9534f;">❌ Google Authorization Cancelled or Failed</h2>
-                <p>Error reason: <code>{error}</code></p>
+                <p>Error reason: <code>{html.escape(error)}</code></p>
                 <p><a href="/admin-ui">Return to Tajlandia Admin Panel</a></p>
             </body></html>
             """,
@@ -183,10 +184,8 @@ def google_oauth_callback(
         with httpx.Client(timeout=15.0) as client:
             token_resp = client.post(token_url, data=data)
             if token_resp.status_code != 200:
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Failed to exchange token with Google: {token_resp.text}"
-                )
+                logger.warning("Google token exchange failed with HTTP %s", token_resp.status_code)
+                raise HTTPException(status_code=500, detail="Google did not accept the authorization code.")
             token_data = token_resp.json()
 
             # Retrieve Google Account email profile
@@ -199,8 +198,11 @@ def google_oauth_callback(
             if userinfo_resp.status_code == 200:
                 google_email = userinfo_resp.json().get("email", target_email)
 
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Network error during Google token exchange: {str(e)}")
+        logger.warning("Google token exchange failed: %s", e)
+        raise HTTPException(status_code=500, detail="Could not complete the Google token exchange. Please try again.")
 
     # Store OAuth tokens in User.preferences["google_workspace"]
     prefs = dict(user.preferences or {})
@@ -246,7 +248,7 @@ def google_oauth_callback(
     <body>
         <div class="card">
             <h1>✅ Google Account Connected!</h1>
-            <p>Your Google Workspace account <strong>{google_email}</strong> is now securely linked to your Tajlandia staff profile (<code>{user.email}</code>).</p>
+            <p>Your Google Workspace account <strong>{html.escape(str(google_email))}</strong> is now securely linked to your Tajlandia staff profile (<code>{html.escape(str(user.email))}</code>).</p>
             <div style="margin: 20px 0;">
                 <span class="pill">📁 Google Drive Connected</span>
                 <span class="pill">✉️ Gmail Sending Active</span>
@@ -1453,6 +1455,19 @@ def block_admin_user(
 
 
 
+def _admin_secret_matches(supplied: Optional[str]) -> bool:
+    """Constant-time check against the configured admin secrets. A default or weak internal secret never counts."""
+    if not supplied:
+        return False
+    candidates = []
+    if not is_weak_secret(settings.INTERNAL_API_SECRET):
+        candidates.append(settings.INTERNAL_API_SECRET)
+    if settings.ADMIN_PASSWORD:
+        candidates.append(settings.ADMIN_PASSWORD)
+    supplied_bytes = supplied.encode("utf-8")
+    return any(hmac.compare_digest(supplied_bytes, c.encode("utf-8")) for c in candidates)
+
+
 @router.post("/register", response_model=AdminUserDirectoryItem, status_code=status.HTTP_201_CREATED, tags=["Authentication"])
 def register_user(
     req: RegisterRequest,
@@ -1466,6 +1481,22 @@ def register_user(
     - Provided 'admin_secret' matches settings.INTERNAL_API_SECRET or settings.ADMIN_PASSWORD, OR
     - No users currently exist in the database (initial onboarding).
     """
+    # Access rule: a super admin session, the configured admin secret, or first-run onboarding.
+    if bearer_creds and bearer_creds.credentials:
+        caller = get_current_user_from_db(db=db, bearer_creds=bearer_creds)
+        if caller.role != "super_admin":
+            raise HTTPException(status_code=403, detail="Only a super admin can register staff accounts.")
+        actor = caller.email
+    elif _admin_secret_matches(req.admin_secret):
+        actor = "admin_secret"
+    elif db.query(User).count() == 0:
+        actor = "bootstrap"
+    else:
+        raise HTTPException(
+            status_code=403,
+            detail="Registration requires a super admin session or a valid admin secret.",
+        )
+
     email_clean = req.email.strip().lower()
     if not email_clean or "@" not in email_clean:
         raise HTTPException(status_code=400, detail="Invalid email address format.")
@@ -1474,12 +1505,11 @@ def register_user(
     if len(plain_pass) < 4:
         raise HTTPException(status_code=400, detail="Password must be at least 4 characters long.")
 
-    # Determine requested / target role
-    requested_role = (req.role or "").strip().lower().replace(" ", "_").replace("-", "_")
-    if requested_role in ["super_admin", "admin", "worker", "employee"]:
-        target_role = requested_role
-    else:
-        target_role = "super_admin"
+    # Determine requested / target role. An unknown role is rejected; it never falls back to super_admin.
+    requested_role = (req.role or "worker").strip().lower().replace(" ", "_").replace("-", "_")
+    if requested_role not in ["super_admin", "admin", "worker", "employee"]:
+        raise HTTPException(status_code=400, detail="Role must be one of: 'worker', 'admin', 'super_admin'.")
+    target_role = requested_role
 
     active_env_key = get_current_env_domain_key()
     if getattr(req, "domain", None) and req.domain.strip():
@@ -1499,33 +1529,21 @@ def register_user(
 
     existing = db.query(User).filter(func.lower(User.email) == email_clean).first()
     if existing:
-        existing.password_hash = hash_password(plain_pass)
-        if req.name and req.name.strip():
-            existing.name = req.name.strip()
-        existing.role = target_role
-        existing.domain = resolved_domain
-        existing.is_active = True
-        existing.allowed_websites = assigned_websites
-        prefs = dict(existing.preferences or {})
-        prefs["allowed_websites"] = assigned_websites
-        existing.preferences = prefs
-        db.commit()
-        db.refresh(existing)
-        new_user = existing
-    else:
-        new_user = User(
-            email=email_clean,
-            name=req.name.strip() if req.name else email_clean.split("@")[0],
-            role=target_role,
-            domain=resolved_domain,
-            password_hash=hash_password(plain_pass),
-            is_active=True,
-            allowed_websites=assigned_websites,
-            preferences={"allowed_websites": assigned_websites}
-        )
-        db.add(new_user)
-        db.commit()
-        db.refresh(new_user)
+        raise HTTPException(status_code=409, detail=f"User with email '{email_clean}' already exists.")
+
+    new_user = User(
+        email=email_clean,
+        name=req.name.strip() if req.name else email_clean.split("@")[0],
+        role=target_role,
+        domain=resolved_domain,
+        password_hash=hash_password(plain_pass),
+        is_active=True,
+        allowed_websites=assigned_websites,
+        preferences={"allowed_websites": assigned_websites}
+    )
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
 
     # Sync to Cloud Firestore admin_authentication collection
     try:
@@ -1547,7 +1565,7 @@ def register_user(
         record_audit_log(
             db=db,
             tool_name="auth:register",
-            staff_user_id=email_clean,
+            staff_user_id=actor,
             tool_arguments={"email": email_clean, "role": target_role, "name": new_user.name, "domain": resolved_domain, "websites": assigned_websites},
             proposed_payload={"action": "register_admin", "email": email_clean, "role": target_role, "domain": resolved_domain, "websites": assigned_websites},
             confirmed_by_staff=True,

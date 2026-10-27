@@ -1341,6 +1341,9 @@ def process_admin_chat(
         site_origin=site_origin,
         agent_type="admin"
     )
+    # The chat log records who is chatting; the conversation object is shared per session, so refresh it every turn.
+    if staff_user is not None:
+        conv.log_actor = {"user_id": staff_user.user_id, "email": staff_user.email, "role": staff_user.role}
 
     # 2. Resolve active turn language
     active_lang, is_switch = resolve_language(
