@@ -102,15 +102,16 @@ def usage_tokens(response: Any) -> Tuple[Optional[int], Optional[int]]:
     return inp, out
 
 
-def _cache_key(tool_name: str, args: Any) -> str:
-    raw = json.dumps({"t": tool_name, "a": args}, sort_keys=True, default=str)
+def _cache_key(tool_name: str, args: Any, scope: str = "") -> str:
+    """`scope` says who is asking (role and selected websites): the same question from another website is another cache entry."""
+    raw = json.dumps({"t": tool_name, "a": args, "s": scope}, sort_keys=True, default=str)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-def tool_cache_get(tool_name: str, args: Any, ttl_sec: float) -> Optional[Any]:
+def tool_cache_get(tool_name: str, args: Any, ttl_sec: float, scope: str = "") -> Optional[Any]:
     if ttl_sec <= 0:
         return None
-    key = _cache_key(tool_name, args)
+    key = _cache_key(tool_name, args, scope)
     now = time.time()
     with _CACHE_LOCK:
         hit = _TOOL_CACHE.get(key)
@@ -123,8 +124,8 @@ def tool_cache_get(tool_name: str, args: Any, ttl_sec: float) -> Optional[Any]:
         return val
 
 
-def tool_cache_set(tool_name: str, args: Any, value: Any) -> None:
-    key = _cache_key(tool_name, args)
+def tool_cache_set(tool_name: str, args: Any, value: Any, scope: str = "") -> None:
+    key = _cache_key(tool_name, args, scope)
     with _CACHE_LOCK:
         _TOOL_CACHE[key] = (time.time(), value)
 

@@ -53,7 +53,8 @@ No migration is needed: nothing changed in PostgreSQL or Firestore structure. Ro
 | B. Admin answers from DB and documents | PASS (model mocked) | Existing admin agent tests. |
 | B. Drive read + add/update listings, with preview and approval | PASS (local/mocked Drive); live Google BLOCKED | Staged as a pending action, applied only after yes. |
 | B. PDF / Excel / Word reports | PASS | Existing report tests. |
-| B. Email / calendar only after yes | PASS (mocked); live Gmail/Calendar BLOCKED | Existing validation and confirm tests. |
+| B. Email / calendar only after yes | 
+PASS (mocked); live Gmail/Calendar BLOCKED | Existing validation and confirm tests. |
 | B. Admin chat history reviewable | PASS (emulator) | `test_chat_log_*`. |
 | C. Every change needs a clear yes; no silent bulk change | PASS | Propose/confirm tests, batch tests. |
 | C. No permanent deletes | FIXED | REST `?hard_delete=true` used to delete permanently with a typed id. Now 403 unless `ALLOW_PERMANENT_DELETE`. Batch delete and REST delete archive. |
@@ -165,6 +166,37 @@ The modal text "Execute Instantly" and "Permanently removes" does not match the 
 again under `change_diff`, the payload again inside the result) and listed an action written to both stores twice. Each piece
 is now sent once, where it first appears; short values ("500 THB") are kept; empty sections are dropped; the result stays a
 non-empty text; the same action from PostgreSQL and Firestore is one row.
+
+## Admin AI Assistant: the QA report (35 chat cases, 14 passed, 19 failed)
+
+Source: the Google Doc "AI Assistant dev preview ... not ready for CRUD work" (read via its link-shared export; it gives totals and
+a few examples, not the 35 cases). Each finding was reproduced through the real `POST /admin/chat` first (the model key is a
+dummy here, so these are the backend's own routing, validation and write paths; how the live model words answers is not tested).
+
+| QA finding | Cause found | Now |
+|---|---|---|
+| "3 Villas - Lamai" to 5,000,000 THB showed 3 THB | the first number in the whole message was taken as the price, and the name extractor deleted every digit from names | The price is the amount that looks like a price (a unit/currency, "to <amount>", or 1,000+); digits in a name are kept. 40 parsing cases pass |
+| -500 saved as 500; status "ready" ignored | the minus sign was dropped; any "status" message silently became "Under construction" | A negative or zero price is refused ("must be greater than 0"); "ready", "sold", "reserved", ... map to the allowed statuses; an unknown status is refused and the valid list shown |
+| Create treated as a search | no create command existed in chat | "Add a new listing: name, type, location, price, status" is staged for a yes; missing parts are asked for, never invented; an existing id or name is refused; it lands on the selected website |
+| Add a buyer lead treated as a search ("0 leads") | same | Explained: leads are saved from the website chatbot, not added by chat (open decision below) |
+| Delete returned a list | no delete command | "Delete X" stages an **archive** (soft delete, hidden from the public site, undoable 6 days) behind a yes; "permanently delete" is refused; another website's listing and workers are refused |
+| Undo advertised but never triggered | no undo command (and the model tool undid immediately, without a yes) | "Undo the last change" / "undo <operation id>" stages the undo behind a yes; once only; nothing to undo says so. The model tool now also stages |
+| Name search returned a generic top 10; specs said "No properties found" | the search tool had no name parameter; specs needed an exact id | "Show X" / "Specs for X" look the listing up by name (Postgres or Firestore index), only on the selected websites; the tool accepts `query` and names |
+| Koh Samui export was an empty leads file | the previous answer mentioned "lead", which turned any export into a leads report; a location was never applied | What the user typed decides; a location/type filters the properties; no match says so instead of an empty file |
+| A change applied without Confirm (not reproduced) | a bare "ok"/"yes" applied whatever proposal was open, even one from many turns earlier | A plain yes applies only the proposal shown in the turn right before; an older one needs the Confirm button or `confirm <id>`. The web app has no auto-confirm |
+
+Found while testing:
+* **Cross-website leak:** the 60-second tool cache was keyed by tool and arguments only, so an admin on one website received the
+  listings, leads and inventory counts cached for another website. Now keyed by role and selected websites.
+* A chat create/update could report success while the Firestore sync had failed; the reply now says so.
+* "find this folder named varsovia" was answered with "Found 10 properties across all areas", and any message that asked for no
+  property search got the same top-10 dump. Folder/file search in the asker's own Drive (read-only) now works, and an unclear
+  message gets a short list of what can be done instead of a random property list.
+
+Tests: `test_admin_chat_crud_parsing.py` (85), `test_admin_chat_crud_e2e.py` (36, real accounts, real chat endpoint, Firestore
+emulator for undo snapshots), `test_admin_drive_search.py` (34, Drive faked).
+If the live panel shows answers like "Found 10 properties across all areas", the model call is probably failing there (the backend
+then falls back to its rule-based answers): check `ANTHROPIC_API_KEY` and `ANTHROPIC_MODEL` in that environment.
 
 ## Chat Logs page (Admin Panel design)
 

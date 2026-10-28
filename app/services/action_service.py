@@ -817,6 +817,10 @@ def confirm_and_execute_action(
             result_data = _execute_update_listing(
                 db, payload, authenticated_staff=authenticated_staff
             )
+        elif action.tool_name == "archive_listing":
+            result_data = _execute_archive_listing(db, payload, authenticated_staff)
+        elif action.tool_name == "undo_operation":
+            result_data = _execute_undo_operation(db, payload, authenticated_staff)
         elif action.tool_name == "send_email":
             result_data = _execute_send_email(
                 payload,
@@ -1032,6 +1036,38 @@ def reject_pending_action(
         "pending_action_id": str(action.id),
         "reason": reason or "Rejected by staff."
     }
+
+
+def _execute_archive_listing(db: Session, payload: Dict[str, Any], staff: AuthenticatedStaff) -> Dict[str, Any]:
+    """Archive (soft delete) one listing through the same path as DELETE /admin/properties/{id}: both stores, undo snapshot, audit."""
+    from app.services.admin_property_fields import resolve_existing_property
+    from app.services.property_search import property_belongs_to_websites
+
+    property_id = str(payload.get("property_id") or "").strip()
+    if not property_id:
+        raise ValueError("Missing property_id in the archive action.")
+    source, record = resolve_existing_property(db, property_id)
+    if not source:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Property with ID '{property_id}' not found.")
+    allowed = list(getattr(staff, "allowed_websites", None) or [])
+    if isinstance(staff, AuthenticatedStaff) and not property_belongs_to_websites(record, allowed):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied: this listing belongs to a website your account cannot reach.")
+    result = rest_delete_property(db, staff, property_id, hard_delete=False)
+    result["title"] = payload.get("property_name") or property_id
+    return result
+
+
+def _execute_undo_operation(db: Session, payload: Dict[str, Any], staff: AuthenticatedStaff) -> Dict[str, Any]:
+    """Undo one operation from its stored snapshot (once, inside the 6-day window, for an account that may see it)."""
+    from app.services.admin_batch_service import undo_batch_property_operation
+
+    operation_id = str(payload.get("operation_id") or "").strip()
+    if not operation_id:
+        raise ValueError("Missing operation_id in the undo action.")
+    result = undo_batch_property_operation(operation_id, staff, db_session=db)
+    if result.get("restored_ok") is False:
+        raise RuntimeError(f"The undo did not restore the previous state exactly: {result}")
+    return result
 
 
 def _execute_batch_property_action(
@@ -1415,18 +1451,20 @@ def _execute_update_listing(
         except Exception as e:
             logger.warning(f"Error persisting property images in SQL: {e}")
 
-    # 2. Sync property info and images directly to Cloud Firestore
+    # 2. Sync property info and images directly to Cloud Firestore (the Admin Panel list reads Firestore first)
+    firestore_synced: Optional[bool] = None
     if getattr(settings, "ENABLE_FIRESTORE_SYNC", True):
         try:
             from app.services.firestore_service import save_or_update_property_firestore
-            save_or_update_property_firestore(
+            firestore_synced = bool(save_or_update_property_firestore(
                 property_id=prop.property_id,
                 fields={**fields, **updated_fields},
                 images=input_images,
                 cover_image=cover_image
-            )
+            ))
         except Exception as e:
             logger.warning(f"Error syncing updated property to Firestore: {e}")
+            firestore_synced = False
 
     # 3. Invalidate search cache so updated property data is immediately reflected
     from app.services.cache_service import search_cache
@@ -1443,6 +1481,7 @@ def _execute_update_listing(
         "operation_id": operation_id,
         "undoable": bool(operation_id),
         "undo_window_days": 6 if operation_id else None,
+        "firestore_synced": firestore_synced,
     }
 
 
