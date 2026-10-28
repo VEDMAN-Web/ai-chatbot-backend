@@ -112,7 +112,10 @@ class GoogleWorkspaceManager:
             except Exception as e:
                 logger.warning(f"Error resolving user Google credentials for '{staff_user_id_or_email}': {e}")
 
-        # Fallback to system-level credentials if available
+        # A named staff member never silently borrows someone else's Google account (Drive, Gmail, Calendar).
+        if staff_user_id_or_email and not getattr(settings, "GOOGLE_SHARED_CREDENTIAL_FALLBACK", False):
+            return None
+        # System-level credentials: no staff member named (background work), or the shared fallback is switched on
         return self.get_credentials()
 
     # 1. Gmail Dispatcher

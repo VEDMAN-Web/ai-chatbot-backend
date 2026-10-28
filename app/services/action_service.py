@@ -975,7 +975,11 @@ def confirm_and_execute_action(
         )
         logger.error(f"Failed executing pending action {action.id}: {safe_error}")
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            status_code=(
+                status.HTTP_422_UNPROCESSABLE_ENTITY
+                if exc.__class__.__name__ in ("BatchOperationError", "OperationNotFound")
+                else status.HTTP_500_INTERNAL_SERVER_ERROR
+            ),
             detail=f"Action execution failed: {safe_error}"
         )
 
@@ -1060,7 +1064,7 @@ def _execute_batch_property_action(
         allowed_ids = {str(it.get("property_id")) for it in preview_items if it.get("property_id")}
         records = [r for r in records if str(r.get("property_id")) in allowed_ids]
         # For non-delete, restrict fields to those shown in each item's rows
-        if op_type != "delete":
+        if op_type not in ("delete", "create", "write"):
             field_map = {
                 str(it.get("property_id")): {r["field"] for r in (it.get("rows") or [])}
                 for it in preview_items
@@ -1082,10 +1086,19 @@ def _execute_batch_property_action(
     if not records:
         raise ValueError("Batch pending action has no listed records/items to apply.")
 
+    staff_for_batch = authenticated_staff
+    if isinstance(authenticated_staff, AuthenticatedStaff):
+        # The websites the admin had selected when uploading, limited to what the account still has
+        allowed = list(authenticated_staff.allowed_websites or [])
+        scope = [s for s in (payload.get("site_scope") or []) if s in allowed] if payload.get("site_scope") else allowed
+        if not scope:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied: your account has no website for this operation.")
+        staff_for_batch = authenticated_staff.model_copy(update={"selected_websites": scope})
+
     return execute_batch_property_operation(
         action_type=op_type,
         records=records,
-        staff_user=authenticated_staff,
+        staff_user=staff_for_batch,
         source_filename=payload.get("source_filename") or "pending_action_confirm",
         db_session=db,
         confirmed_by_staff=True,

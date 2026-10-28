@@ -47,6 +47,7 @@ class ListFilters:
     property_id: Optional[str] = None
     remark_status: Optional[str] = None
     q: Optional[str] = None
+    review_status: Optional[str] = None      # "pending" or "reviewed" (the Admin Panel's review badge)
     model: Optional[str] = None
     date_from: Optional[datetime] = None
     date_to: Optional[datetime] = None
@@ -100,6 +101,7 @@ def summarize(header: Dict[str, Any]) -> Dict[str, Any]:
         "user": {"user_id": owner.get("userId"), "email": owner.get("email"), "role": owner.get("role"), "name": owner.get("name")},
         "model": header.get("model"),
         "first_answer": header.get("firstAnswerPreview"),
+        "review_status": "reviewed" if header.get("reviewStatus") == "reviewed" else "pending",
         "message_count": header.get("messageCount") or 0,
         "created_at": _iso(header.get("createdAt")),
         "last_message_at": _iso(header.get("lastMessageAt")),
@@ -189,6 +191,8 @@ def _matches(header: Dict[str, Any], f: ListFilters) -> bool:
         return False
     if f.model and f.model.strip().lower() not in (header.get("model") or "").lower():
         return False
+    if f.review_status and ("reviewed" if header.get("reviewStatus") == "reviewed" else "pending") != f.review_status:
+        return False
     if f.user:
         needle = f.user.strip().lower()
         if not (str(owner.get("userId") or "") == f.user.strip()
@@ -277,6 +281,51 @@ def resolve_log_key(client, conversation_id: str) -> Optional[str]:
         if snap.exists:
             found.append(((snap.to_dict() or {}).get("lastMessageAt") or datetime.min.replace(tzinfo=timezone.utc), snap.id))
     return max(found)[1] if found else None
+
+
+class ReviewTargetError(Exception):
+    def __init__(self, status_code: int, message: str):
+        super().__init__(message)
+        self.status_code, self.message = status_code, message
+
+
+def load_review_target(conversation_id: str, message_index: Optional[int] = None) -> Dict[str, Any]:
+    """The AI response a super admin reviews: the header, the response, and the question before it.
+
+    `message_index` counts the conversation's messages from 0 (0 = first question, 1 = first answer); by default the first answer,
+    which is the exchange the chat-log list shows. Accepts the session id the list returns or the full log key.
+    """
+    client = _require_client()
+    if not valid_key(conversation_id):
+        raise ReviewTargetError(404, "Conversation not found.")
+    key = resolve_log_key(client, conversation_id)
+    if key is None:
+        raise ReviewTargetError(404, "Conversation not found.")
+    header = client.collection(LOGS).document(key).get().to_dict() or {}
+    messages = _read_messages(client, key)
+    if message_index is None:
+        message_index = next((i for i, m in enumerate(messages) if m["role"] == "assistant"), None)
+        if message_index is None:
+            raise ReviewTargetError(404, "This conversation has no AI response to review.")
+    if message_index < 0 or message_index >= len(messages):
+        raise ReviewTargetError(404, "There is no message at that index.")
+    answer = messages[message_index]
+    if answer["role"] != "assistant":
+        raise ReviewTargetError(422, "message_index must point at an AI response.")
+    question = messages[message_index - 1] if message_index > 0 and messages[message_index - 1]["role"] == "user" else None
+    return {"key": key, "header": header, "index": message_index, "answer": answer, "question": question}
+
+
+def save_review(key: str, message_index: int, status: str, reviewer: str,
+                instruction_id: Optional[str] = None, remark_id: Optional[str] = None) -> Dict[str, Any]:
+    """Record the review on the conversation, so the list can show it as reviewed."""
+    client = _require_client()
+    entry = {"status": status, "by": reviewer, "at": datetime.now(timezone.utc),
+             "instructionId": instruction_id, "remarkId": remark_id}
+    client.collection(LOGS).document(key).update({
+        "reviewStatus": "reviewed", "reviewedAt": entry["at"], f"reviews.{message_index}": entry,
+    })
+    return entry
 
 
 def read_for_review(conversation_id: str) -> Optional[List[Dict[str, Any]]]:

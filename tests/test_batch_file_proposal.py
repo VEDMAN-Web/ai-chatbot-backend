@@ -85,7 +85,7 @@ def writes(monkeypatch):
 def test_upload_is_staged_not_applied(writes):
     admin = _user("admin")
     pid = _property("one")
-    resp = _post(admin["headers"], _csv(f"{pid},Test one,Sold"))
+    resp = _post(admin["headers"], _csv(f"{pid},Test one,Sold Out"))
     assert resp.status_code == 202, resp.text
     body = resp.json()
     assert body["status"] == "PROPOSED" and body["requires_confirmation"] is True
@@ -102,7 +102,7 @@ def test_upload_is_staged_not_applied(writes):
 def test_only_the_uploader_can_confirm_and_only_previewed_rows_apply(writes):
     admin, other = _user("admin"), _user("super_admin")
     pid = _property("two")
-    pending_id = _post(admin["headers"], _csv(f"{pid},Test two,Sold")).json()["pending_action_id"]
+    pending_id = _post(admin["headers"], _csv(f"{pid},Test two,Sold Out")).json()["pending_action_id"]
     assert client.post(f"/api/v1/admin/actions/{pending_id}/confirm", headers=other["headers"]).status_code == 403
     assert writes == []
     done = client.post(f"/api/v1/admin/actions/{pending_id}/confirm", headers=admin["headers"])
