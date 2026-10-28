@@ -1,0 +1,47 @@
+<section class="page intro-page" data-section="intro">
+  <span class="section-marker">SECTION:intro</span>
+  <div class="page-top-bar"></div>
+  <div class="page-chrome-header">
+    <span class="hdr-left">{{ header_text }}</span>
+  </div>
+  <div class="page-chrome-body">
+    <p class="label-caps" style="margin-bottom:3mm;">{{ labels.introduction }}</p>
+    {% if prepared.headline %}
+    <h2 class="display" style="font-size:18pt;margin-bottom:4mm;">{{ prepared.headline }}</h2>
+    {% elif data.name %}
+    <h2 class="display" style="font-size:18pt;margin-bottom:4mm;">{{ data.name }}</h2>
+    {% endif %}
+
+    {% if prepared.description %}
+    <p class="body-text max-prose" style="margin-bottom:5mm;">{{ prepared.description }}</p>
+    {% endif %}
+    {% if prepared.location_blurb %}
+    <p class="body-text max-prose-sm" style="margin-bottom:4mm;">{{ prepared.location_blurb }}</p>
+    {% endif %}
+
+    {% if prepared.highlights %}
+    <p class="label-caps" style="margin:4mm 0 3mm;">{{ labels.highlights_title }}</p>
+    <ul style="list-style:none;margin-bottom:5mm;">
+      {% for h in prepared.highlights[:6] %}
+      <li class="body-text" style="padding:1.5mm 0 1.5mm 4mm;border-left:2px solid var(--accent);margin-bottom:2mm;">{{ h }}</li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+
+    {% if prepared.rows %}
+    <p class="label-caps" style="margin:3mm 0 3mm;">{{ labels.at_a_glance }}</p>
+    <div class="fact-strip">
+      {% for row in prepared.rows[:6] %}
+      <div class="fact-cell">
+        <div class="fact-label">{{ row.label }}</div>
+        <div class="fact-value">{{ row.value }}</div>
+      </div>
+      {% endfor %}
+    </div>
+    {% endif %}
+  </div>
+  <div class="page-chrome-footer">
+    <span></span>
+    <span class="page-num">{{ page_label }}</span>
+  </div>
+</section>

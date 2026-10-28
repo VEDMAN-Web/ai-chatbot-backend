@@ -1,0 +1,22 @@
+<section class="page gallery-page" data-section="gallery">
+  <span class="section-marker">SECTION:gallery</span>
+  <div class="page-top-bar"></div>
+  <div class="page-chrome-header">
+    <span class="hdr-left">{{ header_text }}</span>
+  </div>
+  <div class="page-chrome-body">
+    <p class="label-caps" style="margin-bottom:4mm;">{{ labels.gallery }}</p>
+    {% set imgs = prepared.images or data.images or [] %}
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:4mm;height:230mm;">
+      {% for src in imgs[:6] %}
+      <div class="hero-frame frame-img{% if theme_shape == 'arch' %} arch{% endif %}" style="overflow:hidden;min-height:0;{% if imgs|length == 1 %}grid-column:1/-1;{% endif %}">
+        <img class="img-cover" src="{{ src }}" alt=""/>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+  <div class="page-chrome-footer">
+    <span></span>
+    <span class="page-num">{{ page_label }}</span>
+  </div>
+</section>

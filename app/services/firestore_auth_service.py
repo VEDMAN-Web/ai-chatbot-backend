@@ -5,8 +5,8 @@ from sqlalchemy.orm import Session
 
 from app.core.security import hash_password, verify_password
 from app.db.models import User
-from app.services.firestore_service import get_firestore_client
 from app.core.tenant import get_current_env_domain
+from app.services.firestore_service import get_admin_firestore_client as get_firestore_client
 
 logger = logging.getLogger(__name__)
 
@@ -16,7 +16,7 @@ ADMIN_AUTH_COLLECTION = "admin_authentication"
 def get_admin_from_firestore(email: str) -> Optional[Dict[str, Any]]:
     """
     Looks up an administrative user directly in Cloud Firestore `admin_authentication` collection.
-    Checks document ID directly (e.g. 'admin@tajlandia.com') and queries by 'email' field.
+    Checks document ID directly (e.g. 'user@domain.com') and queries by 'email' field.
     """
     client = get_firestore_client()
     if not client:
@@ -115,7 +115,8 @@ def add_or_update_admin_in_firestore(
     role: str = "super_admin",
     name: str = "Admin Staff",
     domain: Optional[str] = None,
-    is_active: bool = True
+    is_active: bool = True,
+    allowed_websites: Optional[List[str]] = None
 ) -> Dict[str, Any]:
     """
     Adds or updates an admin user in Cloud Firestore `admin_authentication` collection.
@@ -144,11 +145,15 @@ def add_or_update_admin_in_firestore(
         "isActive": is_active,
         "updatedAt": now_iso
     }
+    if allowed_websites:
+        payload["allowed_websites"] = list(allowed_websites)
+        payload["websites"] = list(allowed_websites)
 
     doc_ref = client.collection(ADMIN_AUTH_COLLECTION).document(email_clean)
     existing_doc = doc_ref.get()
     if not existing_doc.exists:
         payload["createdAt"] = now_iso
+        payload["status"] = "active"
 
     doc_ref.set(payload, merge=True)
     logger.info(f"Successfully configured admin '{email_clean}' for domain '{target_domain}' in Firestore collection '{ADMIN_AUTH_COLLECTION}'.")
@@ -178,6 +183,10 @@ def sync_firestore_admin_to_local_db(
         or get_current_env_domain()
     )
 
+    fs_websites = firestore_admin.get("allowed_websites") or firestore_admin.get("websites")
+    fs_status = firestore_admin.get("status") or ("blocked" if not firestore_admin.get("is_active", True) else "active")
+    fs_active = False if fs_status == "blocked" else bool(firestore_admin.get("is_active", True))
+
     if not user:
         user = User(
             email=email_clean,
@@ -185,20 +194,31 @@ def sync_firestore_admin_to_local_db(
             role=firestore_admin.get("role") or "super_admin",
             domain=fs_domain,
             password_hash=pw_hash,
-            is_active=firestore_admin.get("is_active", True)
+            is_active=fs_active,
+            status=fs_status
         )
+        if fs_websites:
+            user.allowed_websites = list(fs_websites)
+            user.preferences = {"allowed_websites": list(fs_websites), "status": fs_status}
         db.add(user)
         db.commit()
         db.refresh(user)
-        logger.info(f"Created local database user cache for Firestore admin '{email_clean}' (domain: {fs_domain}).")
+        logger.info(f"Created local database user cache for Firestore admin '{email_clean}' (domain: {fs_domain}, status: {fs_status}).")
     else:
-        # Update role, domain, or password_hash if changed
+        # Update role, domain, password_hash, status, or allowed_websites if changed
         if pw_hash and user.password_hash != pw_hash:
             user.password_hash = pw_hash
         user.role = firestore_admin.get("role") or user.role or "super_admin"
-        user.is_active = firestore_admin.get("is_active", True)
+        user.is_active = fs_active
+        user.status = fs_status
         if fs_domain and (not getattr(user, "domain", None) or user.domain != fs_domain):
             user.domain = fs_domain
+        if fs_websites:
+            user.allowed_websites = list(fs_websites)
+            prefs = dict(user.preferences or {})
+            prefs["allowed_websites"] = list(fs_websites)
+            prefs["status"] = fs_status
+            user.preferences = prefs
         db.commit()
         db.refresh(user)
 
@@ -389,7 +409,9 @@ def update_admin_in_firestore(
     role: Optional[str] = None,
     domain: Optional[str] = None,
     is_active: Optional[bool] = None,
-    password: Optional[str] = None
+    password: Optional[str] = None,
+    allowed_websites: Optional[List[str]] = None,
+    status: Optional[str] = None
 ) -> bool:
     """
     Updates fields for an admin in Cloud Firestore `admin_authentication` collection.
@@ -412,11 +434,23 @@ def update_admin_in_firestore(
     if domain is not None:
         updates["domain"] = domain
         updates["siteOrigin"] = domain
+    if status is not None:
+        updates["status"] = status
+        if status.lower() == "blocked":
+            updates["isActive"] = False
+            updates["isBlocked"] = True
+        elif status.lower() == "active":
+            updates["isBlocked"] = False
     if is_active is not None:
         updates["isActive"] = is_active
+        if not is_active and "status" not in updates:
+            updates["isBlocked"] = True
     if password is not None and password.strip():
         updates["password"] = password.strip()
         updates["passwordHash"] = hash_password(password.strip())
+    if allowed_websites is not None:
+        updates["allowed_websites"] = list(allowed_websites)
+        updates["websites"] = list(allowed_websites)
 
     try:
         col = client.collection(ADMIN_AUTH_COLLECTION)

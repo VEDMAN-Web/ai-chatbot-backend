@@ -1,0 +1,7 @@
+/* Theme 3 - Electric blue */
+body.theme-3 .cover-page { background: #fff; }
+body.theme-3 .cover-framed { border: 2px solid var(--accent); margin: 14mm 12mm 0; height: 120mm; overflow: hidden; }
+body.theme-3 .cover-bottom-block { background: var(--accent); color: #fff; margin: 0 12mm; padding: 8mm; }
+body.theme-3 .cover-bottom-block h1 { color: #fff; }
+body.theme-3 .cover-bottom-block .btn-cta { background: #fff; color: var(--accent); }
+body.theme-3 .floating-price { position: absolute; right: 14mm; top: 55mm; z-index: 2; box-shadow: 0 4px 16px rgba(0,0,0,0.18); }

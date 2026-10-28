@@ -1,0 +1,37 @@
+<section class="page unit-types-page" data-section="unit_types">
+  <span class="section-marker">SECTION:unit_types</span>
+  <div class="page-top-bar"></div>
+  <div class="page-chrome-header">
+    <span class="hdr-left">{{ header_text }}</span>
+  </div>
+  <div class="page-chrome-body">
+    <p class="label-caps" style="margin-bottom:4mm;">{{ labels.unit_types_title }}</p>
+    {% if prepared.unit_types %}
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:4mm;margin-bottom:6mm;">
+      {% for ut in prepared.unit_types %}
+      <div style="border:1px solid rgba(0,0,0,0.12);padding:4mm;background:var(--card);{% if theme_shape == 'rounded' %}border-radius:12px;{% endif %}">
+        {% if ut.name %}<h3 class="display" style="font-size:13pt;margin-bottom:2mm;">{{ ut.name }}</h3>{% endif %}
+        {% if ut.size_text %}<p class="body-text">{{ ut.size_text }}</p>{% endif %}
+        {% if ut.beds is not none %}<p class="body-text">{{ ut.beds }} {{ labels.beds }}</p>{% endif %}
+        {% if ut.baths is not none %}<p class="body-text">{{ ut.baths }} {{ labels.baths }}</p>{% endif %}
+        {% if ut.units is not none %}<p class="label-caps" style="margin-top:2mm;">{{ ut.units }} {{ labels.units_label }}</p>{% endif %}
+      </div>
+      {% endfor %}
+    </div>
+    {% endif %}
+    {% if prepared.floor_plans %}
+    <p class="label-caps" style="margin:3mm 0;">{{ labels.floor_plans_title }}</p>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:3mm;height:90mm;">
+      {% for src in prepared.floor_plans[:3] %}
+      <div class="hero-frame" style="overflow:hidden;background:#fff;">
+        <img class="img-cover" src="{{ src }}" alt="" style="object-fit:contain;"/>
+      </div>
+      {% endfor %}
+    </div>
+    {% endif %}
+  </div>
+  <div class="page-chrome-footer">
+    <span></span>
+    <span class="page-num">{{ page_label }}</span>
+  </div>
+</section>

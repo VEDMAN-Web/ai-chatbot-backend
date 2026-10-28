@@ -1,18 +1,22 @@
 from datetime import datetime
 from typing import List, Optional, Dict
-from fastapi import Depends, HTTPException, Security, status
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials, APIKeyHeader
-from pydantic import BaseModel
+from fastapi import Depends, HTTPException, Security, status, Request
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
 from app.db.models import User, UserSession
-from app.core.config import settings
-from app.core.tenant import get_user_domain_key, get_current_env_domain, get_current_env_domain_key
+from app.core.tenant import (
+    get_user_domain_key,
+    get_current_env_domain,
+    get_current_env_domain_key,
+    ALL_CANONICAL_WEBSITES,
+    normalize_website_domain,
+    normalize_website_list
+)
 
 security_bearer = HTTPBearer(auto_error=False)
-header_staff_email = APIKeyHeader(name="X-Staff-Email", auto_error=False)
-header_staff_token = APIKeyHeader(name="X-Staff-Token", auto_error=False)
 
 
 def get_role_permissions(role: Optional[str]) -> Dict[str, bool]:
@@ -52,7 +56,7 @@ def get_role_permissions(role: Optional[str]) -> Dict[str, bool]:
             "can_delete_users": False,
             "can_view_directory": False,
             "can_access_admin_chat": True,
-            "can_edit_properties": True
+            "can_edit_properties": False
         }
     return {
         "can_manage_super_admins": False,
@@ -73,31 +77,74 @@ class AuthenticatedStaff(BaseModel):
     domain: Optional[str] = None
     domain_key: Optional[str] = None
     session_id: Optional[str] = None
+    status: str = "active"  # 'active', 'blocked', 'deactivated'
     permissions: Optional[Dict[str, bool]] = None
+    allowed_websites: List[str] = Field(default_factory=list)
+    selected_websites: List[str] = Field(default_factory=list)
 
     class Config:
         from_attributes = True
 
 
+def resolve_user_allowed_websites(user: Optional[User], role: Optional[str]) -> List[str]:
+    """
+    Resolves the list of canonical website domains a user is authorized to access.
+    Super Admins have universal access to all 3 sites by default.
+    Other users are restricted to the specific sites assigned by Super Admin.
+    """
+    r = (role or "").strip().lower()
+    if r == "super_admin":
+        if user and getattr(user, "allowed_websites", None):
+            custom = normalize_website_list(user.allowed_websites)
+            if custom:
+                return custom
+        return list(ALL_CANONICAL_WEBSITES)
+
+    if user:
+        if getattr(user, "allowed_websites", None):
+            custom = normalize_website_list(user.allowed_websites)
+            if custom:
+                return custom
+        if hasattr(user, "preferences") and isinstance(user.preferences, dict):
+            pref_sites = user.preferences.get("allowed_websites") or user.preferences.get("websites")
+            if pref_sites:
+                custom = normalize_website_list(pref_sites)
+                if custom:
+                    return custom
+        if getattr(user, "domain", None):
+            canon = normalize_website_domain(user.domain)
+            if canon:
+                return [canon]
+
+    return [get_current_env_domain()]
+
+
 def get_current_user_from_db(
     db: Session = Depends(get_db),
     bearer_creds: Optional[HTTPAuthorizationCredentials] = Security(security_bearer),
-    staff_email_hdr: Optional[str] = Security(header_staff_email),
-    staff_token_hdr: Optional[str] = Security(header_staff_token)
 ) -> AuthenticatedStaff:
     """
     Backend-verified authentication dependency.
     Identity and role are ALWAYS resolved from PostgreSQL database (UserSession or users table).
     Never trusts client-supplied role or staff_id fields.
     """
-    resolved_email: Optional[str] = None
-
     if bearer_creds and bearer_creds.credentials:
         token = bearer_creds.credentials.strip()
 
         # 1. Check if token exists in UserSession table
         existing_session = db.query(UserSession).filter(UserSession.token == token).first()
         if existing_session:
+            user = db.query(User).filter(User.id == existing_session.user_id).first()
+            user_status = getattr(user, "status", None) or ("blocked" if not getattr(user, "is_active", True) else "active")
+            if not user or not getattr(user, "is_active", True) or user_status == "blocked":
+                # Instantly terminate session in database
+                if existing_session.revoked_at is None:
+                    existing_session.revoked_at = datetime.utcnow()
+                    db.commit()
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="User account is blocked. All active sessions have been terminated. Access denied."
+                )
             if existing_session.revoked_at is not None:
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
@@ -110,15 +157,10 @@ def get_current_user_from_db(
                     detail="Session has expired. Please log in again.",
                     headers={"WWW-Authenticate": "Bearer"}
                 )
-            user = db.query(User).filter(User.id == existing_session.user_id).first()
-            if not user or not getattr(user, "is_active", True):
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail="User account is deactivated or invalid."
-                )
             resolved_role = user.role or "worker"
             resolved_domain = getattr(user, "domain", None) or (user.preferences.get("domain") if isinstance(user.preferences, dict) else None) or get_current_env_domain()
             resolved_domain_key = get_user_domain_key(user, resolved_domain)
+            allowed_sites = resolve_user_allowed_websites(user, resolved_role)
             return AuthenticatedStaff(
                 user_id=str(user.id),
                 email=user.email,
@@ -127,67 +169,76 @@ def get_current_user_from_db(
                 domain=resolved_domain,
                 domain_key=resolved_domain_key,
                 session_id=str(existing_session.id),
-                permissions=get_role_permissions(resolved_role)
+                status=user_status,
+                permissions=get_role_permissions(resolved_role),
+                allowed_websites=allowed_sites,
+                selected_websites=list(allowed_sites)
             )
 
-        # 2. Support standard dev tokens and service secrets
-        if token.startswith("dev-token-"):
-            resolved_email = token.replace("dev-token-", "").strip()
-        elif token == "admin-token":
-            resolved_email = settings.ADMIN_EMAIL
-        elif token == "staff-token":
-            resolved_email = "staff@tajlandia.com"
-        elif settings.INTERNAL_API_SECRET and token == settings.INTERNAL_API_SECRET:
-            resolved_email = settings.ADMIN_EMAIL
-        else:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid or unrecognized authentication token.",
-                headers={"WWW-Authenticate": "Bearer"}
-            )
-
-    elif staff_email_hdr:
-        # Require valid staff email header
-        resolved_email = staff_email_hdr.strip()
-    else:
-        # Seamless development / direct usage: default to admin staff when no headers provided
-        resolved_email = "admin@tajlandia.com"
-
-    # Verify user and role from PostgreSQL database or Cloud Firestore
-    user = db.query(User).filter(User.email.ilike(resolved_email)).first()
-    if not user:
-        try:
-            from app.services.firestore_auth_service import get_admin_from_firestore, sync_firestore_admin_to_local_db
-            fs_admin = get_admin_from_firestore(resolved_email)
-            if fs_admin:
-                user = sync_firestore_admin_to_local_db(db, fs_admin)
-        except Exception:
-            pass
-
-    if not user:
-        # Auto-create admin user in database if not present
-        user = User(
-            email=resolved_email,
-            name="Admin Staff",
-            role="super_admin",
-            domain=get_current_env_domain()
+        # Only a server-issued session token authenticates staff. Header-only, dev-token and
+        # shared-secret logins were removed: they let a caller act as any staff member.
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or unrecognized authentication token.",
+            headers={"WWW-Authenticate": "Bearer"}
         )
-        db.add(user)
-        db.commit()
-        db.refresh(user)
 
-    resolved_role = user.role or "worker"
-    resolved_domain = getattr(user, "domain", None) or (user.preferences.get("domain") if isinstance(user.preferences, dict) else None) or get_current_env_domain()
-    resolved_domain_key = get_user_domain_key(user, resolved_domain)
-    return AuthenticatedStaff(
-        user_id=str(user.id),
-        email=user.email,
-        name=user.name or user.email,
-        role=resolved_role,
-        domain=resolved_domain,
-        domain_key=resolved_domain_key,
-        permissions=get_role_permissions(resolved_role)
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Authentication required. Please provide a valid Authorization Bearer token.",
+        headers={"WWW-Authenticate": "Bearer"}
     )
+
+
+def resolve_selected_websites(request: Request, staff: AuthenticatedStaff) -> List[str]:
+    """
+    Resolves the active selected websites (e.g. from UI checkboxes) for the current request.
+    Extracts from:
+      - Header: 'X-Selected-Websites', 'X-Selected-Sites', 'X-Site-Origin', 'X-Domain'
+      - Query params: 'selected_websites', 'sites', 'websites', 'site', 'site_origin'
+    Validates that EVERY requested website is authorized under the staff account's allowed_websites.
+    If unauthorized, raises 403 Forbidden.
+    If no selection is specified, defaults to the staff's full allowed_websites.
+    """
+    raw_selection = (
+        request.headers.get("X-Selected-Websites")
+        or request.headers.get("X-Selected-Sites")
+        or request.headers.get("X-Site-Origin")
+        or request.headers.get("X-Domain")
+        or request.query_params.get("selected_websites")
+        or request.query_params.get("sites")
+        or request.query_params.get("websites")
+        or request.query_params.get("site")
+        or request.query_params.get("site_origin")
+    )
+    if raw_selection:
+        selected = normalize_website_list(raw_selection)
+        if selected:
+            # Strict RBAC verification against staff.allowed_websites
+            unauthorized = [s for s in selected if s not in staff.allowed_websites]
+            if unauthorized:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=(
+                        f"Access denied: You do not have permissions for website(s): {unauthorized}. "
+                        f"Your authorized websites are: {staff.allowed_websites}."
+                    )
+                )
+            return selected
+
+    return list(staff.allowed_websites)
+
+
+def get_current_staff_with_selected_websites(
+    request: Request,
+    staff: AuthenticatedStaff = Depends(get_current_user_from_db)
+) -> AuthenticatedStaff:
+    """
+    Dependency that populates staff.selected_websites according to the request headers or query params,
+    strictly validated against staff.allowed_websites.
+    """
+    staff.selected_websites = resolve_selected_websites(request, staff)
+    return staff
 
 
 def require_roles(allowed_roles: List[str]):
@@ -212,6 +263,31 @@ def require_roles(allowed_roles: List[str]):
     return role_checker
 
 
+def require_roles_with_sites(allowed_roles: List[str]):
+    """
+    Role-Based Access Control (RBAC) dependency factory with active website selection enforcement.
+    Verifies both role and resolves authorized selected_websites.
+    """
+    def role_and_site_checker(
+        request: Request,
+        staff: AuthenticatedStaff = Depends(get_current_user_from_db)
+    ) -> AuthenticatedStaff:
+        role_check = staff.role
+        if role_check == "employee" and "worker" in allowed_roles:
+            role_check = "worker"
+        elif role_check == "worker" and "employee" in allowed_roles:
+            role_check = "employee"
+
+        if staff.role not in allowed_roles and role_check not in allowed_roles:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Access denied: User role '{staff.role}' lacks permission. Required: {allowed_roles}."
+            )
+        staff.selected_websites = resolve_selected_websites(request, staff)
+        return staff
+    return role_and_site_checker
+
+
 # Convenient role dependencies for RBAC
 VALID_STAFF_ROLES = ["super_admin", "admin", "worker", "employee"]
 ADMIN_MANAGEMENT_ROLES = ["super_admin", "admin"]
@@ -220,4 +296,10 @@ require_super_admin = require_roles(["super_admin"])
 require_admin_or_super_admin = require_roles(["super_admin", "admin"])
 require_admin_or_employee = require_roles(["super_admin", "admin", "worker", "employee"])
 require_staff_or_worker = require_roles(["super_admin", "admin", "worker", "employee"])
+
+require_super_admin_with_sites = require_roles_with_sites(["super_admin"])
+require_admin_or_super_admin_with_sites = require_roles_with_sites(["super_admin", "admin"])
+require_admin_or_employee_with_sites = require_roles_with_sites(["super_admin", "admin", "worker", "employee"])
+require_staff_or_worker_with_sites = require_roles_with_sites(["super_admin", "admin", "worker", "employee"])
+
 

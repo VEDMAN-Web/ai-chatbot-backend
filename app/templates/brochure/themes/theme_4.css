@@ -1,0 +1,7 @@
+/* Theme 4 - Soft pastel */
+body.theme-4 .cover-page, body.theme-4 .page { background: var(--cream); }
+body.theme-4 .pastel-price { background: var(--price_bg); border-radius: 16px; }
+body.theme-4 .pastel-facts { background: var(--card_green); border-radius: 16px; padding: 5mm; }
+body.theme-4 .pastel-desc { background: var(--card_blue); border-radius: 16px; padding: 5mm; }
+body.theme-4 .pastel-income { background: var(--card_lilac); border-radius: 16px; padding: 4mm 5mm; }
+body.theme-4 .btn-cta { border-radius: 999px; }

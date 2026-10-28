@@ -1,0 +1,203 @@
+/* Shared brochure theme rules (portrait A4). Variables come from theme_N.css / inline :root. */
+
+@page {
+  size: A4 portrait;
+  margin: 0;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  font-family: var(--sans);
+  color: var(--ink);
+  background: var(--paper);
+  -webkit-print-color-adjust: exact;
+  print-color-adjust: exact;
+}
+
+.page {
+  width: 210mm;
+  height: 297mm;
+  page-break-after: always;
+  break-after: page;
+  position: relative;
+  overflow: hidden;
+  background: var(--paper);
+  display: flex;
+  flex-direction: column;
+}
+.page:last-child {
+  page-break-after: auto;
+  break-after: auto;
+}
+
+h1, h2, h3, .display {
+  font-family: var(--serif);
+  font-weight: 400;
+  color: var(--ink);
+  letter-spacing: 0.02em;
+}
+
+.label-caps {
+  font-family: var(--sans);
+  font-size: 8pt;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.body-text {
+  font-family: var(--sans);
+  font-size: 9.5pt;
+  line-height: 1.5;
+  color: var(--ink);
+}
+
+.img-cover {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.section-marker {
+  font-size: 1px;
+  color: transparent;
+  position: absolute;
+  left: 0;
+  top: 0;
+  opacity: 0.01;
+}
+
+/* Shape frames */
+.shape-rect .frame-img,
+.shape-rect .hero-frame { border-radius: 0; }
+.shape-rounded .frame-img,
+.shape-rounded .hero-frame { border-radius: 14px; overflow: hidden; }
+.shape-arch .hero-frame,
+.shape-arch .frame-img.arch {
+  border-radius: 50% 50% 0 0 / 28% 28% 0 0;
+  overflow: hidden;
+}
+
+.page-chrome-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6mm 12mm 3mm;
+  font-size: 7.5pt;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  flex-shrink: 0;
+}
+.page-chrome-header .hdr-left {
+  text-transform: uppercase;
+  font-weight: 700;
+  color: var(--ink);
+}
+.page-chrome-body {
+  flex: 1;
+  min-height: 0;
+  padding: 0 12mm;
+  overflow: hidden;
+}
+.page-chrome-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 3mm 12mm 6mm;
+  font-size: 8pt;
+  color: var(--muted);
+  flex-shrink: 0;
+}
+.page-num {
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.08em;
+}
+
+.btn-cta {
+  display: inline-block;
+  padding: 3.2mm 7mm;
+  background: var(--accent);
+  color: var(--accent_text);
+  text-decoration: none;
+  font-family: var(--sans);
+  font-size: 9pt;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  border: none;
+}
+.shape-rounded .btn-cta { border-radius: 999px; }
+
+.chip {
+  display: inline-block;
+  padding: 1.5mm 4mm;
+  background: var(--chip);
+  color: var(--accent_text);
+  font-size: 7.5pt;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+.shape-rounded .chip { border-radius: 999px; }
+
+.fact-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(40mm, 1fr));
+  gap: 0;
+  border: 1px solid rgba(0,0,0,0.12);
+}
+.fact-cell {
+  padding: 4mm 5mm;
+  border-right: 1px solid rgba(0,0,0,0.12);
+  min-width: 0;
+}
+.fact-cell:last-child { border-right: none; }
+.fact-cell .fact-label {
+  font-size: 7pt;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: 1.5mm;
+}
+.fact-cell .fact-value {
+  font-family: var(--serif);
+  font-size: 11pt;
+  color: var(--ink);
+  word-wrap: break-word;
+}
+
+.price-card {
+  background: var(--price_bg);
+  color: var(--price_fg);
+  padding: 5mm 6mm;
+  display: inline-block;
+  max-width: 100%;
+}
+.price-card .price-label {
+  font-size: 7pt;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  opacity: 0.85;
+  margin-bottom: 1mm;
+}
+.price-card .price-value {
+  font-family: var(--serif);
+  font-size: 16pt;
+  line-height: 1.2;
+}
+
+.notice-bar {
+  background: var(--notice);
+  color: #fff;
+  padding: 3mm 5mm;
+  font-size: 8.5pt;
+}
+
+.max-prose {
+  max-height: 55mm;
+  overflow: hidden;
+}
+.max-prose-sm {
+  max-height: 36mm;
+  overflow: hidden;
+}

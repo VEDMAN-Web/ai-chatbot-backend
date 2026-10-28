@@ -1,9 +1,11 @@
 import os
 import io
-import random
 import logging
+import math
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 from typing import List, Dict, Any, Optional
 
 import requests
@@ -19,6 +21,126 @@ from app.db.models import Property
 from app.services.report_service import default_storage_provider
 
 logger = logging.getLogger(__name__)
+
+
+def safe_text(value: Any, default: str = "") -> str:
+    """
+    Coerce any property field to a clean string for PDF drawing.
+    None / NaN / float / Decimal / list / dict → string; never raises on .split().
+    """
+    if value is None:
+        return default
+    if isinstance(value, float):
+        if math.isnan(value) or math.isinf(value):
+            return default
+        try:
+            if value == int(value):
+                return f"{int(value):,}"
+            return f"{value:,.2f}".rstrip("0").rstrip(".")
+        except Exception:
+            return default
+    if isinstance(value, Decimal):
+        try:
+            f = float(value)
+            if math.isnan(f) or math.isinf(f):
+                return default
+            if f == int(f):
+                return f"{int(f):,}"
+            return f"{f:,.2f}".rstrip("0").rstrip(".")
+        except Exception:
+            return str(value)
+    if isinstance(value, bool):
+        return "Yes" if value else "No"
+    if isinstance(value, int):
+        return f"{value:,}"
+    if isinstance(value, (list, tuple, set)):
+        parts = [safe_text(x, "") for x in value]
+        joined = ", ".join(p for p in parts if p)
+        return joined if joined else default
+    if isinstance(value, dict):
+        # Localized name dicts
+        for k in ("en", "pl", "th", "name", "text", "value"):
+            if value.get(k) not in (None, ""):
+                return safe_text(value.get(k), default)
+        try:
+            return ", ".join(f"{k}: {safe_text(v)}" for k, v in list(value.items())[:8]) or default
+        except Exception:
+            return default
+    s = str(value).strip()
+    if not s or s.lower() in ("nan", "none", "null"):
+        return default
+    return s
+
+
+def normalize_dossier_property(obj: Any) -> Any:
+    """Normalise Postgres ORM or Firestore dict into an attribute-accessible object."""
+    if obj is None:
+        return None
+    if isinstance(obj, Property):
+        return SimpleNamespace(
+            property_id=safe_text(getattr(obj, "property_id", ""), ""),
+            property_name=safe_text(getattr(obj, "property_name", None), "Property"),
+            project_name=safe_text(getattr(obj, "project_name", None), ""),
+            property_type=safe_text(getattr(obj, "property_type", None), "Villa"),
+            status=safe_text(getattr(obj, "status", None), ""),
+            province=safe_text(getattr(obj, "province", None), ""),
+            district=safe_text(getattr(obj, "district", None), ""),
+            area=safe_text(getattr(obj, "area", None), ""),
+            price_display=safe_text(getattr(obj, "price_display", None), "On request"),
+            area_display=safe_text(getattr(obj, "area_display", None), ""),
+            description=safe_text(getattr(obj, "description", None), ""),
+            rental_information=safe_text(getattr(obj, "rental_information", None), ""),
+            investment_information=safe_text(getattr(obj, "investment_information", None), ""),
+            ownership_type=safe_text(getattr(obj, "ownership_type", None), ""),
+            has_pool=bool(getattr(obj, "has_pool", False)),
+            amenities=getattr(obj, "amenities", None) or [],
+        )
+    if isinstance(obj, dict):
+        from app.services.admin_property_fields import (
+            localize_name,
+            format_price_thb,
+            parse_price_amount,
+            read_firestore_canonical,
+        )
+        raw = obj.get("raw_firestore_data") if isinstance(obj.get("raw_firestore_data"), dict) else {}
+        doc = dict(raw or {})
+        doc.update({k: v for k, v in obj.items() if k != "raw_firestore_data" and v is not None})
+        canon = read_firestore_canonical(
+            doc,
+            [
+                "property_name", "status", "province", "district", "area", "location",
+                "price_display", "price_numeric_min", "property_type", "area_display",
+                "has_pool", "ownership_type",
+            ],
+        )
+        price = canon.get("price_display") or (
+            format_price_thb(canon.get("price_numeric_min"))
+            if canon.get("price_numeric_min") is not None
+            else "On request"
+        )
+        name = localize_name(canon.get("property_name") or doc.get("name") or doc.get("title")) or "Property"
+        return SimpleNamespace(
+            property_id=safe_text(obj.get("property_id") or obj.get("id") or doc.get("id"), ""),
+            property_name=safe_text(name, "Property"),
+            project_name=safe_text(obj.get("project_name") or doc.get("projectName"), ""),
+            property_type=safe_text(canon.get("property_type") or doc.get("propertyType"), "Villa"),
+            status=safe_text(canon.get("status"), ""),
+            province=safe_text(canon.get("province") or canon.get("location"), ""),
+            district=safe_text(canon.get("district"), ""),
+            area=safe_text(canon.get("area"), ""),
+            price_display=safe_text(price, "On request"),
+            area_display=safe_text(canon.get("area_display") or doc.get("areaSize"), ""),
+            description=safe_text(doc.get("description") or obj.get("description"), ""),
+            rental_information=safe_text(doc.get("rental_information") or obj.get("rental_information"), ""),
+            investment_information=safe_text(
+                doc.get("investment_information") or obj.get("investment_information"), ""
+            ),
+            ownership_type=safe_text(canon.get("ownership_type") or doc.get("ownershipType"), ""),
+            has_pool=bool(canon.get("has_pool") if canon.get("has_pool") is not None else doc.get("pool")),
+            amenities=doc.get("amenities") or obj.get("amenities") or [],
+        )
+    # Already namespace-like
+    return obj
 
 BASE_DIR = Path(__file__).resolve().parents[2]
 
@@ -227,76 +349,11 @@ class DossierPropertyFallback:
 
 
 def _get_default_dossier_properties() -> List[DossierPropertyFallback]:
-    return [
-        DossierPropertyFallback(
-            property_id="PROP-PHK-001",
-            property_name="The Pavilions Grand Ocean Villa",
-            project_name="The Pavilions Phuket Luxury Estates",
-            province="Phuket",
-            district="Choeng Thale",
-            area="Layan Beach",
-            property_type="Villa",
-            price_display="32 500 000 THB",
-            price_numeric_min=32500000.0,
-            bedrooms_display="3-4 Sypialnie",
-            area_display="420 m²",
-            status="Gotowe do odbioru / Ready",
-            has_pool=True,
-            description="Spektakularna willa na wzgórzu z panoramicznym widokiem na Morze Andamańskie. Posiada prywatny basen bezkrawędziowy (infinity pool), przestronny taras słoneczny, luksusowe wykończenie w drewnie tekowym oraz całodobowy serwis hotelowy 5-gwiazdkowego resortu.",
-            rental_information="Program hotelowego poolu najmu generujący prognozowany zysk 8-10% rocznie, z możliwością 45 dni pobytu właścicielskiego rocznie."
-        ),
-        DossierPropertyFallback(
-            property_id="PROP-PHK-002",
-            property_name="Botanica Four Seasons Luxury Pool Villa",
-            project_name="Botanica Luxury Villas Phase IV",
-            province="Phuket",
-            district="Thalang",
-            area="Bang Tao",
-            property_type="Villa",
-            price_display="28 000 000 THB",
-            price_numeric_min=28000000.0,
-            bedrooms_display="3-4 Sypialnie",
-            area_display="380 m²",
-            status="W budowie (Odbiór Q4 2026)",
-            has_pool=True,
-            description="Ekskluzywna prywatna rezydencja w prestiżowej dolinie Bang Tao w sąsiedztwie Laguna Phuket. Nowoczesna architektura tropikalna, wysokie sufity, prywatny ogród krajobrazowy oraz basen o długości 12 metrów.",
-            rental_information="Gwarantowany zwrot z najmu lub w pełni zarządzany model najmu premium dla wymagających ekspatów i turystów."
-        ),
-        DossierPropertyFallback(
-            property_id="PROP-SAM-003",
-            property_name="Samujana Sea-View Executive Villa",
-            project_name="Samujana Estate Koh Samui",
-            province="Koh Samui",
-            district="Bophut",
-            area="Choeng Mon",
-            property_type="Villa",
-            price_display="35 000 000 THB",
-            price_numeric_min=35000000.0,
-            bedrooms_display="4 Sypialnie",
-            area_display="510 m²",
-            status="Gotowe do zamieszkania",
-            has_pool=True,
-            description="Jedna z najbardziej prestiżowych lokalizacji na Koh Samui. Bezpośredni widok na zatokę, prywatne kino domowe, basen ze słoną wodą, prywatny dostęp do plaży oraz dedykowany konsjerż rezydencji.",
-            rental_information="Wysoki popyt w segmencie Ultra-Luxury. Średni roczny zysk operacyjny z najmu wynosi 8.5% netto."
-        ),
-        DossierPropertyFallback(
-            property_id="PROP-PHK-004",
-            property_name="Anantara Residences Panorama Suite",
-            project_name="Anantara Layan Phuket Residences",
-            province="Phuket",
-            district="Thalang",
-            area="Layan",
-            property_type="Condominium",
-            price_display="22 000 000 THB",
-            price_numeric_min=22000000.0,
-            bedrooms_display="2-3 Pokoje",
-            area_display="210 m²",
-            status="Gotowe do odbioru",
-            has_pool=True,
-            description="Luksusowy penthouse z pełną własnością Foreign Freehold w standardzie 5-gwiazdkowej sieci Anantara. Prywatny basen na dachu, wykwintne restauracje na terenie kompleksu, spa i bezpośrednie zejście na plażę.",
-            rental_information="Hotelowy program najmu z renomowaną globalną marką zapewniający bezproblemowe zarządzanie i stabilny przychód dewizowy."
-        ),
-    ]
+    """
+    Production-only: never return hardcoded PROP-PHK / placeholder listings.
+    Dossier generation must use live Firestore/SQL inventory only.
+    """
+    return []
 
 
 def fetch_property_image_reader(prop: Any) -> ImageReader:
@@ -326,11 +383,12 @@ def fetch_property_image_reader(prop: Any) -> ImageReader:
     return _create_fallback_property_image(getattr(prop, "property_name", "Property"))
 
 
-def _draw_text_box(can: canvas.Canvas, text: str, x: float, y: float, w: float, h: float,
+def _draw_text_box(can: canvas.Canvas, text: Any, x: float, y: float, w: float, h: float,
                    font_name: str = FONT_REGULAR, font_size: float = 9.0,
                    text_color = colors.HexColor("#1A202C"), bg_color = None,
                    align: str = "left", leading: float = 12.0):
     """Renders text cleanly wrapped in a specified box."""
+    text = safe_text(text, "")
     if bg_color:
         can.setFillColor(bg_color)
         can.rect(x - 2, y - 2, w + 4, h + 4, fill=1, stroke=0)
@@ -412,33 +470,75 @@ def generate_offer_dossier_pdf(
     completely from scratch using the template structure, high-resolution property
     photos, Unicode fonts, and verified financial models with ZERO placeholder artifacts.
     """
-    # 1. Select Theme Variant (1 to 7)
-    variant_id = template_variant if (template_variant and 1 <= template_variant <= 7) else random.randint(1, 7)
+    # 1. Select Theme Variant (1 to 7) — explicit request, else stable hash of property id(s)
+    from app.services.admin_reply_helpers import choose_dossier_template_variant
+
+    variant_id = choose_dossier_template_variant(
+        property_ids=property_ids,
+        explicit=template_variant,
+    )
     theme = TEMPLATE_THEMES[variant_id]
     template_name = f"Szablon {variant_id} - {theme['name']}"
 
     logo_path = resolve_logo_path(brand)
 
-    # 2. Fetch 4 properties from PostgreSQL
+    # 2. Fetch properties from live production Firestore first, then SQL — never invent placeholders
     props: List[Any] = []
+    try:
+        from app.services.property_search import get_property_by_id, FirestorePropertyAdapter
+        from app.services.firestore_service import fetch_properties_from_firestore
+    except Exception:
+        get_property_by_id = None
+        fetch_properties_from_firestore = None
+        FirestorePropertyAdapter = None
+
     if property_ids:
         for pid in property_ids[:4]:
             if not pid:
                 continue
             pid_clean = str(pid).strip()
-            p = (
-                db.query(Property)
-                .filter(
-                    (Property.property_id.ilike(pid_clean))
-                    | (Property.property_name.ilike(f"%{pid_clean}%"))
-                    | (Property.project_name.ilike(f"%{pid_clean}%"))
+            p = None
+            if get_property_by_id:
+                try:
+                    p = get_property_by_id(db, pid_clean)
+                except Exception:
+                    p = None
+            if p is None and db is not None:
+                p = (
+                    db.query(Property)
+                    .filter(
+                        (Property.property_id.ilike(pid_clean))
+                        | (Property.property_name.ilike(f"%{pid_clean}%"))
+                        | (Property.project_name.ilike(f"%{pid_clean}%"))
+                    )
+                    .first()
                 )
-                .first()
-            )
             if p and p not in props:
                 props.append(p)
 
-    if len(props) < 4:
+    if len(props) < 4 and fetch_properties_from_firestore:
+        needed = 4 - len(props)
+        existing_ids = {
+            str(getattr(p, "property_id", "") or "").strip().lower()
+            for p in props
+            if getattr(p, "property_id", None)
+        }
+        try:
+            fs_list = fetch_properties_from_firestore(limit=needed + len(existing_ids), active_only=True, target="admin")
+            for fp in fs_list or []:
+                if len(props) >= 4:
+                    break
+                pid = str(fp.get("property_id") or fp.get("id") or "").strip().lower()
+                if pid and pid in existing_ids:
+                    continue
+                if FirestorePropertyAdapter:
+                    props.append(FirestorePropertyAdapter(fp))
+                    if pid:
+                        existing_ids.add(pid)
+        except Exception as e:
+            logger.warning(f"Firestore dossier property fetch failed: {e}")
+
+    if len(props) < 4 and db is not None:
         needed = 4 - len(props)
         existing_ids = [p.property_id for p in props if getattr(p, "property_id", None)]
         query = db.query(Property)
@@ -449,14 +549,20 @@ def generate_offer_dossier_pdf(
             if p not in props:
                 props.append(p)
 
-    # If database has fewer than 4 properties, supplement with realistic luxury portfolio options
-    if len(props) < 4:
-        sample_props = _get_default_dossier_properties()
-        for sp in sample_props:
-            if len(props) >= 4:
-                break
-            if not any(getattr(p, "property_name", "") == sp.property_name for p in props):
-                props.append(sp)
+    if not props:
+        raise ValueError(
+            "No verified production properties available to build the offer dossier. "
+            "Cannot generate PDF with placeholder or invented listings."
+        )
+
+    # Normalise PG + Firestore records so NaN/float fields never reach canvas text drawing
+    props = [normalize_dossier_property(p) for p in props if p is not None]
+    props = [p for p in props if p is not None]
+    if not props:
+        raise ValueError(
+            "No verified production properties available to build the offer dossier. "
+            "Cannot generate PDF with placeholder or invented listings."
+        )
 
     # Formatting variables
     client_display = client_name.strip()
@@ -609,7 +715,17 @@ def generate_offer_dossier_pdf(
             can.drawString(c["x"] + 12, c["y"] + c["h"] - 56, f"od {p_item.price_display}")
 
             # Description snippet
-            desc_short = (p_item.description or "Luksusowa willa z basenem i prywatnym ogrodem.")[:140]
+            desc_short = safe_text(
+                p_item.description, "Luksusowa willa z basenem i prywatnym ogrodem."
+            )
+            try:
+                from app.services.instruction_store import get_active_instruction_block
+                _style_notes = get_active_instruction_block("offer_dossier", None, language)
+            except Exception:
+                _style_notes = ""
+            if _style_notes:
+                desc_short = (desc_short + " " + _style_notes).strip()
+            desc_short = desc_short[:140]
             _draw_text_box(can, desc_short, c["x"] + 12, c["y"] + 46, c["w"] - 24, 75,
                            font_name=FONT_REGULAR, font_size=7.5, leading=11,
                            text_color=colors.HexColor("#475569"))
@@ -700,12 +816,15 @@ def generate_offer_dossier_pdf(
         can.setFont(FONT_BOLD, 9.5)
         can.drawString(50, 296, p_obj.area_display or "120-250 m²")
         can.drawString(170, 296, (p_obj.status or "Gotowe")[:20])
-        can.drawString(300, 296, "Freehold / Leasehold")
+        can.drawString(300, 296, (getattr(p_obj, "ownership_type", None) or "Confirm with advisor")[:28])
         amenity_txt = "Prywatny Basen, Ogród" if p_obj.has_pool else "Siłownia, Recepcja"
         can.drawString(420, 296, amenity_txt)
 
         # Property Narrative Description
-        desc_full = p_obj.description or "Inwestycja charakteryzuje się unikalną architekturą, wysoką jakością wykończenia oraz profesjonalnym operatorem hotelowym dbającym o wysokie obłożenie przez cały rok."
+        desc_full = safe_text(
+            p_obj.description,
+            "Inwestycja charakteryzuje się unikalną architekturą, wysoką jakością wykończenia oraz profesjonalnym operatorem hotelowym dbającym o wysokie obłożenie przez cały rok.",
+        )
         _draw_text_box(can, desc_full, 42, 160, 510, 100, font_name=FONT_REGULAR, font_size=8.5, leading=12)
 
         # Income Model Box
@@ -716,7 +835,10 @@ def generate_offer_dossier_pdf(
         can.setFont(FONT_BOLD, 9)
         can.drawString(50, 126, "MODEL GENEROWANIA DOCHODU:" if language == "pl" else "INCOME GENERATION MODEL:")
 
-        inc_desc = (p_obj.rental_information or p_obj.investment_information) or (
+        inc_raw = safe_text(getattr(p_obj, "rental_information", None), "") or safe_text(
+            getattr(p_obj, "investment_information", None), ""
+        )
+        inc_desc = inc_raw or (
             "Szacowany przychód z wynajmu wynosi 120 000 - 200 000 THB miesięcznie. Dostępny program zarządzania najmem."
             if language == "pl" else
             "Expected rental income 120,000 - 200,000 THB/month. Fully managed hotel rental pool program available."

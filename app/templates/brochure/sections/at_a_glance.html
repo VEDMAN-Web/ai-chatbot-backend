@@ -1,0 +1,72 @@
+<section class="page glance-page" data-section="at_a_glance">
+  <span class="section-marker">SECTION:at_a_glance</span>
+  <div class="glance-hero">
+    {% if prepared.hero_image or data.hero_image or (data.images and data.images[0]) %}
+    <img class="img-cover" src="{{ prepared.hero_image or data.hero_image or data.images[0] }}" alt=""/>
+    {% else %}
+    <div class="glance-hero-fallback"></div>
+    {% endif %}
+    <h2 class="glance-overlay">{{ labels.at_a_glance }}</h2>
+  </div>
+  <div class="glance-table">
+    {% for row in prepared.rows or [] %}
+    <div class="glance-row">
+      <span class="glance-key">{{ row.label }}</span>
+      <span class="glance-val">{{ row.value }}</span>
+    </div>
+    {% endfor %}
+  </div>
+</section>
+<style>
+  .glance-page {
+    display: grid;
+    grid-template-rows: 58% 42%;
+  }
+  .glance-hero {
+    position: relative;
+    overflow: hidden;
+    background: var(--ink);
+  }
+  .glance-hero-fallback {
+    width: 100%;
+    height: 100%;
+    background: linear-gradient(135deg, var(--sage), var(--ink));
+  }
+  .glance-overlay {
+    position: absolute;
+    left: 12mm;
+    bottom: 10mm;
+    color: #fff;
+    font-style: italic;
+    font-size: 22pt;
+  }
+  .glance-table {
+    background: var(--cream);
+    padding: 10mm 18mm;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    column-gap: 16mm;
+    row-gap: 4mm;
+    align-content: center;
+  }
+  .glance-row {
+    display: grid;
+    grid-template-columns: 42% 58%;
+    gap: 4mm;
+    align-items: baseline;
+    padding: 2mm 0;
+  }
+  .glance-key {
+    font-family: var(--sans);
+    font-size: 8pt;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--accent);
+    font-weight: 700;
+  }
+  .glance-val {
+    font-family: var(--serif);
+    font-size: 11pt;
+    color: var(--ink);
+  }
+</style>
