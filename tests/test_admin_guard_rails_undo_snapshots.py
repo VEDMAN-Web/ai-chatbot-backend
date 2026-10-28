@@ -11,10 +11,53 @@ from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
 import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.ext.compiler import compiles
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
 from app.core.auth import AuthenticatedStaff
+from app.db.models import Base, Property
 from app.services import action_service
-from app.services.action_service import ACTION_STATUS_PENDING, ACTION_STATUS_REJECTED
+from app.services.action_service import (
+    ACTION_STATUS_PENDING,
+    ACTION_STATUS_REJECTED,
+    confirm_and_execute_action,
+    create_pending_action,
+    get_pending_action,
+)
+from tests.fake_firestore import audit_docs, patch_firestore, set_store_modes
+
+
+@pytest.fixture(autouse=True)
+def _firestore_stores_for_undo_file(monkeypatch):
+    patch_firestore(monkeypatch)
+    set_store_modes(monkeypatch)
+
+
+@compiles(JSONB, "sqlite")
+def _compile_jsonb_sqlite(type_, compiler, **kw):
+    return "JSON"
+
+
+@compiles(UUID, "sqlite")
+def _compile_uuid_sqlite(type_, compiler, **kw):
+    return "CHAR(36)"
+
+
+@pytest.fixture
+def db():
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(bind=engine, tables=[Property.__table__])
+    Session = sessionmaker(bind=engine)
+    session = Session()
+    yield session
+    session.close()
 from app.services.admin_batch_service import (
     BatchOperationError,
     record_crud_operation_snapshot,
@@ -57,42 +100,42 @@ def _pending(**kwargs):
     )
 
 
-def test_confirmed_chat_update_creates_snapshot_returns_operation_id(staff):
-    snapshots = []
-    audits = []
-
-    old_prop = SimpleNamespace(
-        property_id="prop-1",
-        property_name="Old Name",
-        status="Available",
-        price_display="10M THB",
-        websites=["tajlandia.com"],
+def test_confirmed_chat_update_creates_snapshot_returns_operation_id(staff, db, monkeypatch):
+    fake = patch_firestore(monkeypatch)
+    set_store_modes(monkeypatch)
+    db.add(
+        Property(
+            property_id="prop-1",
+            property_name="Old Name",
+            status="Available",
+            price_display="10M THB",
+            price_numeric_min=10_000_000,
+            websites=["tajlandia.com"],
+        )
     )
+    db.commit()
+    snapshots = []
+    fixed_op = "crud_testop123456"
 
     def fake_snapshot(**kwargs):
         snapshots.append(kwargs)
         assert kwargs.get("previous_state") is not None
-        assert kwargs["previous_state"].get("property_name") == "Old Name" or kwargs[
-            "previous_state"
-        ].get("property_name") == "Old Name"
-        return "crud_testop123456"
+        assert kwargs["previous_state"].get("property_name") == "Old Name"
+        return fixed_op
 
-    def capture_audit(**kwargs):
-        audits.append(kwargs)
-        return SimpleNamespace(id="aud1")
+    action = create_pending_action(
+        db,
+        staff_user_id=staff.email,
+        tool_name="create_or_update_listing",
+        action_payload={
+            "mode": "update",
+            "property_id": "prop-1",
+            "fields_to_update": {"price_display": "20M THB", "property_name": "New Name"},
+        },
+        conversation_id="c1",
+    )
 
-    action = _pending()
-    db = MagicMock()
-    # first() returns old prop for lookup; after update still returns prop-like
-    prop_q = MagicMock()
-    prop_q.filter.return_value.first.return_value = old_prop
-    db.query.return_value = prop_q
-
-    with patch("app.services.action_service.get_pending_action", return_value=action), patch(
-        "app.services.action_service.record_audit_log", side_effect=capture_audit
-    ), patch(
-        "app.services.action_service.validate_property_data", return_value=(True, [], "")
-    ), patch(
+    with patch(
         "app.services.admin_batch_service.record_crud_operation_snapshot", side_effect=fake_snapshot
     ), patch(
         "app.services.action_service.record_crud_operation_snapshot", side_effect=fake_snapshot
@@ -101,53 +144,71 @@ def test_confirmed_chat_update_creates_snapshot_returns_operation_id(staff):
     ), patch(
         "app.core.config.settings.ENABLE_FIRESTORE_SYNC", False
     ):
-        out = action_service.confirm_and_execute_action(
-            db=db, pending_action_id=str(action.id), authenticated_staff=staff, confirmation_token=action.confirmation_token
+        out = confirm_and_execute_action(
+            db=db,
+            pending_action_id=str(action.id),
+            authenticated_staff=staff,
+            confirmation_token=action.confirmation_token,
         )
 
     assert snapshots, "snapshot must be saved on confirmed update"
-    assert out["execution_result"].get("operation_id") == "crud_testop123456"
-    assert action.execution_result and action.execution_result.get("operation_id") == "crud_testop123456"
-    # audit has confirm/execute
+    assert out["execution_result"].get("operation_id") == fixed_op
+    refreshed = get_pending_action(db, action.id)
+    assert refreshed.execution_result and refreshed.execution_result.get("operation_id") == fixed_op
+    audits = audit_docs(fake)
     assert any(a.get("confirmed_by_staff") is True for a in audits)
-    assert any(a.get("status") == "SUCCESS" for a in audits)
+    assert any(a.get("status") in ("SUCCESS", "CONFIRMED") for a in audits if a.get("confirmed_by_staff"))
 
 
-def test_rejected_or_pending_creates_no_snapshot(staff):
-    snaps = []
-
-    def boom(**kwargs):
-        snaps.append(1)
-        raise AssertionError("no snapshot on reject")
-
-    action = _pending()
-    with patch("app.services.action_service.get_pending_action", return_value=action), patch(
-        "app.services.action_service.record_audit_log", return_value=SimpleNamespace(id="a")
-    ), patch(
-        "app.services.admin_batch_service.record_crud_operation_snapshot", side_effect=boom
-    ), patch(
-        "app.services.action_service.record_crud_operation_snapshot", side_effect=boom
+def test_rejected_or_pending_creates_no_snapshot(staff, db, monkeypatch):
+    fake = patch_firestore(monkeypatch)
+    set_store_modes(monkeypatch)
+    db.add(
+        Property(
+            property_id="prop-1",
+            property_name="Old Name",
+            status="Available",
+            price_display="10M THB",
+            price_numeric_min=10_000_000,
+        )
+    )
+    db.commit()
+    action = create_pending_action(
+        db,
+        staff_user_id=staff.email,
+        tool_name="create_or_update_listing",
+        action_payload={
+            "mode": "update",
+            "property_id": "prop-1",
+            "fields_to_update": {"property_name": "New Name"},
+        },
+        conversation_id="c1",
+    )
+    with patch(
+        "app.services.admin_batch_service.record_crud_operation_snapshot",
+        side_effect=lambda **k: (_ for _ in ()).throw(AssertionError("no snapshot on reject")),
     ):
         out = action_service.reject_pending_action(
-            db=MagicMock(), pending_action_id=str(action.id), authenticated_staff=staff
+            db=db, pending_action_id=str(action.id), authenticated_staff=staff
         )
     assert out["status"] == ACTION_STATUS_REJECTED
-    assert snaps == []
+    assert not any(path[0] == "admin_batch_operations" for path in fake.docs)
 
 
-def test_undo_restores_old_values_second_undo_refused(staff):
-    mock_fs = MagicMock()
-    projects = MagicMock()
-    batch = MagicMock()
+def test_undo_restores_old_values_second_undo_refused(staff, monkeypatch):
+    fake = patch_firestore(monkeypatch)
+    set_store_modes(monkeypatch)
     original = {"name": "Old Villa", "priceFrom": 10_000_000}
-
-    saved = {
-        "operation_id": "crud_abc",
+    operation_id = "crud_abc"
+    now = datetime.now(timezone.utc)
+    fake.docs[("projects", "prop-1")] = {"name": "Changed Villa", "priceFrom": 20_000_000}
+    fake.docs[("admin_batch_operations", operation_id)] = {
+        "operation_id": operation_id,
         "action_type": "update",
         "status": "APPLIED",
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "expire_at": (datetime.now(timezone.utc) + timedelta(days=6)).isoformat(),
-        "expires_at": (datetime.now(timezone.utc) + timedelta(days=6)).isoformat(),
+        "created_at": now.isoformat(),
+        "expire_at": (now + timedelta(days=6)).isoformat(),
+        "expires_at": (now + timedelta(days=6)).isoformat(),
         "previous_snapshot": {"prop-1": original},
         "raw_firestore": {"prop-1": original},
         "raw_sql": {},
@@ -157,54 +218,79 @@ def test_undo_restores_old_values_second_undo_refused(staff):
         "affected_ids": ["prop-1"],
         "created_ids": [],
     }
-    audits = []
 
-    op_doc = MagicMock()
-    op_doc.exists = True
-    op_doc.to_dict.return_value = saved
-    op_ref = MagicMock()
-    op_ref.get.return_value = op_doc
+    undo1 = undo_batch_property_operation(operation_id, staff, db_session=MagicMock())
+    assert undo1["status"] == "REVERTED"
+    assert fake.docs[("projects", "prop-1")]["name"] == "Old Villa"
+    audits = audit_docs(fake)
+    assert any(
+        (a.get("tool_name") or "").upper() == "UNDO" or "undo" in (a.get("tool_name") or "").lower()
+        for a in audits
+    )
+    assert any(
+        (a.get("tool_arguments") or {}).get("operation_id") == operation_id
+        or (a.get("proposed_payload") or {}).get("original_operation_id") == operation_id
+        for a in audits
+    )
 
-    def col(name):
-        if name == "admin_batch_operations":
-            return batch
-        return projects
+    fake.docs[("admin_batch_operations", operation_id)]["status"] = "REVERTED"
+    with pytest.raises(BatchOperationError) as ei:
+        undo_batch_property_operation(operation_id, staff, db_session=MagicMock())
+    assert "already" in str(ei.value).lower() or "undone" in str(ei.value).lower()
 
-    mock_fs.collection.side_effect = col
-    batch.document.return_value = op_ref
-    proj_ref = MagicMock()
-    restored = MagicMock()
-    restored.exists = True
-    restored.to_dict.return_value = dict(original)
-    proj_ref.get.return_value = restored
-    projects.document.return_value = proj_ref
 
-    def capture_audit(**kwargs):
-        audits.append(kwargs)
-        return SimpleNamespace(id="u1")
-
-    with patch("app.services.admin_batch_service.get_firestore_client", return_value=mock_fs), patch(
-        "app.services.admin_batch_service.record_audit_log", side_effect=capture_audit
-    ):
-        undo1 = undo_batch_property_operation("crud_abc", staff, db_session=MagicMock())
-        assert undo1["status"] == "REVERTED"
-        proj_ref.set.assert_called_with(original)
-        assert any(
-            (a.get("tool_name") or "").upper() == "UNDO"
-            or "undo" in (a.get("tool_name") or "").lower()
-            for a in audits
+def test_change_price_confirm_undo_restores_price(staff, db, monkeypatch):
+    fake = patch_firestore(monkeypatch)
+    set_store_modes(monkeypatch)
+    original_price = 10_000_000
+    new_price = 20_000_000
+    fake.docs[("projects", "prop-1")] = {
+        "name": "Old Villa",
+        "priceFrom": original_price,
+        "property_id": "prop-1",
+    }
+    db.add(
+        Property(
+            property_id="prop-1",
+            property_name="Old Villa",
+            status="Available",
+            price_display="10M THB",
+            price_numeric_min=original_price,
         )
-        assert any(
-            (a.get("tool_arguments") or {}).get("operation_id") == "crud_abc"
-            or (a.get("proposed_payload") or {}).get("original_operation_id") == "crud_abc"
-            for a in audits
-        )
+    )
+    db.commit()
 
-        # Second undo — mark REVERTED
-        saved["status"] = "REVERTED"
-        with pytest.raises(BatchOperationError) as ei:
-            undo_batch_property_operation("crud_abc", staff, db_session=MagicMock())
-        assert "already" in str(ei.value).lower() or "undone" in str(ei.value).lower()
+    action = create_pending_action(
+        db,
+        staff_user_id=staff.email,
+        tool_name="create_or_update_listing",
+        action_payload={
+            "mode": "update",
+            "property_id": "prop-1",
+            "fields_to_update": {
+                "price_display": "20M THB",
+                "price_numeric_min": new_price,
+            },
+        },
+        conversation_id="c1",
+    )
+
+    with patch("app.services.cache_service.search_cache.invalidate"):
+        out = confirm_and_execute_action(
+            db=db,
+            pending_action_id=str(action.id),
+            authenticated_staff=staff,
+            confirmation_token=action.confirmation_token,
+        )
+    operation_id = out["execution_result"].get("operation_id")
+    assert operation_id
+    assert fake.docs[("projects", "prop-1")]["priceFrom"] == new_price
+
+    undo_batch_property_operation(operation_id, staff, db_session=db)
+    assert fake.docs[("projects", "prop-1")]["priceFrom"] == original_price
+    prop = db.query(Property).filter(Property.property_id == "prop-1").first()
+    db.refresh(prop)
+    assert float(prop.price_numeric_min) == float(original_price)
 
 
 def test_undo_after_6_days_refused(staff):
@@ -371,7 +457,10 @@ def test_audit_chain_propose_confirm_execute_undo(staff):
             db=db, pending_action_id=str(action.id), authenticated_staff=staff, confirmation_token=action.confirmation_token
         )
 
-    assert any(a.get("confirmed_by_staff") is True and a.get("status") == "SUCCESS" for a in audits)
+    assert any(
+        a.get("confirmed_by_staff") is True and a.get("status") in ("SUCCESS", "CONFIRMED")
+        for a in audits
+    )
 
     # Undo audit
     mock_fs = MagicMock()

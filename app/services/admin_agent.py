@@ -206,6 +206,66 @@ def summarize_untrusted_document(text: str, filename: Optional[str] = None) -> D
     }
 
 
+def _is_dossier_flow_continuation(message: Optional[str]) -> bool:
+    """True when a waiting dossier turn should consume the message (not greet)."""
+    if not message:
+        return False
+    m = message.strip().lower()
+    if not m:
+        return False
+    if re.search(r"\b(cancel|never\s*mind|abort|stop)\b", m):
+        return True
+    if any(
+        p in m
+        for p in (
+            "assume the rest",
+            "fetch from db",
+            "make everything myself",
+            "make everything yourself",
+            "use defaults",
+            "with defaults",
+            "continue with defaults",
+            "pobierz z bazy",
+            "dobierz z bazy",
+            "details out of 7",
+            "out of 7",
+        )
+    ):
+        return True
+    # Client name / budget style answers (currency or named person + number)
+    if re.search(r"\b(budget|client|name|thb|usd|eur|mln|million|mln)\b", m):
+        return True
+    if re.search(r"\d[\d\s.,]{2,}", m) and len(m.split()) <= 12:
+        return True
+    if re.search(r"\b(for\s+)?(client|klient)\b", m):
+        return True
+    return False
+
+
+def _is_dossier_smalltalk(message: Optional[str]) -> bool:
+    """Greetings / thanks / unrelated short chat while a dossier prompt is open."""
+    if not message:
+        return False
+    m = re.sub(r"\s+", " ", message.strip().lower())
+    if not m:
+        return False
+    if _is_dossier_flow_continuation(m):
+        return False
+    if re.match(
+        r"^(hi|hello|hey|thanks|thank you|thx|ok|okay|cool|great|hi there|"
+        r"dzień dobry|czesc|cześć|dzięki|dziekuje|dziękuję)[\s!.?]*$",
+        m,
+    ):
+        return True
+    # Short unrelated questions without dossier signals
+    if len(m) < 80 and not any(
+        w in m for w in ("dossier", "portfolio", "offer", "client", "budget", "template")
+    ):
+        if m.endswith("?") or m.split()[0] in ("what", "who", "how", "when", "where", "why"):
+            return True
+    return False
+
+
 def refuse_secret_or_prompt_reveal(message: Optional[str]) -> bool:
     """True when staff asks to print/reveal API keys, secrets, or configuration."""
     if not message:
@@ -1458,7 +1518,9 @@ def process_admin_chat(
 
     # Guard: refuse API key / config / system prompt reveal (C1)
     if refuse_secret_or_prompt_reveal(clean_message):
-        refuse_sec = "I can't share keys or configuration."
+        refuse_sec = (
+            "I cannot share keys, passwords, tokens, DATABASE_URL, or the system prompt."
+        )
         refuse_sec = redact_admin_sensitive_output(refuse_sec)
         append_conversation_turn(db, conv, clean_message, refuse_sec)
         return {
@@ -2085,7 +2147,13 @@ def process_admin_chat(
     is_portfolio_followup_waiting = (
         ("1. **Client Name**" in last_assistant_turn or "1. **Imię i nazwisko klienta**" in last_assistant_turn) or
         ("Templates 1 to 7" in last_assistant_turn or "Warianty 1-7" in last_assistant_turn) or
-        ("fetch them from the database & make everything myself" in last_assistant_turn or "pobrać je z bazy danych i dobrać resztę" in last_assistant_turn)
+        ("fetch them from the database & make everything myself" in last_assistant_turn or "pobrać je z bazy danych i dobrać resztę" in last_assistant_turn) or
+        ("still need client details before I generate that offer dossier" in last_assistant_turn)
+    )
+    # Small talk must not keep the dossier prompt looping — only name/budget /
+    # "assume the rest" / "cancel" continue or end that flow.
+    block_fast_for_dossier = (
+        is_portfolio_followup_waiting and _is_dossier_flow_continuation(clean_message)
     )
     draft_reminder = ""
     if open_pending and not has_confirm_intent and not has_reject_intent:
@@ -2114,7 +2182,7 @@ def process_admin_chat(
             "language": active_lang,
         }, timer)
 
-    if not is_undo_request(clean_message) and not is_portfolio_followup_waiting:
+    if not is_undo_request(clean_message) and not block_fast_for_dossier:
         fast_res = try_admin_fast_path(
             db, conv, clean_message, staff_user,
             language=active_lang,
@@ -4018,14 +4086,23 @@ def _run_deterministic_admin(
                 "language": lang_val
             }
             if not is_explicit_answer and not supplied_details:
-                response_text = (
-                    "I still need client details before I generate that offer dossier. "
-                    "Send the client name and budget, or say 'assume the rest' to continue with defaults. "
-                    "I have not generated it.\n\n"
-                    "1. **Client Name** is still missing. "
-                    "You can also say 'fetch them from the database & make everything myself'."
-                )
-                t_res = None
+                # Hello / thanks / unrelated chat: do not re-prompt dossier details.
+                if _is_dossier_smalltalk(message):
+                    return None
+                if re.search(r"\b(cancel|never\s*mind|abort)\b", msg_lower):
+                    response_text = (
+                        "Cancelled. I will not generate that offer dossier."
+                    )
+                    t_res = None
+                else:
+                    response_text = (
+                        "I still need client details before I generate that offer dossier. "
+                        "Send the client name and budget, or say 'assume the rest' to continue with defaults. "
+                        "I have not generated it.\n\n"
+                        "1. **Client Name** is still missing. "
+                        "You can also say 'fetch them from the database & make everything myself'."
+                    )
+                    t_res = None
             else:
                 t_res, _, _ = _execute_admin_tool(db, "generate_client_offer_dossier", offer_args, staff_user, str(conv.id))
                 tool_calls.append({"name": "generate_client_offer_dossier", "args": offer_args})

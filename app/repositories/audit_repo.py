@@ -17,6 +17,7 @@ from app.repositories import _fs_utils as fs
 from app.repositories.store_mode import (
     reads_firestore_first,
     reads_postgres,
+    require_firestore_client,
     store_mode,
     writes_firestore,
     writes_postgres,
@@ -123,8 +124,8 @@ def create(
 
     if writes_firestore(mode):
         client = fs.admin_fs_client()
-        if client is None and mode == "firestore":
-            raise RuntimeError("Firestore client unavailable for audit_logs")
+        if mode == "firestore":
+            client = require_firestore_client(client, store_name="audit_logs")
         if client is not None:
             try:
                 fs.set_document(client, COLLECTION, record.id, record.to_firestore_dict())

@@ -155,6 +155,28 @@ def store():
     reset_instruction_store_for_tests(None)
 
 
+def test_create_contradicting_rule_returns_conflict_report(store):
+    first = store.create(
+        _payload(rule="Always include the property price in replies."),
+        "super@tajlandia.com",
+    )
+    activated = store.activate(first["id"], "super@tajlandia.com")
+    assert activated["status"] == "active"
+
+    opposing = store.create(
+        _payload(
+            rule="Never include the property price in replies.",
+            status="active",
+        ),
+        "super@tajlandia.com",
+    )
+    assert opposing["status"] == "needs_clarification"
+    assert opposing.get("conflict_report")
+    assert first["id"] in opposing["conflict_report"]["against"]
+    assert store.get(opposing["id"])["status"] == "needs_clarification"
+    assert store.get(first["id"])["status"] == "active"
+
+
 def test_round_trip_writes_a_version_every_change(store):
     created = store.create(_payload(), "super@tajlandia.com")
     assert created["id"] == "INS-0001"
@@ -191,18 +213,18 @@ def test_ids_are_unique_under_concurrent_transactions(store):
     assert ids[0].startswith("INS-")
 
 
-def test_remark_stores_no_chat_text_or_pii(store):
-    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
-    Conversation.__table__.create(bind=engine, checkfirst=True)
-    session = sessionmaker(bind=engine)()
-    conv_uuid = uuid.uuid4()
-    conv_id = str(conv_uuid)
-    session.add(Conversation(
-        id=conv_uuid,
-        session_id="s1",
-        message_history=[{"role": "user", "content": "I am Ada ada@example.com, call +66 81 234 5678"}],
-    ))
-    session.commit()
+def test_remark_stores_no_chat_text_or_pii(store, monkeypatch):
+    conv_id = "conv-remark-1"
+    store._client.docs[("conversations", conv_id)] = {
+        "sessionId": "s1",
+        "messageHistory": [
+            {"role": "user", "content": "I am Ada ada@example.com, call +66 81 234 5678"},
+        ],
+    }
+    monkeypatch.setattr(
+        "app.services.firestore_service.get_firestore_client",
+        lambda target="admin", *a, **k: store._client,
+    )
     remark = store.add_remark({
         "conversation_id": conv_id,
         "message_index": 0,
@@ -215,7 +237,7 @@ def test_remark_stores_no_chat_text_or_pii(store):
     assert "I am Ada" not in stored
     assert "+66" not in stored
     from app.services.instruction_store import lookup_chat_excerpt
-    excerpt = lookup_chat_excerpt(session, conv_id, 0)
+    excerpt = lookup_chat_excerpt(None, conv_id, 0)
     assert "ada@example.com" in excerpt["content"]
     with pytest.raises(InstructionStoreError):
         store.add_remark({

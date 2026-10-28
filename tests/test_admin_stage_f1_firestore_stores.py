@@ -38,6 +38,7 @@ from app.services.action_service import (
     get_pending_action,
     reject_pending_action,
 )
+from tests.fake_firestore import FakeFirestore, patch_firestore, set_store_modes
 
 
 @compiles(JSONB, "sqlite")
@@ -210,20 +211,7 @@ def db():
 
 @pytest.fixture
 def fake_fs(monkeypatch):
-    fake = FakeFirestore()
-    monkeypatch.setattr(
-        "app.services.firestore_service.get_admin_firestore_client",
-        lambda: fake,
-    )
-    monkeypatch.setattr(
-        "app.services.firestore_service.get_user_firestore_client",
-        lambda: fake,
-    )
-    monkeypatch.setattr(
-        "app.services.firestore_service.get_firestore_client",
-        lambda target="user", *a, **k: fake,
-    )
-    return fake
+    return patch_firestore(monkeypatch)
 
 
 @pytest.fixture
@@ -239,10 +227,7 @@ def staff():
 
 
 def _modes(monkeypatch, pending="both", audit="both", leads="both"):
-    monkeypatch.setattr("app.core.config.settings.STORE_PENDING_ACTIONS", pending)
-    monkeypatch.setattr("app.core.config.settings.STORE_AUDIT", audit)
-    monkeypatch.setattr("app.core.config.settings.STORE_LEADS_READ", leads)
-    monkeypatch.setattr("app.core.config.settings.ENABLE_AUDIT_LOGGING", True)
+    set_store_modes(monkeypatch, pending=pending, audit=audit, leads=leads)
 
 
 # ----- pending create / confirm / reject / double-confirm / expiry -----

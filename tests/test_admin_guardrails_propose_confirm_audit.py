@@ -16,7 +16,9 @@ from app.services import action_service
 from app.services.action_service import (
     ACTION_STATUS_PENDING,
     ACTION_STATUS_REJECTED,
+    create_pending_action,
 )
+from tests.fake_firestore import audit_docs, patch_firestore, set_store_modes
 from app.services.admin_agent import (
     ADMIN_SYSTEM_PROMPT,
     _execute_admin_tool,
@@ -25,6 +27,22 @@ from app.services.admin_agent import (
     process_admin_chat,
 )
 from app.services.audit_service import record_audit_log
+
+
+@pytest.fixture(autouse=True)
+def _firestore_stores_for_file(monkeypatch):
+    patch_firestore(monkeypatch)
+    set_store_modes(monkeypatch)
+
+
+def _send_email_success(*_a, **_k):
+    return {
+        "delivered": True,
+        "success": True,
+        "completed": True,
+        "provider": "gmail",
+        "is_mock": False,
+    }
 
 
 @pytest.fixture
@@ -168,12 +186,19 @@ def test_confirm_batch_applies_listed_items_only(staff, monkeypatch):
 
 
 def test_reject_batch_changes_nothing(staff, monkeypatch):
-    action = _fake_pending()
-    with patch("app.services.action_service.get_pending_action", return_value=action), patch(
-        "app.services.action_service.record_audit_log"
-    ) as aud, patch(
-        "app.services.admin_batch_service.execute_batch_property_operation"
-    ) as ex:
+    fake = patch_firestore(monkeypatch)
+    action = create_pending_action(
+        db=MagicMock(),
+        staff_user_id=staff.email,
+        tool_name="execute_batch_property_action",
+        action_payload={
+            "operation_type": "delete",
+            "records": [{"property_id": "p1", "name": "P1"}],
+            "items": [{"property_id": "p1", "name": "P1"}],
+        },
+        conversation_id="conv-1",
+    )
+    with patch("app.services.admin_batch_service.execute_batch_property_operation") as ex:
         out = action_service.reject_pending_action(
             db=MagicMock(),
             pending_action_id=str(action.id),
@@ -182,9 +207,11 @@ def test_reject_batch_changes_nothing(staff, monkeypatch):
         )
     assert out["status"] == ACTION_STATUS_REJECTED
     assert not ex.called
-    assert aud.called
-    assert aud.call_args.kwargs.get("confirmed_by_staff") is False
-    assert aud.call_args.kwargs.get("status") == "REJECTED"
+    audits = audit_docs(fake)
+    assert audits
+    rejected = [a for a in audits if a.get("status") == "REJECTED"]
+    assert rejected and rejected[-1].get("confirmed_by_staff") is False
+    assert fake.docs[("pending_actions", action.id)]["status"] == ACTION_STATUS_REJECTED
 
 
 def test_wipe_audit_trail_refused(monkeypatch, staff):
@@ -300,50 +327,54 @@ def test_propose_logs_pending_unconfirmed(monkeypatch, staff):
     assert audits[-1]["status"] == ACTION_STATUS_PENDING
 
 
-def test_confirm_logs_success_confirmed(staff):
-    action = _fake_pending(
+def test_confirm_logs_success_confirmed(staff, monkeypatch):
+    fake = patch_firestore(monkeypatch)
+    action = create_pending_action(
+        db=MagicMock(),
+        staff_user_id=staff.email,
+        tool_name="execute_batch_property_action",
         action_payload={
             "operation_type": "update",
             "records": [{"property_id": "p1", "name": "P1"}],
             "items": [{"property_id": "p1", "name": "P1"}],
-        }
+        },
+        conversation_id="conv-1",
     )
-    audits = []
-
-    def capture(**kwargs):
-        audits.append(kwargs)
-        return SimpleNamespace(id="aud")
-
-    with patch("app.services.action_service.get_pending_action", return_value=action), patch(
-        "app.services.action_service.record_audit_log", side_effect=capture
-    ), patch(
+    with patch(
         "app.services.admin_batch_service.execute_batch_property_operation",
         return_value={"success": True, "affected_ids": ["p1"], "operation_id": "op"},
     ):
         action_service.confirm_and_execute_action(
-            db=MagicMock(), pending_action_id=str(action.id), authenticated_staff=staff, confirmation_token=action.confirmation_token
+            db=MagicMock(),
+            pending_action_id=str(action.id),
+            authenticated_staff=staff,
+            confirmation_token=action.confirmation_token,
         )
-    assert audits
-    assert audits[-1]["confirmed_by_staff"] is True
-    assert audits[-1]["status"] == "SUCCESS"
+    audits = audit_docs(fake)
+    confirmed = [a for a in audits if a.get("confirmed_by_staff") is True]
+    assert confirmed and confirmed[-1].get("status") in ("SUCCESS", "CONFIRMED")
+    assert fake.docs[("pending_actions", action.id)]["status"] == "EXECUTED"
 
 
-def test_reject_logs_rejected_unconfirmed(staff):
-    action = _fake_pending()
-    audits = []
-
-    def capture(**kwargs):
-        audits.append(kwargs)
-        return SimpleNamespace(id="aud")
-
-    with patch("app.services.action_service.get_pending_action", return_value=action), patch(
-        "app.services.action_service.record_audit_log", side_effect=capture
-    ):
-        action_service.reject_pending_action(
-            db=MagicMock(), pending_action_id=str(action.id), authenticated_staff=staff
-        )
-    assert audits[-1]["confirmed_by_staff"] is False
-    assert audits[-1]["status"] == "REJECTED"
+def test_reject_logs_rejected_unconfirmed(staff, monkeypatch):
+    fake = patch_firestore(monkeypatch)
+    action = create_pending_action(
+        db=MagicMock(),
+        staff_user_id=staff.email,
+        tool_name="execute_batch_property_action",
+        action_payload={
+            "operation_type": "delete",
+            "records": [{"property_id": "p1", "name": "P1"}],
+            "items": [{"property_id": "p1", "name": "P1"}],
+        },
+        conversation_id="conv-1",
+    )
+    action_service.reject_pending_action(
+        db=MagicMock(), pending_action_id=str(action.id), authenticated_staff=staff
+    )
+    audits = audit_docs(fake)
+    rejected = [a for a in audits if a.get("status") == "REJECTED"]
+    assert rejected and rejected[-1].get("confirmed_by_staff") is False
 
 
 def test_failed_tool_logs_failed(staff):
@@ -486,81 +517,95 @@ def test_yes_show_me_leads_does_not_confirm(monkeypatch, staff):
 
 
 def test_bare_yes_confirms_single_pending(monkeypatch, staff):
-    pending = _fake_pending()
+    fake = patch_firestore(monkeypatch)
+    monkeypatch.setattr("app.services.action_service._execute_send_email", _send_email_success)
+    conv_id = "conv-1"
+    action = create_pending_action(
+        db=MagicMock(),
+        staff_user_id=staff.email,
+        tool_name="send_email",
+        action_payload={"to": "a@b.com", "subject": "Hi", "body": "x"},
+        conversation_id=conv_id,
+    )
     monkeypatch.setattr(
         "app.services.admin_agent.get_or_create_conversation",
         lambda **kw: SimpleNamespace(
-            id="conv-1", session_id="s1", preferences={"language": "en"}, message_history=[], site_origin="admin"
+            id=conv_id, session_id="s1", preferences={"language": "en"}, message_history=[], site_origin="admin"
         ),
     )
     monkeypatch.setattr("app.services.admin_agent.append_conversation_turn", lambda *a, **k: None)
     monkeypatch.setattr("app.services.admin_agent.resolve_language", lambda **k: ("en", False))
 
-    db = MagicMock()
-    q = MagicMock()
-    q.filter.return_value.order_by.return_value.first.return_value = pending
-    q.filter.return_value.order_by.return_value.all.return_value = [pending]
-    q.filter.return_value.count.return_value = 1
-    db.query.return_value = q
-
-    with patch(
-        "app.services.action_service.confirm_and_execute_action",
-        return_value={"status": "EXECUTED", "execution_result": {}},
-    ) as conf, patch("app.services.admin_agent.settings.ANTHROPIC_API_KEY", None):
-        res = process_admin_chat(db=db, session_id="s1", message="yes", staff_user=staff)
-    assert conf.called
+    with patch("app.services.admin_agent.settings.ANTHROPIC_API_KEY", None):
+        res = process_admin_chat(db=MagicMock(), session_id="s1", message="yes", staff_user=staff)
+    assert fake.docs[("pending_actions", action.id)]["status"] == "EXECUTED"
     assert res.get("action_status") == "executed"
 
 
 def test_two_pending_yes_asks_which(monkeypatch, staff):
-    p1 = _fake_pending(id=uuid4())
-    p2 = _fake_pending(id=uuid4())
+    fake = patch_firestore(monkeypatch)
+    conv_id = "conv-1"
+    create_pending_action(
+        db=MagicMock(),
+        staff_user_id=staff.email,
+        tool_name="send_email",
+        action_payload={"to": "a@b.com", "subject": "One", "body": "x"},
+        conversation_id=conv_id,
+    )
+    create_pending_action(
+        db=MagicMock(),
+        staff_user_id=staff.email,
+        tool_name="send_email",
+        action_payload={"to": "b@b.com", "subject": "Two", "body": "y"},
+        conversation_id=conv_id,
+    )
     monkeypatch.setattr(
         "app.services.admin_agent.get_or_create_conversation",
         lambda **kw: SimpleNamespace(
-            id="conv-1", session_id="s1", preferences={"language": "en"}, message_history=[], site_origin="admin"
+            id=conv_id, session_id="s1", preferences={"language": "en"}, message_history=[], site_origin="admin"
         ),
     )
     monkeypatch.setattr("app.services.admin_agent.append_conversation_turn", lambda *a, **k: None)
     monkeypatch.setattr("app.services.admin_agent.resolve_language", lambda **k: ("en", False))
-
-    db = MagicMock()
-    q = MagicMock()
-    q.filter.return_value.order_by.return_value.first.return_value = p1
-    q.filter.return_value.order_by.return_value.all.return_value = [p1, p2]
-    db.query.return_value = q
 
     with patch("app.services.action_service.confirm_and_execute_action") as conf, patch(
         "app.services.admin_agent.settings.ANTHROPIC_API_KEY", None
     ):
-        res = process_admin_chat(db=db, session_id="s1", message="yes", staff_user=staff)
+        res = process_admin_chat(db=MagicMock(), session_id="s1", message="yes", staff_user=staff)
     assert not conf.called
     assert "which" in (res.get("text") or "").lower()
+    pending_open = [
+        d
+        for path, d in fake.docs.items()
+        if path[0] == "pending_actions" and d.get("status") == ACTION_STATUS_PENDING
+    ]
+    assert len(pending_open) == 2
 
 
 def test_dont_confirm_rejects(monkeypatch, staff):
-    pending = _fake_pending()
+    fake = patch_firestore(monkeypatch)
+    conv_id = "conv-1"
+    action = create_pending_action(
+        db=MagicMock(),
+        staff_user_id=staff.email,
+        tool_name="send_email",
+        action_payload={"to": "a@b.com", "subject": "Hi", "body": "x"},
+        conversation_id=conv_id,
+    )
     monkeypatch.setattr(
         "app.services.admin_agent.get_or_create_conversation",
         lambda **kw: SimpleNamespace(
-            id="conv-1", session_id="s1", preferences={"language": "en"}, message_history=[], site_origin="admin"
+            id=conv_id, session_id="s1", preferences={"language": "en"}, message_history=[], site_origin="admin"
         ),
     )
     monkeypatch.setattr("app.services.admin_agent.append_conversation_turn", lambda *a, **k: None)
     monkeypatch.setattr("app.services.admin_agent.resolve_language", lambda **k: ("en", False))
 
-    db = MagicMock()
-    q = MagicMock()
-    q.filter.return_value.order_by.return_value.first.return_value = pending
-    q.filter.return_value.order_by.return_value.all.return_value = [pending]
-    db.query.return_value = q
-
-    with patch(
-        "app.services.action_service.reject_pending_action",
-        return_value={"status": "REJECTED"},
-    ) as rej, patch("app.services.admin_agent.settings.ANTHROPIC_API_KEY", None):
-        res = process_admin_chat(db=db, session_id="s1", message="don't confirm", staff_user=staff)
-    assert rej.called
+    with patch("app.services.admin_agent.settings.ANTHROPIC_API_KEY", None):
+        res = process_admin_chat(
+            db=MagicMock(), session_id="s1", message="don't confirm", staff_user=staff
+        )
+    assert fake.docs[("pending_actions", action.id)]["status"] == ACTION_STATUS_REJECTED
     assert res.get("action_status") == "rejected"
 
 

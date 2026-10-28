@@ -289,7 +289,9 @@ def test_secret_and_config_refusal_fixed_text(monkeypatch, message):
         message=message,
         staff_user=_staff(),
     )
-    assert res["text"] == "I can't share keys or configuration."
+    assert res["text"] == (
+        "I cannot share keys, passwords, tokens, DATABASE_URL, or the system prompt."
+    )
     assert "As the Tajlandia" not in (res.get("text") or "")
     assert "specialize" not in (res.get("text") or "").lower()
 

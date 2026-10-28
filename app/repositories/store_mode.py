@@ -3,25 +3,37 @@
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
 VALID_STORE_MODES = frozenset({"postgres", "firestore", "both"})
 
 
-def normalize_store_mode(value: Optional[str], default: str = "both") -> str:
-    mode = (value or default or "both").strip().lower()
+def normalize_store_mode(value: Optional[str], default: str = "firestore") -> str:
+    mode = (value or default or "firestore").strip().lower()
     if mode not in VALID_STORE_MODES:
         logger.warning("Unknown store mode %r — using %s", value, default)
         return default
     return mode
 
 
-def store_mode(setting_name: str, default: str = "both") -> str:
+def store_mode(setting_name: str, default: str = "firestore") -> str:
     from app.core.config import settings
 
     return normalize_store_mode(getattr(settings, setting_name, None), default=default)
+
+
+def require_firestore_client(client: Any, *, store_name: str) -> Any:
+    """When STORE mode is firestore-only, missing client is a hard error (no SQL fallback)."""
+    if client is not None:
+        return client
+    msg = (
+        f"Firestore client unavailable for {store_name} "
+        f"(STORE mode is 'firestore'; no silent SQL fallback)."
+    )
+    logger.error(msg)
+    raise RuntimeError(msg)
 
 
 def writes_postgres(mode: str) -> bool:

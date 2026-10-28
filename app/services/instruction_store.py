@@ -476,6 +476,18 @@ class FirestoreInstructionStore:
         doc = self._instruction_from(payload, actor, existing=None)
         doc["id"] = self._allocate("INS")
         doc["version"] = 1
+        # Never silently activate a contradicting rule — return a conflict report.
+        want_active = str(payload.get("status") or "").strip().lower() == "active"
+        conflict = self._conflict_with(doc)
+        if conflict:
+            doc["status"] = "needs_clarification"
+            doc["conflict_report"] = conflict
+            doc["activated_by"] = None
+            doc["activated_at"] = None
+        elif want_active:
+            # Activation still goes through activate() for safety review; keep draft.
+            doc["status"] = "draft"
+            doc["conflict_report"] = None
 
         def apply(batch):
             self._save_instruction(batch, doc)
@@ -997,22 +1009,65 @@ def instruction_config_status() -> Dict[str, Any]:
     }
 
 
+def _messages_from_log_docs(docs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Build chronological messageHistory-shaped turns from chat log rows."""
+    docs = sorted(
+        docs,
+        key=lambda d: str(d.get("created_at") or d.get("createdAt") or d.get("timestamp") or ""),
+    )
+    out: List[Dict[str, Any]] = []
+    for d in docs:
+        user_text = d.get("user_message") or d.get("message") or d.get("query") or d.get("userMessage")
+        asst_text = d.get("assistant_message") or d.get("reply") or d.get("response") or d.get("assistantMessage")
+        if user_text:
+            out.append({"role": "user", "content": str(user_text)})
+        if asst_text:
+            out.append({"role": "assistant", "content": str(asst_text)})
+    return out
+
+
 def _load_firestore_conversation(conversation_id: str) -> Optional[Dict[str, Any]]:
-    """Load a conversations/{id} document from admin Firestore. Never scans SQL."""
+    """
+    Load conversation turns from Firestore.
+    Prefer conversations/{id}; fall back to admin_chat_logs / chat_query_logs.
+    Never scans SQL.
+    """
     from app.services.firestore_service import get_firestore_client
 
     client = get_firestore_client(target="admin")
     if client is None or not conversation_id:
         return None
+    cid = str(conversation_id)
     try:
-        snap = client.collection("conversations").document(str(conversation_id)).get()
-        if not getattr(snap, "exists", False):
-            return None
-        data = snap.to_dict() or {}
-        data["id"] = snap.id
-        return data
+        snap = client.collection("conversations").document(cid).get()
+        if getattr(snap, "exists", False):
+            data = snap.to_dict() or {}
+            data["id"] = snap.id
+            if data.get("messageHistory") or data.get("message_history"):
+                return data
     except Exception:
-        return None
+        pass
+
+    # Fall back to chat log collections (STORE mode firestore / dual-write logs)
+    for collection in ("admin_chat_logs", "chat_query_logs"):
+        try:
+            docs = []
+            for field in ("conversation_id", "conversationId", "session_id", "sessionId"):
+                try:
+                    query = client.collection(collection).where(field, "==", cid)
+                    docs = [dict(s.to_dict() or {}, id=getattr(s, "id", None)) for s in query.stream()]
+                except Exception:
+                    docs = []
+                if docs:
+                    break
+            if not docs:
+                continue
+            messages = _messages_from_log_docs(docs)
+            if messages:
+                return {"id": cid, "messageHistory": messages, "source_collection": collection}
+        except Exception:
+            continue
+    return None
 
 
 def lookup_chat_excerpt(db: Any, conversation_id: Optional[str], message_index: int) -> Optional[Dict[str, Any]]:
@@ -1032,7 +1087,7 @@ def lookup_chat_excerpt(db: Any, conversation_id: Optional[str], message_index: 
 
 
 def review_conversation(db: Any, conversation_id: str) -> Dict[str, Any]:
-    """Read-only view of Firestore Conversation + pending_actions + audit_logs."""
+    """Read-only view of Firestore conversation (or chat logs) + pending + audit."""
     from app.repositories import audit_repo, pending_actions_repo
 
     data = _load_firestore_conversation(str(conversation_id))
@@ -1054,4 +1109,5 @@ def review_conversation(db: Any, conversation_id: str) -> Dict[str, Any]:
         "messages": list(data.get("messageHistory") or data.get("message_history") or []),
         "pending_actions": pending,
         "audit_logs": audits,
+        "source": data.get("source_collection") or "conversations",
     }

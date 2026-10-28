@@ -34,8 +34,12 @@ _REFUSALS = (
         "I will not skip or auto-approve confirmations. Nothing was changed.",
     ),
     (
-        re.compile(r"\b(api key|password|system prompt|secret token|reveal the key)\b", re.I),
-        "I cannot reveal keys, passwords, tokens, or the system prompt.",
+        re.compile(
+            r"\b(api\s*keys?|password|system\s+prompt|secret\s+token|reveal\s+the\s+key|"
+            r"database_url|db_url|credentials?)\b",
+            re.I,
+        ),
+        "I cannot share keys, passwords, tokens, DATABASE_URL, or the system prompt.",
     ),
     (
         re.compile(r"(export|download).{0,40}(personal data|customer data|all leads).{0,40}(public|internet)", re.I),
@@ -211,29 +215,63 @@ def _listed_ids(conv: Any) -> List[str]:
 
 
 def _undo_last(db: Any, conv: Any, staff: Any) -> Dict[str, Any]:
-    from app.repositories import pending_actions_repo
+    from app.repositories import audit_repo, pending_actions_repo
 
+    cid = str(getattr(conv, "id", "") or "")
     try:
         rows = [
-            r for r in pending_actions_repo.list_by_conversation(
-                db, str(getattr(conv, "id", "") or ""), limit=20
-            )
+            r for r in pending_actions_repo.list_by_conversation(db, cid, limit=50)
             if getattr(r, "status", None) == "EXECUTED"
         ]
     except Exception:
         rows = []
-    if not isinstance(rows, list) or not rows:
-        return _text(conv, "There is no confirmed change in this conversation to undo.")
-    rows.sort(key=lambda row: str(getattr(row, "executed_at", None) or getattr(row, "created_at", "") or ""), reverse=True)
-    action = rows[0]
-    payload = action.action_payload or {}
-    fields = payload.get("fields_to_update") or payload.get("fields") or {}
-    from app.services.admin_chat_quality import humanise_field_list
-    label = humanise_field_list(list(fields)[:4]) or action.tool_name
-    result = action.execution_result or {}
-    operation_id = result.get("operation_id") if isinstance(result, dict) else None
+    label = "last change"
+    operation_id = None
+    if isinstance(rows, list) and rows:
+        rows.sort(
+            key=lambda row: str(
+                getattr(row, "executed_at", None) or getattr(row, "created_at", "") or ""
+            ),
+            reverse=True,
+        )
+        action = rows[0]
+        payload = action.action_payload or {}
+        fields = payload.get("fields_to_update") or payload.get("fields") or {}
+        from app.services.admin_chat_quality import humanise_field_list
+        label = humanise_field_list(list(fields)[:4]) or action.tool_name
+        result = action.execution_result or {}
+        if isinstance(result, dict):
+            operation_id = result.get("operation_id")
+        if not operation_id and isinstance(payload, dict):
+            operation_id = payload.get("operation_id")
+
+    # Fallback: latest successful audit in this conversation with an operation_id
     if not operation_id:
-        return _text(conv, f"The last confirmed change ({label}) has no undo snapshot. Nothing was restored.")
+        try:
+            audits = audit_repo.list_by_conversation(db, cid, limit=50)
+            for row in audits:
+                status = str(getattr(row, "status", "") or "").upper()
+                if status not in {"SUCCESS", "EXECUTED", "CONFIRMED"}:
+                    continue
+                payload = getattr(row, "proposed_payload", None) or {}
+                args = getattr(row, "tool_arguments", None) or {}
+                if isinstance(args, dict) and args.get("operation_id"):
+                    operation_id = args.get("operation_id")
+                elif isinstance(payload, dict) and payload.get("operation_id"):
+                    operation_id = payload.get("operation_id")
+                if operation_id:
+                    label = getattr(row, "tool_name", None) or label
+                    break
+        except Exception:
+            pass
+
+    if not operation_id:
+        if not rows:
+            return _text(conv, "There is no confirmed change in this conversation to undo.")
+        return _text(
+            conv,
+            f"The last confirmed change ({label}) has no undo snapshot. Nothing was restored.",
+        )
     from app.services.admin_agent import _execute_admin_tool
 
     undo_res, _, _ = _execute_admin_tool(
@@ -241,10 +279,13 @@ def _undo_last(db: Any, conv: Any, staff: Any) -> Dict[str, Any]:
         "undo_batch_property_operation",
         {"operation_id": operation_id},
         staff,
-        str(getattr(conv, "id", "") or ""),
+        cid,
     )
     if isinstance(undo_res, dict) and undo_res.get("success") is False:
-        return _text(conv, f"I found the last change ({label}) but could not restore it: {undo_res.get('error')}")
+        return _text(
+            conv,
+            f"I found the last change ({label}) but could not restore it: {undo_res.get('error')}",
+        )
     return _text(conv, f"Undone. The last change ({label}) was restored in both databases.")
 
 

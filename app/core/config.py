@@ -155,9 +155,10 @@ class Settings(BaseSettings):
 
     # Stage F1 dual-store modes: "postgres" | "firestore" | "both"
     # both = write both stores; read Firestore first (leads: fall back to SQL if empty)
-    STORE_PENDING_ACTIONS: str = "both"
-    STORE_AUDIT: str = "both"
-    STORE_LEADS_READ: str = "both"
+    # Stage F1: Firestore is the default store. Use "postgres" or "both" only as temporary overrides.
+    STORE_PENDING_ACTIONS: str = "firestore"
+    STORE_AUDIT: str = "firestore"
+    STORE_LEADS_READ: str = "firestore"
 
     # Action Confirmation & Security
     ACTION_EXPIRATION_MINUTES: int = 30

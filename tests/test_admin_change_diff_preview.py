@@ -29,6 +29,8 @@ from app.services.admin_change_diff import (
 )
 from app.services.admin_property_fields import UNREADABLE, expand_proposed_fields, parse_price_amount
 from app.services.admin_agent import is_strict_confirm_message, process_admin_chat
+from app.services.action_service import create_pending_action
+from tests.fake_firestore import patch_firestore, set_store_modes
 
 
 @pytest.fixture
@@ -284,7 +286,12 @@ def test_confirm_applies_only_previewed_fields(staff):
 
 
 def test_chat_delete_requires_count_ack(staff, monkeypatch):
-    action = _pending(
+    patch_firestore(monkeypatch)
+    set_store_modes(monkeypatch)
+    conv_id = "c1"
+    action = create_pending_action(
+        db=MagicMock(),
+        staff_user_id=staff.email,
         tool_name="execute_batch_property_action",
         action_payload={
             "operation_type": "delete",
@@ -298,17 +305,13 @@ def test_chat_delete_requires_count_ack(staff, monkeypatch):
                 "items": [{"property_id": "a"}, {"property_id": "b"}, {"property_id": "c"}],
             },
         },
+        conversation_id=conv_id,
     )
-    db = MagicMock()
-    # open pending query returns our action
-    q = MagicMock()
-    q.filter.return_value.order_by.return_value.all.return_value = [action]
-    db.query.return_value = q
 
     monkeypatch.setattr(
         "app.services.admin_agent.get_or_create_conversation",
         lambda **kw: SimpleNamespace(
-            id="c1",
+            id=conv_id,
             session_id="s1",
             preferences={"language": "en"},
             message_history=[],
@@ -318,35 +321,35 @@ def test_chat_delete_requires_count_ack(staff, monkeypatch):
     monkeypatch.setattr("app.services.admin_agent.append_conversation_turn", lambda *a, **k: None)
     monkeypatch.setattr("app.services.admin_agent.resolve_language", lambda **k: ("en", False))
 
-    with patch("app.services.action_service.confirm_and_execute_action") as conf:
+    with patch("app.services.admin_batch_service.execute_batch_property_operation") as batch_exec:
         res = process_admin_chat(
-            db=db,
+            db=MagicMock(),
             session_id="s1",
             message="yes",
             staff_user=staff,
             site_origin="admin",
         )
-    assert not conf.called
+    assert not batch_exec.called
     assert "3" in (res.get("text") or "")
     assert res.get("action_status") == "pending"
 
     with patch(
-        "app.services.action_service.confirm_and_execute_action",
+        "app.services.admin_batch_service.execute_batch_property_operation",
         return_value={
-            "status": "EXECUTED",
-            "execution_result": {"operation_id": "batch_del1"},
-            "audit_log_id": "a1",
+            "success": True,
             "operation_id": "batch_del1",
+            "affected_ids": ["a", "b", "c"],
+            "affected_count": 3,
         },
-    ) as conf2:
+    ) as batch_exec2:
         res2 = process_admin_chat(
-            db=db,
+            db=MagicMock(),
             session_id="s1",
             message="yes 3",
             staff_user=staff,
             site_origin="admin",
         )
-    assert conf2.called
+    assert batch_exec2.called
     assert res2.get("action_status") == "executed"
     assert "undo" in (res2.get("text") or "").lower()
     assert res2.get("operation_id") == "batch_del1"

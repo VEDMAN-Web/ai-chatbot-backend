@@ -15,6 +15,7 @@ from app.repositories import _fs_utils as fs
 from app.repositories.store_mode import (
     reads_firestore_first,
     reads_postgres,
+    require_firestore_client,
     store_mode,
     writes_firestore,
     writes_postgres,
@@ -65,7 +66,10 @@ def _mode() -> str:
 
 def _leads_client():
     # Leads live on the user/public project (shared contract with public bot)
-    return fs.user_fs_client() or fs.admin_fs_client()
+    client = fs.user_fs_client() or fs.admin_fs_client()
+    if _mode() == "firestore":
+        return require_firestore_client(client, store_name="leads")
+    return client
 
 
 def query_leads(
