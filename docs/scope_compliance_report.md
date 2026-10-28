@@ -13,7 +13,7 @@ a live service or a decision.
 | Run | Passed | Failed | Skipped |
 |---|---|---|---|
 | Baseline, committed code, fresh DB (`tests`, minus the two live-Firestore files CI also ignores) | 1150 | 4 | 0 |
-| After this work, fresh DB, same command (+171 new tests: 105 + 3 + 14 + 48 + 1) | 1321 | 4 | 0 |
+| After this work, fresh DB, same command (+257 new tests) | 1407 | 4 | 0 |
 
 The 4 failures are identical before and after, all in `tests/test_admin_auth_and_audit_apis.py`
 (`forgot_password`, `admin_register`, `activity_logs`, `data_history`). They log in with `settings.ADMIN_PASSWORD` and an
@@ -121,8 +121,50 @@ Verified working: create/read/update/delete per selected website, one and two we
 read-only, no token 401, validation 422 stores nothing, delete = archive and repeatable, cross-website get/update/delete
 refused, propose waits for a yes, reject writes nothing, confirm twice writes once, only the proposer can confirm.
 
-Not covered: Firestore-backed listings (Firestore off in these tests; the Firestore-only scope check is code-reviewed, not
+Not covered: your staging Firestore (no credentials were available here), Firestore-backed listings (Firestore off in these tests; the Firestore-only scope check is code-reviewed, not
 tested here), and the language model choosing the tool (the tests call the tool the model would call).
+
+## Google Workspace and Drive (`tests/test_google_workspace_per_account.py`, 19 tests; `tests/test_admin_workspace_status_chat.py`, 28)
+
+Google is faked (no network), so these show which credentials the backend hands to Google, not that a real consent works.
+* **Fixed:** a staff member who had not connected Google (or whose token refresh failed) silently used the shared
+  `google_token.json` / `service_account.json`, i.e. someone else's Drive. Each staff member now acts only through their own
+  account; the shared one needs `GOOGLE_SHARED_CREDENTIAL_FALLBACK=true`.
+* Verified: super admin, admin and worker each read Drive with their own token; accounts are never mixed; an unconnected
+  worker never reaches Drive; reading makes no Drive write call; the only Drive permission requested is `drive.readonly`
+  (the backend cannot write to Drive; listings go to the database after a confirm).
+* **Fixed:** asking the assistant "my drive is connected ?" returned the off-topic refusal. Drive/Gmail/Calendar/Workspace
+  status questions are now answered from the account (connected email, services actually granted, or how to connect) and
+  Google wording is no longer refused as off-topic.
+* **Not verified:** your real Drive and the Varsovia PDF. If a PDF is image-only the assistant now says "OCR required" instead
+  of reading nothing; I could not open your file to confirm which case it is.
+
+## Bulk upload, history, undo (`tests/test_bulk_upload_e2e.py`, 28 tests, Firestore emulator)
+
+Real files (CSV, Excel, Word, PDF, scanned PDF), real roles, the endpoints the modal calls.
+Bugs found and fixed:
+* Website scope never applied (the endpoint did not resolve the selected websites): an admin could update or delete another
+  website's listings with a file. Now scoped to the selection, kept in the staged action and re-checked at confirm.
+* **Create could overwrite an existing listing with the same id**, and could duplicate a name or an id repeated in the file.
+  Now skipped and reported in `skipped[]`.
+* Create dropped columns not in the preview (a `price` column was lost, then validation failed with HTTP 500). Prices are now
+  read as numbers, a non-positive price is rejected, and row errors are returned at upload (400), not at confirm (was 500).
+* History and undo were open to every admin (history to workers too) and showed operations of other websites. Now admin and
+  super admin only, filtered by website; an operation you may not see is 404.
+* Scanned PDFs give an "OCR required" message.
+
+Verified: nothing is written before the confirm; each file type stages and applies; delete is an archive and undo restores it;
+undo works once and from the stored snapshot alone; expired operations are refused and hidden; only the uploader confirms; a
+worker cannot upload, undo or see history.
+**Open gap:** bulk operations write Firestore only, not PostgreSQL (REST CRUD writes both). Mixed-store listings can differ.
+The modal text "Execute Instantly" and "Permanently removes" does not match the backend (it stages first; delete archives).
+
+## Activity logs: data sent once (`tests/test_audit_log_single_copy.py`, 11 tests)
+
+`/admin/activity-logs` and `/admin/data-history` repeated the same data (`fields` and `fields_to_update`, the preview table
+again under `change_diff`, the payload again inside the result) and listed an action written to both stores twice. Each piece
+is now sent once, where it first appears; short values ("500 THB") are kept; empty sections are dropped; the result stays a
+non-empty text; the same action from PostgreSQL and Firestore is one row.
 
 ## Chat Logs page (Admin Panel design)
 

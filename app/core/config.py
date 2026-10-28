@@ -208,6 +208,9 @@ class Settings(BaseSettings):
     # Google Workspace Integrations (OAuth2, Maps, SMTP)
     GOOGLE_CLIENT_ID: str = ""
     GOOGLE_CLIENT_SECRET: str = ""
+    # A signed-in staff member only ever acts through their OWN connected Google account. Set true to let staff who have
+    # not connected one fall back to the shared credentials/google_token.json or service_account.json (one shared mailbox/Drive).
+    GOOGLE_SHARED_CREDENTIAL_FALLBACK: bool = False
     GOOGLE_REDIRECT_URI: str = "https://web-production-935b27.up.railway.app/api/v1/auth/google/callback"
     GOOGLE_MAPS_API_KEY: str = ""
 

@@ -399,7 +399,7 @@ MAX_BATCH_FILE_BYTES = 5 * 1024 * 1024
 async def propose_batch_file_endpoint(
     file: UploadFile = File(..., description="Uploaded Excel (.xlsx/.xls), CSV, PDF, or Word (.docx) file containing property list"),
     action: str = Form(..., description="Action to perform on target properties: 'delete', 'update', or 'create'"),
-    staff: AuthenticatedStaff = Depends(require_admin_or_super_admin),
+    staff: AuthenticatedStaff = Depends(require_admin_or_super_admin_with_sites),
     db: Session = Depends(get_db)
 ):
     """
@@ -450,7 +450,7 @@ async def propose_batch_file_endpoint(
 @router.post("/operations/{operation_id}/undo")
 def undo_batch_operation_endpoint(
     operation_id: str,
-    staff: AuthenticatedStaff = Depends(require_admin_or_super_admin),
+    staff: AuthenticatedStaff = Depends(require_admin_or_super_admin_with_sites),
     db: Session = Depends(get_db)
 ):
     """
@@ -459,7 +459,8 @@ def undo_batch_operation_endpoint(
     """
     from app.services.admin_batch_service import (
         undo_batch_property_operation,
-        BatchOperationError
+        BatchOperationError,
+        OperationNotFound,
     )
 
     try:
@@ -476,6 +477,8 @@ def undo_batch_operation_endpoint(
         return result
     except HTTPException:
         raise
+    except OperationNotFound as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
     except BatchOperationError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -491,7 +494,7 @@ def undo_batch_operation_endpoint(
 @router.get("/operations/history")
 def get_batch_operations_history_endpoint(
     limit: int = 50,
-    staff: AuthenticatedStaff = Depends(require_admin_or_employee)
+    staff: AuthenticatedStaff = Depends(require_admin_or_super_admin)
 ):
     """
     Returns full history of all past batch operations, showing affected property counts,
@@ -499,7 +502,7 @@ def get_batch_operations_history_endpoint(
     """
     from app.services.admin_batch_service import get_batch_operations_history
     return {
-        "operations": get_batch_operations_history(limit=limit)
+        "operations": get_batch_operations_history(limit=limit, staff_user=staff)
     }
 
 

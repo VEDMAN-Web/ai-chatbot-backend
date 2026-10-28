@@ -1,4 +1,6 @@
-from typing import Optional, Dict, Any
+import ast
+import json
+from typing import Optional, Dict, Any, Tuple
 from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 import copy
@@ -153,6 +155,88 @@ def record_audit_log(
         raise e
 
 
+_REPEAT_MIN_TEXT = 40   # shorter values ("500 THB", "Sold Out") are never treated as repeats
+
+
+def _canon(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, default=str)
+
+
+def _strip_repeats(value: Any, seen: set) -> Any:
+    """Copy of `value` where every object or long text that already appeared (in `seen`) is left out, and empty parts are dropped."""
+    if isinstance(value, dict):
+        cleaned: Dict[str, Any] = {}
+        for key, item in value.items():
+            if isinstance(item, (dict, list)):
+                if not item:
+                    continue
+                marker = _canon(item)
+                if marker in seen:
+                    continue
+                seen.add(marker)
+                item = _strip_repeats(item, seen)
+                if item in ({}, []):
+                    continue
+            elif isinstance(item, str):
+                if not item.strip():
+                    continue
+                if len(item) >= _REPEAT_MIN_TEXT:
+                    if item in seen:
+                        continue
+                    seen.add(item)
+            elif item is None:
+                continue
+            cleaned[key] = item
+        return cleaned
+    if isinstance(value, list):
+        return [_strip_repeats(item, seen) if isinstance(item, (dict, list)) else item for item in value]
+    return value
+
+
+def _as_object(value: Any) -> Any:
+    """A stored result may be JSON text or the text of a Python dict; give back the object when it is one."""
+    if isinstance(value, str):
+        text = value.strip()
+        if text[:1] in ("{", "["):
+            for parse in (json.loads, ast.literal_eval):
+                try:
+                    return parse(text)
+                except Exception:
+                    continue
+    return value
+
+
+def dedupe_log_sections(first: Any, second: Any, result: Any, status: Optional[str] = None) -> Tuple[Any, Any, Any]:
+    """One log row carries the same data in several places. Keep each piece where it first appears:
+    `first`, then `second`, then `result`. Returns the three cleaned sections (`result` stays a non-empty text)."""
+    first = _as_object(first)
+    second = _as_object(second)
+    seen: set = set()
+    if isinstance(second, dict) and isinstance(second.get("fields"), dict) and second.get("fields") == second.get("fields_to_update"):
+        second = {k: v for k, v in second.items() if k != "fields"}   # the panel reads fields_to_update
+    first_clean = _strip_repeats(first, seen) if isinstance(first, (dict, list)) else first
+    second_clean = _strip_repeats(second, seen) if isinstance(second, (dict, list)) else second
+    result_obj = _as_object(result)
+    if isinstance(result_obj, (dict, list)):
+        cleaned = _strip_repeats(result_obj, seen)
+        result_clean = json.dumps(cleaned, default=str) if cleaned else (status or "OK")
+    elif isinstance(result_obj, str) and len(result_obj) >= _REPEAT_MIN_TEXT and result_obj in seen:
+        result_clean = status or "OK"
+    else:
+        result_clean = result_obj
+    return first_clean, second_clean, result_clean
+
+
+def _activity_key(record: Dict[str, Any]) -> Tuple[str, str, str, str]:
+    """The same activity written to both stores has different ids; this is what identifies it."""
+    return (
+        str(record.get("action") or "").lower(),
+        str(record.get("admin_email") or "").lower(),
+        str(record.get("created_at") or "")[:19],
+        str(record.get("pending_action_id") or record.get("conversation_id") or ""),
+    )
+
+
 def query_admin_activity_logs(
     db: Session,
     admin_email: Optional[str] = None,
@@ -193,15 +277,18 @@ def query_admin_activity_logs(
         pg_logs = query.order_by(AuditLog.created_at.desc()).offset(offset).limit(limit).all()
 
         for l in pg_logs:
+            arguments, proposed, result = dedupe_log_sections(
+                l.tool_arguments or {}, l.proposed_payload or {}, l.execution_result, l.status
+            )
             records.append({
                 "id": str(l.id),
                 "admin_email": l.staff_user_id or "system",
                 "action": l.tool_name,
                 "status": l.status,
-                "arguments": l.tool_arguments or {},
-                "proposed_payload": l.proposed_payload or {},
+                "arguments": arguments or {},
+                "proposed_payload": proposed or {},
                 "confirmed_by_staff": l.confirmed_by_staff,
-                "execution_result": l.execution_result,
+                "execution_result": result,
                 "error_message": l.error_message,
                 "conversation_id": l.conversation_id,
                 "pending_action_id": l.pending_action_id,
@@ -220,15 +307,22 @@ def query_admin_activity_logs(
             )
             for fl in fs_logs:
                 details = fl.get("details") or {}
+                fs_status = details.get("status", "SUCCESS") if isinstance(details, dict) else "SUCCESS"
+                arguments, proposed, result = dedupe_log_sections(
+                    details.get("arguments", {}) if isinstance(details, dict) else {},
+                    details.get("payload", {}) if isinstance(details, dict) else {},
+                    details,   # the whole details object repeats the two above; only what is new is kept
+                    fs_status,
+                )
                 records.append({
                     "id": fl.get("id"),
                     "admin_email": fl.get("adminEmail") or fl.get("adminUid") or "admin_system",
                     "action": fl.get("action"),
-                    "status": details.get("status", "SUCCESS") if isinstance(details, dict) else "SUCCESS",
-                    "arguments": details.get("arguments", {}) if isinstance(details, dict) else {},
-                    "proposed_payload": details.get("payload", {}) if isinstance(details, dict) else {},
+                    "status": fs_status,
+                    "arguments": arguments or {},
+                    "proposed_payload": proposed or {},
                     "confirmed_by_staff": details.get("confirmed", True) if isinstance(details, dict) else True,
-                    "execution_result": str(details),
+                    "execution_result": result,
                     "error_message": details.get("error") if isinstance(details, dict) else None,
                     "conversation_id": fl.get("targetId") if fl.get("targetType") == "conversation" else None,
                     "pending_action_id": fl.get("targetId") if fl.get("targetType") == "action" else None,
@@ -239,15 +333,20 @@ def query_admin_activity_logs(
         except Exception as fe:
             logger.warning(f"Could not fetch Firestore logs for activity query: {fe}")
 
-    # Deduplicate by ID and sort descending
+    # Deduplicate by ID, then by activity (the same action written to both stores has two ids; PostgreSQL wins)
     seen_ids = set()
+    seen_activity = set()
     deduped = []
-    for r in sorted(records, key=lambda x: str(x.get("created_at") or ""), reverse=True):
+    for r in sorted(records, key=lambda x: (str(x.get("created_at") or "")[:19], x.get("source") == "postgres", str(x.get("created_at") or "")), reverse=True):
         rid = r.get("id")
         if rid and rid in seen_ids:
             continue
         if rid:
             seen_ids.add(rid)
+        activity = _activity_key(r)
+        if activity[2] and activity in seen_activity:
+            continue
+        seen_activity.add(activity)
         deduped.append(r)
 
     paged = deduped[offset : offset + limit] if source == "firestore" else deduped[:limit]
@@ -324,17 +423,18 @@ def query_data_change_history(
         elif isinstance(payload, dict):
             changes_summary = {k: v for k, v in payload.items() if k not in ("action", "email", "property_id")}
 
+        changes_summary, full_payload, result = dedupe_log_sections(changes_summary, payload, l.execution_result, l.status)
         history_items.append({
             "change_id": str(l.id),
             "updated_by": l.staff_user_id or "system",
             "action": l.tool_name,
             "target_type": extracted_target_type,
             "target_id": str(extracted_target_id),
-            "changes_summary": changes_summary,
-            "full_payload": payload,
+            "changes_summary": changes_summary or {},
+            "full_payload": full_payload or {},
             "status": l.status,
             "confirmed_by_staff": l.confirmed_by_staff,
-            "execution_result": l.execution_result,
+            "execution_result": result,
             "timestamp": l.created_at.isoformat() if l.created_at else None
         })
 
@@ -349,17 +449,24 @@ def query_data_change_history(
         )
         for fl in fs_logs:
             details = fl.get("details") or {}
+            fs_status = details.get("status", "SUCCESS") if isinstance(details, dict) else "SUCCESS"
+            summary, full, result = dedupe_log_sections(
+                details.get("payload", {}) if isinstance(details, dict) else details,
+                details if isinstance(details, dict) else {"details": details},
+                details,
+                fs_status,
+            )
             history_items.append({
                 "change_id": fl.get("id"),
                 "updated_by": fl.get("adminEmail") or fl.get("adminUid") or "admin_system",
                 "action": fl.get("action"),
                 "target_type": fl.get("targetType") or "unknown",
                 "target_id": fl.get("targetId") or "N/A",
-                "changes_summary": details.get("payload", {}) if isinstance(details, dict) else details,
-                "full_payload": details if isinstance(details, dict) else {"details": details},
-                "status": details.get("status", "SUCCESS") if isinstance(details, dict) else "SUCCESS",
+                "changes_summary": summary or {},
+                "full_payload": full or {},
+                "status": fs_status,
                 "confirmed_by_staff": details.get("confirmed", True) if isinstance(details, dict) else True,
-                "execution_result": str(details),
+                "execution_result": result,
                 "timestamp": fl.get("createdAt")
             })
     except Exception as fe:

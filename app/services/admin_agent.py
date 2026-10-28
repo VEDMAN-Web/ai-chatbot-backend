@@ -2823,6 +2823,19 @@ def _run_deterministic_admin(
             "tools_used": [], "language": language
         }
 
+    if _is_workspace_status_question(message):
+        status_res, _needs_confirmation, _pending = _execute_admin_tool(
+            db, "check_google_workspace_status", {}, staff_user, str(conv.id)
+        )
+        reply = _workspace_status_reply(status_res if isinstance(status_res, dict) else {}, language)
+        append_conversation_turn(db, conv, message, reply)
+        return {
+            "type": "text", "text": reply,
+            "session_id": conv.session_id, "conversation_id": str(conv.id),
+            "requires_confirmation": False, "pending_action_id": None,
+            "tools_used": [{"name": "check_google_workspace_status", "args": {}}], "language": language
+        }
+
     # Report follow-ups are always on-topic for admin (must not be blocked by public off-topic rules)
     _is_report_followup = any(
         p in msg_lower
@@ -2842,7 +2855,7 @@ def _run_deterministic_admin(
     ) or ("report" in msg_lower and any(w in msg_lower for w in ("again", "download", "generate", "export", "pdf")))
 
     # Off-topic inquiry handling for internal admin agent
-    if is_off_topic_query(message) and not _is_report_followup:
+    if is_off_topic_query(message) and not _is_report_followup and not _WORKSPACE_WORDS.search(message):
         if language == "pl":
             reply = (
                 "Jako wewnętrzny asystent AI Tajlandia specjalizuję się wyłącznie w zarządzaniu i analizie bazy nieruchomości w Tajlandii (Phuket, Koh Samui, Koh Phangan, Bangkok). "
@@ -4454,6 +4467,55 @@ def _prop_to_dict(p: Any) -> Dict[str, Any]:
     }
 
 
+def _granted_google_services(scopes: Any) -> List[str]:
+    """Services the staff member's Google consent covers, from the scopes Google granted."""
+    granted = " ".join(scopes) if isinstance(scopes, (list, tuple)) else str(scopes or "")
+    services = []
+    if "/auth/drive" in granted:
+        services.append("drive")
+    if "gmail" in granted:
+        services.append("gmail")
+    if "calendar" in granted:
+        services.append("calendar")
+    return services
+
+
+_WORKSPACE_WORDS = re.compile(r"\b(drive|google|gmail|calendar|workspace)\b", re.I)
+_WORKSPACE_STATUS_WORDS = re.compile(
+    r"\b(connect(?:ed|ion)?|linked?|status|log(?:ged)?\s*in|sign(?:ed)?\s*in|authori[sz]ed|access|po[łl]{1,2}czon\w*|pod[łl]{1,2}czon\w*)\b", re.I)
+_WORKSPACE_ACTION_WORDS = re.compile(r"\b(send|read|open|fetch|import|add|update|create|delete|schedule|book|upload|download|extract)\b", re.I)
+
+
+def _is_workspace_status_question(message: str) -> bool:
+    """'is my drive connected?', 'check google workspace status' - answered from the account, never by the model."""
+    return bool(
+        _WORKSPACE_WORDS.search(message)
+        and _WORKSPACE_STATUS_WORDS.search(message)
+        and not _WORKSPACE_ACTION_WORDS.search(message)
+    )
+
+
+def _workspace_status_reply(status: Dict[str, Any], language: str) -> str:
+    services = status.get("services") or []
+    if status.get("connected"):
+        parts = []
+        if "drive" in services:
+            parts.append("Drive: read-only (I can read your files, never change them)")
+        if "gmail" in services:
+            parts.append("Gmail: send, only after you confirm")
+        if "calendar" in services:
+            parts.append("Calendar: create events, only after you confirm")
+        who = status.get("google_email") or status.get("staff_email")
+        if language == "pl":
+            return f"Tak - Twoje konto Google Workspace jest połączone ({who}). " + "; ".join(parts) + "."
+        return f"Yes - your Google Workspace is connected as **{who}**.\n" + "\n".join(f"- {p}" for p in parts)
+    if language == "pl":
+        return ("Nie - Twoje konto Google Workspace nie jest jeszcze połączone. Użyj przycisku **Connect** "
+                "(lewy dolny róg) i zaloguj się kontem Google, na którym są pliki. Do tego czasu nie mogę czytać Twojego Dysku.")
+    return ("No - your Google Workspace is not connected yet. Use the **Connect** button (bottom left) and sign in with the "
+            "Google account whose Drive holds the files. Until then I cannot read your Drive.")
+
+
 def _execute_admin_tool(
     db: Session,
     tool_name: str,
@@ -4933,7 +4995,8 @@ def _execute_admin_tool_uncached(
             "connected": is_conn,
             "google_email": google_mail,
             "staff_email": staff_email,
-            "services": ["drive", "gmail", "calendar"] if is_conn else [],
+            "services": _granted_google_services((gw_data or {}).get("scopes")) if is_conn else [],
+            "drive_access": "read-only" if is_conn else None,
             "connect_url": "/api/v1/auth/google/login"
         }, False, None
 
@@ -5337,7 +5400,7 @@ def _execute_admin_tool_uncached(
 
     elif tool_name == "get_batch_operations_history":
         from app.services.admin_batch_service import get_batch_operations_history
-        hist = get_batch_operations_history(limit=tool_args.get("limit", 10))
+        hist = get_batch_operations_history(limit=tool_args.get("limit", 10), staff_user=staff_user)
         return {"operations": hist}, False, None
 
     elif tool_name == "execute_batch_property_action":
@@ -5425,6 +5488,17 @@ def _execute_admin_tool_uncached(
                 "requires_confirmation": False,
             }, False, None
 
+        from app.services.admin_batch_service import BatchOperationError as _BatchError, validate_batch_records
+        try:
+            validate_batch_records(op_type, records)
+        except _BatchError as exc:
+            return {
+                "status": "VALIDATION_FAILED",
+                "success": False,
+                "message": str(exc),
+                "requires_confirmation": False,
+            }, False, None
+
         from app.services.admin_change_diff import build_batch_change_diff
         change_diff = build_batch_change_diff(
             db=db,
@@ -5434,6 +5508,7 @@ def _execute_admin_tool_uncached(
         )
         action_payload = {
             "operation_type": op_type,
+            "site_scope": list(getattr(staff_user, "selected_websites", None) or getattr(staff_user, "allowed_websites", None) or []),
             "items": items,
             "records": records,
             "update_fields": up_fields,

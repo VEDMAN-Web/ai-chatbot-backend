@@ -235,6 +235,10 @@ def _store_summary(raw_fs: Optional[Dict[str, Any]], raw_sql: Optional[Dict[str,
     }
 
 
+class OperationNotFound(Exception):
+    """The operation does not exist, or the caller may not see it (the two are not told apart)."""
+
+
 class BatchOperationError(Exception):
     """Raised when batch operation or undo fails."""
     pass
@@ -326,12 +330,16 @@ def parse_property_batch_file(file_bytes: bytes, filename: str) -> List[Dict[str
                     records.append(_standardize_property_row(cleaned))
 
         elif ext == "pdf":
-            import pypdf
-            reader = pypdf.PdfReader(io.BytesIO(file_bytes))
-            full_text = ""
-            for page in reader.pages:
-                full_text += (page.extract_text() or "") + "\n"
-            records = _extract_properties_from_raw_text(full_text)
+            from app.services.drive_service import EXTRACT_ERROR, EXTRACT_NEEDS_OCR, inspect_pdf_bytes
+            pdf = inspect_pdf_bytes(file_bytes)
+            if pdf["status"] == EXTRACT_NEEDS_OCR:
+                raise BatchOperationError(
+                    f"'{filename}' is a scanned or image-only PDF with no readable text. OCR is required and is not enabled, "
+                    "so nothing was read. Upload a text PDF, an Excel/CSV/Word file."
+                )
+            if pdf["status"] == EXTRACT_ERROR:
+                raise BatchOperationError(f"'{filename}' could not be read as a PDF ({pdf.get('error')}).")
+            records = _extract_properties_from_raw_text(pdf["text"] + "\n")
 
         elif ext == "docx":
             import docx
@@ -464,6 +472,112 @@ def _extract_properties_from_raw_text(text: str) -> List[Dict[str, Any]]:
 # 2. Bulk Execution Engine with Instant Action & 6-Day Snapshot
 # ==============================================================================
 
+def _name_slug(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", str(value or "").strip().lower()).strip("-")
+
+
+def _normalize_sites(value: Any) -> List[str]:
+    if not value:
+        return []
+    from app.core.tenant import normalize_website_list
+    return normalize_website_list(value)
+
+
+def _taken_ids_and_names(projects_col: Any, db_session: Any) -> Tuple[set, set]:
+    """Ids and name slugs of every existing listing (Firestore and PostgreSQL), read once per batch."""
+    ids: set = set()
+    names: set = set()
+    for doc in projects_col.stream():
+        data = doc.to_dict() or {}
+        ids.add(str(doc.id).lower())
+        for key in ("name", "title", "property_name"):
+            val = data.get(key)
+            labels = list(val.values()) if isinstance(val, dict) else [val]
+            names.update(s for s in (_name_slug(v) for v in labels if v) if s)
+    if _is_real_db_session(db_session):
+        from app.db.models import Property
+        for pid, name in db_session.query(Property.property_id, Property.property_name).all():
+            ids.add(str(pid).lower())
+            if name:
+                names.add(_name_slug(name))
+    return ids, names
+
+
+def _row_price(rec: Dict[str, Any]) -> Optional[float]:
+    """The price in a file row as a number (a leading minus is kept, so -5 is never read as 5); None when absent."""
+    raw = None
+    for key in ("price_numeric_min", "price_from", "price", "price_display"):
+        if rec.get(key) not in (None, ""):
+            raw = rec[key]
+            break
+    if raw is None:
+        return None
+    text = str(raw).strip().replace(",", "")
+    match = re.search(r"-?\d+(?:\.\d+)?", text)
+    return float(match.group(0)) if match else None
+
+
+def _canonical_create_doc(rec: Dict[str, Any]) -> Dict[str, Any]:
+    """A new listing from one file row: the file's columns plus the canonical name and numeric price."""
+    doc = {k: v for k, v in rec.items() if v is not None and k != "price"}
+    mapped = _batch_fields_for_validation(rec)
+    name = mapped.get("property_name") or doc.get("name")
+    doc["name"] = name
+    doc["property_name"] = name
+    number = _row_price(rec) or 0
+    if number > 0:
+        doc["price_numeric_min"] = number
+        doc.setdefault("price_display", f"{number:,} THB")
+    if rec.get("price") is not None:
+        doc.setdefault("price_display", str(rec["price"]))
+    return doc
+
+
+def validate_batch_records(action_type: str, records: List[Dict[str, Any]]) -> None:
+    """The same row checks the executor makes, run when the file is uploaded so errors show before anyone confirms."""
+    from app.services.action_service import validate_listing_values
+
+    action_clean = (action_type or "").lower().strip()
+    if action_clean in ("delete", "remove"):
+        return
+    creating = action_clean in ("create", "write")
+    problems: List[Dict[str, Any]] = []
+    for rec in records:
+        mapped = _batch_fields_for_validation(rec if isinstance(rec, dict) else {})
+        supplied_id = rec.get("property_id") if isinstance(rec, dict) else None
+        if creating:
+            mapped.update({k: rec[k] for k in ("price_numeric_min",) if rec.get(k)})
+            canon = _canonical_create_doc(rec)
+            if canon.get("price_numeric_min"):
+                mapped["price_numeric_min"] = canon["price_numeric_min"]
+        errs = validate_listing_values(
+            mapped,
+            property_id=str(supplied_id) if creating and supplied_id else None,
+            is_create=creating,
+            check_property_id=bool(creating and supplied_id),
+        )
+        price = _row_price(rec) if isinstance(rec, dict) else None
+        if price is not None and price <= 0:
+            errs = dict(errs or {})
+            errs["price"] = "price must be greater than 0"
+        if errs:
+            problems.append({"property_id": supplied_id, "fields": errs})
+    if problems:
+        raise BatchOperationError("Validation failed: " + json.dumps(problems))
+
+
+def can_access_operation(data: Dict[str, Any], staff_user: Any) -> bool:
+    """A super admin sees every operation. Others see operations on websites they have, or (older records) their own."""
+    if getattr(staff_user, "role", None) == "super_admin":
+        return True
+    op_sites = [s for s in (data.get("websites") or []) if s]
+    allowed = set(getattr(staff_user, "allowed_websites", None) or [])
+    if op_sites:
+        return set(op_sites) <= allowed
+    return bool(data.get("staff_user_id") and data.get("staff_user_id") == getattr(staff_user, "user_id", None)) \
+        or bool(data.get("staff_email") and data.get("staff_email") == getattr(staff_user, "email", None))
+
+
 def execute_batch_property_operation(
     action_type: str,
     records: List[Dict[str, Any]],
@@ -526,6 +640,7 @@ def execute_batch_property_operation(
     # A. DELETE / REMOVE
     # --------------------------------------------------------------------------
     selected_sites = getattr(staff_user, "selected_websites", None)
+    skipped_rows: List[Dict[str, Any]] = []
 
     if action_clean == "delete":
         for rec in records:
@@ -597,11 +712,33 @@ def execute_batch_property_operation(
     # C. CREATE / WRITE
     # --------------------------------------------------------------------------
     elif action_clean == "create":
+        taken_ids, taken_names = _taken_ids_and_names(projects_col, db_session)
+        allowed_sites = list(getattr(staff_user, "allowed_websites", None) or [])
         for rec in records:
-            new_id = rec.get("property_id") or f"PROP-{uuid.uuid4().hex[:8].upper()}"
-            doc_payload = dict(rec)
-            if selected_sites and not doc_payload.get("websites"):
-                doc_payload["websites"] = selected_sites
+            new_id = rec.get("property_id") or f"prop-{uuid.uuid4().hex[:8]}"
+            doc_payload = _canonical_create_doc(rec)
+            slug = _name_slug(doc_payload.get("name"))
+            if str(new_id).lower() in taken_ids:
+                skipped_rows.append({"property_id": new_id, "reason": "a listing with this id already exists"})
+                continue
+            if slug and slug in taken_names:
+                skipped_rows.append({"property_id": new_id, "reason": "a listing with this name already exists"})
+                continue
+            requested = _normalize_sites(doc_payload.get("websites"))
+            if requested:
+                outside = [s for s in requested if s not in allowed_sites or (selected_sites and s not in selected_sites)]
+                if outside:
+                    skipped_rows.append({"property_id": new_id, "reason": f"website(s) {outside} are outside your selection"})
+                    continue
+                doc_payload["websites"] = requested
+            elif selected_sites:
+                doc_payload["websites"] = list(selected_sites)
+            else:
+                skipped_rows.append({"property_id": new_id, "reason": "no website is selected"})
+                continue
+            taken_ids.add(str(new_id).lower())
+            if slug:
+                taken_names.add(slug)
             doc_payload["isActive"] = True
             doc_payload["createdAt"] = now.isoformat()
             doc_payload["updatedAt"] = now.isoformat()
@@ -634,6 +771,7 @@ def execute_batch_property_operation(
         "source_filename": source_filename,
         "staff_user_id": staff_user.user_id,
         "staff_email": staff_user.email,
+        "websites": list(selected_sites or []),
         "status": "APPLIED",
         "affected_count": len(affected_ids),
         "affected_ids": affected_ids,
@@ -684,6 +822,8 @@ def execute_batch_property_operation(
         "source_filename": source_filename,
         "affected_count": len(affected_ids),
         "affected_ids": affected_ids,
+        "skipped": skipped_rows,
+        "skipped_count": len(skipped_rows),
         "created_at": now.isoformat(),
         "expire_at": expire_at_iso,
         "expires_at": expire_at_iso,
@@ -754,6 +894,7 @@ def record_crud_operation_snapshot(
         "source_filename": source,
         "staff_user_id": staff_user.user_id,
         "staff_email": staff_user.email,
+        "websites": list(getattr(staff_user, "selected_websites", None) or []),
         "status": "APPLIED",
         "affected_count": len(affected_ids),
         "affected_ids": affected_ids,
@@ -953,9 +1094,11 @@ def undo_batch_property_operation(
     op_doc = op_ref.get()
 
     if not op_doc.exists:
-        raise BatchOperationError(f"Operation '{operation_id}' not found.")
+        raise OperationNotFound(f"Operation '{operation_id}' not found.")
 
     data = op_doc.to_dict() or {}
+    if not can_access_operation(data, staff_user):
+        raise OperationNotFound(f"Operation '{operation_id}' not found.")
     status = data.get("status")
     if status == "REVERTED":
         raise BatchOperationError(f"Operation '{operation_id}' has already been undone.")
@@ -1116,7 +1259,7 @@ def undo_batch_property_operation(
 # 4. Operations History API
 # ==============================================================================
 
-def get_batch_operations_history(limit: int = 50) -> List[Dict[str, Any]]:
+def get_batch_operations_history(limit: int = 50, staff_user: Any = None) -> List[Dict[str, Any]]:
     """
     Retrieves history of past batch property operations with remaining undo time.
     Expired snapshots are hidden (treated as nonexistent).
@@ -1136,6 +1279,8 @@ def get_batch_operations_history(limit: int = 50) -> List[Dict[str, Any]]:
             data = doc.to_dict() or {}
             # Hide expired / purged-equivalent ops from history
             if _is_snapshot_expired(data, now=now):
+                continue
+            if staff_user is not None and not can_access_operation(data, staff_user):
                 continue
 
             expire_at_str = data.get("expire_at") or data.get("expires_at")
