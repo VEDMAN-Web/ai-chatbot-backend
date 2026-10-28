@@ -6,25 +6,29 @@ from sqlalchemy.orm import Session
 from fastapi import HTTPException, status
 import logging
 
-from app.db.models import PendingAction, Property
+from app.db.models import Property
 from app.core.config import settings
 from app.core.auth import AuthenticatedStaff
 from app.services.audit_service import record_audit_log
 from app.services.google_services import google_manager
+from app.repositories import pending_actions_repo
 
 # Re-exported so tests can patch `app.services.action_service.record_crud_operation_snapshot`
 from app.services.admin_batch_service import record_crud_operation_snapshot  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
-# Lifecycle States
-ACTION_STATUS_PENDING = "PENDING"
-ACTION_STATUS_CONFIRMED = "CONFIRMED"
-ACTION_STATUS_EXECUTED = "EXECUTED"
-ACTION_STATUS_REJECTED = "REJECTED"
-ACTION_STATUS_EXPIRED = "EXPIRED"
-ACTION_STATUS_FAILED = "FAILED"
-ACTION_STATUS_SUPERSEDED = "SUPERSEDED"
+# Lifecycle States (kept in sync with pending_actions_repo)
+ACTION_STATUS_PENDING = pending_actions_repo.ACTION_STATUS_PENDING
+ACTION_STATUS_CONFIRMED = pending_actions_repo.ACTION_STATUS_CONFIRMED
+ACTION_STATUS_EXECUTED = pending_actions_repo.ACTION_STATUS_EXECUTED
+ACTION_STATUS_REJECTED = pending_actions_repo.ACTION_STATUS_REJECTED
+ACTION_STATUS_EXPIRED = pending_actions_repo.ACTION_STATUS_EXPIRED
+ACTION_STATUS_FAILED = pending_actions_repo.ACTION_STATUS_FAILED
+ACTION_STATUS_SUPERSEDED = pending_actions_repo.ACTION_STATUS_SUPERSEDED
+
+# Back-compat alias for type hints / isinstance checks in tests
+PendingAction = pending_actions_repo.PendingActionRecord
 
 
 # Canonical listing values. Input is matched case-insensitively and stored in this form.
@@ -324,6 +328,7 @@ def create_pending_action(
     Creates a new pending action staged for explicit employee/admin confirmation.
     Claude NEVER executes write actions directly; it only proposes them here.
     Validates data completeness for listing creations and updates.
+    Persistence goes through pending_actions_repo (STORE_PENDING_ACTIONS).
     """
     if tool_name in ["create_or_update_listing", "propose_listing_update"]:
         from app.services.admin_property_fields import resolve_existing_property
@@ -341,15 +346,6 @@ def create_pending_action(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=err_msg
             )
-    minutes = (
-        expires_in_minutes
-        if expires_in_minutes is not None
-        else getattr(settings, "ADMIN_PENDING_ACTION_TTL_MIN", None)
-        or settings.ACTION_EXPIRATION_MINUTES
-    )
-    now = datetime.now(timezone.utc)
-    expires_at = now + timedelta(minutes=minutes)
-    confirmation_token = f"act_{secrets.token_hex(16)}"
 
     # Supersede older PENDING actions for the same property (same conversation preferred)
     prop_id = (
@@ -359,107 +355,57 @@ def create_pending_action(
     )
     if prop_id:
         try:
-            q = db.query(PendingAction).filter(PendingAction.status == ACTION_STATUS_PENDING)
-            if conversation_id:
-                q = q.filter(PendingAction.conversation_id == str(conversation_id))
-            for old in q.all():
-                old_payload = old.action_payload or {}
-                old_pid = (
-                    old_payload.get("property_id")
-                    or old_payload.get("target_property_id")
-                    or ((old_payload.get("change_diff") or {}).get("property_id") if isinstance(old_payload.get("change_diff"), dict) else None)
+            for old in pending_actions_repo.list_pending_for_property(
+                db, property_id=str(prop_id), conversation_id=conversation_id
+            ):
+                pending_actions_repo.update_fields(
+                    db,
+                    old.id,
+                    status=ACTION_STATUS_SUPERSEDED,
+                    error=f"Superseded by newer proposal for property {prop_id}",
                 )
-                if old_pid and str(old_pid).strip().lower() == str(prop_id).strip().lower():
-                    old.status = ACTION_STATUS_SUPERSEDED
-                    old.error_message = f"Superseded by newer proposal for property {prop_id}"
         except Exception as e:
             logger.warning(f"Could not supersede older pending actions: {e}")
 
-    action = PendingAction(
-        confirmation_token=confirmation_token,
-        staff_user_id=staff_user_id,
+    action = pending_actions_repo.create(
+        db,
+        staff_email=staff_user_id,
         tool_name=tool_name,
         action_payload=action_payload,
-        status=ACTION_STATUS_PENDING,
         conversation_id=conversation_id,
-        expires_at=expires_at,
-        created_at=now
+        expires_in_minutes=expires_in_minutes,
     )
 
-    db.add(action)
-    db.commit()
-    db.refresh(action)
-
-    # Record initial audit entry
-    record_audit_log(
-        db=db,
-        staff_user_id=staff_user_id,
-        tool_name=tool_name,
-        proposed_payload=action_payload,
-        confirmed_by_staff=False,
-        status=ACTION_STATUS_PENDING,
-        conversation_id=conversation_id,
-        pending_action_id=str(action.id)
-    )
+    # Record initial audit entry — if this fails, roll back the pending row
+    from app.services.audit_service import AuditPersistenceError, AUDIT_WRITE_FAILED_MSG
+    try:
+        record_audit_log(
+            db=db,
+            staff_user_id=staff_user_id,
+            tool_name=tool_name,
+            proposed_payload=action_payload,
+            confirmed_by_staff=False,
+            status=ACTION_STATUS_PENDING,
+            conversation_id=conversation_id,
+            pending_action_id=str(action.id),
+            raise_on_failure=True,
+        )
+    except AuditPersistenceError:
+        try:
+            pending_actions_repo.delete(db, str(action.id))
+        except Exception as cleanup_exc:
+            logger.warning(f"Could not remove pending action after audit failure: {cleanup_exc}")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=AUDIT_WRITE_FAILED_MSG,
+        )
 
     return action
 
 
 def get_pending_action(db: Session, pending_action_id: str) -> PendingAction:
     """Retrieves a pending action and lazily marks it as EXPIRED if the timeout elapsed."""
-    import uuid
-    action = None
-
-    # 1. If ID starts with token prefix "act_", query by confirmation_token
-    if isinstance(pending_action_id, str) and pending_action_id.startswith("act_"):
-        try:
-            action = db.query(PendingAction).filter(PendingAction.confirmation_token == pending_action_id).first()
-        except Exception:
-            action = None
-
-    # 2. Try querying by primary key UUID (safely cast string to UUID object)
-    if not action:
-        target_uuid = None
-        if isinstance(pending_action_id, uuid.UUID):
-            target_uuid = pending_action_id
-        elif isinstance(pending_action_id, str):
-            clean_str = pending_action_id.replace("act_", "").strip()
-            try:
-                target_uuid = uuid.UUID(clean_str)
-            except Exception:
-                target_uuid = None
-
-        if target_uuid:
-            try:
-                action = db.query(PendingAction).filter(PendingAction.id == target_uuid).first()
-            except Exception:
-                action = None
-
-    # 3. Fallback: query by confirmation_token
-    if not action and isinstance(pending_action_id, str):
-        try:
-            action = db.query(PendingAction).filter(PendingAction.confirmation_token == pending_action_id).first()
-        except Exception:
-            action = None
-
-    if not action:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Pending action '{pending_action_id}' not found."
-        )
-
-    # Server-side expiration check
-    if action.expires_at.tzinfo is None:
-        is_expired = action.expires_at < datetime.now()
-    else:
-        is_expired = action.expires_at < datetime.now(timezone.utc)
-
-    if action.status == ACTION_STATUS_PENDING and is_expired:
-        action.status = ACTION_STATUS_EXPIRED
-        db.commit()
-        db.refresh(action)
-
-    return action
+    return pending_actions_repo.get(db, pending_action_id)
 
 
 def _append_action_lifecycle_note(
@@ -474,31 +420,20 @@ def _append_action_lifecycle_note(
     reason: Optional[str] = None,
 ) -> None:
     """
-    Append a system/assistant note to conversation history so the chat model
-    sees UI button confirms/rejects (not only free-text Confirm).
+    Append a system/assistant note to Firestore conversation history so the chat
+    model sees UI button confirms/rejects (not only free-text Confirm).
     """
-    if not conversation_id or db is None:
+    if not conversation_id:
         return
     try:
-        from app.db.models import Conversation
         from app.services.admin_property_fields import format_price_thb
-
-        conv = db.query(Conversation).filter(Conversation.id == conversation_id).first()
-        if conv is None:
-            # conversation_id may be stored as string UUID
-            try:
-                conv = db.query(Conversation).filter(Conversation.id == str(conversation_id)).first()
-            except Exception:
-                conv = None
-        if conv is None:
-            return
+        from app.services.firestore_service import get_firestore_client
 
         result_data = result_data or {}
         detail = ""
         updated = result_data.get("updated_fields") or {}
         if "price_numeric_min" in updated or "price_display" in updated:
             new_p = updated.get("price_numeric_min") or updated.get("price_display")
-            # Prefer change_diff snapshot if present on result
             detail = f" price → {format_price_thb(new_p)}"
         elif updated:
             detail = " fields=" + ",".join(list(updated.keys())[:5])
@@ -516,7 +451,17 @@ def _append_action_lifecycle_note(
                 f"{reason or 'No changes applied.'}"
             )
 
-        history = list(getattr(conv, "message_history", None) or [])
+        client = get_firestore_client(target="admin")
+        if client is None:
+            return
+        ref = client.collection("conversations").document(str(conversation_id))
+        try:
+            snap = ref.get()
+            data = snap.to_dict() if getattr(snap, "exists", False) else {}
+        except Exception:
+            data = {}
+        data = dict(data or {})
+        history = list(data.get("messageHistory") or data.get("message_history") or [])
         history.append({
             "role": "assistant",
             "content": text,
@@ -525,25 +470,24 @@ def _append_action_lifecycle_note(
             "pending_action_id": pending_action_id,
             "action_lifecycle": status.upper(),
         })
-        # Cap history growth
         if len(history) > 400:
             history = history[-400:]
-        conv.message_history = history
-        prefs = dict(getattr(conv, "preferences", None) or {})
+        prefs = dict(data.get("preferences") or {})
         if status.upper() in ("CONFIRMED", "EXECUTED", "REJECTED"):
-            # Clear stale pending id from session prefs
             if prefs.get("last_pending_action_id") == str(pending_action_id):
                 prefs.pop("last_pending_action_id", None)
             prefs["last_finished_action_id"] = str(pending_action_id)
             prefs["last_finished_action_status"] = status.upper()
-        conv.preferences = prefs
-        db.commit()
+        ref.set(
+            {
+                "messageHistory": history,
+                "preferences": prefs,
+                "updatedAt": datetime.now(timezone.utc).isoformat(),
+            },
+            merge=True,
+        )
     except Exception as e:
         logger.warning(f"_append_action_lifecycle_note failed: {e}")
-        try:
-            db.rollback()
-        except Exception:
-            pass
 
 
 def _action_target_websites(payload: Optional[Dict[str, Any]]) -> list:
@@ -665,12 +609,18 @@ def confirm_and_execute_action(
         ok, stale_list = verify_diff_still_current(db, change_diff)
         if not ok:
             # Supersede old pending (not a silent loop of REJECTED twins)
-            action.status = ACTION_STATUS_SUPERSEDED
-            action.error_message = (
+            stale_msg = (
                 "Stale values detected; refused apply. Superseded with one fresh proposal. "
                 + "; ".join(stale_list[:8])
             )
-            db.commit()
+            pending_actions_repo.update_fields(
+                db,
+                str(action.id),
+                status=ACTION_STATUS_SUPERSEDED,
+                error=stale_msg,
+            )
+            action.status = ACTION_STATUS_SUPERSEDED
+            action.error_message = stale_msg
             record_audit_log(
                 db=db,
                 staff_user_id=authenticated_staff.email,
@@ -678,7 +628,7 @@ def confirm_and_execute_action(
                 proposed_payload=payload,
                 confirmed_by_staff=True,
                 status="SUPERSEDED",
-                error_message=action.error_message,
+                error_message=stale_msg,
                 conversation_id=action.conversation_id,
                 pending_action_id=str(action.id),
             )
@@ -759,12 +709,72 @@ def confirm_and_execute_action(
                 "action_status": "awaiting_confirmation" if new_action else "superseded",
             }
 
-    # 4. Mark confirmed
-    action.status = ACTION_STATUS_CONFIRMED
-    action.confirmed_at = datetime.now(timezone.utc)
-    db.commit()
+    # 4. Persist confirm audit BEFORE any data mutation. If audit cannot be written,
+    # stop here so nothing changes.
+    from app.services.audit_service import AuditPersistenceError, AUDIT_WRITE_FAILED_MSG
 
-    # 5. Execute action payload based on tool_name (only previewed fields/items)
+    audit_payload_pre = dict(action.action_payload or {})
+    try:
+        audit = record_audit_log(
+            db=db,
+            staff_user_id=authenticated_staff.email,
+            tool_name=action.tool_name,
+            proposed_payload=audit_payload_pre,
+            confirmed_by_staff=True,
+            execution_result=None,
+            status="CONFIRMED",
+            conversation_id=action.conversation_id,
+            pending_action_id=str(action.id),
+            raise_on_failure=True,
+        )
+    except AuditPersistenceError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=AUDIT_WRITE_FAILED_MSG,
+        )
+
+    # 5. Atomic claim PENDING → CONFIRMED (double-confirm races execute once)
+    # Keep a handle to the originally-fetched object so unit tests that reuse the
+    # same in-memory action see EXECUTED on a second confirm.
+    pre_claim_action = action
+    claimed = pending_actions_repo.claim_confirm(
+        db,
+        str(action.id),
+        staff_email=authenticated_staff.email,
+        known_action=action,
+    )
+    if claimed.status == ACTION_STATUS_EXECUTED:
+        stored = claimed.execution_result if isinstance(claimed.execution_result, dict) else {}
+        return {
+            "status": ACTION_STATUS_EXECUTED,
+            "pending_action_id": str(claimed.id),
+            "tool_name": claimed.tool_name,
+            "execution_result": stored,
+            "operation_id": stored.get("operation_id") if isinstance(stored, dict) else None,
+            "idempotent": True,
+            "message": "This action was already confirmed. Returning the original result.",
+        }
+    if not getattr(claimed, "claim_won", False):
+        # Another tab/request already claimed — re-read; return idempotent if done
+        refreshed = get_pending_action(db, str(action.id))
+        if refreshed.status == ACTION_STATUS_EXECUTED:
+            stored = refreshed.execution_result if isinstance(refreshed.execution_result, dict) else {}
+            return {
+                "status": ACTION_STATUS_EXECUTED,
+                "pending_action_id": str(refreshed.id),
+                "tool_name": refreshed.tool_name,
+                "execution_result": stored,
+                "operation_id": stored.get("operation_id") if isinstance(stored, dict) else None,
+                "idempotent": True,
+                "message": "This action was already confirmed. Returning the original result.",
+            }
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Action cannot be executed. Current status is '{refreshed.status}'.",
+        )
+    action = claimed
+
+    # 6. Execute action payload based on tool_name (only previewed fields/items)
     result_data: Dict[str, Any] = {}
     try:
         if action.tool_name == "ingest_property_from_url":
@@ -810,46 +820,69 @@ def confirm_and_execute_action(
                 merged_payload["operation_id"] = operation_id
                 action.action_payload = merged_payload
 
-        # 6. Mark executed
+        # 7. Mark executed via repo
+        now_ex = datetime.now(timezone.utc)
+        action = pending_actions_repo.update_fields(
+            db,
+            str(action.id),
+            status=ACTION_STATUS_EXECUTED,
+            result=result_data,
+            executed_at=now_ex,
+            action_payload=action.action_payload,
+        ) or action
         action.status = ACTION_STATUS_EXECUTED
-        action.executed_at = datetime.now(timezone.utc)
         action.execution_result = result_data
-        db.commit()
+        action.executed_at = now_ex
+        # Sync the pre-claim object (shared SimpleNamespace/ORM in unit tests)
+        if pre_claim_action is not None and pre_claim_action is not action:
+            try:
+                pre_claim_action.status = ACTION_STATUS_EXECUTED
+                pre_claim_action.execution_result = result_data
+                pre_claim_action.executed_at = now_ex
+            except Exception:
+                pass
 
-        # 7. Record immutable audit log (include recipient/subject or event details for non-undoable)
-        audit_payload = dict(action.action_payload or {})
-        if action.tool_name == "send_email":
-            audit_payload = {
-                **audit_payload,
-                "to": (action.action_payload or {}).get("to"),
-                "subject": (action.action_payload or {}).get("subject"),
-                "undoable": False,
-                "operation_id": operation_id,
-            }
-        elif action.tool_name == "create_calendar_event":
-            audit_payload = {
-                **audit_payload,
-                "title": (action.action_payload or {}).get("title"),
-                "start_time": (action.action_payload or {}).get("start_time"),
-                "attendees": (action.action_payload or {}).get("attendees"),
-                "undoable": False,
-                "operation_id": operation_id,
-            }
-        elif operation_id:
-            audit_payload["operation_id"] = operation_id
-
-        audit = record_audit_log(
-            db=db,
-            staff_user_id=authenticated_staff.email,
-            tool_name=action.tool_name,
-            proposed_payload=audit_payload,
-            tool_arguments={"operation_id": operation_id} if operation_id else None,
-            confirmed_by_staff=True,
-            execution_result=str(result_data),
-            status="SUCCESS",
-            conversation_id=action.conversation_id,
-            pending_action_id=str(action.id)
-        )
+        # Enrich the pre-write audit row with execution outcome (best-effort)
+        if (
+            audit is not None
+            and not getattr(audit, "is_ephemeral", False)
+            and not getattr(audit, "audit_write_failed", False)
+            and getattr(audit, "id", None)
+            and not str(audit.id).startswith("audit_")
+        ):
+            try:
+                audit_payload = dict(action.action_payload or {})
+                if action.tool_name == "send_email":
+                    audit_payload = {
+                        **audit_payload,
+                        "to": (action.action_payload or {}).get("to"),
+                        "subject": (action.action_payload or {}).get("subject"),
+                        "undoable": False,
+                        "operation_id": operation_id,
+                    }
+                elif action.tool_name == "create_calendar_event":
+                    audit_payload = {
+                        **audit_payload,
+                        "title": (action.action_payload or {}).get("title"),
+                        "start_time": (action.action_payload or {}).get("start_time"),
+                        "attendees": (action.action_payload or {}).get("attendees"),
+                        "undoable": False,
+                        "operation_id": operation_id,
+                    }
+                elif operation_id:
+                    audit_payload["operation_id"] = operation_id
+                audit.proposed_payload = audit_payload
+                audit.tool_arguments = {"operation_id": operation_id} if operation_id else None
+                audit.execution_result = str(result_data)
+                audit.status = "SUCCESS"
+                db.add(audit)
+                db.commit()
+            except Exception as enrich_exc:
+                logger.warning(f"Could not enrich confirm audit row: {enrich_exc}")
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
 
         from app.core.config import settings as _settings
         audit_disabled = bool(
@@ -920,21 +953,30 @@ def confirm_and_execute_action(
         }
 
     except Exception as exc:
+        pending_actions_repo.update_fields(
+            db,
+            str(action.id),
+            status=ACTION_STATUS_FAILED,
+            error=str(exc),
+        )
         action.status = ACTION_STATUS_FAILED
         action.error_message = str(exc)
-        db.commit()
 
-        record_audit_log(
-            db=db,
-            staff_user_id=authenticated_staff.email,
-            tool_name=action.tool_name,
-            proposed_payload=action.action_payload,
-            confirmed_by_staff=True,
-            status="FAILED",
-            error_message=str(exc),
-            conversation_id=action.conversation_id,
-            pending_action_id=str(action.id)
-        )
+        try:
+            record_audit_log(
+                db=db,
+                staff_user_id=authenticated_staff.email,
+                tool_name=action.tool_name,
+                proposed_payload=action.action_payload,
+                confirmed_by_staff=True,
+                status="FAILED",
+                error_message=str(exc),
+                conversation_id=action.conversation_id,
+                pending_action_id=str(action.id),
+                raise_on_failure=False,
+            )
+        except Exception as aud_exc:
+            logger.warning(f"Could not record FAILED audit for {action.id}: {aud_exc}")
         logger.error(f"Failed executing pending action {action.id}: {exc}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -949,17 +991,17 @@ def reject_pending_action(
     reason: Optional[str] = None
 ) -> Dict[str, Any]:
     """Rejects a pending action and records the cancellation in audit logs."""
-    action = get_pending_action(db, pending_action_id)
-
-    if action.status != ACTION_STATUS_PENDING:
+    action = pending_actions_repo.claim_reject(
+        db,
+        pending_action_id,
+        staff_email=authenticated_staff.email,
+        reason=reason,
+    )
+    if action.status != ACTION_STATUS_REJECTED:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Action cannot be rejected. Current status is '{action.status}'."
+            detail=f"Action cannot be rejected. Current status is '{action.status}'.",
         )
-
-    action.status = ACTION_STATUS_REJECTED
-    action.error_message = reason or "Rejected by staff."
-    db.commit()
 
     record_audit_log(
         db=db,
@@ -1229,6 +1271,7 @@ def _execute_update_listing(
             verified[k] = live.get(k)
         from app.services.cache_service import search_cache
         search_cache.invalidate()
+        _bump_properties_version()
         title = (
             (resolved or {}).get("property_name")
             if isinstance(resolved, dict)
@@ -1338,6 +1381,7 @@ def _execute_update_listing(
     # 3. Invalidate search cache so updated property data is immediately reflected
     from app.services.cache_service import search_cache
     search_cache.invalidate()
+    _bump_properties_version()
 
     return {
         "property_id": prop.property_id,
@@ -1462,12 +1506,21 @@ def _fs_sync_enabled() -> bool:
         return bool(getattr(settings, "ENABLE_FIRESTORE_SYNC", True))
 
 
+def _bump_properties_version() -> None:
+    try:
+        from app.services.firestore_service import bump_properties_version
+        bump_properties_version(target="user")
+    except Exception as e:
+        logger.debug("bump_properties_version skipped: %s", e)
+
+
 def _invalidate_search_cache() -> None:
     try:
         from app.services.cache_service import search_cache
         search_cache.invalidate()
     except Exception as exc:
         logger.warning("Search cache invalidation failed: %s", exc)
+    _bump_properties_version()
 
 
 def _summary_sql(prop: Any) -> Optional[Dict[str, Any]]:

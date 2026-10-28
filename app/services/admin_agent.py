@@ -207,17 +207,27 @@ def summarize_untrusted_document(text: str, filename: Optional[str] = None) -> D
 
 
 def refuse_secret_or_prompt_reveal(message: Optional[str]) -> bool:
-    """True when staff asks to print/reveal API keys or the system prompt."""
+    """True when staff asks to print/reveal API keys, secrets, or configuration."""
     if not message:
         return False
     m = message.strip().lower()
     if re.search(
         r"(?:print|show|reveal|dump|give|output|display)\s+(?:your\s+|the\s+|my\s+)?"
-        r"(?:api\s*key|secret|token|password|system\s+prompt|hidden\s+rules?|prompt)",
+        r"(?:api\s*keys?|secret|token|password|system\s+prompt|hidden\s+rules?|prompt)",
         m,
     ):
         return True
-    if "api key" in m and any(w in m for w in ("print", "show", "reveal", "dump")):
+    if re.search(r"\b(?:database_url|db_url|connection\s*string)\b", m):
+        return True
+    if re.search(
+        r"(?:what\s+is|what's|whats|show|print|reveal|dump|give\s+me|tell\s+me).{0,40}"
+        r"(?:database_url|db_url|api\s*keys?|secret|token|password|config(?:uration)?)",
+        m,
+    ):
+        return True
+    if "api key" in m and any(w in m for w in ("print", "show", "reveal", "dump", "what")):
+        return True
+    if "api keys" in m:
         return True
     if "system prompt" in m and any(w in m for w in ("print", "show", "reveal", "dump", "your")):
         return True
@@ -1437,7 +1447,6 @@ def process_admin_chat(
         }
 
     # 2.5 Action Intent & Confirmation/Rejection Decision Engine (strict parse — B5/B7)
-    from app.db.models import PendingAction
     from app.services.action_service import (
         ACTION_STATUS_PENDING,
         confirm_and_execute_action,
@@ -1447,17 +1456,9 @@ def process_admin_chat(
 
     msg_low = clean_message.lower()
 
-    # Guard: refuse API key / system prompt reveal (C1)
+    # Guard: refuse API key / config / system prompt reveal (C1)
     if refuse_secret_or_prompt_reveal(clean_message):
-        refuse_sec = (
-            "I cannot print API keys or the system prompt. "
-            "That request is refused for security reasons."
-        )
-        if active_lang == "pl":
-            refuse_sec = (
-                "Nie mogę ujawnić kluczy API ani promptu systemowego. "
-                "Ta prośba jest odrzucona ze względów bezpieczeństwa."
-            )
+        refuse_sec = "I can't share keys or configuration."
         refuse_sec = redact_admin_sensitive_output(refuse_sec)
         append_conversation_turn(db, conv, clean_message, refuse_sec)
         return {
@@ -1546,26 +1547,10 @@ def process_admin_chat(
 
     if db is not None:
         try:
-            open_pending = (
-                db.query(PendingAction)
-                .filter(
-                    PendingAction.conversation_id == str(conv.id),
-                    PendingAction.status == ACTION_STATUS_PENDING,
-                )
-                .order_by(PendingAction.created_at.desc())
-                .all()
+            from app.repositories import pending_actions_repo
+            open_pending = pending_actions_repo.list_open_pending(
+                db, str(conv.id), limit=10
             ) or []
-            # Lazy-expire any stale PENDING so they never appear in notes/cards
-            refreshed = []
-            for pa in open_pending:
-                try:
-                    refreshed.append(get_pending_action(db, str(pa.id)))
-                except Exception:
-                    refreshed.append(pa)
-            open_pending = [
-                pa for pa in refreshed
-                if getattr(pa, "status", None) == ACTION_STATUS_PENDING
-            ]
         except Exception:
             open_pending = []
 
@@ -1648,6 +1633,25 @@ def process_admin_chat(
             "download_link": None,
             "language": active_lang,
         }
+
+    # Confirm / yes with nothing pending — never fall through to property search
+    if has_confirm_intent and not has_reject_intent and not target_action:
+        nothing_text = "There is nothing waiting for confirmation right now."
+        if active_lang == "pl":
+            nothing_text = "Nie ma teraz nic oczekującego na potwierdzenie."
+        append_conversation_turn(db, conv, clean_message or "yes", nothing_text)
+        return _attach_timing_debug({
+            "type": "text",
+            "text": nothing_text,
+            "session_id": conv.session_id,
+            "conversation_id": str(conv.id),
+            "requires_confirmation": False,
+            "pending_action_id": None,
+            "action_status": None,
+            "tools_used": [],
+            "download_link": None,
+            "language": active_lang,
+        }, timer)
 
     # A. Execute Confirmation
     if target_action and has_confirm_intent and not has_reject_intent:
@@ -1963,7 +1967,15 @@ def process_admin_chat(
                 "language": active_lang
             }, timer)
         except Exception as e:
-            err_text = f"Failed to execute action: {str(e)}"
+            from fastapi import HTTPException as _HTTPException
+            from app.services.audit_service import AUDIT_WRITE_FAILED_MSG
+            detail = getattr(e, "detail", None)
+            if isinstance(e, _HTTPException) and detail:
+                err_text = str(detail)
+            elif AUDIT_WRITE_FAILED_MSG.lower() in str(e).lower():
+                err_text = AUDIT_WRITE_FAILED_MSG
+            else:
+                err_text = f"Failed to execute action: {str(e)}"
             append_conversation_turn(db, conv, clean_message or "Confirm", err_text)
             return _attach_timing_debug({
                 "type": "text",
@@ -3606,14 +3618,25 @@ def _run_deterministic_admin(
                     f"Once authorized, your private Google Drive and Calendar will be active."
                 )
 
-    # E. Generate Client Offer Dossier / Portfolio PDF (8-Page Multi-Property Investor Proposal)
+    # E0 / E. Brochure (single property) + Client Offer Dossier / Portfolio PDF
+    is_brochure_request = (
+        ("brochure" in msg_lower or "broszura" in msg_lower)
+        and not any(k in msg_lower for k in ("dossier", "portfolio", "offer for", "client offer"))
+        and (
+            any(w in msg_lower for w in (
+                "give", "get", "generate", "create", "make", "download", "send",
+                "daj", "wygeneruj", "pobierz", "for", "of", "about", "dla",
+            ))
+            or msg_lower.strip().startswith("brochure")
+        )
+    )
     PORTFOLIO_TRIGGERS = [
         "portfolio pdf", "offer pdf", "oferta pdf", "ofertę pdf", "oferte pdf",
         "investor offer", "client offer", "clint offer", "clinet offer", "oferta dla", "dla dariusza", "dla klienta", "propozycja dla",
         "ofertowy pdf", "wygeneruj ofertę", "wygeneruj oferte", "generate offer", "create offer",
         "investor proposal", "make a portfolio", "create portfolio", "prepare portfolio",
         "wygeneruj portfolio", "stwórz portfolio", "przygotuj portfolio", "client portfolio", "investor portfolio",
-        "offer for", "dossier for", "dossier dla"
+        "offer for", "dossier for", "dossier dla", "offer dossier", "generate offer dossier",
     ]
     has_portfolio_intent = any(k in msg_lower for k in PORTFOLIO_TRIGGERS) or (
         ("portfolio" in msg_lower or (("client" in msg_lower or "clint" in msg_lower) and ("offer" in msg_lower or "proposal" in msg_lower or "dossier" in msg_lower))) and
@@ -3640,17 +3663,133 @@ def _run_deterministic_admin(
         has_portfolio_intent = False
         is_answering_portfolio = False
         is_explicit_answer = False
+        is_brochure_request = False
 
-    if has_portfolio_intent or is_answering_portfolio or is_explicit_answer:
+    if is_brochure_request and not has_portfolio_intent and not is_answering_portfolio:
+        # Single-property brochure — never fall through to a property list
+        brochure_pid = prop_id
+        brochure_name = None
+        name_m = re.search(
+            r"(?:brochure|broszura)\s+(?:for|of|about|dla|o)\s+(.+)$",
+            message.strip(),
+            re.I,
+        )
+        if name_m:
+            brochure_name = name_m.group(1).strip(" .,;:'\"")
+        if not brochure_pid and brochure_name:
+            from app.services.admin_property_resolver import resolve_admin_property_name
+            resolved = resolve_admin_property_name(
+                brochure_name, language=language, already_extracted=True
+            )
+            if resolved.kind == "resolved" and resolved.property_id:
+                brochure_pid = resolved.property_id
+                brochure_name = resolved.official_name or brochure_name
+            elif resolved.kind == "ambiguous":
+                response_text = resolved.message or (
+                    "Which property did you mean for the brochure? Please pick one name."
+                )
+                brochure_pid = None
+            else:
+                response_text = (
+                    f"I couldn't find a property matching `{brochure_name}`. "
+                    "Name a real listing and I will generate its brochure."
+                )
+                brochure_pid = None
+        elif not brochure_pid:
+            response_text = (
+                "Which property should I generate the brochure for? "
+                "Name the listing (e.g. `give me the brochure for Isla Kata`)."
+            )
+
+        if brochure_pid:
+            t_res, _, _ = _execute_admin_tool(
+                db,
+                "generate_property_brochure",
+                {"property_id": brochure_pid, "language": language},
+                staff_user,
+                str(conv.id),
+            )
+            tool_calls.append({"name": "generate_property_brochure", "args": {"property_id": brochure_pid}})
+            tool_results.append(t_res)
+            if isinstance(t_res, dict) and (t_res.get("file_url") or t_res.get("success")):
+                fname = t_res.get("filename") or "brochure.pdf"
+                furl = t_res.get("file_url") or t_res.get("download_url") or "#"
+                label = t_res.get("property_name") or brochure_name or brochure_pid
+                response_text = (
+                    t_res.get("message")
+                    or format_report_ready_message(
+                        filename=str(fname),
+                        format_type="pdf",
+                        language=language,
+                        storage_ok=bool(t_res.get("storage_ok", True)) and bool(furl and furl != "#"),
+                    )
+                )
+                if label and label not in (response_text or ""):
+                    response_text = f"Brochure for **{label}** is ready.\n\n{response_text}"
+            else:
+                err = (t_res or {}).get("error") or (t_res or {}).get("message") or "generation failed"
+                response_text = (
+                    f"I could not generate the brochure for `{brochure_name or brochure_pid}`: {err}"
+                )
+
+    elif has_portfolio_intent or is_answering_portfolio or is_explicit_answer:
+        # Pre-detect core details so a fully specified first message generates immediately
+        from app.services.admin_property_fields import describe_money as _pre_money
+        _money = _pre_money(message)
+        _pre_client = bool(re.search(
+            r"(?:client(?:\s*name)?(?:\s*is|\s*:)?|dla klienta)\s+([A-ZĄĆĘŁŃÓŚŹŻa-ząćęłńóśźż]+(?:\s+[A-ZĄĆĘŁŃÓŚŹŻa-ząćęłńóśźż]+)?)",
+            message,
+            re.I,
+        )) or any(n in msg_lower for n in ("dariusz", "alexander", "michael"))
+        _pre_budget = bool(
+            (_money and (_money.get("multiplier") or _money.get("thb", 0) >= 100_000))
+            or max_price_val
+            or re.search(r"\bbudget\b.{0,20}\d", msg_lower)
+        )
+        _pre_prop = bool(re.search(r"PROP-[A-Z0-9]+-[0-9]+", message, re.I))
+        if not _pre_prop:
+            _pm = re.search(
+                r"(?:dossier|offer|portfolio)\s+for\s+(.+?)\s+for\s+client",
+                message,
+                re.I,
+            )
+            if _pm:
+                try:
+                    from app.services.admin_property_resolver import resolve_admin_property_name as _rpn
+                    _rr = _rpn(_pm.group(1).strip(), language=language, already_extracted=True)
+                    _pre_prop = _rr.kind == "resolved"
+                except Exception:
+                    _pre_prop = bool(_pm.group(1).strip())
+
         # Check if we should ask clarifying questions first (Turn 1)
         should_ask_questions = not (is_answering_portfolio or is_explicit_answer)
         if any(w in msg_lower for w in ["immediately", "without asking", "natychmiast", "bez pytania"]):
             should_ask_questions = False
+        # Client + budget present → generate now (defaults for brand/template/goal)
+        if _pre_client and _pre_budget:
+            should_ask_questions = False
 
         if should_ask_questions:
-            # Turn 1: Ask the 7 clarifying questions warmly
             staff_name = _get_staff_display_name(staff_user, raw_user_message or message)
-            if language == "pl":
+            missing_core = []
+            if not _pre_client:
+                missing_core.append("**Client Name**" if language != "pl" else "**Imię klienta**")
+            if not _pre_budget:
+                missing_core.append("**Target Budget**" if language != "pl" else "**Budżet**")
+            # Partial details: ask only for what is still missing (not the full 7)
+            if missing_core and (_pre_client or _pre_budget or _pre_prop):
+                if language == "pl":
+                    response_text = (
+                        f"Mogę wygenerować dossier, gdy podasz: {', '.join(missing_core)}. "
+                        f"Albo napisz **'dobierz resztę'**, a użyję domyślnych wartości."
+                    )
+                else:
+                    response_text = (
+                        f"I can generate that offer dossier once I have: {' and '.join(missing_core)}. "
+                        f"Or say **'assume the rest'** to continue with defaults."
+                    )
+            elif language == "pl":
+                # Turn 1: Ask the 7 clarifying questions warmly
                 response_text = (
                     f"Oczywiście **{staff_name}**, chętnie przygotuję portfolio ofertowe PDF dla Twojego klienta! 🌟\n\n"
                     f"Zanim rozpocznę generowanie, czy możesz podać poniższe szczegóły, czy mam pobrać je z bazy danych i dobrać resztę automatycznie?\n\n"
@@ -3682,9 +3821,13 @@ def _run_deterministic_admin(
             combined_text = f"{prev_user_turn} {message}".strip()
             comb_lower = combined_text.lower()
 
-            # 1. Client Name
+            # 1. Client Name (prefer "for client X" / "client name X" over bare "for <property>")
             client_name_provided = False
-            c_match = re.search(r'(?:client(?:\s*name)?(?:\s*is|\s*:)?|dla|for)\s+([A-ZĄĆĘŁŃÓŚŹŻa-ząćęłńóśźż]+(?:\s+[A-ZĄĆĘŁŃÓŚŹŻa-ząćęłńóśźż]+)?)', message, re.IGNORECASE)
+            c_match = re.search(
+                r'(?:client(?:\s*name)?(?:\s*is|\s*:)?|dla klienta)\s+([A-ZĄĆĘŁŃÓŚŹŻa-ząćęłńóśźż]+(?:\s+[A-ZĄĆĘŁŃÓŚŹŻa-ząćęłńóśźż]+)?)',
+                message,
+                re.IGNORECASE,
+            )
             if c_match:
                 client_name = c_match.group(1).strip().title()
                 client_name_provided = True
@@ -3789,6 +3932,24 @@ def _run_deterministic_admin(
             else:
                 property_ids = None
                 props_provided = False
+                name_m = re.search(
+                    r"(?:dossier|offer|portfolio)\s+for\s+(.+?)(?:\s+for\s+client|\s+budget\b|$)",
+                    message,
+                    re.I,
+                )
+                if name_m:
+                    cand = name_m.group(1).strip(" .,;:'\"")
+                    if cand and "client" not in cand.lower():
+                        try:
+                            from app.services.admin_property_resolver import resolve_admin_property_name
+                            resolved = resolve_admin_property_name(
+                                cand, language=language, already_extracted=True
+                            )
+                            if resolved.kind == "resolved" and resolved.property_id:
+                                property_ids = [resolved.property_id]
+                                props_provided = True
+                        except Exception:
+                            pass
 
             # 5. Template Variant (1-7) — explicit number, else stable hash of property id(s)
             from app.services.admin_reply_helpers import choose_dossier_template_variant
@@ -4955,7 +5116,7 @@ def _execute_admin_tool_uncached(
     # 5. Read Tool: get_buyer_leads
     elif tool_name == "get_buyer_leads":
         from datetime import datetime, timezone, timedelta
-        from app.db.models import Lead
+        from app.repositories import leads_read_repo
         from app.services.admin_reply_helpers import (
             format_leads_date_window,
             format_leads_zero_with_offer,
@@ -4978,6 +5139,7 @@ def _execute_admin_tool_uncached(
         limit = int(tool_args.get("limit") or 10)
         calendar_week = bool(tool_args.get("calendar_week"))
         all_time = (not calendar_week) and (days is None or days <= 0)
+        site_filter = tool_args.get("site") or tool_args.get("website")
 
         now = datetime.now(timezone.utc)
         window_start = None
@@ -4989,11 +5151,7 @@ def _execute_admin_tool_uncached(
             days = max(1, (window_end.date() - window_start.date()).days + 1)
             all_time = False
         elif all_time:
-            # Soft cap when table is large: last 180 days still labeled as all-time store scan
-            try:
-                total_rows = int(db.query(Lead).count() or 0)
-            except (TypeError, ValueError):
-                total_rows = 0
+            total_rows = leads_read_repo.count_leads(db)
             if total_rows > 500:
                 window_start = now - timedelta(days=ALL_TIME_LEADS_SOFT_CAP_DAYS)
                 all_time = False
@@ -5004,31 +5162,24 @@ def _execute_admin_tool_uncached(
         else:
             window_start = now - timedelta(days=max(1, int(days)))
 
-        query = db.query(Lead)
-        if min_sc:
-            query = query.filter(Lead.lead_score >= min_sc)
-        if st:
-            query = query.filter(Lead.status == st)
-        if window_start is not None:
-            try:
-                query = query.filter(Lead.created_at >= window_start.replace(tzinfo=None))
-            except Exception:
-                try:
-                    query = query.filter(Lead.created_at >= window_start)
-                except Exception:
-                    pass
-
-        # Newest first for all-time; score then date when filtered
-        if all_time or days == 0:
-            leads = query.order_by(Lead.created_at.desc(), Lead.lead_score.desc()).limit(limit).all()
-        else:
-            leads = query.order_by(Lead.lead_score.desc(), Lead.created_at.desc()).limit(limit).all()
-
-        # Total matching the window (not just the page limit)
-        try:
-            total_matching = int(query.count() or 0)
-        except (TypeError, ValueError):
-            total_matching = len(leads)
+        order = "newest" if (all_time or days == 0) else "score"
+        leads = leads_read_repo.query_leads(
+            db,
+            window_start=window_start,
+            status=st,
+            min_score=min_sc,
+            site=site_filter,
+            limit=max(limit, 50),
+            order=order,
+        )
+        total_matching = leads_read_repo.count_leads(
+            db,
+            window_start=window_start,
+            status=st,
+            min_score=min_sc,
+            site=site_filter,
+        )
+        leads = leads[:limit]
 
         window_label = format_leads_date_window(
             days=days,
@@ -5040,8 +5191,7 @@ def _execute_admin_tool_uncached(
         )
 
         lead_saving_on = bool(getattr(settings, "ENABLE_LEAD_SAVING", False))
-        # Most recent lead overall (for empty-window offer + lead-saving note)
-        most_recent = db.query(Lead).order_by(Lead.created_at.desc()).first()
+        most_recent = leads_read_repo.most_recent_lead(db)
         most_recent_date = None
         most_recent_days_ago = None
         if most_recent and getattr(most_recent, "created_at", None):
@@ -5066,13 +5216,13 @@ def _execute_admin_tool_uncached(
             if not all_time:
                 try:
                     w_start = now - timedelta(days=wider_days)
-                    wq = db.query(Lead)
-                    if min_sc:
-                        wq = wq.filter(Lead.lead_score >= min_sc)
-                    if st:
-                        wq = wq.filter(Lead.status == st)
-                    wq = wq.filter(Lead.created_at >= w_start.replace(tzinfo=None))
-                    wider_count = wq.count()
+                    wider_count = leads_read_repo.count_leads(
+                        db,
+                        window_start=w_start,
+                        status=st,
+                        min_score=min_sc,
+                        site=site_filter,
+                    )
                 except Exception:
                     wider_count = 0
             msg = format_leads_zero_with_offer(
@@ -5209,6 +5359,45 @@ def _execute_admin_tool_uncached(
                 "success": False,
                 "error": str(e),
                 "message": f"Nie udało się wygenerować dossier PDF: {str(e)}"
+            }, False, None
+
+    elif tool_name == "generate_property_brochure":
+        try:
+            from app.services.brochure_service import generate_and_upload_brochure
+            pid = tool_args.get("property_id") or ""
+            lang = tool_args.get("language") or "en"
+            res = generate_and_upload_brochure(
+                db=db,
+                property_id=str(pid),
+                site_origin="admin",
+                language=lang,
+                client_name=tool_args.get("client_name"),
+            )
+            record_audit_log(
+                db=db,
+                staff_user_id=staff_email,
+                tool_name="generate_property_brochure",
+                tool_arguments=tool_args,
+                status="SUCCESS",
+                conversation_id=conversation_id,
+            )
+            if isinstance(res, dict):
+                res.setdefault("success", True)
+            return res, False, None
+        except Exception as e:
+            logger.error(f"Error generating property brochure: {e}", exc_info=True)
+            record_audit_log(
+                db=db,
+                staff_user_id=staff_email,
+                tool_name="generate_property_brochure",
+                tool_arguments=tool_args,
+                status="FAILED",
+                conversation_id=conversation_id,
+            )
+            return {
+                "success": False,
+                "error": str(e),
+                "message": f"Could not generate brochure: {e}",
             }, False, None
 
     elif tool_name == "ingest_property_from_url":

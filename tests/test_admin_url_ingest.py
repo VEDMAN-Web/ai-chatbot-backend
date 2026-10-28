@@ -879,7 +879,8 @@ def test_multi_field_edit_then_confirm(world, monkeypatch, message, name, kind, 
     _chat(world, "https://example.com/edit-me")
     edited = _chat(world, message)
     assert "Applied" in edited["text"]
-    assert "Not understood" in edited["text"]
+    # Empty "Not understood" table is omitted when every edit was applied
+    assert "Not understood" not in edited["text"]
     assert name in edited["text"]
     pending = world["db"].query(PendingAction).filter(PendingAction.status == "PENDING").one()
     prov = pending.action_payload["provenance"]

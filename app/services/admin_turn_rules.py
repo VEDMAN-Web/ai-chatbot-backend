@@ -211,15 +211,15 @@ def _listed_ids(conv: Any) -> List[str]:
 
 
 def _undo_last(db: Any, conv: Any, staff: Any) -> Dict[str, Any]:
-    from app.db.models import PendingAction
+    from app.repositories import pending_actions_repo
 
     try:
-        rows = (
-            db.query(PendingAction)
-            .filter(PendingAction.conversation_id == str(getattr(conv, "id", "") or ""))
-            .filter(PendingAction.status == "EXECUTED")
-            .all()
-        )
+        rows = [
+            r for r in pending_actions_repo.list_by_conversation(
+                db, str(getattr(conv, "id", "") or ""), limit=20
+            )
+            if getattr(r, "status", None) == "EXECUTED"
+        ]
     except Exception:
         rows = []
     if not isinstance(rows, list) or not rows:

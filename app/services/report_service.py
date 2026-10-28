@@ -1299,28 +1299,26 @@ def generate_report(
             else f"last {period_days} days through {now.strftime('%Y-%m-%d')}"
         )
 
-        query = db.query(Lead)
+        from app.repositories import leads_read_repo
+
         leads: List[Any] = []
         capped = False
         if lead_ids:
             clean_lids = [str(lid).strip() for lid in lead_ids if lid]
-            leads = query.filter(
-                (Lead.contact_name.in_(clean_lids))
-                | (Lead.id.in_(clean_lids))
-            ).order_by(Lead.created_at.desc()).all()
+            leads = leads_read_repo.query_leads(
+                db, ids=clean_lids, limit=LEADS_REPORT_CAP, order="newest"
+            )
             period_subtitle = f"selected leads ({len(leads)})"
         else:
+            window_start = None
             if not all_time and period_days:
                 window_start = now - timedelta(days=period_days)
-                try:
-                    query = query.filter(Lead.created_at >= window_start.replace(tzinfo=None))
-                except Exception:
-                    query = query.filter(Lead.created_at >= window_start)
-            total_matching = query.count()
-            leads = (
-                query.order_by(Lead.created_at.desc(), Lead.lead_score.desc())
-                .limit(LEADS_REPORT_CAP)
-                .all()
+            total_matching = leads_read_repo.count_leads(db, window_start=window_start)
+            leads = leads_read_repo.query_leads(
+                db,
+                window_start=window_start,
+                limit=LEADS_REPORT_CAP,
+                order="newest",
             )
             capped = total_matching > LEADS_REPORT_CAP
             if capped:
@@ -1330,14 +1328,8 @@ def generate_report(
             if not leads and not all_time and period_days:
                 wider = 30 if period_days < 30 else (90 if period_days < 90 else 180)
                 w_start = now - timedelta(days=wider)
-                try:
-                    wider_q = db.query(Lead).filter(
-                        Lead.created_at >= w_start.replace(tzinfo=None)
-                    )
-                except Exception:
-                    wider_q = db.query(Lead).filter(Lead.created_at >= w_start)
-                wider_count = wider_q.count()
-                most_recent = db.query(Lead).order_by(Lead.created_at.desc()).first()
+                wider_count = leads_read_repo.count_leads(db, window_start=w_start)
+                most_recent = leads_read_repo.most_recent_lead(db)
                 recent_d = None
                 if most_recent and getattr(most_recent, "created_at", None):
                     try:

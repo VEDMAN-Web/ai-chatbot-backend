@@ -134,6 +134,11 @@ def test_get_buyer_leads_defaults_all_time_not_seven(monkeypatch):
             return FakeQuery(leads_rows)
 
     monkeypatch.setattr(aa.settings, "ENABLE_LEAD_SAVING", False)
+    monkeypatch.setattr(aa.settings, "STORE_LEADS_READ", "postgres")
+    monkeypatch.setattr(
+        "app.services.firestore_service.get_firestore_client",
+        lambda *a, **k: None,
+    )
     staff = MagicMock()
     staff.email = "admin@test.com"
     staff.selected_websites = None
@@ -160,6 +165,11 @@ def test_leads_report_no_filters_includes_all(monkeypatch, tmp_path):
     from app.services import report_service as rs
 
     monkeypatch.setattr(rs.settings, "REPORT_STORAGE_DIR", str(tmp_path / "reports"))
+    monkeypatch.setattr(rs.settings, "STORE_LEADS_READ", "postgres")
+    monkeypatch.setattr(
+        "app.services.firestore_service.get_firestore_client",
+        lambda *a, **k: None,
+    )
     store = InMemoryStorageProvider()
 
     class L:
@@ -226,6 +236,11 @@ def test_leads_report_empty_period_offers_wider(monkeypatch, tmp_path):
     from app.services import report_service as rs
 
     monkeypatch.setattr(rs.settings, "REPORT_STORAGE_DIR", str(tmp_path / "reports"))
+    monkeypatch.setattr(rs.settings, "STORE_LEADS_READ", "postgres")
+    monkeypatch.setattr(
+        "app.services.firestore_service.get_firestore_client",
+        lambda *a, **k: None,
+    )
 
     class FakeQuery:
         def __init__(self, empty=True):
@@ -256,17 +271,32 @@ def test_leads_report_empty_period_offers_wider(monkeypatch, tmp_path):
             # first calls for period query return empty; wider uses same — simplify
             return FakeQuery(empty=True)
 
-    # Patch wider count path: after empty, generate_report queries again for wider
+    # Patch wider count path: after empty, generate_report queries again for wider.
+    # leads_read_repo.count_leads / most_recent use .all(), not .count().
     calls = {"n": 0}
+    recent = SimpleNamespace(
+        id="r1",
+        contact_name="Recent",
+        contact_email="r@corp.com",
+        contact_phone="",
+        preferred_location="",
+        preferred_type=None,
+        budget_min=None,
+        budget_max=None,
+        lead_score=10,
+        buying_signals=[],
+        status="new",
+        created_at=datetime(2026, 10, 11, tzinfo=timezone.utc),
+    )
 
     class TrackingDB:
         def query(self, model):
             calls["n"] += 1
             q = FakeQuery(empty=True)
-            # When counting wider window (later calls), return some count
             if calls["n"] > 2:
                 q = FakeQuery(empty=False)
-                q.all = lambda: []
+                q.all = lambda: [recent] * 12
+                q.first = lambda: recent
             return q
 
     out = generate_report(

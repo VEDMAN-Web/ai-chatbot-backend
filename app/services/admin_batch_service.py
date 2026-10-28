@@ -1068,6 +1068,11 @@ def undo_batch_property_operation(
             search_cache.invalidate()
         except Exception:
             pass
+        try:
+            from app.services.firestore_service import bump_properties_version
+            bump_properties_version(target="user")
+        except Exception:
+            pass
 
     differing = _verify_exact_restore(data, projects_col, db_session, property_ids or created_ids)
     restored_ok = len(differing) == 0

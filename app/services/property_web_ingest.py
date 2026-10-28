@@ -1672,13 +1672,11 @@ def _edit_report(draft: Dict[str, Any], changed: List[str], rejected: List[Dict[
         lines.append(f"| {label} | {'' if value is None else value} |")
     if not seen:
         lines.append("| — | nothing applied |")
-    lines.append("")
-    lines.append("Not understood")
-    lines.append("| Text | Reason |")
-    lines.append("| --- | --- |")
-    if not rejected:
-        lines.append("| — | none |")
-    else:
+    if rejected:
+        lines.append("")
+        lines.append("Not understood")
+        lines.append("| Text | Reason |")
+        lines.append("| --- | --- |")
         for item in rejected:
             text = str(item.get("value") or item.get("field") or "").replace("|", "/")
             reason = str(item.get("reason") or "I could not tell which field this is.").replace("|", "/")
@@ -1743,13 +1741,23 @@ def _save_one(db: Any, staff: Any, action: Any) -> str:
         return f"The save failed: {exc}. Nothing was saved."
     if not result.get("saved"):
         return result.get("message") or "Nothing was saved."
+    from app.repositories import pending_actions_repo
+
+    executed_at = datetime.now(timezone.utc)
+    execution_result = {
+        "operation_id": result.get("operation_id"),
+        "property_id": result.get("property_id"),
+    }
+    pending_actions_repo.update_fields(
+        db,
+        str(action.id),
+        status=ACTION_STATUS_EXECUTED,
+        executed_at=executed_at,
+        execution_result=execution_result,
+    )
     action.status = ACTION_STATUS_EXECUTED
-    action.executed_at = datetime.now(timezone.utc)
-    action.execution_result = {"operation_id": result.get("operation_id"), "property_id": result.get("property_id")}
-    try:
-        db.commit()
-    except Exception:
-        pass
+    action.executed_at = executed_at
+    action.execution_result = execution_result
     audit = result.get("audit")
     text = result["message"]
     if audit == "disabled" and (getattr(staff, "role", "") or "").lower() == "super_admin":
@@ -1790,12 +1798,20 @@ def try_handle_property_url_turn(
         return _chat_response(conv, text, None, language)
 
     if urls:
+        from app.repositories import pending_actions_repo
+
         superseded = None
         for old in drafts:
-            old.status = "SUPERSEDED"
-            old.error_message = "Superseded by a newer URL draft"
             payload = old.action_payload or {}
             superseded = payload.get("source_url") or superseded
+            pending_actions_repo.update_fields(
+                db,
+                str(old.id),
+                status="SUPERSEDED",
+                error="Superseded by a newer URL draft",
+            )
+            old.status = "SUPERSEDED"
+            old.error_message = "Superseded by a newer URL draft"
         texts = []
         last_id = None
         errors = []
@@ -1820,12 +1836,16 @@ def try_handle_property_url_turn(
         return _chat_response(conv, text, last_id, language)
 
     if command and command.get("op") == "cancel":
+        from app.repositories import pending_actions_repo
+
         for draft_action in drafts:
+            pending_actions_repo.update_fields(
+                db,
+                str(draft_action.id),
+                status="REJECTED",
+                error="Discarded by staff.",
+            )
             draft_action.status = "REJECTED"
-        try:
-            db.commit()
-        except Exception:
-            pass
         text = "Discarded. Nothing was saved."
         append_conversation_turn(db, conv, message or "", text)
         return _chat_response(conv, text, None, language)
@@ -1852,20 +1872,19 @@ def try_handle_property_url_turn(
         if skip_is_refused(field):
             text = f"I cannot skip {field}. It is required before I can save."
         else:
+            from app.repositories import pending_actions_repo
+
             payload = copy.deepcopy(dict(latest.action_payload or {}))
             payload.setdefault("skipped_fields", [])
             if field not in payload["skipped_fields"]:
                 payload["skipped_fields"].append(field)
             provenance = payload.get("provenance") or {}
             provenance.pop(field, None)
-            from sqlalchemy.orm.attributes import flag_modified
-
+            payload["provenance"] = provenance
+            pending_actions_repo.update_fields(
+                db, str(latest.id), action_payload=payload
+            )
             latest.action_payload = payload
-            flag_modified(latest, "action_payload")
-            try:
-                db.commit()
-            except Exception:
-                pass
             text = f"Skipped {field}.\n\n" + render_preview(payload)
         append_conversation_turn(db, conv, message or "", text)
         return _chat_response(conv, text, str(latest.id), language)
@@ -1900,14 +1919,12 @@ def try_handle_property_url_turn(
     elif not changed and not rejected and command and command.get("op") not in {"confirm", "cancel", "confirm_all"}:
         text = "I did not change the draft. " + CONFIRM_FOOTER
     else:
-        from sqlalchemy.orm.attributes import flag_modified
+        from app.repositories import pending_actions_repo
 
+        pending_actions_repo.update_fields(
+            db, str(latest.id), action_payload=payload
+        )
         latest.action_payload = payload
-        flag_modified(latest, "action_payload")
-        try:
-            db.commit()
-        except Exception:
-            pass
         visible_changed = [field for field in changed if field != "foreign_listing"]
         text = render_preview(payload, changed_only=visible_changed or None)
         if (command or {}).get("report") or rejected:

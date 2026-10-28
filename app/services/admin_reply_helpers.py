@@ -136,34 +136,22 @@ def load_admin_action_state_from_db(
 ) -> Dict[str, Any]:
     """Load open PENDING + last 3 finished actions for SESSION STATE."""
     out: Dict[str, Any] = {"open_pending": [], "recent_finished": []}
-    if db is None or not conversation_id:
+    if not conversation_id:
         return out
     try:
-        from app.db.models import PendingAction
+        from app.repositories import pending_actions_repo
         from app.services.action_service import ACTION_STATUS_PENDING
 
-        open_q = (
-            db.query(PendingAction)
-            .filter(
-                PendingAction.conversation_id == str(conversation_id),
-                PendingAction.status == ACTION_STATUS_PENDING,
-            )
-            .order_by(PendingAction.created_at.desc())
-            .limit(5)
-            .all()
+        out["open_pending"] = pending_actions_repo.list_open_pending(
+            db, str(conversation_id), limit=5
         )
-        out["open_pending"] = list(open_q or [])
-        finished = (
-            db.query(PendingAction)
-            .filter(
-                PendingAction.conversation_id == str(conversation_id),
-                PendingAction.status != ACTION_STATUS_PENDING,
-            )
-            .order_by(PendingAction.created_at.desc())
-            .limit(8)
-            .all()
+        finished = pending_actions_repo.list_by_conversation(
+            db, str(conversation_id), status=None, limit=12
         )
-        # Prefer most recently executed/rejected
+        finished = [
+            a for a in finished
+            if getattr(a, "status", None) != ACTION_STATUS_PENDING
+        ]
         finished_sorted = sorted(
             finished or [],
             key=lambda a: getattr(a, "executed_at", None) or getattr(a, "created_at", None) or 0,

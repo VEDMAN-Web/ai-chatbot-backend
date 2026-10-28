@@ -1,18 +1,60 @@
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, FrozenSet, List
 from datetime import datetime, timezone
 from sqlalchemy.orm import Session
-import copy
 import logging
-
-from app.db.models import AuditLog
 
 logger = logging.getLogger(__name__)
 
+AUDIT_WRITE_FAILED_MSG = "Could not record the audit log, nothing was changed"
+
 # Keys that must never be stored in plaintext in audit logs
 SENSITIVE_KEYS = {
-    "api_key", "token", "secret", "password", "authorization", 
+    "api_key", "token", "secret", "password", "authorization",
     "anthropic_api_key", "openai_api_key", "client_secret", "credential"
 }
+
+# Read-only / non-mutating tools: audit failure must never crash the chat turn
+READ_ONLY_AUDIT_TOOLS: FrozenSet[str] = frozenset({
+    "search_properties_full",
+    "get_database_inventory_stats",
+    "get_property_knowledge",
+    "fetch_drive_file",
+    "generate_report",
+    "get_buyer_leads",
+    "check_google_workspace_status",
+    "generate_client_offer_dossier",
+    "generate_property_brochure",
+    "get_batch_operations_history",
+    "admin:read_chat_logs",
+    "admin:read_audit_logs",
+    "admin:read_visitor_logs",
+    "auth:login",
+    "auth:logout",
+    "auth:login_failed",
+})
+
+
+class AuditPersistenceError(RuntimeError):
+    """Raised when a write-path audit row cannot be persisted."""
+
+    def __init__(self, message: str = AUDIT_WRITE_FAILED_MSG):
+        super().__init__(message)
+
+
+def is_read_only_audit_tool(tool_name: Optional[str]) -> bool:
+    """True for inventory/search/report/log reads — audit failure must not raise."""
+    if not tool_name:
+        return False
+    name = str(tool_name).strip()
+    if name in READ_ONLY_AUDIT_TOOLS:
+        return True
+    low = name.lower()
+    if low.startswith("admin:read") or low.startswith("auth:"):
+        return True
+    if "list" in low and ("log" in low or "report" in low or "lead" in low):
+        return True
+    return False
+
 
 def sanitize_payload(obj: Any) -> Any:
     """Recursively scrub sensitive keys and credentials from logged payloads."""
@@ -20,7 +62,6 @@ def sanitize_payload(obj: Any) -> Any:
         sanitized = {}
         for k, v in obj.items():
             k_low = k.lower()
-            # Do not redact LLM usage metrics like 'total_tokens', 'prompt_tokens', etc.
             if k_low.endswith("_tokens") or k_low in ["token_count", "tokens_count"]:
                 sanitized[k] = sanitize_payload(v)
             elif any(sens in k_low for sens in SENSITIVE_KEYS):
@@ -45,76 +86,98 @@ def record_audit_log(
     error_message: Optional[str] = None,
     conversation_id: Optional[str] = None,
     pending_action_id: Optional[str] = None,
-    request_id: Optional[str] = None
-) -> AuditLog:
+    request_id: Optional[str] = None,
+    raise_on_failure: Optional[bool] = None,
+):
     """
-    Creates an immutable, append-only audit log entry in the audit_logs table.
-    Enforces server-side sanitization of secrets.
+    Creates an immutable audit log entry via audit_repo (Postgres / Firestore / both).
+    Does not write the legacy admin_audit_log mirror.
+
+    On failure: read-only tools return an ephemeral entry; write tools raise
+    AuditPersistenceError with AUDIT_WRITE_FAILED_MSG.
     """
+    from app.core.config import settings
+    from app.repositories import audit_repo
+
     safe_args = sanitize_payload(tool_arguments or {})
     safe_payload = sanitize_payload(proposed_payload or {})
 
-    log_entry = AuditLog(
-        staff_user_id=staff_user_id,
-        tool_name=tool_name,
-        tool_arguments=safe_args,
-        proposed_payload=safe_payload,
-        confirmed_by_staff=confirmed_by_staff,
-        execution_result=execution_result,
-        status=status,
-        error_message=error_message,
-        conversation_id=conversation_id,
-        pending_action_id=pending_action_id,
-        request_id=request_id,
-        created_at=datetime.now(timezone.utc)
-    )
+    class _Ephemeral:
+        pass
 
-    from app.core.config import settings
     if not getattr(settings, "ENABLE_AUDIT_LOGGING", False):
-        # Keep an in-memory/ephemeral entry for debugging — never present as a real audit id
-        log_entry.id = f"audit_ephemeral_{datetime.now(timezone.utc).timestamp()}"
-        setattr(log_entry, "is_ephemeral", True)
-        setattr(log_entry, "audit_logging_disabled", True)
+        entry = _Ephemeral()
+        entry.id = f"audit_ephemeral_{datetime.now(timezone.utc).timestamp()}"
+        entry.staff_user_id = staff_user_id
+        entry.tool_name = tool_name
+        entry.tool_arguments = safe_args
+        entry.proposed_payload = safe_payload
+        entry.confirmed_by_staff = confirmed_by_staff
+        entry.execution_result = execution_result
+        entry.status = status
+        entry.error_message = error_message
+        entry.conversation_id = conversation_id
+        entry.pending_action_id = pending_action_id
+        entry.request_id = request_id
+        entry.created_at = datetime.now(timezone.utc)
+        setattr(entry, "is_ephemeral", True)
+        setattr(entry, "audit_logging_disabled", True)
         logger.warning(
             "ENABLE_AUDIT_LOGGING is off — not persisting audit for tool=%s pending=%s "
             "(ephemeral id %s must not be shown as a real audit id)",
             tool_name,
             pending_action_id,
-            log_entry.id,
+            entry.id,
         )
-        return log_entry
+        return entry
 
     try:
-        db.add(log_entry)
-        db.commit()
-        db.refresh(log_entry)
-
-        # Sync to Firestore admin_audit_log collection
-        if getattr(settings, "ENABLE_FIRESTORE_SYNC", False):
-            try:
-                from app.services.firestore_service import create_audit_log_in_firestore
-                create_audit_log_in_firestore(
-                    admin_email=staff_user_id or "system",
-                    action=tool_name,
-                    details={
-                        "arguments": safe_args,
-                        "payload": safe_payload,
-                        "status": status,
-                        "confirmed": confirmed_by_staff,
-                        "error": error_message
-                    },
-                    target_type="action",
-                    target_id=pending_action_id or conversation_id or "",
-                    admin_uid=staff_user_id
-                )
-            except Exception as fe:
-                logger.warning(f"Firestore audit log sync error: {fe}")
-
-        return log_entry
+        record = audit_repo.create(
+            db,
+            tool_name=tool_name,
+            staff_user_id=staff_user_id,
+            tool_arguments=safe_args,
+            proposed_payload=safe_payload,
+            confirmed_by_staff=confirmed_by_staff,
+            execution_result=execution_result,
+            status=status,
+            error_message=error_message,
+            conversation_id=conversation_id,
+            pending_action_id=pending_action_id,
+            request_id=request_id,
+        )
+        return record
     except Exception as e:
-        db.rollback()
+        try:
+            if db is not None:
+                db.rollback()
+        except Exception:
+            pass
         logger.error(f"Failed to record audit log: {e}")
-        raise e
+        entry = _Ephemeral()
+        entry.id = f"audit_failed_{datetime.now(timezone.utc).timestamp()}"
+        entry.staff_user_id = staff_user_id
+        entry.tool_name = tool_name
+        entry.tool_arguments = safe_args
+        entry.proposed_payload = safe_payload
+        entry.confirmed_by_staff = confirmed_by_staff
+        entry.execution_result = execution_result
+        entry.status = status
+        entry.error_message = error_message
+        entry.conversation_id = conversation_id
+        entry.pending_action_id = pending_action_id
+        entry.request_id = request_id
+        entry.created_at = datetime.now(timezone.utc)
+        setattr(entry, "is_ephemeral", True)
+        setattr(entry, "audit_write_failed", True)
+        should_raise = (
+            raise_on_failure
+            if raise_on_failure is not None
+            else not is_read_only_audit_tool(tool_name)
+        )
+        if should_raise:
+            raise AuditPersistenceError(AUDIT_WRITE_FAILED_MSG) from e
+        return entry
 
 
 def query_admin_activity_logs(
@@ -129,98 +192,45 @@ def query_admin_activity_logs(
     source: str = "all"
 ) -> Dict[str, Any]:
     """
-    Queries administrative activity logs across PostgreSQL and Cloud Firestore.
-    Provides filtering, pagination, and unified log structures.
+    Queries administrative activity logs via audit_repo (merges legacy admin_audit_log).
     """
+    from app.repositories import audit_repo
+
+    result = audit_repo.query(
+        db,
+        staff_email=admin_email,
+        tool_name=action,
+        status=status,
+        start_date=start_date,
+        end_date=end_date,
+        limit=limit,
+        offset=offset,
+    )
     records = []
-    total_count = 0
-
-    if source in ("postgres", "all"):
-        query = db.query(AuditLog)
-
-        if admin_email:
-            query = query.filter(AuditLog.staff_user_id.ilike(f"%{admin_email.strip()}%"))
-
-        if action:
-            query = query.filter(AuditLog.tool_name.ilike(f"%{action.strip()}%"))
-
-        if status:
-            query = query.filter(AuditLog.status.ilike(status.strip()))
-
-        if start_date:
-            query = query.filter(AuditLog.created_at >= start_date)
-
-        if end_date:
-            query = query.filter(AuditLog.created_at <= end_date)
-
-        total_count = query.count()
-        pg_logs = query.order_by(AuditLog.created_at.desc()).offset(offset).limit(limit).all()
-
-        for l in pg_logs:
-            records.append({
-                "id": str(l.id),
-                "admin_email": l.staff_user_id or "system",
-                "action": l.tool_name,
-                "status": l.status,
-                "arguments": l.tool_arguments or {},
-                "proposed_payload": l.proposed_payload or {},
-                "confirmed_by_staff": l.confirmed_by_staff,
-                "execution_result": l.execution_result,
-                "error_message": l.error_message,
-                "conversation_id": l.conversation_id,
-                "pending_action_id": l.pending_action_id,
-                "created_at": l.created_at.isoformat() if l.created_at else None,
-                "source": "postgres"
-            })
-
-    # Include Firestore audit logs if requested
-    if source in ("firestore", "all"):
-        try:
-            from app.services.firestore_service import get_audit_logs_from_firestore
-            fs_logs = get_audit_logs_from_firestore(
-                admin_email=admin_email,
-                action=action,
-                limit=limit
-            )
-            for fl in fs_logs:
-                details = fl.get("details") or {}
-                records.append({
-                    "id": fl.get("id"),
-                    "admin_email": fl.get("adminEmail") or fl.get("adminUid") or "admin_system",
-                    "action": fl.get("action"),
-                    "status": details.get("status", "SUCCESS") if isinstance(details, dict) else "SUCCESS",
-                    "arguments": details.get("arguments", {}) if isinstance(details, dict) else {},
-                    "proposed_payload": details.get("payload", {}) if isinstance(details, dict) else {},
-                    "confirmed_by_staff": details.get("confirmed", True) if isinstance(details, dict) else True,
-                    "execution_result": str(details),
-                    "error_message": details.get("error") if isinstance(details, dict) else None,
-                    "conversation_id": fl.get("targetId") if fl.get("targetType") == "conversation" else None,
-                    "pending_action_id": fl.get("targetId") if fl.get("targetType") == "action" else None,
-                    "created_at": fl.get("createdAt"),
-                    "source": "firestore"
-                })
-                total_count += 1
-        except Exception as fe:
-            logger.warning(f"Could not fetch Firestore logs for activity query: {fe}")
-
-    # Deduplicate by ID and sort descending
-    seen_ids = set()
-    deduped = []
-    for r in sorted(records, key=lambda x: str(x.get("created_at") or ""), reverse=True):
-        rid = r.get("id")
-        if rid and rid in seen_ids:
-            continue
-        if rid:
-            seen_ids.add(rid)
-        deduped.append(r)
-
-    paged = deduped[offset : offset + limit] if source == "firestore" else deduped[:limit]
-
+    for row in result.get("logs") or []:
+        records.append({
+            "id": row.id,
+            "admin_email": row.staff_user_id,
+            "staff_user_id": row.staff_user_id,
+            "action": row.tool_name,
+            "tool_name": row.tool_name,
+            "status": row.status,
+            "confirmed_by_staff": row.confirmed_by_staff,
+            "error_message": row.error_message,
+            "conversation_id": row.conversation_id,
+            "pending_action_id": row.pending_action_id,
+            "created_at": row.created_at.isoformat() if getattr(row.created_at, "isoformat", None) else str(row.created_at),
+            "source": "audit_logs",
+            "tool_arguments": row.tool_arguments,
+            "proposed_payload": row.proposed_payload,
+            "execution_result": row.execution_result,
+        })
     return {
-        "total": len(deduped) if source != "postgres" else total_count,
+        "total": result.get("total") or len(records),
+        "logs": records,
         "limit": limit,
         "offset": offset,
-        "logs": paged
+        "source": source,
     }
 
 
@@ -230,119 +240,77 @@ def query_data_change_history(
     target_id: Optional[str] = None,
     updated_by: Optional[str] = None,
     limit: int = 50,
-    offset: int = 0
+    offset: int = 0,
 ) -> Dict[str, Any]:
     """
-    Chronological audit trail of who updated which data across the platform
-    (properties, users, batch operations, etc.).
+    Data-history view: audit rows that look like listing/property mutations.
+    Merges legacy admin_audit_log via audit_repo (no new mirror writes).
     """
-    query = db.query(AuditLog)
+    from app.repositories import audit_repo
 
-    if updated_by:
-        query = query.filter(AuditLog.staff_user_id.ilike(f"%{updated_by.strip()}%"))
-
-    mutation_tools = [
-        "update_listing", "create_listing", "delete_listing",
-        "batch_operation", "batch_file", "auth:register",
-        "auth:change_password", "auth:reset_password",
-        "confirm_action", "admin:update_user", "admin:delete_user"
-    ]
-
-    if target_type:
-        tt = target_type.strip().lower()
-        if "prop" in tt or "listing" in tt:
-            query = query.filter(AuditLog.tool_name.in_(["update_listing", "create_listing", "delete_listing", "batch_operation"]))
-        elif "user" in tt or "auth" in tt:
-            query = query.filter(AuditLog.tool_name.in_(["auth:register", "auth:change_password", "auth:reset_password", "admin:update_user", "admin:delete_user"]))
-        else:
-            query = query.filter(AuditLog.tool_name.ilike(f"%{tt}%"))
-    else:
-        query = query.filter(AuditLog.tool_name.in_(mutation_tools) | AuditLog.tool_name.ilike("%update%") | AuditLog.tool_name.ilike("%delete%") | AuditLog.tool_name.ilike("%create%"))
-
-    total = query.count()
-    logs = query.order_by(AuditLog.created_at.desc()).offset(offset).limit(limit).all()
-
-    history_items = []
-    for l in logs:
-        args = l.tool_arguments or {}
-        payload = l.proposed_payload or {}
-        
+    result = audit_repo.query(
+        db,
+        staff_email=updated_by,
+        limit=max(limit + offset + 200, 200),
+        offset=0,
+    )
+    history_items: List[Dict[str, Any]] = []
+    mutate_hints = (
+        "create_or_update_listing", "propose_listing_update", "ingest_property",
+        "execute_batch", "manage_property_images", "admin_rest_", "undo_batch",
+        "property", "listing",
+    )
+    for row in result.get("logs") or []:
+        tool = (row.tool_name or "")
+        tool_l = tool.lower()
+        payload = row.proposed_payload if isinstance(row.proposed_payload, dict) else {}
         extracted_target_id = (
-            args.get("property_id") or payload.get("property_id") or
-            args.get("email") or payload.get("email") or
-            l.pending_action_id or l.request_id or "N/A"
+            payload.get("property_id")
+            or payload.get("target_property_id")
+            or row.pending_action_id
+            or "N/A"
         )
-
-        if target_id and target_id.strip().lower() not in str(extracted_target_id).lower():
-            continue
-
         extracted_target_type = "property"
-        if "auth" in l.tool_name or "user" in l.tool_name:
+        if "user" in tool_l or "auth" in tool_l:
             extracted_target_type = "user"
-        elif "batch" in l.tool_name:
+        elif "batch" in tool_l:
             extracted_target_type = "batch_operation"
+
+        if target_type and extracted_target_type != target_type:
+            continue
+        if target_id and str(target_id) not in str(extracted_target_id) and str(target_id) not in str(payload):
+            continue
+        if not any(h in tool_l for h in mutate_hints) and not target_id:
+            continue
 
         changes_summary = {}
         if isinstance(payload.get("fields"), dict):
             changes_summary = payload.get("fields")
         elif isinstance(payload, dict):
-            changes_summary = {k: v for k, v in payload.items() if k not in ("action", "email", "property_id")}
+            changes_summary = {
+                k: v for k, v in payload.items()
+                if k not in ("action", "email", "property_id")
+            }
 
         history_items.append({
-            "change_id": str(l.id),
-            "updated_by": l.staff_user_id or "system",
-            "action": l.tool_name,
+            "change_id": str(row.id),
+            "updated_by": row.staff_user_id or "system",
+            "action": tool,
             "target_type": extracted_target_type,
             "target_id": str(extracted_target_id),
             "changes_summary": changes_summary,
             "full_payload": payload,
-            "status": l.status,
-            "confirmed_by_staff": l.confirmed_by_staff,
-            "execution_result": l.execution_result,
-            "timestamp": l.created_at.isoformat() if l.created_at else None
+            "status": row.status,
+            "confirmed_by_staff": row.confirmed_by_staff,
+            "execution_result": row.execution_result,
+            "timestamp": row.created_at.isoformat() if getattr(row.created_at, "isoformat", None) else str(row.created_at),
         })
 
-    # Include Firestore data changes
-    try:
-        from app.services.firestore_service import get_audit_logs_from_firestore
-        fs_logs = get_audit_logs_from_firestore(
-            admin_email=updated_by,
-            target_type=target_type,
-            target_id=target_id,
-            limit=limit
-        )
-        for fl in fs_logs:
-            details = fl.get("details") or {}
-            history_items.append({
-                "change_id": fl.get("id"),
-                "updated_by": fl.get("adminEmail") or fl.get("adminUid") or "admin_system",
-                "action": fl.get("action"),
-                "target_type": fl.get("targetType") or "unknown",
-                "target_id": fl.get("targetId") or "N/A",
-                "changes_summary": details.get("payload", {}) if isinstance(details, dict) else details,
-                "full_payload": details if isinstance(details, dict) else {"details": details},
-                "status": details.get("status", "SUCCESS") if isinstance(details, dict) else "SUCCESS",
-                "confirmed_by_staff": details.get("confirmed", True) if isinstance(details, dict) else True,
-                "execution_result": str(details),
-                "timestamp": fl.get("createdAt")
-            })
-    except Exception as fe:
-        logger.warning(f"Could not fetch Firestore data history: {fe}")
-
-    # Deduplicate and sort
-    seen = set()
-    deduped_history = []
-    for h in sorted(history_items, key=lambda x: str(x.get("timestamp") or ""), reverse=True):
-        cid = h.get("change_id")
-        if cid and cid in seen:
-            continue
-        if cid:
-            seen.add(cid)
-        deduped_history.append(h)
-
+    history_items.sort(key=lambda x: str(x.get("timestamp") or ""), reverse=True)
+    page = history_items[offset: offset + limit]
     return {
-        "total": len(deduped_history),
+        "total": len(history_items),
         "limit": limit,
         "offset": offset,
-        "history": deduped_history[:limit]
+        "history": page,
     }

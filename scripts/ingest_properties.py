@@ -9,7 +9,7 @@ import openpyxl
 from decimal import Decimal
 from sqlalchemy.orm import Session
 from app.db.session import engine, SessionLocal, Base
-from app.db.models import Property, PropertyImage, PropertySpec, DocumentChunk
+from app.db.models import Property, PropertyImage, PropertySpec
 
 def parse_bedrooms(bed_str):
     if not bed_str:

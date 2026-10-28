@@ -997,28 +997,32 @@ def instruction_config_status() -> Dict[str, Any]:
     }
 
 
+def _load_firestore_conversation(conversation_id: str) -> Optional[Dict[str, Any]]:
+    """Load a conversations/{id} document from admin Firestore. Never scans SQL."""
+    from app.services.firestore_service import get_firestore_client
+
+    client = get_firestore_client(target="admin")
+    if client is None or not conversation_id:
+        return None
+    try:
+        snap = client.collection("conversations").document(str(conversation_id)).get()
+        if not getattr(snap, "exists", False):
+            return None
+        data = snap.to_dict() or {}
+        data["id"] = snap.id
+        return data
+    except Exception:
+        return None
+
+
 def lookup_chat_excerpt(db: Any, conversation_id: Optional[str], message_index: int) -> Optional[Dict[str, Any]]:
     """Read-only. The excerpt is never written back to Firestore."""
-    if db is None or not conversation_id:
+    if not conversation_id:
         return None
-    from app.db.models import Conversation
-
-    conv = None
-    try:
-        conv = db.query(Conversation).filter(Conversation.id == conversation_id).first()
-    except Exception:
-        conv = None
-    if conv is None:
-        try:
-            for row in db.query(Conversation).all():
-                if str(row.id) == str(conversation_id):
-                    conv = row
-                    break
-        except Exception:
-            return None
-    if conv is None:
+    data = _load_firestore_conversation(str(conversation_id))
+    if data is None:
         return None
-    history = list(getattr(conv, "message_history", None) or [])
+    history = list(data.get("messageHistory") or data.get("message_history") or [])
     if message_index < 0 or message_index >= len(history):
         return None
     turn = history[message_index]
@@ -1028,35 +1032,26 @@ def lookup_chat_excerpt(db: Any, conversation_id: Optional[str], message_index: 
 
 
 def review_conversation(db: Any, conversation_id: str) -> Dict[str, Any]:
-    """Read-only view of Conversation, PendingAction and AuditLog. Writes nothing."""
-    from app.db.models import AuditLog, Conversation, PendingAction
+    """Read-only view of Firestore Conversation + pending_actions + audit_logs."""
+    from app.repositories import audit_repo, pending_actions_repo
 
-    conv = None
-    for row in db.query(Conversation).all():
-        if str(row.id) == str(conversation_id):
-            conv = row
-            break
-    if conv is None:
+    data = _load_firestore_conversation(str(conversation_id))
+    if data is None:
         raise InstructionStoreError("Conversation was not found.")
-    pending = []
-    for row in db.query(PendingAction).all():
-        if str(row.conversation_id or "") == str(conversation_id):
-            pending.append({
-                "id": str(row.id),
-                "tool_name": row.tool_name,
-                "status": row.status,
-            })
-    audits = []
-    for row in db.query(AuditLog).all():
-        if str(row.conversation_id or "") == str(conversation_id):
-            audits.append({
-                "id": str(row.id),
-                "tool_name": row.tool_name,
-                "status": row.status,
-            })
+    pending_rows = pending_actions_repo.list_by_conversation(
+        db, str(conversation_id), limit=100
+    )
+    pending = [
+        {"id": str(row.id), "tool_name": row.tool_name, "status": row.status}
+        for row in pending_rows
+    ]
+    audits = [
+        {"id": str(row.id), "tool_name": row.tool_name, "status": row.status}
+        for row in audit_repo.list_by_conversation(db, str(conversation_id), limit=100)
+    ]
     return {
-        "conversation_id": str(conv.id),
-        "messages": list(conv.message_history or []),
+        "conversation_id": str(data.get("id") or conversation_id),
+        "messages": list(data.get("messageHistory") or data.get("message_history") or []),
         "pending_actions": pending,
         "audit_logs": audits,
     }

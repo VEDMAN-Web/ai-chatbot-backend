@@ -1007,6 +1007,11 @@ def execute_property_image_change(db: Any, payload: Dict[str, Any], staff: Any) 
         search_cache.invalidate()
     except Exception:
         pass
+    try:
+        from app.services.firestore_service import bump_properties_version
+        bump_properties_version(target="user")
+    except Exception:
+        pass
     return {
         "success": True,
         "property_id": property_id,

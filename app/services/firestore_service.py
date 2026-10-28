@@ -1417,6 +1417,47 @@ def delete_property_firestore(
 
 
 # ==============================================================================
+# 1b. Properties catalog version (Stage F1)
+# ==============================================================================
+
+def bump_properties_version(target: str = "user") -> Optional[int]:
+    """
+    Increment meta/properties_version = {version:int, updated_at}.
+    Call after every property create/update/archive/undo and image add/replace/cover/remove.
+    Returns the new version, or None when Firestore is unavailable.
+    """
+    client = get_firestore_client(target=target)
+    if not client:
+        logger.warning("bump_properties_version: Firestore client unavailable")
+        return None
+    try:
+        ref = client.collection("meta").document("properties_version")
+        now_iso = datetime.now(timezone.utc).isoformat()
+        if hasattr(client, "run_transaction"):
+            def _txn(txn):
+                snap = txn.get(ref)
+                data = {}
+                if hasattr(snap, "to_dict"):
+                    if getattr(snap, "exists", True):
+                        data = snap.to_dict() or {}
+                elif isinstance(snap, dict):
+                    data = snap
+                current = int(data.get("version") or 0)
+                nxt = current + 1
+                txn.set(ref, {"version": nxt, "updated_at": now_iso}, merge=True)
+                return nxt
+            return client.run_transaction(_txn)
+        snap = ref.get()
+        data = snap.to_dict() if getattr(snap, "exists", False) else {}
+        nxt = int((data or {}).get("version") or 0) + 1
+        ref.set({"version": nxt, "updated_at": now_iso}, merge=True)
+        return nxt
+    except Exception as e:
+        logger.warning("bump_properties_version failed: %s", e)
+        return None
+
+
+# ==============================================================================
 # 2. Lead Management
 # ==============================================================================
 

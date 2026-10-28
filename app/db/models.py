@@ -93,7 +93,6 @@ class Property(Base):
     # Relationships
     images = relationship("PropertyImage", back_populates="property", cascade="all, delete-orphan")
     specs = relationship("PropertySpec", back_populates="property", uselist=False, cascade="all, delete-orphan")
-    documents = relationship("DocumentChunk", back_populates="property", cascade="all, delete-orphan")
 
     __table_args__ = (
         Index("ix_prop_search_composite", "property_type", "area", "status"),
@@ -138,23 +137,6 @@ class PropertySpec(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     property = relationship("Property", back_populates="specs")
-
-
-class DocumentChunk(Base):
-    __tablename__ = "document_chunks"
-
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    property_id = Column(String(64), ForeignKey("properties.property_id", ondelete="CASCADE"), nullable=True, index=True)
-    document_title = Column(String(255), nullable=False)
-    source_type = Column(String(50), default="brochure")  # brochure, spec_sheet, faq, article, drive_doc
-    chunk_text = Column(Text, nullable=False)
-    # Stored as JSONB float array with transparent migration to VECTOR(1536) once extension is activated
-    embedding = Column(JSONB, nullable=True)
-    is_internal_only = Column(Boolean, default=False, index=True)
-    metadata_json = Column(JSONB, default=dict)
-    created_at = Column(DateTime, default=datetime.utcnow)
-
-    property = relationship("Property", back_populates="documents")
 
 
 class User(Base):

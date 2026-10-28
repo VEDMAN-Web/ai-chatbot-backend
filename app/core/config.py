@@ -153,6 +153,12 @@ class Settings(BaseSettings):
     CHAT_LOG_RETENTION_DAYS: int = 180
     CHAT_LOG_MASK_PII: bool = True
 
+    # Stage F1 dual-store modes: "postgres" | "firestore" | "both"
+    # both = write both stores; read Firestore first (leads: fall back to SQL if empty)
+    STORE_PENDING_ACTIONS: str = "both"
+    STORE_AUDIT: str = "both"
+    STORE_LEADS_READ: str = "both"
+
     # Action Confirmation & Security
     ACTION_EXPIRATION_MINUTES: int = 30
     # Preferred alias for pending-action TTL (Task E); falls back to ACTION_EXPIRATION_MINUTES
@@ -426,6 +432,12 @@ def log_config_warnings() -> None:
     if not getattr(settings, "ENABLE_LEAD_SAVING", False):
         logger.warning("Lead saving is OFF")
 
+    try:
+        from app.repositories.store_mode import log_store_modes_at_startup
+        log_store_modes_at_startup()
+    except Exception as e:
+        logger.debug("Could not log STORE_* modes at startup: %s", e)
+
     redirect = (getattr(settings, "GOOGLE_REDIRECT_URI", None) or "").strip()
     if redirect and "railway.app" in redirect.lower():
         on_cloud_run = bool(os.environ.get("K_SERVICE"))
@@ -515,6 +527,10 @@ def get_admin_config_status() -> Dict[str, Any]:
     admin_chat_on = bool(getattr(settings, "ADMIN_CHAT_LOGGING", True))
     retention = int(getattr(settings, "CHAT_LOG_RETENTION_DAYS", 180) or 180)
     mask_pii = bool(getattr(settings, "CHAT_LOG_MASK_PII", True))
+    from app.repositories.store_mode import normalize_store_mode
+    store_pending = normalize_store_mode(getattr(settings, "STORE_PENDING_ACTIONS", None))
+    store_audit = normalize_store_mode(getattr(settings, "STORE_AUDIT", None))
+    store_leads = normalize_store_mode(getattr(settings, "STORE_LEADS_READ", None))
     return {
         "audit_logging": audit_on,
         "lead_saving": lead_on,
@@ -522,6 +538,9 @@ def get_admin_config_status() -> Dict[str, Any]:
         "admin_chat_logging": admin_chat_on,
         "chat_log_retention_days": retention,
         "chat_log_mask_pii": mask_pii,
+        "store_pending_actions": store_pending,
+        "store_audit": store_audit,
+        "store_leads_read": store_leads,
         "flags": {
             "ENABLE_AUDIT_LOGGING": {
                 "value": audit_on,
@@ -546,6 +565,18 @@ def get_admin_config_status() -> Dict[str, Any]:
             "CHAT_LOG_MASK_PII": {
                 "value": mask_pii,
                 "what_it_does": "Masks emails and phone numbers in admin chat log text.",
+            },
+            "STORE_PENDING_ACTIONS": {
+                "value": store_pending,
+                "what_it_does": "Where pending_actions are stored: postgres, firestore, or both.",
+            },
+            "STORE_AUDIT": {
+                "value": store_audit,
+                "what_it_does": "Where audit_logs are stored: postgres, firestore, or both.",
+            },
+            "STORE_LEADS_READ": {
+                "value": store_leads,
+                "what_it_does": "Where admin lead reads come from: postgres, firestore, or both.",
             },
         },
         "firestore_project_shared": not bool(admin_fs),
