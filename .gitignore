@@ -107,3 +107,10 @@ tajlandia_railway_dump.dump
 Thumbs.db
 ehthumbs.db
 Desktop.ini
+
+# Local test output dumps
+test_suite_*.txt
+junit_out.xml
+suite_junit.xml
+suite_out.txt
+test_full_out.txt

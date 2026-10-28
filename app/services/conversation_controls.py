@@ -778,6 +778,12 @@ def merge_applied_filters(
     single_location = mentions_location and not any((mentions_budget, mentions_type, mentions_beds, mentions_amenity, mentions_status))
     single_amenity = mentions_amenity and not any((mentions_budget, mentions_location, mentions_type, mentions_beds, mentions_status))
 
+    single_status = mentions_status and not any((mentions_budget, mentions_location, mentions_type, mentions_beds, mentions_amenity))
+    if single_status:
+        out = dict(base)
+        out["status"] = ext.get("status")
+        return out
+
     if single_budget:
         out = dict(base)
         out["max_price"] = ext.get("max_price", out.get("max_price"))

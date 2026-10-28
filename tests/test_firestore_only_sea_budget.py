@@ -247,3 +247,39 @@ def test_zero_results_explain_budget_filter(fake_fs, monkeypatch):
     text = (result.get("text") or "").lower()
     assert "budget" in text
     assert "relax" in text or "relaxed" in text
+
+
+# ---------------------------------------------------------------------------
+# Bare single word + status-only follow-up
+# ---------------------------------------------------------------------------
+
+def test_bare_sea_gets_did_you_mean_not_off_topic(fake_fs):
+    intent, args = detect_deterministic_intent("Sea")
+    assert intent == IntentType.PROPERTY_DETAILS
+    assert args.get("name_uncertain") is True
+    assert args.get("name_candidates")
+
+
+@pytest.mark.parametrize("word", ["hello", "thanks", "yes", "Phuket", "villa", "pool", "freehold"])
+def test_bare_common_words_are_not_name_lookups(fake_fs, word):
+    intent, args = detect_deterministic_intent(word)
+    assert not (intent == IntentType.PROPERTY_DETAILS and args.get("name_uncertain") and args.get("name_candidates"))
+
+
+@pytest.mark.parametrize("text", ["ready to move in", "only completed ones"])
+def test_status_followup_keeps_city_and_type(fake_fs, text):
+    state = {
+        "active_filters": {"location": "Bangkok", "property_type": "Condominium"},
+        "location": "Bangkok",
+        "property_type": "Condominium",
+        "last_result_ids": ["bk-ready-low", "bk-offplan"],
+    }
+    intent, args = detect_deterministic_intent(text, stored_state=state)
+    assert intent == IntentType.PROPERTY_SEARCH
+    assert args == {"status": "Ready"}
+
+    prefs = {"active_filters": dict(state["active_filters"]), **state}
+    merged = merge_applied_filters(prefs, extract_search_filters_deterministic(text), text)
+    assert merged["location"] == "Bangkok"
+    assert merged["property_type"] == "Condominium"
+    assert merged["status"] == "Ready"

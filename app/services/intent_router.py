@@ -869,6 +869,13 @@ _LONG_PHONE_RE = re.compile(
     r"(\+?\d{1,4}[-.\s]?(?:\(?\d{1,4}\)?[-.\s]?)?(?:\d{2,4}[-.\s]?){2,4}\d{2,4})"
 )
 _EMAIL_RE_LEAD = re.compile(r"[\w\.-]+@[\w\.-]+\.\w+")
+_BARE_WORD_SKIP = frozenset({
+    "yes", "yep", "yeah", "nope", "okay", "ok", "thanks", "thank", "thx", "hello", "hey", "hii", "hiii",
+    "bye", "goodbye", "help", "please", "sure", "fine", "good", "great", "nice", "cool", "more", "next",
+    "back", "stop", "cancel", "reset", "clear", "start", "again", "what", "why", "how", "when", "who",
+    "where", "price", "prices", "cheap", "cheaper", "details", "info", "compare", "pdf", "brochure",
+    "villa", "villas", "condo", "condos", "house", "houses", "sale", "rent",
+})
 _ABOUT_NAME_FRAGMENT_RE = re.compile(
     r"^(?:(?:can\s+you\s+)?tell\s+me\s+(?:more\s+)?about|"
     r"(?:more\s+)?(?:details?|info(?:rmation)?)\s+(?:about|on|for)|"
@@ -928,9 +935,20 @@ def _partial_name_multi_match_intent(msg_clean: str) -> Optional[Tuple[IntentTyp
     → PROPERTY_DETAILS with name_candidates for Did you mean A, B or C?
     """
     m = _ABOUT_NAME_FRAGMENT_RE.match((msg_clean or "").strip())
-    if not m:
-        return None
-    fragment = m.group(1).strip(" .,?!'\"")
+    if m:
+        fragment = m.group(1).strip(" .,?!'\"")
+    else:
+        # A bare single word ("Sea") that is not a greeting, filler, place, type or amenity.
+        bare = (msg_clean or "").strip(" .,?!'\"")
+        if not re.fullmatch(r"[A-Za-z]{3,20}", bare) or bare.lower() in _BARE_WORD_SKIP:
+            return None
+        try:
+            _f = extract_search_filters_deterministic(bare)
+        except Exception:
+            _f = {}
+        if any(v not in (None, "", [], {}, False) for v in (_f or {}).values()):
+            return None  # a real filter word (place, type, amenity, status)
+        fragment = bare
     fragment = re.sub(r"^(?:the|a|an)\s+", "", fragment, flags=re.I).strip()
     if not fragment or len(fragment) > 40:
         return None
@@ -1156,6 +1174,10 @@ def detect_deterministic_intent(
         _by_mention = _mention_intent(msg_clean, reference_map=_pc0.get("reference_map"))
         if _by_mention:
             return _by_mention
+        _partial = _partial_name_multi_match_intent(msg_clean)
+        if _partial:
+            return _partial
+    elif len(msg_clean) >= 3 and not _is_card_action_message(msg_clean) and not _should_skip_mention_for_lead(message):
         _partial = _partial_name_multi_match_intent(msg_clean)
         if _partial:
             return _partial
@@ -1618,6 +1640,18 @@ def detect_deterministic_intent(
                     "property_ids": [a, b],
                     "raw_query": msg_clean,
                 }
+
+    # 3b. Status-only follow-up on a search that is already on screen ("ready to move in", "only completed",
+    # "under construction"): keep city / type / budget and add the status filter, never jump to one listing.
+    if (state.get("active_filters") or state.get("location") or state.get("property_type")
+            or state.get("last_result_ids")) and len(msg_clean.split()) <= 6:
+        try:
+            _st = extract_search_filters_deterministic(msg_clean)
+        except Exception:
+            _st = {}
+        _meaningful = {k: v for k, v in (_st or {}).items() if v not in (None, "", [], {}, False)}
+        if set(_meaningful) == {"status"} and not _PROPERTY_ID_RE.search(msg_clean):
+            return IntentType.PROPERTY_SEARCH, _meaningful
 
     # 4. Filter Refinement on active search
     # A full price range is a search, not a one-sided "budget 20" refine.
