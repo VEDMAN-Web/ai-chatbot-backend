@@ -5665,6 +5665,9 @@ _process_admin_chat_impl = process_admin_chat
 
 def process_admin_chat(*args, **kwargs):
     """Attach the stored confirmation token for the proposer or a super admin."""
+    import time as _time
+
+    started = _time.monotonic()
     res = _process_admin_chat_impl(*args, **kwargs)
     db = kwargs.get("db", args[0] if args else None)
     staff = kwargs.get("staff_user", args[3] if len(args) > 3 else None)
@@ -5672,4 +5675,32 @@ def process_admin_chat(*args, **kwargs):
     if isinstance(res, dict) and res.get("text"):
         from app.services.admin_chat_quality import scrub_user_reply
         res["text"] = scrub_user_reply(res.get("text"))
+    try:
+        from app.services.admin_logs_service import log_admin_chat_turn
+
+        message = kwargs.get("message", args[2] if len(args) > 2 else None)
+        session_id = kwargs.get("session_id", args[1] if len(args) > 1 else None)
+        site_origin = kwargs.get("site_origin", args[4] if len(args) > 4 else None)
+        language = kwargs.get("requested_language", args[5] if len(args) > 5 else None)
+        turn_index = 0
+        try:
+            history = getattr(kwargs.get("conv", None), "message_history", None)
+            if isinstance(history, list):
+                turn_index = len(history)
+        except Exception:
+            turn_index = 0
+        if isinstance(res, dict):
+            log_admin_chat_turn(
+                session_id=session_id,
+                conversation_id=res.get("conversation_id"),
+                staff=staff,
+                site_origin=site_origin,
+                user_message=message,
+                reply=res,
+                language=language or res.get("language"),
+                latency_ms=int((_time.monotonic() - started) * 1000),
+                turn_index=turn_index,
+            )
+    except Exception:
+        pass
     return res

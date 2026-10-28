@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
@@ -11,12 +13,15 @@ from sqlalchemy.orm import Session
 
 from app.core.auth import AuthenticatedStaff, require_super_admin
 from app.db.session import get_db
+from app.services.audit_service import record_audit_log
 from app.services.instruction_store import (
     InstructionStoreError,
     get_store,
     lookup_chat_excerpt,
     review_conversation,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/admin/superadmin", tags=["Super Admin Instructions"])
 
@@ -72,6 +77,22 @@ def _actor(staff: AuthenticatedStaff) -> str:
     return staff.email or "super_admin"
 
 
+def _audit_instruction(db: Session, staff: AuthenticatedStaff, tool_name: str, arguments: dict, result: str = "ok") -> None:
+    try:
+        record_audit_log(
+            db=db,
+            tool_name=tool_name,
+            staff_user_id=_actor(staff),
+            tool_arguments=arguments,
+            proposed_payload={"action": tool_name, **arguments},
+            confirmed_by_staff=True,
+            status="SUCCESS",
+            execution_result=result,
+        )
+    except Exception as exc:
+        logger.warning("Instruction audit failed for %s: %s", tool_name, exc)
+
+
 def _call(fn):
     try:
         return fn()
@@ -101,9 +122,11 @@ def import_instructions(
     body: ImportBody,
     request: Request,
     staff: AuthenticatedStaff = Depends(require_super_admin),
+    db: Session = Depends(get_db),
 ):
     _limit_superadmin_write(request, staff)
     saved = _call(lambda: get_store().import_bundle(body.model_dump(), _actor(staff)))
+    _audit_instruction(db, staff, "instruction:import", {"count": len(saved)}, f"imported {len(saved)}")
     return {"saved": len(saved), "instructions": saved}
 
 
@@ -112,9 +135,11 @@ def create_instruction(
     body: InstructionBody,
     request: Request,
     staff: AuthenticatedStaff = Depends(require_super_admin),
+    db: Session = Depends(get_db),
 ):
     _limit_superadmin_write(request, staff)
     doc = _call(lambda: get_store().create(body.model_dump(exclude_unset=True), _actor(staff)))
+    _audit_instruction(db, staff, "instruction:create", {"instruction_id": doc.get("id")}, "created")
     return doc
 
 
@@ -142,9 +167,12 @@ def update_instruction(
     body: InstructionBody,
     request: Request,
     staff: AuthenticatedStaff = Depends(require_super_admin),
+    db: Session = Depends(get_db),
 ):
     _limit_superadmin_write(request, staff)
-    return _call(lambda: get_store().update(instruction_id, body.model_dump(exclude_unset=True), _actor(staff)))
+    doc = _call(lambda: get_store().update(instruction_id, body.model_dump(exclude_unset=True), _actor(staff)))
+    _audit_instruction(db, staff, "instruction:update", {"instruction_id": instruction_id}, "updated")
+    return doc
 
 
 @router.post("/instructions/{instruction_id}/activate")
@@ -152,9 +180,12 @@ def activate_instruction(
     instruction_id: str,
     request: Request,
     staff: AuthenticatedStaff = Depends(require_super_admin),
+    db: Session = Depends(get_db),
 ):
     _limit_superadmin_write(request, staff)
-    return _call(lambda: get_store().activate(instruction_id, _actor(staff)))
+    doc = _call(lambda: get_store().activate(instruction_id, _actor(staff)))
+    _audit_instruction(db, staff, "instruction:activate", {"instruction_id": instruction_id}, "activated")
+    return doc
 
 
 @router.post("/instructions/{instruction_id}/archive")
@@ -162,9 +193,12 @@ def archive_instruction(
     instruction_id: str,
     request: Request,
     staff: AuthenticatedStaff = Depends(require_super_admin),
+    db: Session = Depends(get_db),
 ):
     _limit_superadmin_write(request, staff)
-    return _call(lambda: get_store().archive(instruction_id, _actor(staff)))
+    doc = _call(lambda: get_store().archive(instruction_id, _actor(staff)))
+    _audit_instruction(db, staff, "instruction:archive", {"instruction_id": instruction_id}, "archived")
+    return doc
 
 
 @router.post("/instructions/{instruction_id}/rollback")
@@ -173,9 +207,16 @@ def rollback_instruction(
     body: RollbackBody,
     request: Request,
     staff: AuthenticatedStaff = Depends(require_super_admin),
+    db: Session = Depends(get_db),
 ):
     _limit_superadmin_write(request, staff)
-    return _call(lambda: get_store().rollback(instruction_id, body.version, _actor(staff)))
+    doc = _call(lambda: get_store().rollback(instruction_id, body.version, _actor(staff)))
+    _audit_instruction(
+        db, staff, "instruction:rollback",
+        {"instruction_id": instruction_id, "version": body.version},
+        "rolled_back",
+    )
+    return doc
 
 
 @router.post("/remarks")

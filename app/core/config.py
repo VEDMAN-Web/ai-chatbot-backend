@@ -147,8 +147,11 @@ class Settings(BaseSettings):
 
     # Lead/audit permanent writes (separate from chat memory which is always Firestore when sync is on)
     ENABLE_LEAD_SAVING: bool = False
-    ENABLE_CHAT_LOGGING: bool = False  # legacy flag — chat memory uses Firestore via ENABLE_FIRESTORE_SYNC
-    ENABLE_AUDIT_LOGGING: bool = False
+    ENABLE_CHAT_LOGGING: bool = False  # legacy flag — public visitor chat_query_logs
+    ENABLE_AUDIT_LOGGING: bool = True
+    ADMIN_CHAT_LOGGING: bool = True
+    CHAT_LOG_RETENTION_DAYS: int = 180
+    CHAT_LOG_MASK_PII: bool = True
 
     # Action Confirmation & Security
     ACTION_EXPIRATION_MINUTES: int = 30
@@ -416,6 +419,10 @@ def log_config_warnings() -> None:
     """
     if not getattr(settings, "ENABLE_AUDIT_LOGGING", False):
         logger.warning("Admin audit logging is OFF")
+        if is_production_env():
+            logger.warning(
+                "ENABLE_AUDIT_LOGGING is False while ENV=production — admin actions will not be audited"
+            )
     if not getattr(settings, "ENABLE_LEAD_SAVING", False):
         logger.warning("Lead saving is OFF")
 
@@ -502,9 +509,45 @@ def get_admin_config_status() -> Dict[str, Any]:
     else:
         report_storage_label = "ephemeral"
 
+    audit_on = bool(getattr(settings, "ENABLE_AUDIT_LOGGING", True))
+    lead_on = bool(getattr(settings, "ENABLE_LEAD_SAVING", False))
+    chat_on = bool(getattr(settings, "ENABLE_CHAT_LOGGING", False))
+    admin_chat_on = bool(getattr(settings, "ADMIN_CHAT_LOGGING", True))
+    retention = int(getattr(settings, "CHAT_LOG_RETENTION_DAYS", 180) or 180)
+    mask_pii = bool(getattr(settings, "CHAT_LOG_MASK_PII", True))
     return {
-        "audit_logging": bool(getattr(settings, "ENABLE_AUDIT_LOGGING", False)),
-        "lead_saving": bool(getattr(settings, "ENABLE_LEAD_SAVING", False)),
+        "audit_logging": audit_on,
+        "lead_saving": lead_on,
+        "chat_logging": chat_on,
+        "admin_chat_logging": admin_chat_on,
+        "chat_log_retention_days": retention,
+        "chat_log_mask_pii": mask_pii,
+        "flags": {
+            "ENABLE_AUDIT_LOGGING": {
+                "value": audit_on,
+                "what_it_does": "Writes who/what/when for admin actions to the audit log.",
+            },
+            "ENABLE_CHAT_LOGGING": {
+                "value": chat_on,
+                "what_it_does": "Allows the public chatbot to write visitor turns to chat_query_logs.",
+            },
+            "ENABLE_LEAD_SAVING": {
+                "value": lead_on,
+                "what_it_does": "Saves visitor lead captures from the public chatbot.",
+            },
+            "ADMIN_CHAT_LOGGING": {
+                "value": admin_chat_on,
+                "what_it_does": "Writes each admin chat turn to admin_chat_logs in Firestore.",
+            },
+            "CHAT_LOG_RETENTION_DAYS": {
+                "value": retention,
+                "what_it_does": "Age in days after which purge-chat-logs may delete log rows.",
+            },
+            "CHAT_LOG_MASK_PII": {
+                "value": mask_pii,
+                "what_it_does": "Masks emails and phone numbers in admin chat log text.",
+            },
+        },
         "firestore_project_shared": not bool(admin_fs),
         "google_redirect_host": redirect_host,
         "database_configured": _database_url_is_configured(settings.DATABASE_URL),

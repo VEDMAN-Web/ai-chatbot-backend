@@ -287,6 +287,12 @@ const API_ROUTES = {
   properties: '/api/v1/properties',
   login: '/api/v1/auth/login',
   logout: '/api/v1/auth/logout',
+  queryLogSessions: '/api/v1/admin/query-logs/sessions',
+  queryLogSession: (id) => `/api/v1/admin/query-logs/sessions/${encodeURIComponent(id)}`,
+  queryLogStats: '/api/v1/admin/query-logs/stats',
+  adminChatLogSessions: '/api/v1/admin/chat-logs/sessions',
+  adminChatLogSession: (id) => `/api/v1/admin/chat-logs/sessions/${encodeURIComponent(id)}`,
+  adminChatLogStats: '/api/v1/admin/chat-logs/stats',
 };
 
 const confirmationTokens = {};
@@ -477,6 +483,166 @@ function updateAdminLoginUI() {
     const initials = String(user.name || user.email || 'AD').trim().slice(0, 2).toUpperCase();
     avatar.innerText = initials;
     avatar.title = loggedIn ? `${user.email || user.name} (${user.role || 'staff'})` : 'Staff Account';
+  }
+  updateVisitorLogsButtonVisibility();
+}
+
+function canViewVisitorLogs() {
+  const role = String(getAdminUser()?.role || '').toLowerCase();
+  return isAdminLoggedIn() && (role === 'admin' || role === 'super_admin');
+}
+
+function canViewAdminChatLogs() {
+  return isAdminLoggedIn() && String(getAdminUser()?.role || '').toLowerCase() === 'super_admin';
+}
+
+function updateVisitorLogsButtonVisibility() {
+  const btn = document.getElementById('btnVisitorLogs');
+  if (!btn) return;
+  btn.style.display = (currentMode === 'admin' && canViewVisitorLogs()) ? 'inline-flex' : 'none';
+  const adminTab = document.getElementById('tabBtnAdminChatLogs');
+  if (adminTab) adminTab.style.display = canViewAdminChatLogs() ? 'inline-flex' : 'none';
+}
+
+let visitorLogsKind = 'visitor';
+
+function openVisitorLogsModal() {
+  if (!canViewVisitorLogs()) {
+    openAdminLoginModal();
+    return;
+  }
+  const overlay = document.getElementById('visitorLogsOverlay');
+  const modal = document.getElementById('visitorLogsModal');
+  if (overlay) overlay.style.display = 'block';
+  if (modal) modal.style.display = 'block';
+  switchVisitorLogsTab(canViewAdminChatLogs() && visitorLogsKind === 'admin' ? 'admin' : 'visitor');
+}
+
+function closeVisitorLogsModal() {
+  const overlay = document.getElementById('visitorLogsOverlay');
+  const modal = document.getElementById('visitorLogsModal');
+  if (overlay) overlay.style.display = 'none';
+  if (modal) modal.style.display = 'none';
+}
+
+function switchVisitorLogsTab(kind) {
+  visitorLogsKind = kind === 'admin' && canViewAdminChatLogs() ? 'admin' : 'visitor';
+  const vBtn = document.getElementById('tabBtnVisitorSessions');
+  const aBtn = document.getElementById('tabBtnAdminChatLogs');
+  if (vBtn) vBtn.classList.toggle('active', visitorLogsKind === 'visitor');
+  if (aBtn) aBtn.classList.toggle('active', visitorLogsKind === 'admin');
+  loadVisitorLogs();
+}
+
+function visitorFilterQuery() {
+  const params = new URLSearchParams();
+  const site = document.getElementById('visitorFilterSite')?.value?.trim();
+  const from = document.getElementById('visitorFilterFrom')?.value;
+  const to = document.getElementById('visitorFilterTo')?.value;
+  const q = document.getElementById('visitorFilterQ')?.value?.trim();
+  const lang = document.getElementById('visitorFilterLang')?.value;
+  const flagged = document.getElementById('visitorFilterFlagged')?.checked;
+  if (site) params.set('site', site);
+  if (from) params.set('date_from', from);
+  if (to) params.set('date_to', to);
+  if (q) params.set('q', q);
+  if (lang) params.set('language', lang);
+  if (flagged) params.set('flagged', 'true');
+  params.set('limit', '50');
+  return params.toString();
+}
+
+async function loadVisitorLogs() {
+  const status = document.getElementById('visitorSessionsStatus');
+  const table = document.getElementById('visitorSessionsTable');
+  const empty = document.getElementById('visitorDetailEmpty');
+  const content = document.getElementById('visitorDetailContent');
+  if (status) status.innerText = 'Loading…';
+  if (table) table.innerHTML = '';
+  if (empty) empty.style.display = 'block';
+  if (content) { content.style.display = 'none'; content.innerHTML = ''; }
+  const sessionsUrl = visitorLogsKind === 'admin' ? API_ROUTES.adminChatLogSessions : API_ROUTES.queryLogSessions;
+  const statsUrl = visitorLogsKind === 'admin' ? API_ROUTES.adminChatLogStats : API_ROUTES.queryLogStats;
+  try {
+    const [sessionsRes, statsRes] = await Promise.all([
+      fetch(`${sessionsUrl}?${visitorFilterQuery()}`, { headers: adminAuthHeaders() }),
+      fetch(statsUrl, { headers: adminAuthHeaders() }),
+    ]);
+    if (sessionsRes.status === 401 || sessionsRes.status === 403) {
+      if (status) status.innerText = sessionsRes.status === 401 ? 'Sign in required.' : 'Not allowed for your role.';
+      return;
+    }
+    const sessionsData = await sessionsRes.json().catch(() => ({}));
+    const statsData = await statsRes.json().catch(() => ({}));
+    renderVisitorStats(statsData);
+    if (sessionsData.message && !(sessionsData.rows || []).length) {
+      if (status) status.innerText = sessionsData.message;
+      return;
+    }
+    const rows = sessionsData.rows || [];
+    if (status) status.innerText = rows.length ? `${rows.length} session(s)` : 'No sessions match these filters.';
+    if (!table) return;
+    rows.forEach((row) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'visitor-session-row';
+      btn.innerHTML = `<div class="visitor-session-meta"><span>${row.site_origin || '—'} · ${row.language || '—'}</span><span>${row.turns || 0} turns${row.flagged_turns ? ` · ${row.flagged_turns} flagged` : ''}</span></div><div class="visitor-session-q">${escapeHtml(row.last_question || '(no question)')}</div>`;
+      btn.onclick = () => openVisitorSession(row.session_id, btn);
+      table.appendChild(btn);
+    });
+  } catch (err) {
+    if (status) status.innerText = 'Could not load logs right now.';
+  }
+}
+
+function renderVisitorStats(stats) {
+  const today = new Date().toISOString().slice(0, 10);
+  const day = (stats.days || []).find((item) => item.date === today) || {};
+  const turns = document.getElementById('visitorStatTurns');
+  const sessions = document.getElementById('visitorStatSessions');
+  const flagged = document.getElementById('visitorStatFlagged');
+  if (turns) turns.innerText = day.turns != null ? day.turns : '0';
+  if (sessions) sessions.innerText = day.sessions != null ? day.sessions : '0';
+  if (flagged) flagged.innerText = day.flagged != null ? day.flagged : '0';
+}
+
+async function openVisitorSession(sessionId, rowBtn) {
+  document.querySelectorAll('.visitor-session-row').forEach((el) => el.classList.remove('active'));
+  if (rowBtn) rowBtn.classList.add('active');
+  const empty = document.getElementById('visitorDetailEmpty');
+  const content = document.getElementById('visitorDetailContent');
+  if (empty) empty.style.display = 'none';
+  if (content) {
+    content.style.display = 'block';
+    content.innerHTML = '<div class="visitor-status">Loading conversation…</div>';
+  }
+  const url = visitorLogsKind === 'admin'
+    ? API_ROUTES.adminChatLogSession(sessionId)
+    : API_ROUTES.queryLogSession(sessionId);
+  try {
+    const res = await fetch(url, { headers: adminAuthHeaders() });
+    const data = await res.json().catch(() => ({}));
+    if (!content) return;
+    if (data.message && !(data.rows || []).length) {
+      content.innerHTML = `<div class="visitor-status">${escapeHtml(data.message)}</div>`;
+      return;
+    }
+    const turns = data.rows || [];
+    content.innerHTML = turns.map((turn) => `
+      <div class="visitor-turn">
+        <div class="visitor-turn-meta">
+          <span>${escapeHtml(turn.created_at || '')}</span>
+          <span>cards: ${turn.cards_count || 0}</span>
+          <span>fallback: ${escapeHtml(turn.fallback_type || 'none')}</span>
+          ${turn.flagged ? '<span>flagged</span>' : ''}
+        </div>
+        <p class="visitor-turn-q"><strong>Q:</strong> ${escapeHtml(turn.user_message || '')}</p>
+        <p class="visitor-turn-a"><strong>A:</strong> ${escapeHtml(turn.bot_reply || '')}</p>
+        <button type="button" class="btn-secondary visitor-correct-btn" disabled title="Available in the next update">Correct this answer</button>
+      </div>
+    `).join('') || '<div class="visitor-status">No turns in this session.</div>';
+  } catch (err) {
+    if (content) content.innerHTML = '<div class="visitor-status">Could not load this conversation.</div>';
   }
 }
 
@@ -696,6 +862,7 @@ function setAgentMode(mode, createNew = true) {
   if (btnBatchOps) btnBatchOps.style.display = (mode === 'admin') ? 'inline-flex' : 'none';
   if (btnAttachment) btnAttachment.style.display = (mode === 'admin') ? 'inline-flex' : 'none';
   if (btnPropertyImages) btnPropertyImages.style.display = (mode === 'admin') ? 'inline-flex' : 'none';
+  updateVisitorLogsButtonVisibility();
   if (mode !== 'admin') clearPropertyImageTray();
 
   // Update Hero texts & prompt cards according to current mode & language

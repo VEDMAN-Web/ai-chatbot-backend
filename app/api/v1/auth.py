@@ -595,6 +595,21 @@ def user_login(
     except Exception as e:
         logger.warning(f"Error checking Firestore admin credentials for '{email_clean}': {e}")
 
+    def _audit_login_failure(reason: str) -> None:
+        try:
+            record_audit_log(
+                db=db,
+                tool_name="auth:login_failed",
+                staff_user_id=email_clean,
+                tool_arguments={"email": email_clean, "reason": reason},
+                proposed_payload={"action": "login_failed", "email": email_clean},
+                confirmed_by_staff=False,
+                status="FAILED",
+                execution_result=reason,
+            )
+        except Exception as ae:
+            logger.warning("Audit log failed for failed login: %s", ae)
+
     if firestore_admin:
         # Authenticated successfully via live Firebase data!
         user = sync_firestore_admin_to_local_db(db, firestore_admin, plain_password=req.password)
@@ -602,6 +617,7 @@ def user_login(
         # Fallback to local PostgreSQL database
         user = db.query(User).filter(func.lower(User.email) == email_clean).first()
         if not user:
+            _audit_login_failure("invalid_credentials")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid email or password.",
@@ -616,6 +632,7 @@ def user_login(
                 UserSession.revoked_at.is_(None)
             ).update({"revoked_at": datetime.utcnow()}, synchronize_session=False)
             db.commit()
+            _audit_login_failure("account_blocked")
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="User account is blocked. All active sessions have been terminated. Access denied."
@@ -623,6 +640,7 @@ def user_login(
 
         # 3. Verify password against database password_hash
         if not user.password_hash or not verify_password(req.password, user.password_hash):
+            _audit_login_failure("invalid_credentials")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid email or password.",
@@ -637,6 +655,7 @@ def user_login(
             UserSession.revoked_at.is_(None)
         ).update({"revoked_at": datetime.utcnow()}, synchronize_session=False)
         db.commit()
+        _audit_login_failure("account_blocked")
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="User account is blocked. All active sessions have been terminated. Access denied."
@@ -728,6 +747,20 @@ def user_login(
     db.add(new_session)
     db.commit()
 
+    try:
+        record_audit_log(
+            db=db,
+            tool_name="auth:login",
+            staff_user_id=user.email,
+            tool_arguments={"email": user.email, "role": user_role, "domain": user_domain},
+            proposed_payload={"action": "login", "email": user.email},
+            confirmed_by_staff=True,
+            status="SUCCESS",
+            execution_result=f"Login for {user.email}",
+        )
+    except Exception as ae:
+        logger.warning("Audit log failed for login: %s", ae)
+
     return UserLoginResponse(
         access_token=session_token,
         token_type="bearer",
@@ -763,14 +796,33 @@ def user_logout(
     elif body and body.token:
         token_to_revoke = body.token.strip()
 
+    logout_email = None
     if token_to_revoke:
         session = db.query(UserSession).filter(
             UserSession.token == token_to_revoke,
             UserSession.revoked_at.is_(None)
         ).first()
         if session:
+            try:
+                owner = db.query(User).filter(User.id == session.user_id).first()
+                logout_email = getattr(owner, "email", None)
+            except Exception:
+                logout_email = None
             session.revoked_at = datetime.utcnow()
             db.commit()
+            try:
+                record_audit_log(
+                    db=db,
+                    tool_name="auth:logout",
+                    staff_user_id=logout_email or "unknown",
+                    tool_arguments={"email": logout_email},
+                    proposed_payload={"action": "logout"},
+                    confirmed_by_staff=True,
+                    status="SUCCESS",
+                    execution_result=f"Logout for {logout_email or 'session'}",
+                )
+            except Exception as ae:
+                logger.warning("Audit log failed for logout: %s", ae)
 
     return UserLogoutResponse(
         success=True,
