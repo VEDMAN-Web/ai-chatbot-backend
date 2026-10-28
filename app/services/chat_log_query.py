@@ -47,6 +47,7 @@ class ListFilters:
     property_id: Optional[str] = None
     remark_status: Optional[str] = None
     q: Optional[str] = None
+    model: Optional[str] = None
     date_from: Optional[datetime] = None
     date_to: Optional[datetime] = None
 
@@ -96,7 +97,9 @@ def summarize(header: Dict[str, Any]) -> Dict[str, Any]:
         "agent_type": header.get("agentType"),
         "session_id": header.get("sessionId"),
         "website": header.get("website") or None,
-        "user": {"user_id": owner.get("userId"), "email": owner.get("email"), "role": owner.get("role")},
+        "user": {"user_id": owner.get("userId"), "email": owner.get("email"), "role": owner.get("role"), "name": owner.get("name")},
+        "model": header.get("model"),
+        "first_answer": header.get("firstAnswerPreview"),
         "message_count": header.get("messageCount") or 0,
         "created_at": _iso(header.get("createdAt")),
         "last_message_at": _iso(header.get("lastMessageAt")),
@@ -126,6 +129,7 @@ def serialize_message(doc_id: str, data: Dict[str, Any]) -> Dict[str, Any]:
         "remark_status": data.get("remarkStatus") or "none",
         "language": data.get("language"),
         "latency_ms": data.get("latencyMs"),
+        "model": data.get("model"),
     }
 
 
@@ -182,6 +186,8 @@ def _matches(header: Dict[str, Any], f: ListFilters) -> bool:
     if f.role and (owner.get("role") or "").lower() != f.role.lower():
         return False
     if f.website and header.get("website") != f.website:
+        return False
+    if f.model and f.model.strip().lower() not in (header.get("model") or "").lower():
         return False
     if f.user:
         needle = f.user.strip().lower()
@@ -260,15 +266,29 @@ def get_conversation(staff: AuthenticatedStaff, conversation_id: str, page: int 
     }
 
 
+def resolve_log_key(client, conversation_id: str) -> Optional[str]:
+    """The log key for an id: the key itself, or a bare session id (what the Admin Panel lists) of either bot."""
+    coll = client.collection(LOGS)
+    if coll.document(conversation_id).get().exists:
+        return conversation_id
+    found = []
+    for agent in ("public", "admin"):
+        snap = coll.document(f"{agent}__{conversation_id}").get()
+        if snap.exists:
+            found.append(((snap.to_dict() or {}).get("lastMessageAt") or datetime.min.replace(tzinfo=timezone.utc), snap.id))
+    return max(found)[1] if found else None
+
+
 def read_for_review(conversation_id: str) -> Optional[List[Dict[str, Any]]]:
     """Messages of a conversation as {role, content, timestamp}, for the super-admin review. None if not logged."""
     try:
         client = _client()
         if client is None or not valid_key(conversation_id):
             return None
-        if not client.collection(LOGS).document(conversation_id).get().exists:
+        key = resolve_log_key(client, conversation_id)
+        if key is None:
             return None
         return [{"role": m["role"], "content": m["content"], "timestamp": m["created_at"]}
-                for m in _read_messages(client, conversation_id)]
+                for m in _read_messages(client, key)]
     except Exception:
         return None

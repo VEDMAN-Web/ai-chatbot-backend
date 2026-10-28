@@ -204,7 +204,7 @@ def test_sorting_and_paging(world):
 def test_list_items_carry_what_a_reviewer_needs(world):
     item = _list(world.people.boss, conversation_id=world.keys.a1).json()["items"][0]
     assert item["agent_type"] == "admin" and item["website"] == "tajlandia.com" and item["message_count"] == 2
-    assert item["user"] == {"user_id": world.people.admin_taj["id"], "email": world.people.admin_taj["email"], "role": "admin"}
+    assert item["user"] == {"user_id": world.people.admin_taj["id"], "email": world.people.admin_taj["email"], "role": "admin", "name": None}
     assert item["first_question"] == "list properties in Layan" and item["last_message_at"].startswith("2026-10-24")
 
 

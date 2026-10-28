@@ -62,7 +62,7 @@ def test_the_staff_member_is_recorded_for_admin_chats(fs):
     logs.record_turn(_conversation("admin", "adm-1", actor=actor), "List properties", "Found 3.")
     key = "admin__adm-1"
     head, msgs = _header(fs, key), _messages(fs, key)
-    assert head["agentType"] == "admin" and head["owner"] == {"userId": "u-42", "email": "ann@tajlandia.com", "role": "admin"}
+    assert head["agentType"] == "admin" and head["owner"] == {"userId": "u-42", "email": "ann@tajlandia.com", "role": "admin", "name": None}
     assert head["actorUserIds"] == ["u-42"]
     assert all(m["actor"]["email"] == "ann@tajlandia.com" for m in msgs)
 

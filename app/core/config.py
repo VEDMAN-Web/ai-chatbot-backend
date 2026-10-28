@@ -177,6 +177,8 @@ class Settings(BaseSettings):
     ENABLE_CHAT_LOG_STORE: bool = True
     # Approved answer corrections are given for matching (even reworded) questions
     ENABLE_ANSWER_CORRECTIONS: bool = True
+    # The scope forbids permanent deletes: DELETE archives a listing. This opt-in exists only for maintenance on staging.
+    ALLOW_PERMANENT_DELETE: bool = False
     CORRECTION_MATCH_THRESHOLD: float = 0.88
     EMBEDDING_MODEL: str = "text-embedding-3-small"
     ENABLE_AUDIT_LOGGING: bool = True

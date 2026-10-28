@@ -665,6 +665,11 @@ def confirm_and_execute_action(
     action = get_pending_action(db, pending_action_id)
     _claim_action(db, action, authenticated_staff)
 
+    from app.core.permissions import tool_denial
+    denial = tool_denial(getattr(authenticated_staff, "role", None), action.tool_name)
+    if denial:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=denial)
+
     # 1. Check expiration
     if action.status == ACTION_STATUS_EXPIRED:
         raise HTTPException(
@@ -1112,6 +1117,50 @@ def _serialize_property_snapshot(prop: Any) -> Dict[str, Any]:
     return out
 
 
+def _enforce_listing_scope(db, payload, fields, orig_fields, prop, resolved, resolve_source, staff) -> None:
+    """Confirm-time guard for chat-driven listing changes (the account may have changed since the proposal).
+
+    Runs for a real signed-in staff member only. Refuses a website outside the account, a listing that belongs to
+    websites the account cannot reach, and a new or renamed listing that would duplicate another one.
+    """
+    if not isinstance(staff, AuthenticatedStaff):
+        return
+    from app.core.tenant import normalize_website_list
+    from app.services.property_search import property_belongs_to_websites
+
+    allowed = list(staff.allowed_websites or [])
+    if "websites" in orig_fields or "selected_websites" in orig_fields or "websites" in payload:
+        requested = orig_fields.get("websites") or orig_fields.get("selected_websites") or payload.get("websites") or fields.get("websites")
+    else:
+        requested = None
+    requested = normalize_website_list(requested) if requested else []
+    requested += [s for s in normalize_website_list(payload.get("site_scope") or []) if s not in requested]
+    outside = [s for s in requested if s not in allowed]
+    if outside:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Access denied: your account has no access to website(s) {outside}.",
+        )
+    existing = prop if prop is not None else (resolved if isinstance(resolved, dict) else None)
+    if existing is not None and not property_belongs_to_websites(existing, allowed):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied: this listing belongs to a website your account cannot reach.",
+        )
+    new_name = fields.get("property_name")
+    duplicate = None
+    if existing is None and not resolve_source:
+        duplicate = _duplicate_property_message(
+            db, str(payload.get("property_id") or ""), str(new_name or payload.get("title") or "")
+        )
+    elif new_name:
+        current_name = existing.get("property_name") if isinstance(existing, dict) else getattr(existing, "property_name", "")
+        if str(new_name).strip() != str(current_name or "").strip():
+            duplicate = _duplicate_property_message(db, "", str(new_name), exclude_id=str(payload.get("property_id") or ""))
+    if duplicate:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=duplicate)
+
+
 def _execute_update_listing(
     db: Session,
     payload: Dict[str, Any],
@@ -1189,6 +1238,8 @@ def _execute_update_listing(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=err_msg
         )
+
+    _enforce_listing_scope(db, payload, fields, orig_fields, prop, resolved, resolve_source, authenticated_staff)
 
     allowed_fields = {
         "property_name", "project_name", "property_type", "status",
@@ -1298,8 +1349,9 @@ def _execute_update_listing(
             prop.websites = norm_websites
             updated_fields["websites"] = norm_websites
         else:
-            default_site = payload.get("site_origin") or get_current_env_domain()
-            prop.websites = normalize_website_list([default_site])
+            # The websites the admin had selected when asking; the environment default only when none were recorded
+            scope = payload.get("site_scope") or [payload.get("site_origin") or get_current_env_domain()]
+            prop.websites = normalize_website_list(scope)
             updated_fields["websites"] = prop.websites
 
         for k, v in fields.items():
@@ -1644,11 +1696,12 @@ def _apply_sql_fields(prop: Property, fields: Dict[str, Any], websites: Optional
         prop.is_public = bool(data["is_public"])
 
 
-def _duplicate_property_message(db: Any, property_id: str, name: str) -> Optional[str]:
+def _duplicate_property_message(db: Any, property_id: str, name: str, exclude_id: Optional[str] = None) -> Optional[str]:
+    """Why this id/name would duplicate a listing, or None. `exclude_id` is the listing being renamed (it may match itself)."""
     slug = name_slug(name)
     seen_ids = []
     for candidate in (property_id, slug):
-        if not candidate or candidate in seen_ids:
+        if not candidate or candidate in seen_ids or candidate == exclude_id:
             continue
         seen_ids.append(candidate)
         raw = _read_raw_firestore(candidate)
@@ -1670,7 +1723,7 @@ def _duplicate_property_message(db: Any, property_id: str, name: str) -> Optiona
                         labels.extend(str(v) for v in val.values() if v)
                     elif val:
                         labels.append(str(val))
-                if doc.id == property_id or any(name_slug(label) == slug for label in labels):
+                if doc.id != exclude_id and (doc.id == property_id or any(name_slug(label) == slug for label in labels)):
                     return (
                         f"A property named '{name}' already exists in Firestore as '{doc.id}'. "
                         "Use update instead of create."
@@ -1680,7 +1733,7 @@ def _duplicate_property_message(db: Any, property_id: str, name: str) -> Optiona
 
     if _is_real_db_session(db):
         for row in db.query(Property).all():
-            if row.property_id in (property_id, slug) or (slug and name_slug(row.property_name or "") == slug):
+            if row.property_id != exclude_id and (row.property_id in (property_id, slug) or (slug and name_slug(row.property_name or "") == slug)):
                 return (
                     f"Property '{name or property_id}' already exists in Postgres as '{row.property_id}'. "
                     "Use update instead of create."
@@ -1906,6 +1959,10 @@ def rest_update_property(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Property with ID '{property_id}' not found.",
         )
+    if fields.get("property_name"):
+        duplicate = _duplicate_property_message(db, "", str(fields["property_name"]), exclude_id=property_id)
+        if duplicate:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=duplicate)
     before = {"sql": _summary_sql(prop), "firestore": _summary_fs(raw)}
     operation_id = _require_undo_snapshot(
         db=db,
@@ -2022,7 +2079,12 @@ def rest_delete_property(
     confirm_property_id: Optional[str] = None,
     allow_without_undo: bool = False,
 ) -> Dict[str, Any]:
-    """Soft-delete by default. Hard delete requires a typed property id confirmation."""
+    """Soft-delete by default. Hard delete is off unless ALLOW_PERMANENT_DELETE is set, then needs a typed property id."""
+    if hard_delete and not getattr(settings, "ALLOW_PERMANENT_DELETE", False):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Permanent deletes are disabled. DELETE archives the listing and can be undone.",
+        )
     if hard_delete and confirm_property_id != property_id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

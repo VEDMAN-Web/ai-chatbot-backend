@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -201,3 +202,55 @@ def read_conversation_review(
 ):
     """Read-only chat, pending actions and audit rows. Nothing is written."""
     return _call(lambda: review_conversation(db, conversation_id))
+
+
+@router.get("/conversations")
+def list_conversation_logs(
+    search: Optional[str] = Query(None, max_length=200),
+    role: Optional[str] = Query(None, max_length=50),
+    model: Optional[str] = Query(None, max_length=80),
+    website: Optional[str] = Query(None, max_length=100, description="Only this website (the panel's chat selector)"),
+    start_date: Optional[datetime] = Query(None),
+    end_date: Optional[datetime] = Query(None),
+    limit: int = Query(25, ge=1, le=100),
+    offset: int = Query(0, ge=0, le=10000),
+    staff: AuthenticatedStaff = Depends(require_super_admin),
+):
+    """The list the Admin Panel's chat-log page loads. It reads the same chat log as /admin/chat-logs/conversations.
+
+    A row's `conversation_id` is the session id (a UUID), which is what the panel opens with the review endpoint below.
+    """
+    from app.core.tenant import normalize_website_domain
+    from app.services import chat_log_query as query
+
+    site = None
+    if website:
+        site = normalize_website_domain(website)
+        if not site:
+            raise HTTPException(status_code=422, detail="Unknown website.")
+    filters = query.ListFilters(q=search, role=role, model=model, website=site, date_from=start_date, date_to=end_date)
+    try:
+        found = query.list_conversations(staff, filters, page=1, page_size=offset + limit)
+        client = None
+        logs = []
+        for item in found["items"][offset:offset + limit]:
+            user = item.get("user") or {}
+            answer = item.get("first_answer")
+            if answer is None:  # logged before answer previews were stored
+                client = client or query._require_client()
+                replies = [m for m in query._read_messages(client, item["conversation_id"], limit=2) if m["role"] == "assistant"]
+                answer = (replies[0]["content"] or "")[:160] if replies else ""
+            logs.append({
+                "conversation_id": item.get("session_id") or item.get("conversation_id"),
+                "user_name": user.get("name"),
+                "user_email": user.get("email"),
+                "role": user.get("role"),
+                "project": item.get("website"),
+                "model": item.get("model"),
+                "created_at": item.get("last_message_at") or item.get("created_at"),
+                "user_message": item.get("first_question") or "",
+                "ai_response": answer or "",
+            })
+    except query.ChatLogUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    return {"total": found["total"], "limit": limit, "offset": offset, "logs": logs}

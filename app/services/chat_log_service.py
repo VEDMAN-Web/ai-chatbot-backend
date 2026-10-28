@@ -154,8 +154,16 @@ def actor_of(conversation: Any) -> Dict[str, Optional[str]]:
             "userId": str(actor.get("user_id")) if actor.get("user_id") else None,
             "email": actor.get("email"),
             "role": actor.get("role") or "worker",
+            "name": _clean_text(actor.get("name"), 120) if actor.get("name") else None,
         }
-    return {"userId": None, "email": None, "role": "public"}
+    return {"userId": None, "email": None, "role": "public", "name": None}
+
+
+def model_of(agent_type: Optional[str]) -> str:
+    """The model configured for this bot. It is the configured name, not proof of which fallback answered."""
+    if agent_type == "admin":
+        return getattr(settings, "ADMIN_MAIN_MODEL", "") or getattr(settings, "ANTHROPIC_MODEL", "") or ""
+    return getattr(settings, "OPENAI_MODEL", "") or ""
 
 
 def website_of(site_origin: Optional[str]) -> str:
@@ -187,6 +195,7 @@ def record_turn(
         website = website_of(site_origin)
         actor = actor_of(conversation)
         language = (getattr(conversation, "preferences", None) or {}).get("language")
+        model = model_of(agent_type)
 
         question = _clean_text(user_message)
         answer = _clean_text(assistant_message)
@@ -208,7 +217,7 @@ def record_turn(
             if role == "assistant":
                 doc.update({
                     "propertyIds": property_ids, "evidenceStatus": evidence["evidenceStatus"], "sources": evidence["sources"],
-                    "responseStatus": status, "toolSummary": tool_summary, "latencyMs": latency_ms,
+                    "responseStatus": status, "toolSummary": tool_summary, "latencyMs": latency_ms, "model": model,
                     "errorMessage": _clean_text(answer, 500) if status == "error" else None,
                 })
             return doc
@@ -240,6 +249,8 @@ def record_turn(
                 "searchTokens": union(head.get("searchTokens"), tokens_of(question + " " + answer, 80), MAX_TOKENS_PER_HEADER),
                 "firstQuestionPreview": head.get("firstQuestionPreview") or _preview(question),
                 "lastQuestionPreview": _preview(question),
+                "firstAnswerPreview": head.get("firstAnswerPreview") or _preview(answer),
+                "model": model,
                 "language": language,
             }
             txn.set(header_ref, header, merge=True)

@@ -47,7 +47,8 @@ _SUCCESS_CLAIM_RE = re.compile(
     r"(?:email|message|mail)\s+(?:has\s+been\s+|was\s+)?sent\b|"
     r"(?:calendar\s+)?event\s+(?:has\s+been\s+|was\s+)?(?:created|scheduled)\b|"
     r"(?:action|operation|update|listing)\s+(?:completed|executed|applied)\s+successfully|"
-    r"(?:has\s+been|was)\s+(?:successfully\s+)?(?:sent|created|updated|applied|deleted)|"
+    r"(?:has\s+been|was)\s+(?:successfully\s+)?(?:sent|created|updated|applied|deleted|saved|archived|emailed)|"
+    r"\bI(?:'ve|\s+have)\s+(?:just\s+|now\s+)?(?:successfully\s+)?(?:updated|changed|saved|deleted|archived|created|sent|emailed|booked|scheduled)\b|"
     r"wysłan[ayo]|wyslano|pomyślnie\s+(?:wysł|zaktualiz|utworz)|"
     r"✅\s*\*\*[^*]*(?:success|sent|updated|created|executed)"
     r")",

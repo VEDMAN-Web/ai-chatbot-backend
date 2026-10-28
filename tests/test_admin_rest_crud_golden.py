@@ -610,7 +610,18 @@ def test_sql_only_update_skips_firestore_when_sync_disabled(world, monkeypatch):
     assert _sql_row(world["db"], "sql-nosync").status == "Reserved"
 
 
-def test_hard_delete_requires_typed_confirmation(world):
+def test_permanent_delete_is_refused_by_default(world):
+    world["client"].post("/api/v1/admin/properties", json=_minimal_body(property_id="keep-villa"))
+    res = world["client"].delete(
+        "/api/v1/admin/properties/keep-villa?hard_delete=true&confirm_property_id=keep-villa"
+    )
+    assert res.status_code == 403, res.text
+    assert _sql_row(world["db"], "keep-villa") is not None
+    assert _fs_doc(world["admin_fs"], "keep-villa") is not None
+
+
+def test_hard_delete_requires_typed_confirmation(world, monkeypatch):
+    monkeypatch.setattr(settings, "ALLOW_PERMANENT_DELETE", True)
     world["client"].post("/api/v1/admin/properties", json=_minimal_body(property_id="hard-villa"))
     missing = world["client"].delete("/api/v1/admin/properties/hard-villa?hard_delete=true")
     assert missing.status_code == 400

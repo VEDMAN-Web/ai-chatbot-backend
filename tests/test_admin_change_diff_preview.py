@@ -37,6 +37,7 @@ def staff():
         user_id="admin-001",
         email="admin@tajlandia.com",
         role="super_admin",
+        allowed_websites=["tajlandia.com", "varsoviaestate.com", "thai.estate"],   # what a super admin account carries
     )
 
 
