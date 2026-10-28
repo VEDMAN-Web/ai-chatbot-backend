@@ -699,6 +699,51 @@ def _build_excel_report(properties_data: List[Dict[str, Any]], title: str) -> by
     return buf.getvalue()
 
 
+_PDF_FONT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "assets", "fonts")
+_THAI_RUN = re.compile(r"[฀-๿]+")
+_PDF_FONTS: Optional[Tuple[str, str, bool]] = None
+
+
+def _register_pdf_fonts() -> Tuple[str, str, bool]:
+    """
+    Registers Noto Sans (Latin incl. Polish) and Noto Sans Thai once and returns (regular, bold, thai_available).
+    Falls back to Helvetica when the font files are missing, so report generation never fails on fonts.
+    """
+    global _PDF_FONTS
+    if _PDF_FONTS is not None:
+        return _PDF_FONTS
+    try:
+        from reportlab.pdfbase import pdfmetrics
+        from reportlab.pdfbase.ttfonts import TTFont
+
+        def _add(name: str, filename: str) -> None:
+            pdfmetrics.registerFont(TTFont(name, os.path.join(_PDF_FONT_DIR, filename)))
+
+        _add("ReportSans", "NotoSans-Regular.ttf")
+        _add("ReportSans-Bold", "NotoSans-Bold.ttf")
+        thai = True
+        try:
+            _add("ReportThai", "NotoSansThai-Regular.ttf")
+            _add("ReportThai-Bold", "NotoSansThai-Bold.ttf")
+        except Exception:
+            thai = False
+        _PDF_FONTS = ("ReportSans", "ReportSans-Bold", thai)
+    except Exception as exc:
+        logger.warning("Report fonts unavailable, using Helvetica: %s", exc)
+        _PDF_FONTS = ("Helvetica", "Helvetica-Bold", False)
+    return _PDF_FONTS
+
+
+def _pdf_markup(value: Any) -> str:
+    """Escapes a value for ReportLab paragraph markup and puts Thai runs in the Thai font."""
+    from xml.sax.saxutils import escape
+
+    text = escape("" if value is None else str(value))
+    if _register_pdf_fonts()[2]:
+        text = _THAI_RUN.sub(lambda m: '<font name="ReportThai">' + m.group(0) + '</font>', text)
+    return text
+
+
 def _build_pdf_report(properties_data: List[Dict[str, Any]], title: str) -> bytes:
     from reportlab.lib.pagesizes import letter
     from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
@@ -710,24 +755,27 @@ def _build_pdf_report(properties_data: List[Dict[str, Any]], title: str) -> byte
     story = []
     styles = getSampleStyleSheet()
 
+    font_regular, font_bold, _thai = _register_pdf_fonts()
+    title_style = ParagraphStyle("ReportTitle", parent=styles["Title"], fontName=font_bold)
+    meta_style = ParagraphStyle("ReportMeta", parent=styles["Normal"], fontName=font_regular)
+    cell_style = ParagraphStyle("ReportCell", parent=styles["Normal"], fontName=font_regular, fontSize=9, leading=11)
+    head_style = ParagraphStyle("ReportHead", parent=cell_style, fontName=font_bold, fontSize=10, textColor=colors.whitesmoke)
+
     # Title
-    story.append(Paragraph(f"<b>{title}</b>", styles["Title"]))
+    story.append(Paragraph(f"<b>{_pdf_markup(title)}</b>", title_style))
     story.append(Spacer(1, 12))
 
     # Metadata
     date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    story.append(Paragraph(f"Generated: {date_str} | Total Properties: {len(properties_data)}", styles["Normal"]))
+    story.append(Paragraph(f"Generated: {date_str} | Total Properties: {len(properties_data)}", meta_style))
     story.append(Spacer(1, 16))
 
-    # Table data
-    table_data = [["ID", "Property Name", "Location", "Price", "Status"]]
+    # Table data: cells wrap, so no value is cut off
+    table_data = [[Paragraph(h, head_style) for h in ["ID", "Property Name", "Location", "Price", "Status"]]]
     for p in properties_data:
         table_data.append([
-            p.get("property_id", ""),
-            p.get("property_name", "")[:28],
-            p.get("location", "")[:20],
-            p.get("price_display", "")[:20],
-            p.get("status", "")[:18]
+            Paragraph(_pdf_markup(p.get(key, "")), cell_style)
+            for key in ("property_id", "property_name", "location", "price_display", "status")
         ])
 
     table = Table(table_data, colWidths=[80, 160, 110, 100, 90])
@@ -735,12 +783,10 @@ def _build_pdf_report(properties_data: List[Dict[str, Any]], title: str) -> byte
         ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#1E3A8A")),
         ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
         ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-        ('FONTSIZE', (0, 0), (-1, 0), 10),
+        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
         ('BOTTOMPADDING', (0, 0), (-1, 0), 6),
         ('BACKGROUND', (0, 1), (-1, -1), colors.HexColor("#F8FAFC")),
         ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#CBD5E1")),
-        ('FONTSIZE', (0, 1), (-1, -1), 9),
     ]))
     story.append(table)
 
@@ -891,11 +937,12 @@ def _build_lead_pdf_report(leads_data: List[Dict[str, Any]], title: str) -> byte
     doc = SimpleDocTemplate(buf, pagesize=letter, rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=36)
     story = []
     styles = getSampleStyleSheet()
+    font_regular, font_bold, _thai = _register_pdf_fonts()
 
     title_style = ParagraphStyle(
         'LeadTitle',
         parent=styles['Title'],
-        fontName='Helvetica-Bold',
+        fontName=font_bold,
         fontSize=18,
         leading=22,
         textColor=colors.HexColor("#0F172A")
@@ -903,7 +950,7 @@ def _build_lead_pdf_report(leads_data: List[Dict[str, Any]], title: str) -> byte
     meta_style = ParagraphStyle(
         'LeadMeta',
         parent=styles['Normal'],
-        fontName='Helvetica',
+        fontName=font_regular,
         fontSize=9,
         leading=13,
         textColor=colors.HexColor("#64748B")
@@ -911,7 +958,7 @@ def _build_lead_pdf_report(leads_data: List[Dict[str, Any]], title: str) -> byte
     cell_bold = ParagraphStyle(
         'LeadCellBold',
         parent=styles['Normal'],
-        fontName='Helvetica-Bold',
+        fontName=font_bold,
         fontSize=9,
         leading=12,
         textColor=colors.white
@@ -919,19 +966,19 @@ def _build_lead_pdf_report(leads_data: List[Dict[str, Any]], title: str) -> byte
     cell_regular = ParagraphStyle(
         'LeadCellReg',
         parent=styles['Normal'],
-        fontName='Helvetica',
+        fontName=font_regular,
         fontSize=8.5,
         leading=12,
         textColor=colors.HexColor("#334155")
     )
 
-    story.append(Paragraph(f"<b>{title}</b>", title_style))
+    story.append(Paragraph(f"<b>{_pdf_markup(title)}</b>", title_style))
     story.append(Spacer(1, 6))
 
     date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     period_note = ""
     if leads_data and leads_data[0].get("_period_subtitle"):
-        period_note = f" | {leads_data[0]['_period_subtitle']}"
+        period_note = f" | {_pdf_markup(leads_data[0]['_period_subtitle'])}"
     story.append(Paragraph(
         f"Generated: {date_str} | Buyer Leads: {len(leads_data)}{period_note} | Confidential Agency Internal",
         meta_style,
@@ -943,21 +990,21 @@ def _build_lead_pdf_report(leads_data: List[Dict[str, Any]], title: str) -> byte
         status_val = str(lead.get('status', 'new')).upper()
         test_tag = " &nbsp;|&nbsp; [possible test entry]" if lead.get("possible_test_entry") else ""
         header_text = (
-            f"LEAD #{idx+1}: {lead.get('contact_name', 'Client')} &nbsp;|&nbsp; "
-            f"Status: {status_val} &nbsp;|&nbsp; Score: {score_val}/100{test_tag}"
+            f"LEAD #{idx+1}: {_pdf_markup(lead.get('contact_name', 'Client'))} &nbsp;|&nbsp; "
+            f"Status: {_pdf_markup(status_val)} &nbsp;|&nbsp; Score: {_pdf_markup(score_val)}/100{test_tag}"
         )
 
         table_rows = [
             [Paragraph(f"<b>{header_text}</b>", cell_bold), ""],
-            [Paragraph(f"<b>Email:</b> {lead.get('contact_email', 'N/A')}", cell_regular),
-             Paragraph(f"<b>Phone:</b> {lead.get('contact_phone', 'N/A')}", cell_regular)],
-            [Paragraph(f"<b>Preferred Location:</b> {lead.get('preferred_location', 'Thailand')}", cell_regular),
-             Paragraph(f"<b>Target Budget:</b> {lead.get('budget', 'Flexible')}", cell_regular)],
-            [Paragraph(f"<b>Client Notes:</b> {lead.get('notes', 'Web inquiry')}", cell_regular), ""]
+            [Paragraph(f"<b>Email:</b> {_pdf_markup(lead.get('contact_email', 'N/A'))}", cell_regular),
+             Paragraph(f"<b>Phone:</b> {_pdf_markup(lead.get('contact_phone', 'N/A'))}", cell_regular)],
+            [Paragraph(f"<b>Preferred Location:</b> {_pdf_markup(lead.get('preferred_location', 'Thailand'))}", cell_regular),
+             Paragraph(f"<b>Target Budget:</b> {_pdf_markup(lead.get('budget', 'Flexible'))}", cell_regular)],
+            [Paragraph(f"<b>Client Notes:</b> {_pdf_markup(lead.get('notes', 'Web inquiry'))}", cell_regular), ""]
         ]
         signals = lead.get('buying_signals', [])
         if signals:
-            sig_text = " • ".join(str(s) for s in signals)
+            sig_text = " • ".join(_pdf_markup(s) for s in signals)
             table_rows.append([Paragraph(f"<b>Buying Signals:</b> {sig_text}", cell_regular), ""])
 
         t = Table(table_rows, colWidths=[270, 270])

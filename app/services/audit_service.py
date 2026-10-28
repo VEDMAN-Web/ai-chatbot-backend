@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 import copy
 import logging
+import re
 
 from app.db.models import AuditLog
 
@@ -14,22 +15,55 @@ SENSITIVE_KEYS = {
     "anthropic_api_key", "openai_api_key", "client_secret", "credential"
 }
 
+# Keys that hold message content (it may contain a client's personal data). The audit trail keeps who the
+# message went to and its subject, plus the size of the content, but not the content itself.
+CONTENT_KEYS = {"body", "html_body"}
+EXACT_SENSITIVE_KEYS = {"otp", "pin", "pwd", "cookie", "set-cookie", "x-api-key"}
+
+# Credentials that appear inside text values (error messages, URLs, headers copied into a result).
+_TEXT_SECRET_PATTERNS = [
+    (re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}"), "Bearer [REDACTED_SECRET]"),
+    (re.compile(r"(?i)\bBasic\s+[A-Za-z0-9+/=]{8,}"), "Basic [REDACTED_SECRET]"),
+    (re.compile(r"\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{3,}"), "[REDACTED_SECRET]"),
+    (re.compile(r"\b(?:sk|pk|rk)-[A-Za-z0-9_-]{10,}"), "[REDACTED_SECRET]"),
+    (re.compile(r"\bya29\.[A-Za-z0-9._-]{10,}"), "[REDACTED_SECRET]"),
+    (re.compile(r"\b1//[A-Za-z0-9._-]{10,}"), "[REDACTED_SECRET]"),
+    (re.compile(r"\bAIza[A-Za-z0-9_-]{20,}"), "[REDACTED_SECRET]"),
+    (re.compile(r"\bact_[0-9a-fA-F]{16,}"), "[REDACTED_SECRET]"),
+    (re.compile(r"(?i)([?&;\s](?:access_token|refresh_token|id_token|token|api_key|apikey|key|secret|client_secret|password|signature|sig|code)=)[^&\s\"']+"),
+     r"\1[REDACTED_SECRET]"),
+]
+
+
+def scrub_text(value: Optional[str]) -> Optional[str]:
+    """Removes credentials from free text before it is stored in the audit trail."""
+    if not isinstance(value, str) or not value:
+        return value
+    for pattern, replacement in _TEXT_SECRET_PATTERNS:
+        value = pattern.sub(replacement, value)
+    return value
+
+
 def sanitize_payload(obj: Any) -> Any:
-    """Recursively scrub sensitive keys and credentials from logged payloads."""
+    """Recursively scrub sensitive keys, message content and credentials from logged payloads."""
     if isinstance(obj, dict):
         sanitized = {}
         for k, v in obj.items():
-            k_low = k.lower()
+            k_low = str(k).lower()
             # Do not redact LLM usage metrics like 'total_tokens', 'prompt_tokens', etc.
             if k_low.endswith("_tokens") or k_low in ["token_count", "tokens_count"]:
                 sanitized[k] = sanitize_payload(v)
-            elif any(sens in k_low for sens in SENSITIVE_KEYS):
+            elif k_low in EXACT_SENSITIVE_KEYS or any(sens in k_low for sens in SENSITIVE_KEYS):
                 sanitized[k] = "[REDACTED_SECRET]"
+            elif k_low in CONTENT_KEYS and isinstance(v, str):
+                sanitized[k] = f"[CONTENT NOT LOGGED: {len(v)} characters]"
             else:
                 sanitized[k] = sanitize_payload(v)
         return sanitized
-    elif isinstance(obj, list):
+    elif isinstance(obj, (list, tuple)):
         return [sanitize_payload(item) for item in obj]
+    elif isinstance(obj, str):
+        return scrub_text(obj)
     return obj
 
 
@@ -53,6 +87,8 @@ def record_audit_log(
     """
     safe_args = sanitize_payload(tool_arguments or {})
     safe_payload = sanitize_payload(proposed_payload or {})
+    execution_result = scrub_text(execution_result)
+    error_message = scrub_text(error_message)
 
     log_entry = AuditLog(
         staff_user_id=staff_user_id,
@@ -346,3 +382,26 @@ def query_data_change_history(
         "offset": offset,
         "history": deduped_history[:limit]
     }
+
+
+class AuditUnavailable(Exception):
+    """The audit trail cannot be written, so a sensitive change must not go ahead."""
+
+
+def record_sensitive_audit(db: Session, **kwargs: Any) -> AuditLog:
+    """
+    Fail-safe audit for sensitive writes (corrections, roles, imports). The entry is written BEFORE the change.
+    If auditing is switched off or the entry cannot be stored, AuditUnavailable is raised and the caller must
+    refuse the change, instead of proceeding without the required trail.
+    """
+    from app.core.config import settings
+
+    if not getattr(settings, "ENABLE_AUDIT_LOGGING", False):
+        raise AuditUnavailable("Audit logging is disabled, so this change is blocked.")
+    try:
+        entry = record_audit_log(db=db, **kwargs)
+    except Exception as exc:
+        raise AuditUnavailable("The audit trail could not be written, so this change is blocked.") from exc
+    if getattr(entry, "is_ephemeral", False):
+        raise AuditUnavailable("The audit trail could not be written, so this change is blocked.")
+    return entry

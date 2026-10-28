@@ -152,6 +152,7 @@ def append_conversation_turn(
                 new_preferences=new_preferences,
             )
             _IN_SESSION_CONVERSATIONS[session_key] = conversation
+            _log_turn(conversation, user_message, assistant_message, tool_calls, tool_results, structured_data)
             return conversation
         except Exception as e:
             logger.error(f"Firestore append_conversation_turn failed: {e}")
@@ -190,7 +191,18 @@ def append_conversation_turn(
         conversation.preferences = prefs
 
     _IN_SESSION_CONVERSATIONS[session_key] = conversation
+    _log_turn(conversation, user_message, assistant_message, tool_calls, tool_results, structured_data)
     return conversation
+
+
+def _log_turn(conversation, user_message, assistant_message, tool_calls, tool_results, structured_data) -> None:
+    """Add the turn to the administrators' chat log. Never raises: a logging problem must not break a chat."""
+    try:
+        from app.services.chat_log_service import record_turn
+
+        record_turn(conversation, user_message, assistant_message, tool_calls, tool_results, structured_data)
+    except Exception as e:
+        logger.warning(f"Chat log hook failed (chat unaffected): {e}")
 
 
 def get_session_message_count(conversation) -> int:

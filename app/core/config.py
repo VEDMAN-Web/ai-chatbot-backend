@@ -24,6 +24,15 @@ _WEAK_SECRETS = {
     "default",
 }
 
+DEFAULT_INTERNAL_API_SECRET = "tajlandia-internal-secret-token"
+
+
+def is_weak_secret(value: Optional[str]) -> bool:
+    """True for an empty, well-known default or too-short secret."""
+    cleaned = (value or "").strip()
+    return cleaned.lower() in _WEAK_SECRETS or len(cleaned) < 16
+
+
 
 class Settings(BaseSettings):
     PROJECT_NAME: str = "Varsovia Estate AI Property Platform"
@@ -164,13 +173,21 @@ class Settings(BaseSettings):
     # Lead/audit permanent writes (separate from chat memory which is always Firestore when sync is on)
     ENABLE_LEAD_SAVING: bool = False
     ENABLE_CHAT_LOGGING: bool = False  # legacy flag — chat memory uses Firestore via ENABLE_FIRESTORE_SYNC
-    ENABLE_AUDIT_LOGGING: bool = False
+    # Persistent chat log for administrators (Firestore `chat_logs`); needs Firestore to be configured
+    ENABLE_CHAT_LOG_STORE: bool = True
+    # Approved answer corrections are given for matching (even reworded) questions
+    ENABLE_ANSWER_CORRECTIONS: bool = True
+    # The scope forbids permanent deletes: DELETE archives a listing. This opt-in exists only for maintenance on staging.
+    ALLOW_PERMANENT_DELETE: bool = False
+    CORRECTION_MATCH_THRESHOLD: float = 0.88
+    EMBEDDING_MODEL: str = "text-embedding-3-small"
+    ENABLE_AUDIT_LOGGING: bool = True
 
     # Action Confirmation & Security
     ACTION_EXPIRATION_MINUTES: int = 30
     # Preferred alias for pending-action TTL (Task E); falls back to ACTION_EXPIRATION_MINUTES
     ADMIN_PENDING_ACTION_TTL_MIN: int = 30
-    INTERNAL_API_SECRET: str = "tajlandia-internal-secret-token"
+    INTERNAL_API_SECRET: str = DEFAULT_INTERNAL_API_SECRET
     ADMIN_EMAIL: Optional[str] = None
     ADMIN_PASSWORD: Optional[str] = None
     SESSION_EXPIRE_HOURS: int = 168  # 7 days session validity
@@ -361,6 +378,22 @@ def assert_database_configured_or_exit() -> None:
         "DATABASE_URL is not configured. Set DATABASE_URL in the environment or .env file "
         "(do not embed real passwords in code). Refusing to start."
     )
+
+
+def assert_secrets_configured_or_exit() -> None:
+    """
+    In production, refuse to start with a missing, default or short INTERNAL_API_SECRET.
+    It signs password-reset tokens, OAuth state and report download links.
+    """
+    if is_test_environment():
+        return
+    if (settings.ENVIRONMENT or "").strip().lower() not in ("production", "prod"):
+        return
+    if is_weak_secret(settings.INTERNAL_API_SECRET):
+        raise RuntimeError(
+            "INTERNAL_API_SECRET is missing, a known default, or shorter than 16 characters. "
+            "Set a long random value in the environment. Refusing to start."
+        )
 
 
 def log_config_warnings() -> None:

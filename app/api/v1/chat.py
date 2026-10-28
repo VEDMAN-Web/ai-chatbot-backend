@@ -1,6 +1,7 @@
 import os
 import logging
 import time
+import uuid
 from decimal import Decimal
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse, FileResponse
@@ -158,6 +159,7 @@ class LeadSubmitResponse(BaseModel):
     lead_id: str
     lead_score: float
     message: str
+    lead_saved: bool = True
 
 
 # --- Endpoints ---
@@ -200,6 +202,7 @@ def handle_public_chat(
         conversation = bind_conversation_site_origin(conversation, request_origin)
 
         recorded_lead_id = None
+        lead_saved_ok = False
         if has_contact:
             budget_dec = Decimal(str(req.budget)) if req.budget is not None else None
             if getattr(settings, "ENABLE_LEAD_SAVING", False):
@@ -232,6 +235,7 @@ def handle_public_chat(
                         buying_signal=f"Direct contact submission: {req.contact_email or req.contact_phone or req.contact_name}",
                         notes=_lead_notes,
                     )
+                    lead_saved_ok = True
                 except Exception as lead_err:
                     logger.warning("Lead save failed (chat reply unaffected): %s", lead_err)
                     recorded_lead_id = None
@@ -288,7 +292,7 @@ def handle_public_chat(
                 "language": lang,
                 "brochure_property_id": None,
                 "lead_id": recorded_lead_id,
-                "lead_saved": bool(getattr(settings, "ENABLE_LEAD_SAVING", False)),
+                "lead_saved": lead_saved_ok,
                 "session_limit_reached": False,
                 "message_limit": None,
                 "session_limit_warning": False,
@@ -330,6 +334,7 @@ def handle_public_chat(
         if has_contact:
             response["lead_captured"] = True
             response["lead_id"] = recorded_lead_id
+            response["lead_saved"] = lead_saved_ok
 
         # Count only successfully processed visitor chat messages
         new_count = increment_session_message_count(conversation)
@@ -470,6 +475,7 @@ def submit_direct_lead(
     )
     recorded_lead_id = f"lead_session_{uuid.uuid4().hex[:8]}"
     lead_score = 0.8
+    lead_saved = False
     if getattr(settings, "ENABLE_LEAD_SAVING", False):
         try:
             from app.services.lead_service import enqueue_lead_save
@@ -495,6 +501,7 @@ def submit_direct_lead(
                 notes=req.notes,
                 buying_signal="Direct frontend lead submission",
             )
+            lead_saved = True
         except Exception as lead_err:
             logger.warning("Direct lead save failed (response unaffected): %s", lead_err)
 
@@ -512,10 +519,19 @@ def submit_direct_lead(
             except Exception as e:
                 logger.warning(f"Firestore direct lead sync error: {e}")
 
+    if not lead_saved:
+        return {
+            "status": "not_saved",
+            "lead_id": recorded_lead_id,
+            "lead_score": lead_score,
+            "lead_saved": False,
+            "message": "Thank you. We could not store your request just now, so please contact an advisor directly.",
+        }
     return {
         "status": "success",
         "lead_id": recorded_lead_id,
         "lead_score": lead_score,
+        "lead_saved": True,
         "message": "Thank you! Your inquiry has been registered. An advisor will contact you shortly."
     }
 

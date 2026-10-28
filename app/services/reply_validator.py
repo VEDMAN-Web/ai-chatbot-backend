@@ -160,6 +160,14 @@ _AMENITY_CLAIM_PATTERNS: List[Tuple[str, re.Pattern]] = [
     )),
 ]
 
+# More amenities the bot must not claim unless the record lists them (same affirmative forms as above).
+for _name in ("golf", "sauna", "cinema", "tennis", "elevator", "helipad", "marina", "rooftop"):
+    _AMENITY_CLAIM_PATTERNS.append((_name, re.compile(
+        r"(?:" + _name + r"\s*(?:course|court)?\s*:\s*(?:yes|✓))|"
+        r"\b(?:has|with|includes?|offers?)\s+(?:a\s+|an\s+|private\s+)?" + _name + r"\b",
+        re.I,
+    )))
+
 _OWNERSHIP_CLAIM = re.compile(
     r"\bfreehold\s+for\s+foreigners?\b|\bforeign(?:er)?\s+freehold\b|"
     r"\bfreehold\b|\bleasehold\b|\bforeign\s+quota\b",
@@ -175,7 +183,7 @@ _YIELD_CLAIM = re.compile(
 )
 
 _COMPLETION_CLAIM = re.compile(
-    r"\b(?:completion|completes?|handover|ready)\s*(?:in\s*)?(?:q[1-4]\s*)?(\d{4})\b|"
+    r"\b(?:completion|completes?|handover|delivery|ready)\b(?:[^.\n]{0,30}?\b(?:q[1-4]\s*)?(?:[a-z]{3,9}\s+)?)?(\d{4})\b|"
     r"\b(q[1-4]\s*\d{4})\b|"
     r"\bcompletion\s*:\s*([^\n.]+)",
     re.I,
@@ -208,7 +216,9 @@ def _normalize_number_tokens(blob: str) -> set:
             out.add(f"{v:g}m")
         except ValueError:
             pass
-    for m in re.finditer(r"\d+(?:[.,]\d+)?", text):
+    # Grouped amounts ("12,500,000") are one number; splitting them on the commas left a shared "000" fragment
+    # that made any other comma-formatted price look supported.
+    for m in re.finditer(r"\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:[.,]\d+)?", text):
         raw = m.group(0).replace(",", "")
         try:
             f = float(raw)

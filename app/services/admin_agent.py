@@ -1341,6 +1341,9 @@ def process_admin_chat(
         site_origin=site_origin,
         agent_type="admin"
     )
+    # The chat log records who is chatting; the conversation object is shared per session, so refresh it every turn.
+    if staff_user is not None:
+        conv.log_actor = {"user_id": staff_user.user_id, "email": staff_user.email, "role": staff_user.role, "name": getattr(staff_user, "name", None)}
 
     # 2. Resolve active turn language
     active_lang, is_switch = resolve_language(
@@ -4502,6 +4505,11 @@ def _execute_admin_tool_uncached(
 ):
     """Inner tool executor (no cache)."""
 
+    from app.core.permissions import tool_denial
+    denial = tool_denial(getattr(staff_user, "role", None), tool_name)
+    if denial:
+        return {"status": "FORBIDDEN", "message": denial}, False, None
+
     # 1. Read Tool: search_properties_full
     if tool_name == "search_properties_full":
         selected_websites = getattr(staff_user, "selected_websites", None)
@@ -5033,6 +5041,23 @@ def _execute_admin_tool_uncached(
         target_pid = tool_args.get("target_property_id")
 
         drive_res = fetch_drive_file(file_id, file_name, staff_user_email=staff_email, db=db)
+        if not drive_res.get("usable"):
+            # Nothing readable came back (missing, scanned, empty, too large or corrupt): never build a listing from it.
+            status_word = drive_res.get("extraction_status") or "not_found"
+            record_audit_log(
+                db=db,
+                staff_user_id=staff_email,
+                tool_name="ingest_property_from_drive",
+                tool_arguments=tool_args,
+                status="REFUSED",
+                error_message=f"Drive file unusable: {status_word}",
+                conversation_id=conversation_id,
+            )
+            return {
+                "status": "DRIVE_FILE_UNUSABLE",
+                "extraction_status": status_word,
+                "message": drive_res.get("content") or "The Drive file could not be read.",
+            }, False, None
         extracted, mode, existing_prop = extract_property_from_document(
             db=db,
             raw_text=drive_res.get("content", ""),
@@ -5130,6 +5155,27 @@ def _execute_admin_tool_uncached(
             raw_fields.pop("websites", None)
             raw_fields.pop("selected_websites", None)
 
+        if resolve_source == "firestore" and isinstance(resolved, dict) and selected_websites \
+                and not property_belongs_to_websites(resolved, selected_websites):
+            return {
+                "status": "FORBIDDEN",
+                "message": f"Access denied: Property '{target_pid}' does not belong to your currently selected website(s): {selected_websites}."
+            }, False, None
+        if explicit_websites:
+            from app.core.tenant import normalize_website_list as _norm_sites
+            asked = _norm_sites(raw_fields.get("websites") or raw_fields.get("selected_websites"))
+            allowed_sites = list(getattr(staff_user, "allowed_websites", None) or [])
+            outside = [s for s in asked if s not in allowed_sites]
+            unselected = [s for s in asked if selected_websites and s not in selected_websites]
+            if outside or unselected:
+                return {
+                    "status": "FORBIDDEN",
+                    "message": (
+                        f"Access denied: you cannot put a listing on {outside or unselected}. "
+                        f"Your account has {allowed_sites}; you currently selected {selected_websites}."
+                    ),
+                }, False, None
+
         # Exists in PG or Firestore → always update (never create-required fields)
         if resolve_source:
             mode = "update"
@@ -5166,6 +5212,17 @@ def _execute_admin_tool_uncached(
 
         tool_args["fields_to_update"] = canonical or raw_fields
         tool_args["fields"] = tool_args["fields_to_update"]
+
+        # One listing per name: a new listing may not reuse a name, and a rename may not collide with another listing
+        from app.services.action_service import _duplicate_property_message
+        new_name = (canonical or raw_fields).get("property_name")
+        if new_name:
+            duplicate = _duplicate_property_message(
+                db, "" if resolve_source else str(target_pid or ""), str(new_name),
+                exclude_id=str(target_pid) if resolve_source else None,
+            )
+            if duplicate:
+                return {"status": "DUPLICATE", "message": duplicate}, False, None
 
         # Pass resolved record (ORM or dict) so update path skips create validation
         is_valid, missing, err_msg = validate_property_data(
@@ -5207,6 +5264,8 @@ def _execute_admin_tool_uncached(
         payload["mode"] = change_diff.get("operation_type") or mode
         payload["resolve_source"] = resolve_source or change_diff.get("resolve_source")
         payload["is_update_only"] = True if resolve_source else payload.get("is_update_only")
+        if not resolve_source and selected_websites:
+            payload["site_scope"] = list(selected_websites)   # a new listing goes to the website(s) selected in the panel
 
         action = create_pending_action(
             db=db,

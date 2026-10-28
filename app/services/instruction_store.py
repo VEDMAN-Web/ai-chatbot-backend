@@ -841,7 +841,17 @@ def instruction_config_status() -> Dict[str, Any]:
 
 def lookup_chat_excerpt(db: Any, conversation_id: Optional[str], message_index: int) -> Optional[Dict[str, Any]]:
     """Read-only. The excerpt is never written back to Firestore."""
-    if db is None or not conversation_id:
+    if not conversation_id:
+        return None
+    # The chat log (Firestore) is where conversations are actually kept; the Postgres table is a legacy fallback.
+    from app.services.chat_log_query import read_for_review
+
+    logged = read_for_review(conversation_id)
+    if logged is not None:
+        if message_index < 0 or message_index >= len(logged):
+            return None
+        return {"role": logged[message_index]["role"], "content": logged[message_index]["content"]}
+    if db is None:
         return None
     from app.db.models import Conversation
 
@@ -872,14 +882,17 @@ def lookup_chat_excerpt(db: Any, conversation_id: Optional[str], message_index: 
 def review_conversation(db: Any, conversation_id: str) -> Dict[str, Any]:
     """Read-only view of Conversation, PendingAction and AuditLog. Writes nothing."""
     from app.db.models import AuditLog, Conversation, PendingAction
+    from app.services.chat_log_query import read_for_review
 
+    logged = read_for_review(conversation_id)
     conv = None
-    for row in db.query(Conversation).all():
-        if str(row.id) == str(conversation_id):
-            conv = row
-            break
-    if conv is None:
-        raise InstructionStoreError("Conversation was not found.")
+    if logged is None:
+        for row in db.query(Conversation).all():
+            if str(row.id) == str(conversation_id):
+                conv = row
+                break
+        if conv is None:
+            raise InstructionStoreError("Conversation was not found.")
     pending = []
     for row in db.query(PendingAction).all():
         if str(row.conversation_id or "") == str(conversation_id):
@@ -897,8 +910,8 @@ def review_conversation(db: Any, conversation_id: str) -> Dict[str, Any]:
                 "status": row.status,
             })
     return {
-        "conversation_id": str(conv.id),
-        "messages": list(conv.message_history or []),
+        "conversation_id": str(conversation_id) if logged is not None else str(conv.id),
+        "messages": logged if logged is not None else list(conv.message_history or []),
         "pending_actions": pending,
         "audit_logs": audits,
     }

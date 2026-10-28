@@ -201,6 +201,7 @@ class TestAdminDataCompletenessValidation:
     def test_admin_tool_create_or_update_listing_returns_validation_failed(self, db_session):
         staff_user = MagicMock()
         staff_user.email = "admin@tajlandia.com"
+        staff_user.role = "admin"   # changing property data needs a verified admin role
 
         invalid_tool_args = {
             "property_id": "PROP-TOOL-FAIL",

@@ -17,6 +17,7 @@ from app.api.v1.chat import router as chat_router
 from app.api.v1.admin import router as admin_router
 from app.api.v1.auth import router as auth_router
 from app.api.v1.superadmin_instructions import router as superadmin_instructions_router
+from app.api.v1.chat_logs import router as chat_logs_router
 
 logger = logging.getLogger(__name__)
 
@@ -69,8 +70,13 @@ def startup_db_init():
     """Ensure all PostgreSQL tables and extensions exist on boot for both admin and user databases."""
     # Fail fast if DATABASE_URL is missing outside tests; then emit config flag warnings (no secrets)
     try:
-        from app.core.config import assert_database_configured_or_exit, log_config_warnings
+        from app.core.config import (
+            assert_database_configured_or_exit,
+            assert_secrets_configured_or_exit,
+            log_config_warnings,
+        )
         assert_database_configured_or_exit()
+        assert_secrets_configured_or_exit()
         log_config_warnings()
     except RuntimeError:
         raise
@@ -221,6 +227,7 @@ app.add_middleware(
 app.include_router(chat_router, prefix="/api/v1")
 app.include_router(admin_router, prefix="/api/v1")
 app.include_router(superadmin_instructions_router, prefix="/api/v1")
+app.include_router(chat_logs_router, prefix="/api/v1")
 app.include_router(auth_router, prefix="/api/v1")
 
 # Convenience route aliases for authentication and user management

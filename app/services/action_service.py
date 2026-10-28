@@ -9,7 +9,7 @@ import logging
 from app.db.models import PendingAction, Property
 from app.core.config import settings
 from app.core.auth import AuthenticatedStaff
-from app.services.audit_service import record_audit_log
+from app.services.audit_service import record_audit_log, sanitize_payload, scrub_text
 from app.services.google_services import google_manager
 
 # Re-exported so tests can patch `app.services.action_service.record_crud_operation_snapshot`
@@ -312,6 +312,76 @@ def validate_property_data(
     return True, [], ""
 
 
+_EMAIL_ADDRESS_RE = re.compile(r"^[^@\s<>,;]+@[^@\s<>,;]+\.[^@\s<>,;]{2,}$")
+MAX_EMAIL_RECIPIENTS = 10
+MAX_CALENDAR_ATTENDEES = 50
+
+
+def _single_line(value: Any, label: str, max_len: int, problems: List[str]) -> None:
+    text = value if isinstance(value, str) else ""
+    if not text.strip():
+        problems.append(f"{label} is required")
+    elif len(text) > max_len:
+        problems.append(f"{label} must be at most {max_len} characters")
+    elif "\r" in text or "\n" in text:
+        problems.append(f"{label} must be a single line")
+
+
+def _parse_iso_datetime(value: Any) -> Optional[datetime]:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        return datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def validate_email_action(payload: Dict[str, Any]) -> List[str]:
+    """Problems with a proposed email; an empty list means it can be staged for confirmation."""
+    problems: List[str] = []
+    recipients = [part.strip() for part in re.split(r"[;,]", str(payload.get("to") or "")) if part.strip()]
+    if not recipients:
+        problems.append("a recipient email address is required")
+    elif len(recipients) > MAX_EMAIL_RECIPIENTS:
+        problems.append(f"at most {MAX_EMAIL_RECIPIENTS} recipients are allowed")
+    elif not all(_EMAIL_ADDRESS_RE.match(r) for r in recipients):
+        problems.append("the recipient is not a valid email address")
+    _single_line(payload.get("subject"), "subject", 200, problems)
+    body = payload.get("body")
+    if not isinstance(body, str) or not body.strip():
+        problems.append("the message body is required")
+    elif len(body) > 20000:
+        problems.append("the message body must be at most 20000 characters")
+    return problems
+
+
+def validate_calendar_action(payload: Dict[str, Any]) -> List[str]:
+    """Problems with a proposed calendar event. Times need an explicit UTC offset, e.g. 2026-11-03T10:00:00+07:00."""
+    problems: List[str] = []
+    _single_line(payload.get("title"), "title", 200, problems)
+    start = _parse_iso_datetime(payload.get("start_time"))
+    if start is None:
+        problems.append("start_time must be an ISO 8601 date and time")
+    elif start.tzinfo is None:
+        problems.append("start_time must include a UTC offset (for example 2026-11-03T10:00:00+07:00)")
+    elif start < datetime.now(timezone.utc) - timedelta(minutes=5):
+        problems.append("start_time is in the past")
+    if payload.get("end_time"):
+        end = _parse_iso_datetime(payload.get("end_time"))
+        if end is None:
+            problems.append("end_time must be an ISO 8601 date and time")
+        elif end.tzinfo is None:
+            problems.append("end_time must include a UTC offset")
+        elif start is not None and start.tzinfo is not None and end < start:
+            problems.append("end_time must not be before start_time")
+    attendees = payload.get("attendees") or []
+    if not isinstance(attendees, list) or len(attendees) > MAX_CALENDAR_ATTENDEES:
+        problems.append(f"attendees must be a list of at most {MAX_CALENDAR_ATTENDEES} email addresses")
+    elif not all(isinstance(a, str) and _EMAIL_ADDRESS_RE.match(a.strip()) for a in attendees):
+        problems.append("an attendee is not a valid email address")
+    return problems
+
+
 def create_pending_action(
     db: Session,
     staff_user_id: str,
@@ -325,6 +395,17 @@ def create_pending_action(
     Claude NEVER executes write actions directly; it only proposes them here.
     Validates data completeness for listing creations and updates.
     """
+    if tool_name in ("send_email", "create_calendar_event"):
+        problems = (
+            validate_email_action(action_payload or {})
+            if tool_name == "send_email"
+            else validate_calendar_action(action_payload or {})
+        )
+        if problems:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Cannot stage this action: " + "; ".join(problems) + ".",
+            )
     if tool_name in ["create_or_update_listing", "propose_listing_update"]:
         from app.services.admin_property_fields import resolve_existing_property
         src, rec = resolve_existing_property(db, action_payload.get("property_id"))
@@ -450,7 +531,8 @@ def get_pending_action(db: Session, pending_action_id: str) -> PendingAction:
 
     # Server-side expiration check
     if action.expires_at.tzinfo is None:
-        is_expired = action.expires_at < datetime.now()
+        # Stored as naive UTC; compare with UTC now, not the server's local time.
+        is_expired = action.expires_at < datetime.now(timezone.utc).replace(tzinfo=None)
     else:
         is_expired = action.expires_at < datetime.now(timezone.utc)
 
@@ -460,6 +542,30 @@ def get_pending_action(db: Session, pending_action_id: str) -> PendingAction:
         db.refresh(action)
 
     return action
+
+
+def staff_owns_action(action: Any, staff: Any) -> bool:
+    """True when the proposer of the pending action is this staff member (matched by email or user id)."""
+    owner = str(getattr(action, "staff_user_id", "") or "").strip().lower()
+    if not owner:
+        return False
+    mine = {
+        str(getattr(staff, "email", "") or "").strip().lower(),
+        str(getattr(staff, "user_id", "") or "").strip().lower(),
+    }
+    mine.discard("")
+    return owner in mine
+
+
+def _claim_action(db: Session, action: PendingAction, staff: Any) -> None:
+    """Only the proposer may decide an action. On a real session the row is locked so a second request waits."""
+    if not staff_owns_action(action, staff):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the staff member who proposed this action can confirm or reject it.",
+        )
+    if _is_real_db_session(db):
+        db.refresh(action, with_for_update=True)
 
 
 def _append_action_lifecycle_note(
@@ -557,6 +663,12 @@ def confirm_and_execute_action(
     Updates lifecycle states: PENDING -> CONFIRMED -> EXECUTED (or FAILED).
     """
     action = get_pending_action(db, pending_action_id)
+    _claim_action(db, action, authenticated_staff)
+
+    from app.core.permissions import tool_denial
+    denial = tool_denial(getattr(authenticated_staff, "role", None), action.tool_name)
+    if denial:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=denial)
 
     # 1. Check expiration
     if action.status == ACTION_STATUS_EXPIRED:
@@ -770,7 +882,7 @@ def confirm_and_execute_action(
             proposed_payload=audit_payload,
             tool_arguments={"operation_id": operation_id} if operation_id else None,
             confirmed_by_staff=True,
-            execution_result=str(result_data),
+            execution_result=str(sanitize_payload(result_data)),
             status="SUCCESS",
             conversation_id=action.conversation_id,
             pending_action_id=str(action.id)
@@ -845,8 +957,9 @@ def confirm_and_execute_action(
         }
 
     except Exception as exc:
+        safe_error = scrub_text(str(exc))
         action.status = ACTION_STATUS_FAILED
-        action.error_message = str(exc)
+        action.error_message = safe_error
         db.commit()
 
         record_audit_log(
@@ -856,14 +969,14 @@ def confirm_and_execute_action(
             proposed_payload=action.action_payload,
             confirmed_by_staff=True,
             status="FAILED",
-            error_message=str(exc),
+            error_message=safe_error,
             conversation_id=action.conversation_id,
             pending_action_id=str(action.id)
         )
-        logger.error(f"Failed executing pending action {action.id}: {exc}")
+        logger.error(f"Failed executing pending action {action.id}: {safe_error}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Action execution failed: {str(exc)}"
+            detail=f"Action execution failed: {safe_error}"
         )
 
 
@@ -875,6 +988,7 @@ def reject_pending_action(
 ) -> Dict[str, Any]:
     """Rejects a pending action and records the cancellation in audit logs."""
     action = get_pending_action(db, pending_action_id)
+    _claim_action(db, action, authenticated_staff)
 
     if action.status != ACTION_STATUS_PENDING:
         raise HTTPException(
@@ -1003,6 +1117,50 @@ def _serialize_property_snapshot(prop: Any) -> Dict[str, Any]:
     return out
 
 
+def _enforce_listing_scope(db, payload, fields, orig_fields, prop, resolved, resolve_source, staff) -> None:
+    """Confirm-time guard for chat-driven listing changes (the account may have changed since the proposal).
+
+    Runs for a real signed-in staff member only. Refuses a website outside the account, a listing that belongs to
+    websites the account cannot reach, and a new or renamed listing that would duplicate another one.
+    """
+    if not isinstance(staff, AuthenticatedStaff):
+        return
+    from app.core.tenant import normalize_website_list
+    from app.services.property_search import property_belongs_to_websites
+
+    allowed = list(staff.allowed_websites or [])
+    if "websites" in orig_fields or "selected_websites" in orig_fields or "websites" in payload:
+        requested = orig_fields.get("websites") or orig_fields.get("selected_websites") or payload.get("websites") or fields.get("websites")
+    else:
+        requested = None
+    requested = normalize_website_list(requested) if requested else []
+    requested += [s for s in normalize_website_list(payload.get("site_scope") or []) if s not in requested]
+    outside = [s for s in requested if s not in allowed]
+    if outside:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Access denied: your account has no access to website(s) {outside}.",
+        )
+    existing = prop if prop is not None else (resolved if isinstance(resolved, dict) else None)
+    if existing is not None and not property_belongs_to_websites(existing, allowed):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied: this listing belongs to a website your account cannot reach.",
+        )
+    new_name = fields.get("property_name")
+    duplicate = None
+    if existing is None and not resolve_source:
+        duplicate = _duplicate_property_message(
+            db, str(payload.get("property_id") or ""), str(new_name or payload.get("title") or "")
+        )
+    elif new_name:
+        current_name = existing.get("property_name") if isinstance(existing, dict) else getattr(existing, "property_name", "")
+        if str(new_name).strip() != str(current_name or "").strip():
+            duplicate = _duplicate_property_message(db, "", str(new_name), exclude_id=str(payload.get("property_id") or ""))
+    if duplicate:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=duplicate)
+
+
 def _execute_update_listing(
     db: Session,
     payload: Dict[str, Any],
@@ -1080,6 +1238,8 @@ def _execute_update_listing(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=err_msg
         )
+
+    _enforce_listing_scope(db, payload, fields, orig_fields, prop, resolved, resolve_source, authenticated_staff)
 
     allowed_fields = {
         "property_name", "project_name", "property_type", "status",
@@ -1189,8 +1349,9 @@ def _execute_update_listing(
             prop.websites = norm_websites
             updated_fields["websites"] = norm_websites
         else:
-            default_site = payload.get("site_origin") or get_current_env_domain()
-            prop.websites = normalize_website_list([default_site])
+            # The websites the admin had selected when asking; the environment default only when none were recorded
+            scope = payload.get("site_scope") or [payload.get("site_origin") or get_current_env_domain()]
+            prop.websites = normalize_website_list(scope)
             updated_fields["websites"] = prop.websites
 
         for k, v in fields.items():
@@ -1535,11 +1696,12 @@ def _apply_sql_fields(prop: Property, fields: Dict[str, Any], websites: Optional
         prop.is_public = bool(data["is_public"])
 
 
-def _duplicate_property_message(db: Any, property_id: str, name: str) -> Optional[str]:
+def _duplicate_property_message(db: Any, property_id: str, name: str, exclude_id: Optional[str] = None) -> Optional[str]:
+    """Why this id/name would duplicate a listing, or None. `exclude_id` is the listing being renamed (it may match itself)."""
     slug = name_slug(name)
     seen_ids = []
     for candidate in (property_id, slug):
-        if not candidate or candidate in seen_ids:
+        if not candidate or candidate in seen_ids or candidate == exclude_id:
             continue
         seen_ids.append(candidate)
         raw = _read_raw_firestore(candidate)
@@ -1561,7 +1723,7 @@ def _duplicate_property_message(db: Any, property_id: str, name: str) -> Optiona
                         labels.extend(str(v) for v in val.values() if v)
                     elif val:
                         labels.append(str(val))
-                if doc.id == property_id or any(name_slug(label) == slug for label in labels):
+                if doc.id != exclude_id and (doc.id == property_id or any(name_slug(label) == slug for label in labels)):
                     return (
                         f"A property named '{name}' already exists in Firestore as '{doc.id}'. "
                         "Use update instead of create."
@@ -1571,7 +1733,7 @@ def _duplicate_property_message(db: Any, property_id: str, name: str) -> Optiona
 
     if _is_real_db_session(db):
         for row in db.query(Property).all():
-            if row.property_id in (property_id, slug) or (slug and name_slug(row.property_name or "") == slug):
+            if row.property_id != exclude_id and (row.property_id in (property_id, slug) or (slug and name_slug(row.property_name or "") == slug)):
                 return (
                     f"Property '{name or property_id}' already exists in Postgres as '{row.property_id}'. "
                     "Use update instead of create."
@@ -1797,6 +1959,10 @@ def rest_update_property(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Property with ID '{property_id}' not found.",
         )
+    if fields.get("property_name"):
+        duplicate = _duplicate_property_message(db, "", str(fields["property_name"]), exclude_id=property_id)
+        if duplicate:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=duplicate)
     before = {"sql": _summary_sql(prop), "firestore": _summary_fs(raw)}
     operation_id = _require_undo_snapshot(
         db=db,
@@ -1913,7 +2079,12 @@ def rest_delete_property(
     confirm_property_id: Optional[str] = None,
     allow_without_undo: bool = False,
 ) -> Dict[str, Any]:
-    """Soft-delete by default. Hard delete requires a typed property id confirmation."""
+    """Soft-delete by default. Hard delete is off unless ALLOW_PERMANENT_DELETE is set, then needs a typed property id."""
+    if hard_delete and not getattr(settings, "ALLOW_PERMANENT_DELETE", False):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Permanent deletes are disabled. DELETE archives the listing and can be undone.",
+        )
     if hard_delete and confirm_property_id != property_id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
