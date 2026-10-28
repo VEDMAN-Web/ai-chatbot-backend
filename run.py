@@ -8,6 +8,23 @@ import uvicorn
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 sys.path.insert(0, BASE_DIR)
 
+def _env_flag(name, default=True):
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip().lower() not in ("0", "false", "no", "off")
+
+
+def sql_startup_enabled():
+    """SQL_STARTUP=false skips Postgres schema sync, alembic and catalog seeding (Firestore-only deploys)."""
+    return _env_flag("SQL_STARTUP", True)
+
+
+def alembic_on_start_enabled():
+    """RUN_ALEMBIC_ON_START=false keeps schema sync but never runs alembic upgrade/stamp."""
+    return _env_flag("RUN_ALEMBIC_ON_START", True)
+
+
 def init_database():
     """Initializes tables and extensions with retries for cloud databases."""
     import sqlalchemy as sa
@@ -31,7 +48,10 @@ def init_database():
             ensure_postgres_schema((admin_engine, user_engine))
             print("    [OK] All database tables successfully created for admin and user databases.")
 
-            # 3. Upgrade alembic migrations to head
+            # 3. Upgrade alembic migrations to head (skippable)
+            if not alembic_on_start_enabled():
+                print("    [OK] RUN_ALEMBIC_ON_START=false: alembic upgrade skipped.")
+                return True
             try:
                 from alembic.config import Config
                 from alembic import command
@@ -74,10 +94,14 @@ def seed_data():
         print(f"    [WARNING] Ingestion error: {e}")
 
 def main():
-    db_ok = init_database()
-    if db_ok:
-        seed_data()
+    if not sql_startup_enabled():
+        print("--> [OK] SQL_STARTUP=false: skipping PostgreSQL schema sync, alembic and seeding (Firestore-only).")
+        db_ok = False
     else:
+        db_ok = init_database()
+    if sql_startup_enabled() and db_ok:
+        seed_data()
+    elif sql_startup_enabled():
         print("--> [NOTICE] Skipping local PostgreSQL seeding (PostgreSQL not reachable or using remote Firestore).")
 
     # Railway injects PORT and routes the public URL to that port.
