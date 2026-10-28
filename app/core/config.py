@@ -159,6 +159,11 @@ class Settings(BaseSettings):
     STORE_PENDING_ACTIONS: str = "firestore"
     STORE_AUDIT: str = "firestore"
     STORE_LEADS_READ: str = "firestore"
+    # Stage F3: staff users + login sessions (admin_authentication / admin_sessions).
+    STORE_USERS: str = "firestore"
+    # Local development only: accept "dev-token-<email>" and the bare X-Staff-Email header. Never in production.
+    ALLOW_INSECURE_DEV_AUTH: bool = False
+    ALLOW_HARD_DELETE: bool = False
 
     # Action Confirmation & Security
     ACTION_EXPIRATION_MINUTES: int = 30

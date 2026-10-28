@@ -57,9 +57,11 @@ def log_store_modes_at_startup() -> None:
     pending = store_mode("STORE_PENDING_ACTIONS")
     audit = store_mode("STORE_AUDIT")
     leads = store_mode("STORE_LEADS_READ")
+    users = store_mode("STORE_USERS", default="firestore")
     logger.info(
-        "STORE modes: pending_actions=%s audit=%s leads_read=%s",
+        "STORE modes: pending_actions=%s audit=%s leads_read=%s users=%s",
         pending,
         audit,
         leads,
+        users,
     )

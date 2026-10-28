@@ -187,9 +187,9 @@ def _propose_listing(db: Any, conv: Any, staff: Any, message: str, record: Any, 
 
 def _google_connected(db: Any, staff: Any) -> bool:
     try:
-        from app.db.models import User
+        from app.repositories import users_repo
 
-        user = db.query(User).filter(User.email.ilike(getattr(staff, "email", ""))).first()
+        user = users_repo.get_by_email(db, getattr(staff, "email", ""))
         prefs = getattr(user, "preferences", None) or {}
         workspace = prefs.get("google_workspace") or {}
         return bool(workspace.get("connected") and workspace.get("refresh_token"))

@@ -12,6 +12,11 @@ logger = logging.getLogger(__name__)
 
 ADMIN_AUTH_COLLECTION = "admin_authentication"
 
+try:  # removes a legacy plain-text "password" field when a document is updated
+    from google.cloud.firestore_v1 import DELETE_FIELD as _DROP_PLAINTEXT
+except Exception:  # pragma: no cover - library not installed (tests)
+    _DROP_PLAINTEXT = None
+
 
 def get_admin_from_firestore(email: str) -> Optional[Dict[str, Any]]:
     """
@@ -82,19 +87,10 @@ def verify_firestore_admin_credentials(email: str, password: str) -> Optional[Di
         return None
 
     stored_hash = admin_doc.get("passwordHash") or admin_doc.get("password_hash")
-    stored_plain = admin_doc.get("password")
 
-    is_verified = False
-
-    # 1. Verify bcrypt hash if present
-    if stored_hash and verify_password(password, stored_hash):
-        is_verified = True
-    # 2. Verify direct match with plaintext password if configured in Firebase Console
-    elif stored_plain and password == str(stored_plain):
-        is_verified = True
-    # 3. Verify if password was placed directly into passwordHash field as plaintext
-    elif stored_hash and password == str(stored_hash):
-        is_verified = True
+    # Only a bcrypt hash is accepted. A stored hash is never accepted as the password itself, and
+    # plain-text passwords are upgraded through users_repo.upgrade_legacy_password at login.
+    is_verified = bool(stored_hash) and verify_password(password, stored_hash)
 
     if is_verified:
         return {
@@ -136,7 +132,6 @@ def add_or_update_admin_in_firestore(
 
     payload = {
         "email": email_clean,
-        "password": password,
         "passwordHash": hashed,
         "role": role,
         "name": name,
@@ -248,9 +243,9 @@ def update_admin_password_in_firestore(email: str, new_password: str) -> bool:
 
         if doc.exists:
             doc_ref.update({
-                "password": new_password,
                 "passwordHash": hashed,
-                "updatedAt": now_iso
+                "updatedAt": now_iso,
+                **({"password": _DROP_PLAINTEXT} if _DROP_PLAINTEXT is not None else {}),
             })
             logger.info(f"Updated password for admin '{email_clean}' in Firestore doc '{email_clean}'.")
             return True
@@ -265,9 +260,9 @@ def update_admin_password_in_firestore(email: str, new_password: str) -> bool:
         if docs:
             target_ref = col.document(docs[0].id)
             target_ref.update({
-                "password": new_password,
                 "passwordHash": hashed,
-                "updatedAt": now_iso
+                "updatedAt": now_iso,
+                **({"password": _DROP_PLAINTEXT} if _DROP_PLAINTEXT is not None else {}),
             })
             logger.info(f"Updated password for admin '{email_clean}' in Firestore doc '{docs[0].id}'.")
             return True
@@ -275,7 +270,6 @@ def update_admin_password_in_firestore(email: str, new_password: str) -> bool:
         # Fallback: create or merge
         doc_ref.set({
             "email": email_clean,
-            "password": new_password,
             "passwordHash": hashed,
             "updatedAt": now_iso,
             "isActive": True,
@@ -503,7 +497,8 @@ def update_admin_in_firestore(
         if not is_active and "status" not in updates:
             updates["isBlocked"] = True
     if password is not None and password.strip():
-        updates["password"] = password.strip()
+        if _DROP_PLAINTEXT is not None:
+            updates["password"] = _DROP_PLAINTEXT
         updates["passwordHash"] = hash_password(password.strip())
     if allowed_websites is not None:
         updates["allowed_websites"] = list(allowed_websites)

@@ -3646,8 +3646,8 @@ def _run_deterministic_admin(
         "google drive status", "connect google", "podłącz google", "podlacz google",
         "status google", "połączenie z google", "polaczenie z google"
     ]):
-        from app.db.models import User
-        target_u = db.query(User).filter(User.email.ilike(staff_user.email)).first()
+        from app.repositories import users_repo
+        target_u = users_repo.get_by_email(db, staff_user.email)
         gw_data = (target_u.preferences or {}).get("google_workspace") if target_u else None
         is_conn = bool(gw_data and gw_data.get("connected") and gw_data.get("refresh_token"))
         google_mail = gw_data.get("google_email") if gw_data else None
@@ -5371,8 +5371,8 @@ def _execute_admin_tool_uncached(
 
     # 6. Read Tool: check_google_workspace_status
     elif tool_name == "check_google_workspace_status":
-        from app.db.models import User
-        target_u = db.query(User).filter(User.email.ilike(staff_email)).first()
+        from app.repositories import users_repo
+        target_u = users_repo.get_by_email(db, staff_email)
         gw_data = (target_u.preferences or {}).get("google_workspace") if target_u else None
         is_conn = bool(gw_data and gw_data.get("connected") and gw_data.get("refresh_token"))
         google_mail = gw_data.get("google_email") if gw_data else None

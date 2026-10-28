@@ -1048,6 +1048,17 @@ def delete_property_endpoint(
     """
     _limit_admin_write(request, staff)
     from app.services.action_service import rest_delete_property
+    if hard_delete:
+        if (staff.role or "").lower() != "super_admin":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Permanent delete is restricted to super admins. Use archive instead.",
+            )
+        if not getattr(settings, "ALLOW_HARD_DELETE", False):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Permanent delete is disabled on this environment (ALLOW_HARD_DELETE is off).",
+            )
 
     raw, prop = _property_scope_target(property_id, db)
     target_obj = raw or prop

@@ -8,6 +8,18 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pytest
 
+try:
+    from google.cloud.firestore_v1 import DELETE_FIELD as _DELETE_FIELD
+except Exception:  # pragma: no cover
+    _DELETE_FIELD = object()
+
+
+def _apply_deletes(merged):
+    """Real Firestore removes a field set to DELETE_FIELD; mimic that."""
+    for key in [k for k, v in merged.items() if v is _DELETE_FIELD]:
+        merged.pop(key, None)
+    return merged
+
 
 class _Snap:
     def __init__(self, doc_id, data):
@@ -38,8 +50,8 @@ class _Ref:
             current = self.store.docs.get(self.path)
             if isinstance(current, dict):
                 merged = copy.deepcopy(current)
-                merged.update(copy.deepcopy(data))
-                self.store.write(self.path, merged, merge=False)
+                merged.update(dict(data))
+                self.store.write(self.path, _apply_deletes(merged), merge=False)
             else:
                 self.store.write(self.path, data, merge=False)
 
@@ -148,8 +160,8 @@ class FakeFirestore:
     def write(self, path, data, merge):
         if merge and isinstance(self.docs.get(path), dict):
             merged = copy.deepcopy(self.docs[path])
-            merged.update(copy.deepcopy(data))
-            self.docs[path] = merged
+            merged.update({k: (v if v is _DELETE_FIELD else copy.deepcopy(v)) for k, v in data.items()})
+            self.docs[path] = _apply_deletes(merged)
         else:
             self.docs[path] = copy.deepcopy(data)
 

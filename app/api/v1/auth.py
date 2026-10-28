@@ -12,10 +12,9 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.security import HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field, ConfigDict, model_validator
 from sqlalchemy.orm import Session
-from sqlalchemy import func
 
 from app.db.session import get_db
-from app.db.models import User, UserSession
+from app.repositories import users_repo
 from app.core.config import settings
 from app.core.auth import (
     AuthenticatedStaff,
@@ -50,6 +49,46 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/auth", tags=["Multi-Tenant Authentication & Google OAuth"])
 
 STATE_SECRET = settings.INTERNAL_API_SECRET or "tajlandia-oauth-state-secret"
+
+
+def _store_call(fn):
+    """Run a user-store call. An unavailable store is a 503, never a silent success."""
+    try:
+        return fn()
+    except HTTPException:
+        raise
+    except RuntimeError as exc:
+        logger.error("User store unavailable: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Authentication store is temporarily unavailable. Please try again shortly.",
+        ) from exc
+
+
+_WEAK_SECRETS = {
+    "", "changeme", "change-me", "secret", "password", "admin", "tajlandia-internal-secret-token",
+    "tajlandia-oauth-state-secret", "tajlandia-reset-secret", "your-secret-here",
+}
+
+
+def _is_weak_secret(value: Optional[str]) -> bool:
+    text = (value or "").strip()
+    return len(text) < 12 or text.lower() in _WEAK_SECRETS
+
+
+def _admin_secret_matches(supplied: Optional[str]) -> bool:
+    """Constant-time check against the configured admin secrets. A default or weak internal secret never counts."""
+    if not supplied:
+        return False
+    candidates = []
+    if not _is_weak_secret(settings.INTERNAL_API_SECRET):
+        candidates.append(settings.INTERNAL_API_SECRET)
+    if settings.ADMIN_PASSWORD and not _is_weak_secret(settings.ADMIN_PASSWORD):
+        candidates.append(settings.ADMIN_PASSWORD)
+    supplied_bytes = supplied.encode("utf-8")
+    return any(hmac.compare_digest(supplied_bytes, c.encode("utf-8")) for c in candidates)
+
+
 
 
 def _generate_state_token(user_id: str, email: str) -> str:
@@ -165,7 +204,7 @@ def google_oauth_callback(
         raise HTTPException(status_code=400, detail="Invalid or expired OAuth state parameter.")
 
     target_email = verified["email"]
-    user = db.query(User).filter(User.email.ilike(target_email)).first()
+    user = _store_call(lambda: users_repo.get_by_email(db, target_email))
     if not user:
         raise HTTPException(status_code=404, detail=f"User with email '{target_email}' not found.")
 
@@ -225,8 +264,7 @@ def google_oauth_callback(
     user.google_email = google_email
     if refresh_token:
         user.google_refresh_token = refresh_token
-    db.commit()
-    db.refresh(user)
+    _store_call(lambda: users_repo.save_user(db, user))
 
     html_success = f"""
     <!DOCTYPE html>
@@ -270,7 +308,7 @@ def get_google_status(
     """
     Returns the Google Workspace connection status for the authenticated user.
     """
-    user = db.query(User).filter(User.email.ilike(staff.email)).first()
+    user = _store_call(lambda: users_repo.get_by_email(db, staff.email))
     gw = (user.preferences or {}).get("google_workspace") if user else None
 
     if gw and gw.get("connected") and gw.get("refresh_token"):
@@ -302,7 +340,7 @@ def disconnect_google_oauth(
     """
     Revokes and unlinks the connected Google account for the authenticated staff member.
     """
-    user = db.query(User).filter(User.email.ilike(staff.email)).first()
+    user = _store_call(lambda: users_repo.get_by_email(db, staff.email))
     if not user:
         raise HTTPException(status_code=404, detail="User not found.")
 
@@ -325,7 +363,7 @@ def disconnect_google_oauth(
     user.preferences = prefs
     user.google_email = None
     user.google_refresh_token = None
-    db.commit()
+    _store_call(lambda: users_repo.save_user(db, user))
 
     return {
         "status": "disconnected",
@@ -345,7 +383,7 @@ class GoogleAuthInfo(BaseModel):
     services: list[str] = Field(default_factory=list)
 
 
-def _get_user_google_info(user: Optional[User]) -> GoogleAuthInfo:
+def _get_user_google_info(user: Optional[Any]) -> GoogleAuthInfo:
     if not user:
         return GoogleAuthInfo()
     prefs = user.preferences or {}
@@ -586,15 +624,6 @@ def user_login(
         message="Too many login attempts. Try again later.",
     )
 
-    # 1. Look up & authenticate user dynamically in Cloud Firestore `admin_authentication` (Live Firebase Data)
-    from app.services.firestore_auth_service import verify_firestore_admin_credentials, sync_firestore_admin_to_local_db
-    
-    firestore_admin = None
-    try:
-        firestore_admin = verify_firestore_admin_credentials(email_clean, req.password)
-    except Exception as e:
-        logger.warning(f"Error checking Firestore admin credentials for '{email_clean}': {e}")
-
     def _audit_login_failure(reason: str) -> None:
         try:
             record_audit_log(
@@ -610,55 +639,37 @@ def user_login(
         except Exception as ae:
             logger.warning("Audit log failed for failed login: %s", ae)
 
-    if firestore_admin:
-        # Authenticated successfully via live Firebase data!
-        user = sync_firestore_admin_to_local_db(db, firestore_admin, plain_password=req.password)
-    else:
-        # Fallback to local PostgreSQL database
-        user = db.query(User).filter(func.lower(User.email) == email_clean).first()
-        if not user:
-            _audit_login_failure("invalid_credentials")
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid email or password.",
-                headers={"WWW-Authenticate": "Bearer"}
-            )
+    # 1. Look up the account in the user store (Firestore admin_authentication by default)
+    user = _store_call(lambda: users_repo.get_by_email(db, email_clean))
+    if not user:
+        _audit_login_failure("invalid_credentials")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid email or password.",
+            headers={"WWW-Authenticate": "Bearer"}
+        )
 
-        # 2. Verify account is active and not blocked in database
-        user_status = (getattr(user, "status", None) or "active").lower()
-        if user_status == "blocked" or not getattr(user, "is_active", True):
-            db.query(UserSession).filter(
-                UserSession.user_id == user.id,
-                UserSession.revoked_at.is_(None)
-            ).update({"revoked_at": datetime.utcnow()}, synchronize_session=False)
-            db.commit()
-            _audit_login_failure("account_blocked")
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="User account is blocked. All active sessions have been terminated. Access denied."
-            )
-
-        # 3. Verify password against database password_hash
-        if not user.password_hash or not verify_password(req.password, user.password_hash):
-            _audit_login_failure("invalid_credentials")
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid email or password.",
-                headers={"WWW-Authenticate": "Bearer"}
-            )
-
-    # Universal check: verify account is not blocked regardless of auth source (Firestore or DB)
+    # 2. Blocked or deactivated accounts never log in (their sessions are revoked)
     user_status = (getattr(user, "status", None) or "active").lower()
     if user_status == "blocked" or not getattr(user, "is_active", True):
-        db.query(UserSession).filter(
-            UserSession.user_id == user.id,
-            UserSession.revoked_at.is_(None)
-        ).update({"revoked_at": datetime.utcnow()}, synchronize_session=False)
-        db.commit()
+        _store_call(lambda: users_repo.revoke_user_sessions(db, user.id))
         _audit_login_failure("account_blocked")
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="User account is blocked. All active sessions have been terminated. Access denied."
+        )
+
+    # 3. Verify the password. A plain-text password typed in the Firebase console is accepted once
+    #    and immediately replaced by a bcrypt hash.
+    password_ok = bool(user.password_hash) and verify_password(req.password, user.password_hash)
+    if not password_ok:
+        password_ok = bool(_store_call(lambda: users_repo.upgrade_legacy_password(db, user, req.password)))
+    if not password_ok:
+        _audit_login_failure("invalid_credentials")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid email or password.",
+            headers={"WWW-Authenticate": "Bearer"}
         )
 
     # 4. Enforce staff/admin role from live account
@@ -692,7 +703,7 @@ def user_login(
                 # Persist selected default website for this account if changed
                 if getattr(user, "domain", None) != canon_req:
                     user.domain = canon_req
-                    db.commit()
+                    _store_call(lambda: users_repo.save_user(db, user))
             else:
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
@@ -738,14 +749,7 @@ def user_login(
     session_lifetime = timedelta(hours=settings.SESSION_EXPIRE_HOURS)
     expires_at = datetime.utcnow() + session_lifetime
 
-    new_session = UserSession(
-        user_id=user.id,
-        token=session_token,
-        expires_at=expires_at,
-        created_at=datetime.utcnow()
-    )
-    db.add(new_session)
-    db.commit()
+    _store_call(lambda: users_repo.create_session(db, user.id, session_token, expires_at))
 
     try:
         record_audit_log(
@@ -798,18 +802,16 @@ def user_logout(
 
     logout_email = None
     if token_to_revoke:
-        session = db.query(UserSession).filter(
-            UserSession.token == token_to_revoke,
-            UserSession.revoked_at.is_(None)
-        ).first()
+        session = _store_call(lambda: users_repo.get_session_by_token(db, token_to_revoke))
+        if session is not None and session.revoked_at is not None:
+            session = None
         if session:
             try:
-                owner = db.query(User).filter(User.id == session.user_id).first()
+                owner = users_repo.get_by_id(db, session.user_id)
                 logout_email = getattr(owner, "email", None)
             except Exception:
                 logout_email = None
-            session.revoked_at = datetime.utcnow()
-            db.commit()
+            _store_call(lambda: users_repo.revoke_session(db, session))
             try:
                 record_audit_log(
                     db=db,
@@ -839,7 +841,7 @@ def get_current_user_profile(
     Returns the authenticated user's profile based on the active session token,
     including linked Google OAuth account details.
     """
-    user = db.query(User).filter(User.email.ilike(staff.email)).first()
+    user = _store_call(lambda: users_repo.get_by_email(db, staff.email))
     g_info = _get_user_google_info(user) if user else GoogleAuthInfo()
 
     resolved_role = staff.role or "worker"
@@ -885,34 +887,18 @@ def list_admin_users_with_google_status(
             detail="Access denied: Your account belongs to a different domain."
         )
 
-    query = db.query(User)
-
     # Role scope enforcement: regular admin cannot view super_admin accounts
+    roles_filter = None
     if staff.role != "super_admin":
-        query = query.filter(User.role.in_(["admin", "worker", "employee"]))
-
-    # Query filters
+        roles_filter = ["admin", "worker", "employee"]
     if role:
         role_clean = role.strip().lower()
-        if role_clean in ["worker", "employee"]:
-            query = query.filter(User.role.in_(["worker", "employee"]))
-        else:
-            query = query.filter(func.lower(User.role) == role_clean)
+        wanted = ["worker", "employee"] if role_clean in ["worker", "employee"] else [role_clean]
+        roles_filter = wanted if roles_filter is None else [r for r in wanted if r in roles_filter]
 
-    if search:
-        search_term = f"%{search.strip().lower()}%"
-        query = query.filter(
-            func.lower(User.email).like(search_term) |
-            func.lower(User.name).like(search_term)
-        )
-
-    if is_active is not None:
-        query = query.filter(User.is_active == is_active)
-
-    if status:
-        query = query.filter(func.lower(User.status) == status.strip().lower())
-
-    all_users = query.order_by(User.created_at.asc()).all()
+    all_users = _store_call(lambda: users_repo.list_users(
+        db, roles=roles_filter, search=search, is_active=is_active, status=status
+    ))
 
     # Filter by domain: Super Admins can inspect all domains; regular Admins are restricted to their allowed websites or active env
     if staff.role == "super_admin":
@@ -927,11 +913,7 @@ def list_admin_users_with_google_status(
     now = datetime.utcnow()
     results = []
     for u in users:
-        active_sess_count = db.query(UserSession).filter(
-            UserSession.user_id == u.id,
-            UserSession.revoked_at.is_(None),
-            UserSession.expires_at > now
-        ).count()
+        active_sess_count = _store_call(lambda: users_repo.count_active_sessions(db, u.id))
 
         resolved_u_role = u.role or "worker"
         resolved_u_domain = u.domain or CANONICAL_DOMAINS.get(active_env_key, get_current_env_domain())
@@ -1036,39 +1018,21 @@ def create_admin_user(
     else:
         assigned_websites = normalize_website_list([target_domain])
 
-    existing = db.query(User).filter(func.lower(User.email) == email_clean).first()
-    if existing:
-        raise HTTPException(status_code=400, detail=f"User with email '{email_clean}' already exists.")
-
-    new_user = User(
-        email=email_clean,
-        name=req.name.strip() if req.name else email_clean.split("@")[0],
-        role=target_role,
-        domain=target_domain,
-        allowed_websites=assigned_websites,
-        password_hash=hash_password(req.password.strip()),
-        is_active=req.is_active,
-        status=req.status or "active",
-        preferences={"allowed_websites": assigned_websites}
-    )
-    db.add(new_user)
-    db.commit()
-    db.refresh(new_user)
-
-    # Sync to Cloud Firestore admin_authentication
     try:
-        from app.services.firestore_auth_service import add_or_update_admin_in_firestore
-        add_or_update_admin_in_firestore(
+        new_user = _store_call(lambda: users_repo.create_user(
+            db,
             email=email_clean,
-            password=req.password.strip(),
+            name=req.name.strip() if req.name else email_clean.split("@")[0],
             role=target_role,
-            name=new_user.name or email_clean,
             domain=target_domain,
-            is_active=new_user.is_active,
-            allowed_websites=assigned_websites
-        )
-    except Exception as fe:
-        logger.warning(f"Error syncing created user '{email_clean}' to Firestore: {fe}")
+            allowed_websites=assigned_websites,
+            password_hash=hash_password(req.password.strip()),
+            is_active=req.is_active,
+            status=req.status or "active",
+            preferences={"allowed_websites": assigned_websites},
+        ))
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"User with email '{email_clean}' already exists.")
 
     # Audit log
     try:
@@ -1111,7 +1075,7 @@ def get_admin_user_details(
     Retrieves details and status for a specific user account.
     Enforces strict domain isolation (cannot access user of other website).
     """
-    user = db.query(User).filter(User.id == user_id).first()
+    user = _store_call(lambda: users_repo.get_by_id(db, user_id))
     if not user:
         raise HTTPException(status_code=404, detail="User not found.")
 
@@ -1133,12 +1097,7 @@ def get_admin_user_details(
     if staff.role != "super_admin" and user.role == "super_admin":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admins cannot view super admin accounts.")
 
-    now = datetime.utcnow()
-    active_sess_count = db.query(UserSession).filter(
-        UserSession.user_id == user.id,
-        UserSession.revoked_at.is_(None),
-        UserSession.expires_at > now
-    ).count()
+    active_sess_count = _store_call(lambda: users_repo.count_active_sessions(db, user.id))
 
     resolved_u_role = user.role or "worker"
     resolved_u_domain = user.domain or CANONICAL_DOMAINS.get(active_env_key, get_current_env_domain())
@@ -1176,7 +1135,7 @@ def update_admin_user(
       - Admin can only grant websites within their own allowed_websites.
     Syncs with PostgreSQL and Cloud Firestore.
     """
-    user = db.query(User).filter(User.id == user_id).first()
+    user = _store_call(lambda: users_repo.get_by_id(db, user_id))
     if not user:
         raise HTTPException(status_code=404, detail="User not found.")
 
@@ -1227,10 +1186,7 @@ def update_admin_user(
             raise HTTPException(status_code=400, detail="Password must be at least 4 characters long.")
         user.password_hash = hash_password(new_plain_password)
         # Revoke existing sessions so user logs in with new password
-        db.query(UserSession).filter(
-            UserSession.user_id == user.id,
-            UserSession.revoked_at.is_(None)
-        ).update({"revoked_at": datetime.utcnow()})
+        _store_call(lambda: users_repo.revoke_user_sessions(db, user.id))
     if req.role is not None:
         target_role = req.role.strip().lower()
         if target_role not in ["worker", "admin", "super_admin", "employee"]:
@@ -1264,38 +1220,16 @@ def update_admin_user(
         user.status = target_status
         if target_status == "blocked":
             user.is_active = False
-            db.query(UserSession).filter(
-                UserSession.user_id == user.id,
-                UserSession.revoked_at.is_(None)
-            ).update({"revoked_at": datetime.utcnow()}, synchronize_session=False)
+            _store_call(lambda: users_repo.revoke_user_sessions(db, user.id))
         elif target_status == "active":
             user.is_active = True
     if req.is_active is not None:
         user.is_active = req.is_active
         if not req.is_active:
-            db.query(UserSession).filter(
-                UserSession.user_id == user.id,
-                UserSession.revoked_at.is_(None)
-            ).update({"revoked_at": datetime.utcnow()}, synchronize_session=False)
+            _store_call(lambda: users_repo.revoke_user_sessions(db, user.id))
 
-    db.commit()
-    db.refresh(user)
+    _store_call(lambda: users_repo.save_user(db, user))
 
-    # Sync to Cloud Firestore
-    try:
-        from app.services.firestore_auth_service import update_admin_in_firestore
-        update_admin_in_firestore(
-            email=user.email,
-            name=user.name,
-            role=user.role,
-            domain=user.domain,
-            is_active=user.is_active,
-            password=new_plain_password,
-            allowed_websites=user.allowed_websites,
-            status=user.status
-        )
-    except Exception as fe:
-        logger.warning(f"Error syncing updated user '{user.email}' to Firestore: {fe}")
 
     # Audit log
     try:
@@ -1312,12 +1246,7 @@ def update_admin_user(
     except Exception as ae:
         logger.warning(f"Audit log failed for user update: {ae}")
 
-    now = datetime.utcnow()
-    active_sess_count = db.query(UserSession).filter(
-        UserSession.user_id == user.id,
-        UserSession.revoked_at.is_(None),
-        UserSession.expires_at > now
-    ).count()
+    active_sess_count = _store_call(lambda: users_repo.count_active_sessions(db, user.id))
 
     resolved_u_role = user.role or "worker"
     resolved_u_domain = user.domain or CANONICAL_DOMAINS.get(active_env_key, get_current_env_domain())
@@ -1352,7 +1281,7 @@ def delete_admin_user(
       - Cross-domain deletion is strictly blocked (403).
     Removes account from PostgreSQL and Cloud Firestore admin_authentication.
     """
-    user = db.query(User).filter(User.id == user_id).first()
+    user = _store_call(lambda: users_repo.get_by_id(db, user_id))
     if not user:
         raise HTTPException(status_code=404, detail="User not found.")
 
@@ -1391,17 +1320,9 @@ def delete_admin_user(
 
     deleted_email = user.email
 
-    # Cascade sessions
-    db.query(UserSession).filter(UserSession.user_id == user.id).delete()
-    db.delete(user)
-    db.commit()
+    # Cascade sessions and remove the account
+    _store_call(lambda: users_repo.delete_user(db, user))
 
-    # Delete from Firestore admin_authentication
-    try:
-        from app.services.firestore_auth_service import delete_admin_from_firestore
-        delete_admin_from_firestore(deleted_email)
-    except Exception as fe:
-        logger.warning(f"Error deleting user '{deleted_email}' from Firestore: {fe}")
 
     # Audit log
     try:
@@ -1437,7 +1358,7 @@ def block_admin_user(
       - Blocked users cannot log in (403 Forbidden) and cannot call any admin APIs (chat, CRUD, etc.).
     A Super Admin cannot block their own account.
     """
-    user = db.query(User).filter(User.id == user_id).first()
+    user = _store_call(lambda: users_repo.get_by_id(db, user_id))
     if not user:
         raise HTTPException(status_code=404, detail="User not found.")
 
@@ -1452,31 +1373,15 @@ def block_admin_user(
         user.status = "blocked"
         user.is_active = False
         # Revoke all active sessions immediately
-        now = datetime.utcnow()
-        revoked_count = db.query(UserSession).filter(
-            UserSession.user_id == user.id,
-            UserSession.revoked_at.is_(None)
-        ).update({"revoked_at": now}, synchronize_session=False)
-        db.commit()
-        db.refresh(user)
+        _store_call(lambda: users_repo.save_user(db, user))
+        revoked_count = _store_call(lambda: users_repo.revoke_user_sessions(db, user.id))
         logger.info(f"Blocked user {user.email} (id={user.id}). Revoked {revoked_count} active sessions.")
     else:
         user.status = "active"
         user.is_active = True
-        db.commit()
-        db.refresh(user)
+        _store_call(lambda: users_repo.save_user(db, user))
         logger.info(f"Unblocked user {user.email} (id={user.id}).")
 
-    # Sync to Cloud Firestore admin_authentication
-    try:
-        from app.services.firestore_auth_service import update_admin_in_firestore
-        update_admin_in_firestore(
-            email=user.email,
-            is_active=user.is_active,
-            status=user.status
-        )
-    except Exception as fe:
-        logger.warning(f"Error syncing block status for user '{user.email}' to Firestore: {fe}")
 
     # Record Audit Log
     try:
@@ -1506,11 +1411,7 @@ def block_admin_user(
         permissions=get_role_permissions(resolved_u_role),
         created_at=user.created_at,
         google_auth=_get_user_google_info(user),
-        active_sessions_count=0 if is_blocking else db.query(UserSession).filter(
-            UserSession.user_id == user.id,
-            UserSession.revoked_at.is_(None),
-            UserSession.expires_at > datetime.utcnow()
-        ).count(),
+        active_sessions_count=0 if is_blocking else _store_call(lambda: users_repo.count_active_sessions(db, user.id)),
         allowed_websites=resolve_user_allowed_websites(user, resolved_u_role)
     )
 
@@ -1529,6 +1430,21 @@ def register_user(
     - Provided 'admin_secret' matches settings.INTERNAL_API_SECRET or settings.ADMIN_PASSWORD, OR
     - No users currently exist in the database (initial onboarding).
     """
+    # Access rule: a super admin session, the configured admin secret, or first-run onboarding.
+    if bearer_creds and bearer_creds.credentials:
+        caller = get_current_user_from_db(db=db, bearer_creds=bearer_creds, staff_email_hdr=None, staff_token_hdr=None)
+        if caller.role != "super_admin":
+            raise HTTPException(status_code=403, detail="Only a super admin can register staff accounts.")
+    elif _admin_secret_matches(req.admin_secret):
+        pass
+    elif not _store_call(lambda: users_repo.any_user_exists(db)):
+        pass  # first-run onboarding: the very first account may be created without a session
+    else:
+        raise HTTPException(
+            status_code=403,
+            detail="Registration requires a super admin session or a valid admin secret.",
+        )
+
     email_clean = req.email.strip().lower()
     if not email_clean or "@" not in email_clean:
         raise HTTPException(status_code=400, detail="Invalid email address format.")
@@ -1538,11 +1454,11 @@ def register_user(
         raise HTTPException(status_code=400, detail="Password must be at least 4 characters long.")
 
     # Determine requested / target role
-    requested_role = (req.role or "").strip().lower().replace(" ", "_").replace("-", "_")
-    if requested_role in ["super_admin", "admin", "worker", "employee"]:
-        target_role = requested_role
-    else:
-        target_role = "super_admin"
+    # An unknown or missing role is rejected. It never falls back to super_admin.
+    requested_role = (req.role or "worker").strip().lower().replace(" ", "_").replace("-", "_")
+    if requested_role not in ["super_admin", "admin", "worker", "employee"]:
+        raise HTTPException(status_code=400, detail="Role must be one of: 'worker', 'admin', 'super_admin'.")
+    target_role = requested_role
 
     active_env_key = get_current_env_domain_key()
     if getattr(req, "domain", None) and req.domain.strip():
@@ -1560,23 +1476,10 @@ def register_user(
     else:
         assigned_websites = [normalize_website_domain(resolved_domain)]
 
-    existing = db.query(User).filter(func.lower(User.email) == email_clean).first()
-    if existing:
-        existing.password_hash = hash_password(plain_pass)
-        if req.name and req.name.strip():
-            existing.name = req.name.strip()
-        existing.role = target_role
-        existing.domain = resolved_domain
-        existing.is_active = True
-        existing.allowed_websites = assigned_websites
-        prefs = dict(existing.preferences or {})
-        prefs["allowed_websites"] = assigned_websites
-        existing.preferences = prefs
-        db.commit()
-        db.refresh(existing)
-        new_user = existing
-    else:
-        new_user = User(
+    # Registering never overwrites an existing account (that would be an account takeover).
+    try:
+        new_user = _store_call(lambda: users_repo.create_user(
+            db,
             email=email_clean,
             name=req.name.strip() if req.name else email_clean.split("@")[0],
             role=target_role,
@@ -1584,28 +1487,11 @@ def register_user(
             password_hash=hash_password(plain_pass),
             is_active=True,
             allowed_websites=assigned_websites,
-            preferences={"allowed_websites": assigned_websites}
-        )
-        db.add(new_user)
-        db.commit()
-        db.refresh(new_user)
+            preferences={"allowed_websites": assigned_websites},
+        ))
+    except ValueError:
+        raise HTTPException(status_code=409, detail=f"User with email '{email_clean}' already exists.")
 
-    # Sync to Cloud Firestore admin_authentication collection
-    try:
-        from app.services.firestore_auth_service import add_or_update_admin_in_firestore
-        add_or_update_admin_in_firestore(
-            email=email_clean,
-            password=req.password.strip(),
-            role=target_role,
-            name=new_user.name or email_clean,
-            domain=resolved_domain,
-            is_active=True,
-            allowed_websites=assigned_websites
-        )
-    except Exception as e:
-        logger.warning(f"Error syncing new admin '{email_clean}' to Firestore: {e}")
-
-    # Record audit log
     try:
         record_audit_log(
             db=db,
@@ -1681,7 +1567,7 @@ def forgot_password_endpoint(
     """
     from app.core.config import is_production_env
     from app.core.rate_limit import enforce_rate_limit
-    from app.services.firestore_auth_service import get_admin_from_firestore, generate_password_reset_token
+    from app.services.firestore_auth_service import generate_password_reset_token
 
     email_clean = req.email.strip().lower()
     if not email_clean or "@" not in email_clean:
@@ -1698,14 +1584,9 @@ def forgot_password_endpoint(
 
     account_exists = False
     try:
-        account_exists = bool(get_admin_from_firestore(email_clean))
+        account_exists = bool(users_repo.get_by_email(db, email_clean))
     except Exception as exc:
         logger.warning("Forgot-password lookup failed: %s", exc)
-    try:
-        db_user = db.query(User).filter(func.lower(User.email) == email_clean).first()
-        account_exists = account_exists or bool(db_user)
-    except Exception as exc:
-        logger.warning("Forgot-password database lookup failed: %s", exc)
 
     # Same cryptographic work either way so the response timing stays close.
     reset_token = generate_password_reset_token(email_clean, expires_in_seconds=1800)
@@ -1747,7 +1628,6 @@ def reset_password_endpoint(
     from app.core.rate_limit import enforce_rate_limit
     from app.services.firestore_auth_service import (
         invalidate_password_reset_tokens,
-        update_admin_password_in_firestore,
         verify_password_reset_token,
     )
 
@@ -1773,23 +1653,13 @@ def reset_password_endpoint(
         )
 
     # 1. Update in Cloud Firestore admin_authentication
-    fs_updated = update_admin_password_in_firestore(email_clean, new_pw)
-
-    # 2. Update in PostgreSQL
-    db_user = db.query(User).filter(func.lower(User.email) == email_clean).first()
-    new_hash = hash_password(new_pw)
-    if db_user:
-        db_user.password_hash = new_hash
-        # Revoke all active sessions
-        now = datetime.utcnow()
-        db.query(UserSession).filter(
-            UserSession.user_id == db_user.id,
-            UserSession.revoked_at.is_(None)
-        ).update({"revoked_at": now})
-        db.commit()
-    elif not fs_updated:
+    target = _store_call(lambda: users_repo.get_by_email(db, email_clean))
+    if not target:
         raise HTTPException(status_code=404, detail="User account not found.")
-
+    target.password_hash = hash_password(new_pw)
+    target.legacy_plain_password = None
+    _store_call(lambda: users_repo.save_user(db, target))
+    _store_call(lambda: users_repo.revoke_user_sessions(db, target.id))
     invalidate_password_reset_tokens(email_clean)
 
     try:
@@ -1823,7 +1693,6 @@ def change_password_endpoint(
     Requires current password verification.
     Updates password in Cloud Firestore `admin_authentication` and PostgreSQL.
     """
-    from app.services.firestore_auth_service import verify_firestore_admin_credentials, update_admin_password_in_firestore
 
     old_pw = req.old_password.strip()
     new_pw = req.new_password.strip()
@@ -1834,32 +1703,20 @@ def change_password_endpoint(
     if old_pw == new_pw:
         raise HTTPException(status_code=400, detail="New password cannot be the same as the current password.")
 
-    user = db.query(User).filter(User.email.ilike(staff.email)).first()
-    verified = False
-
-    try:
-        fs_admin = verify_firestore_admin_credentials(staff.email, old_pw)
-        if fs_admin:
-            verified = True
-    except Exception as e:
-        logger.warning(f"Error checking Firestore credentials: {e}")
-
-    if not verified and user and user.password_hash and verify_password(old_pw, user.password_hash):
-        verified = True
-
+    user = _store_call(lambda: users_repo.get_by_email(db, staff.email))
+    verified = bool(
+        user and user.password_hash and verify_password(old_pw, user.password_hash)
+    ) or bool(user and _store_call(lambda: users_repo.upgrade_legacy_password(db, user, old_pw)))
     if not verified:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Current password is incorrect."
         )
 
-    # 1. Update in Cloud Firestore admin_authentication
-    update_admin_password_in_firestore(staff.email, new_pw)
-
-    # 2. Update in PostgreSQL
-    if user:
-        user.password_hash = hash_password(new_pw)
-        db.commit()
+    user.password_hash = hash_password(new_pw)
+    user.legacy_plain_password = None
+    _store_call(lambda: users_repo.save_user(db, user))
+    _store_call(lambda: users_repo.revoke_user_sessions(db, user.id))
 
     from app.services.firestore_auth_service import invalidate_password_reset_tokens
     invalidate_password_reset_tokens(staff.email)

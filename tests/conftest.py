@@ -74,6 +74,7 @@ def _default_stores_postgres_when_no_fs(monkeypatch):
     monkeypatch.setattr("app.core.config.settings.STORE_PENDING_ACTIONS", "postgres")
     monkeypatch.setattr("app.core.config.settings.STORE_AUDIT", "postgres")
     monkeypatch.setattr("app.core.config.settings.STORE_LEADS_READ", "postgres")
+    monkeypatch.setattr("app.core.config.settings.STORE_USERS", "postgres")
     yield
 
 
