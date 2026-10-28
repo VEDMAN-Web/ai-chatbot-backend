@@ -114,3 +114,8 @@ junit_out.xml
 suite_junit.xml
 suite_out.txt
 test_full_out.txt
+
+# Keep shared test helpers tracked
+!tests/conftest.py
+!tests/__init__.py
+!tests/fake_firestore.py

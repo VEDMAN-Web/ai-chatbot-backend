@@ -610,7 +610,8 @@ def test_sql_only_update_skips_firestore_when_sync_disabled(world, monkeypatch):
     assert _sql_row(world["db"], "sql-nosync").status == "Reserved"
 
 
-def test_hard_delete_requires_typed_confirmation(world):
+def test_hard_delete_requires_typed_confirmation(world, monkeypatch):
+    monkeypatch.setattr(settings, "ALLOW_HARD_DELETE", True)
     world["client"].post("/api/v1/admin/properties", json=_minimal_body(property_id="hard-villa"))
     missing = world["client"].delete("/api/v1/admin/properties/hard-villa?hard_delete=true")
     assert missing.status_code == 400
@@ -630,6 +631,29 @@ def test_hard_delete_requires_typed_confirmation(world):
     assert gone.json()["firestore"] is True
     assert _sql_row(world["db"], "hard-villa") is None
     assert _fs_doc(world["admin_fs"], "hard-villa") is None
+
+
+def test_hard_delete_blocked_by_default_even_for_super_admin(world):
+    world["client"].post("/api/v1/admin/properties", json=_minimal_body(property_id="keep-villa"))
+    res = world["client"].delete(
+        "/api/v1/admin/properties/keep-villa?hard_delete=true&confirm_property_id=keep-villa"
+    )
+    assert res.status_code == 403, res.text
+    assert "ALLOW_HARD_DELETE" in res.json()["detail"]
+    assert _sql_row(world["db"], "keep-villa") is not None
+    assert _fs_doc(world["admin_fs"], "keep-villa") is not None
+
+
+def test_hard_delete_blocked_for_plain_admin_even_with_flag(world, monkeypatch):
+    monkeypatch.setattr(settings, "ALLOW_HARD_DELETE", True)
+    world["client"].post("/api/v1/admin/properties", json=_minimal_body(property_id="admin-villa"))
+    world["holder"]["staff"] = _staff(role="admin")
+    res = world["client"].delete(
+        "/api/v1/admin/properties/admin-villa?hard_delete=true&confirm_property_id=admin-villa"
+    )
+    assert res.status_code == 403, res.text
+    assert "super admin" in res.json()["detail"].lower()
+    assert _fs_doc(world["admin_fs"], "admin-villa") is not None
 
 
 def test_wrong_website_and_worker_are_forbidden(world):

@@ -66,17 +66,15 @@ class GoogleWorkspaceManager:
     ) -> Optional[Any]:
         """
         Multi-tenant credential resolver.
-        Retrieves user-specific OAuth2 credentials from PostgreSQL (User.preferences["google_workspace"]).
+        Retrieves user-specific OAuth2 credentials from the user store (preferences["google_workspace"]).
         If the access token is expired, refreshes it automatically and persists the new token in the database.
         Falls back to global credentials if no user credentials are present.
         """
-        if db and staff_user_id_or_email:
+        if staff_user_id_or_email:
             try:
-                from app.db.models import User
+                from app.repositories import users_repo
                 clean_target = staff_user_id_or_email.strip()
-                user = db.query(User).filter(
-                    (User.email.ilike(clean_target))
-                ).first()
+                user = users_repo.get_by_email(db, clean_target)
 
                 if user and user.preferences:
                     gw = user.preferences.get("google_workspace")
@@ -102,7 +100,7 @@ class GoogleWorkspaceManager:
                                 if creds.expiry:
                                     prefs["google_workspace"]["expires_at"] = int(creds.expiry.timestamp())
                                 user.preferences = prefs
-                                db.commit()
+                                users_repo.save_user(db, user)
                                 logger.info(f"Refreshed Google OAuth token for user '{user.email}'")
                             except Exception as refr_err:
                                 logger.warning(f"Could not refresh token for user '{user.email}': {refr_err}")

@@ -169,6 +169,27 @@ class Settings(BaseSettings):
     # Public chatbot datastore modes: firestore | postgres | both (Firestore first, SQL if index empty)
     STORE_PROPERTIES_READ_USER: str = "firestore"
     STORE_LEADS_USER: str = "firestore"
+    # Stage F3: staff users + login sessions (admin_authentication / admin_sessions).
+    STORE_USERS: str = "firestore"
+    # Local development only: accept "dev-token-<email>" and the bare X-Staff-Email header. Never in production.
+    ALLOW_INSECURE_DEV_AUTH: bool = False
+    ALLOW_HARD_DELETE: bool = False
+
+    # Auth hardening (shared with the admin service)
+    ENV: str = ""
+    EXPOSE_RESET_TOKEN_IN_RESPONSE: bool = False
+    RATE_LIMIT_LOGIN_ATTEMPTS: int = 10
+    RATE_LIMIT_LOGIN_WINDOW_SEC: int = 900
+    RATE_LIMIT_RESET_ATTEMPTS: int = 5
+    RATE_LIMIT_RESET_WINDOW_SEC: int = 3600
+    RATE_LIMIT_PUBLIC_CHAT: int = 60
+    RATE_LIMIT_PUBLIC_CHAT_WINDOW_SEC: int = 60
+    RATE_LIMIT_ADMIN_CHAT: int = 30
+    RATE_LIMIT_ADMIN_CHAT_WINDOW_SEC: int = 60
+    RATE_LIMIT_ADMIN_WRITE: int = 30
+    RATE_LIMIT_ADMIN_WRITE_WINDOW_SEC: int = 60
+    RATE_LIMIT_IMPORT_AND_SUPERADMIN: int = 20
+    RATE_LIMIT_IMPORT_WINDOW_SEC: int = 60
     # Absolute base for relative listing image URLs on property cards
     PUBLIC_API_BASE_URL: str = ""
 
@@ -326,6 +347,18 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+def runtime_env() -> str:
+    """ENV when set, otherwise ENVIRONMENT. Lowercased."""
+    explicit = (getattr(settings, "ENV", None) or "").strip().lower()
+    if explicit:
+        return explicit
+    return (getattr(settings, "ENVIRONMENT", None) or "development").strip().lower()
+
+
+def is_production_env() -> bool:
+    return runtime_env() in ("production", "prod")
 
 
 def is_test_environment() -> bool:

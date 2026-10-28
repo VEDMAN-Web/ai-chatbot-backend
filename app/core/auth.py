@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
-from app.db.models import User, UserSession
+from app.repositories import users_repo
 from app.core.config import settings
 from app.core.tenant import (
     get_user_domain_key,
@@ -89,7 +89,7 @@ class AuthenticatedStaff(BaseModel):
         from_attributes = True
 
 
-def resolve_user_allowed_websites(user: Optional[User], role: Optional[str]) -> List[str]:
+def resolve_user_allowed_websites(user: Optional[object], role: Optional[str]) -> List[str]:
     """
     Resolves the list of canonical website domains a user is authorized to access.
     Super Admins have universal access to all 3 sites by default.
@@ -122,6 +122,37 @@ def resolve_user_allowed_websites(user: Optional[User], role: Optional[str]) -> 
     return [get_current_env_domain()]
 
 
+def _insecure_dev_auth_allowed() -> bool:
+    """
+    "dev-token-<email>" bearer tokens and the bare X-Staff-Email header skip the password check.
+    They exist only for local development and are never accepted in production.
+    """
+    if str(getattr(settings, "ENV", "") or getattr(settings, "ENVIRONMENT", "")).strip().lower() in {"production", "prod"}:
+        return False
+    return bool(getattr(settings, "ALLOW_INSECURE_DEV_AUTH", False))
+
+
+def _guard_store(fn):
+    """Run a user-store call. A missing store is a 503, never a silent success."""
+    try:
+        return fn()
+    except HTTPException:
+        raise
+    except RuntimeError as e:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Authentication store is temporarily unavailable. Please try again shortly.",
+        ) from e
+
+
+def _load_session(db, token: str):
+    return _guard_store(lambda: users_repo.get_session_by_token(db, token))
+
+
+def _load_user_by_id(db, user_id):
+    return _guard_store(lambda: users_repo.get_by_id(db, user_id))
+
+
 def get_current_user_from_db(
     db: Session = Depends(get_db),
     bearer_creds: Optional[HTTPAuthorizationCredentials] = Security(security_bearer),
@@ -130,7 +161,7 @@ def get_current_user_from_db(
 ) -> AuthenticatedStaff:
     """
     Backend-verified authentication dependency.
-    Identity and role are ALWAYS resolved from PostgreSQL database (UserSession or users table).
+    Identity and role are ALWAYS resolved from the user store (users_repo), never from client input.
     Never trusts client-supplied role or staff_id fields.
     """
     resolved_email: Optional[str] = None
@@ -138,16 +169,15 @@ def get_current_user_from_db(
     if bearer_creds and bearer_creds.credentials:
         token = bearer_creds.credentials.strip()
 
-        # 1. Check if token exists in UserSession table
-        existing_session = db.query(UserSession).filter(UserSession.token == token).first()
+        # 1. Check if token exists in the session store (users_repo: Firestore by default)
+        existing_session = _load_session(db, token)
         if existing_session:
-            user = db.query(User).filter(User.id == existing_session.user_id).first()
+            user = _load_user_by_id(db, existing_session.user_id)
             user_status = getattr(user, "status", None) or ("blocked" if not getattr(user, "is_active", True) else "active")
             if not user or not getattr(user, "is_active", True) or user_status == "blocked":
-                # Instantly terminate session in database
+                # Instantly terminate session
                 if existing_session.revoked_at is None:
-                    existing_session.revoked_at = datetime.utcnow()
-                    db.commit()
+                    users_repo.revoke_session(db, existing_session)
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail="User account is blocked. All active sessions have been terminated. Access denied."
@@ -184,10 +214,16 @@ def get_current_user_from_db(
 
         # 2. Support standard dev tokens and service secrets
         if token.startswith("dev-token-"):
+            if not _insecure_dev_auth_allowed():
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Invalid or unrecognized authentication token.",
+                    headers={"WWW-Authenticate": "Bearer"}
+                )
             resolved_email = token.replace("dev-token-", "").strip().lower()
         elif settings.INTERNAL_API_SECRET and token == settings.INTERNAL_API_SECRET:
-            # Service token authenticated: select an active super admin dynamically from DB
-            admin_user = db.query(User).filter(User.role == "super_admin", User.is_active == True).first()
+            # Service token authenticated: select an active super admin dynamically from the user store
+            admin_user = _guard_store(lambda: users_repo.first_active_super_admin(db))
             if not admin_user:
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
@@ -202,7 +238,7 @@ def get_current_user_from_db(
                 headers={"WWW-Authenticate": "Bearer"}
             )
 
-    elif staff_email_hdr:
+    elif staff_email_hdr and _insecure_dev_auth_allowed():
         resolved_email = staff_email_hdr.strip().lower()
     else:
         raise HTTPException(
@@ -211,16 +247,8 @@ def get_current_user_from_db(
             headers={"WWW-Authenticate": "Bearer"}
         )
 
-    # Verify user and role dynamically from PostgreSQL database or Cloud Firestore
-    user = db.query(User).filter(func.lower(User.email) == resolved_email).first()
-    if not user:
-        try:
-            from app.services.firestore_auth_service import get_admin_from_firestore, sync_firestore_admin_to_local_db
-            fs_admin = get_admin_from_firestore(resolved_email)
-            if fs_admin:
-                user = sync_firestore_admin_to_local_db(db, fs_admin)
-        except Exception:
-            pass
+    # Verify user and role dynamically from the user store (Firestore admin_authentication by default)
+    user = _guard_store(lambda: users_repo.get_by_email(db, resolved_email))
 
     if not user:
         raise HTTPException(
