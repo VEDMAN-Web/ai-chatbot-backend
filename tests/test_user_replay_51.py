@@ -94,6 +94,8 @@ def _post(client, session_id, message):
 @pytest.fixture
 def replay_client(monkeypatch):
     _seed()
+    # Explicit SQL store: this replay suite seeds SQLite listings (not Firestore).
+    monkeypatch.setattr("app.core.config.settings.STORE_PROPERTIES_READ_USER", "sql")
     monkeypatch.setattr("app.services.firestore_service.get_firestore_client", lambda *a, **k: None)
     monkeypatch.setattr("app.services.public_agent.get_firestore_client", lambda *a, **k: None, raising=False)
     monkeypatch.setattr(public_agent, "client", None)

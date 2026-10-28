@@ -977,8 +977,8 @@ def load_brochure_data(
     language: str = "en",
 ) -> BrochureData:
     """
-    Load BrochureData from the public property index (Firestore), with optional SQL
-    when STORE_PROPERTIES_READ_USER is postgres/both.
+    Load BrochureData from Firestore (property index / projects docs).
+    SQL only when STORE_PROPERTIES_READ_USER is sql|both.
     Raises ValueError if the property exists in neither store.
     Never invents missing values.
     """
@@ -987,23 +987,35 @@ def load_brochure_data(
         raise ValueError("Property with ID '' not found.")
 
     lang = _normalize_lang(language)
-    from app.services.property_index import get_property_index, public_store_mode, sanitize_public_card
+    from app.services.property_index import (
+        IndexUnavailable,
+        get_property_index,
+        public_store_mode,
+    )
     mode = public_store_mode()
 
     if mode in ("firestore", "both"):
+        fs_card = None
         try:
-            fs_card = get_property_index().get_by_id(pid, site=site_origin)
-            if not fs_card:
+            fs_card = get_property_index().get_by_id(pid, site=site_origin, include_raw=True)
+        except IndexUnavailable as e:
+            logger.error("Property index unavailable for brochure '%s': %s", pid, e)
+        except Exception as e:
+            logger.warning("Property index brochure lookup failed for '%s': %s", pid, e)
+        if not fs_card:
+            try:
                 from app.services.firestore_service import get_property_by_id_from_firestore
                 fs_card = get_property_by_id_from_firestore(pid)
-                if fs_card:
-                    fs_card = sanitize_public_card(fs_card)
-            if fs_card and isinstance(fs_card, dict):
-                return _from_firestore_card(fs_card, lang, site_origin)
-        except Exception as e:
-            logger.warning(f"Index/Firestore brochure data lookup failed for '{pid}': {e}")
+            except Exception as e:
+                logger.warning("Firestore brochure data lookup failed for '%s': %s", pid, e)
+                fs_card = None
+        if fs_card and isinstance(fs_card, dict):
+            # Keep raw_firestore_data for honest brochure fields; do not sanitize it away.
+            return _from_firestore_card(fs_card, lang, site_origin)
+        if mode == "firestore":
+            raise ValueError(f"Property with ID '{property_id}' not found.")
 
-    if mode in ("postgres", "both"):
+    if mode in ("sql", "both"):
         prop = _load_postgres_property(db, pid)
         if prop is not None:
             return _from_postgres(prop, lang, site_origin)

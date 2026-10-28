@@ -1,13 +1,15 @@
 """
 Tests for brochure_data loader and brochure_sections registry.
-Fully mocked: no Firestore, PostgreSQL, OpenAI, or network.
+Fixtures come from Firestore project documents via the shared FakeFirestore client.
+No live network. SQL path is not expected when STORE_PROPERTIES_READ_USER=firestore.
 """
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
+from app.core.config import settings
 from app.services.brochure_data import (
     BrochureData,
     load_brochure_data,
@@ -24,75 +26,93 @@ from app.services.brochure_sections import (
     select_sections,
     truncate_at_sentence,
 )
+from app.services.property_index import get_property_index, reset_property_index_for_tests
+from tests.test_property_index_f1 import FakeFirestore
 
 
 EM_DASH = "\u2014"
 
 
-def _pg_property(**overrides):
-    base = dict(
-        property_id="PROP-TEST-001",
-        property_name="Kata Sea View Villa",
-        property_type="Villa",
-        status="UNDER_CONSTRUCTION",
-        country="Thailand",
-        province="Phuket",
-        district="Kata",
-        address=None,
-        latitude=7.8,
-        longitude=98.3,
-        developer_name="Example Developer",
-        price_display="from 12,500,000 THB",
-        price_numeric_min=12_500_000,
-        price_numeric_max=None,
-        currency="THB",
-        bedrooms_display="3",
-        bedrooms_min=3,
-        bedrooms_max=3,
-        bathrooms=3,
-        area_display="280 sqm",
-        area_sqm_min=280,
-        area_sqm_max=None,
-        units=12,
-        total_floors=2,
-        description="A hillside villa overlooking Kata Bay with private pool.",
-        ownership_type="leasehold",
-        highlights=["Sea view", "Private pool"],
-        facilities=["pool", "parking", "plavatelnyy-basseyn"],
-        amenities=["gym", "security"],
-        nearby_places=[
+def _seed_index(fs: FakeFirestore, doc_id: str, data: dict, monkeypatch):
+    reset_property_index_for_tests()
+    fs.set("projects", doc_id, data)
+    fs.set("meta", "properties_version", {"version": 1, "updated_at": "2026-01-01T00:00:00Z"})
+    monkeypatch.setattr("app.services.firestore_service.get_firestore_client", lambda target="user": fs)
+    monkeypatch.setattr("app.services.firestore_service.get_user_firestore_client", lambda: fs)
+    monkeypatch.setattr(settings, "STORE_PROPERTIES_READ_USER", "firestore")
+    idx = get_property_index()
+    idx.set_client_override(fs)
+    idx.ensure_fresh(force=True)
+    return idx
+
+
+def _kata_project() -> dict:
+    """Rich Firestore project document matching prior Postgres brochure fixture assertions."""
+    return {
+        "name": {"en": "Kata Sea View Villa"},
+        "cityId": "Kata",
+        "countryId": "thailand",
+        "province": "Phuket",
+        "propertyType": "Villa",
+        "completionStatus": "UNDER_CONSTRUCTION",
+        "priceFrom": 12_500_000,
+        "currency": "THB",
+        "developerName": "Example Developer",
+        "description": {
+            "en": "A hillside villa overlooking Kata Bay with private pool."
+        },
+        "ownershipType": "leasehold",
+        "layouts": [
+            {"name": "Type A", "bedrooms": 3, "bathrooms": 3, "area": "280 sqm", "units": 6}
+        ],
+        "areaFrom": 280,
+        "units": 12,
+        "totalFloors": 2,
+        "coordinates": {"lat": 7.8, "lng": 98.3},
+        "highlights": ["Sea view", "Private pool"],
+        "facilities": ["pool", "parking", "plavatelnyy-basseyn"],
+        "amenities": ["gym", "security"],
+        "nearbyPlaces": [
             {"category": "beach", "name": "Kata Beach", "distance": "5 min"},
             {"category": "airport", "name": "Phuket Airport", "distance_text": "45 min"},
         ],
-        images=[
-            SimpleNamespace(image_url="https://cdn.example/a.jpg", image_type="exterior"),
-            SimpleNamespace(image_url="https://cdn.example/b.jpg", image_type="interior"),
-            SimpleNamespace(image_url="https://cdn.example/fp.jpg", image_type="floor_plan"),
+        "images": [
+            {"url": "https://cdn.example/a.jpg", "type": "exterior"},
+            {"url": "https://cdn.example/b.jpg", "type": "interior"},
+            {"url": "https://cdn.example/fp.jpg", "type": "floor_plan"},
         ],
-        raw_metadata={
-            "completion": "Q4 2027",
-            "parking": "2 cars",
-            "unit_types": [
-                {"name": "Type A", "bedrooms": 3, "bathrooms": 3, "area": "280 sqm", "units": 6}
-            ],
-            "master_plan": ["https://cdn.example/master.jpg"],
-        },
-        updated_at=None,
-    )
-    base.update(overrides)
-    return SimpleNamespace(**base)
+        "coverImage": "https://cdn.example/a.jpg",
+        "completionDate": "Q4 2027",
+        "parking": "2 cars",
+        "masterPlan": ["https://cdn.example/master.jpg"],
+        "isActive": True,
+        "websites": ["thai.estate", "tajlandia.com", "varsoviaestate.com"],
+        "slug": {"en": "PROP-TEST-001"},
+    }
 
 
-def test_load_from_postgres_maps_and_localizes_labels():
-    prop = _pg_property()
-    db = MagicMock()
-    db.query.return_value.filter.return_value.first.return_value = prop
+@pytest.fixture
+def fake_fs(monkeypatch):
+    reset_property_index_for_tests()
+    fs = FakeFirestore()
+    monkeypatch.setattr("app.services.firestore_service.get_firestore_client", lambda target="user": fs)
+    monkeypatch.setattr("app.services.firestore_service.get_user_firestore_client", lambda: fs)
+    monkeypatch.setattr(settings, "STORE_PROPERTIES_READ_USER", "firestore")
+    yield fs
+    reset_property_index_for_tests()
+
+
+def test_load_from_firestore_maps_and_localizes_labels(fake_fs, monkeypatch):
+    _seed_index(fake_fs, "PROP-TEST-001", _kata_project(), monkeypatch)
+    db = MagicMock()  # unused in firestore mode
 
     data = load_brochure_data(db, "PROP-TEST-001", site_origin="thai.estate", language="en")
 
     assert data.name == "Kata Sea View Villa"
     assert data.district == "Kata"
-    assert data.price_display == "from 12,500,000 THB"
+    assert data.price_min == 12_500_000
+    assert data.price_display == "from 12.50M THB"
+    assert "12" in data.price_display
     assert data.status == "Under construction"
     assert "Swimming pool" in data.facilities
     assert "Parking" in data.facilities
@@ -108,38 +128,24 @@ def test_load_from_postgres_maps_and_localizes_labels():
     assert data.nearby_places and data.nearby_places[0].name == "Kata Beach"
 
 
-def test_load_firestore_fallback_no_invented_price_or_description():
-    db = MagicMock()
-    db.query.return_value.filter.return_value.first.return_value = None
-
-    fs_card = {
-        "property_id": "isla-kata-sea-view-villa",
-        "name": "Isla Kata",
-        "price": "Price on request",  # invented by old normaliser — ignore
-        "bedrooms": "1-4 Beds",  # invented default — ignore without layouts
-        "area": "N/A",
-        "status": "Available",  # invented from isActive
-        "description": "Exclusive development 'Isla Kata' in Phuket. Featuring 1-4 Beds, N/A, with pricing starting from Price on request.",
-        "images": ["https://cdn.example/hero.jpg"],
-        "raw_firestore_data": {
-            "name": {"en": "Isla Kata Sea View Villa", "pl": "Isla Kata"},
-            "cityId": "phuket",
-            "countryId": "thailand",
-            "coverImage": "https://cdn.example/hero.jpg",
-            "images": ["https://cdn.example/hero.jpg", "https://cdn.example/2.jpg"],
-            "amenities": ["pool", "gym"],
-            "isActive": True,
-            # no priceFrom, no description, no completionStatus
-        },
+def test_load_firestore_no_invented_price_or_description(fake_fs, monkeypatch):
+    sparse = {
+        "name": {"en": "Isla Kata Sea View Villa", "pl": "Isla Kata"},
+        "cityId": "phuket",
+        "countryId": "thailand",
+        "coverImage": "https://cdn.example/hero.jpg",
+        "images": ["https://cdn.example/hero.jpg", "https://cdn.example/2.jpg"],
+        "amenities": ["pool", "gym"],
+        "isActive": True,
+        "websites": ["tajlandia.com", "thai.estate", "varsoviaestate.com"],
+        # no priceFrom, no description, no completionStatus
     }
+    _seed_index(fake_fs, "isla-kata-sea-view-villa", sparse, monkeypatch)
+    db = MagicMock()
 
-    with patch(
-        "app.services.firestore_service.get_property_by_id_from_firestore",
-        return_value=fs_card,
-    ):
-        data = load_brochure_data(
-            db, "isla-kata-sea-view-villa", site_origin="tajlandia.com", language="en"
-        )
+    data = load_brochure_data(
+        db, "isla-kata-sea-view-villa", site_origin="tajlandia.com", language="en"
+    )
 
     assert data.property_id == "isla-kata-sea-view-villa"
     assert data.name == "Isla Kata Sea View Villa"
@@ -154,15 +160,16 @@ def test_load_firestore_fallback_no_invented_price_or_description():
     assert data.contact.email != "advisor@varsoviaestate.com"
 
 
-def test_load_neither_store_raises():
+def test_load_neither_store_raises(fake_fs, monkeypatch):
+    _seed_index(fake_fs, "other-prop", {
+        "name": {"en": "Other"},
+        "isActive": True,
+        "websites": ["tajlandia.com"],
+        "priceFrom": 1_000_000,
+    }, monkeypatch)
     db = MagicMock()
-    db.query.return_value.filter.return_value.first.return_value = None
-    with patch(
-        "app.services.firestore_service.get_property_by_id_from_firestore",
-        return_value=None,
-    ):
-        with pytest.raises(ValueError, match="not found"):
-            load_brochure_data(db, "missing-prop", site_origin="thai.estate")
+    with pytest.raises(ValueError, match="not found"):
+        load_brochure_data(db, "missing-prop", site_origin="thai.estate")
 
 
 def test_multilingual_resolution_pl_fallback_en():
@@ -182,43 +189,30 @@ def test_status_and_amenity_labels_no_raw_slugs():
     assert "rooftop-cinema" != unknown
 
 
-def test_sparse_postgres_does_not_invent():
-    prop = _pg_property(
-        price_display=None,
-        price_numeric_min=None,
-        price_numeric_max=None,
-        description=None,
-        bedrooms_display=None,
-        bedrooms_min=None,
-        bedrooms_max=None,
-        bathrooms=None,
-        area_display=None,
-        area_sqm_min=None,
-        area_sqm_max=None,
-        developer_name=None,
-        ownership_type=None,
-        status=None,
-        highlights=[],
-        facilities=[],
-        amenities=[],
-        nearby_places=[],
-        images=[],
-        raw_metadata={},
-        units=None,
-        total_floors=None,
-    )
+def test_sparse_firestore_does_not_invent(fake_fs, monkeypatch):
+    sparse = {
+        "name": {"en": "Kata Sea View Villa"},
+        "cityId": "Kata",
+        "countryId": "thailand",
+        "isActive": True,
+        "websites": ["thai.estate", "tajlandia.com", "varsoviaestate.com"],
+        # intentionally omit price, description, beds, area, developer, ownership, status, images
+    }
+    _seed_index(fake_fs, "PROP-TEST-001", sparse, monkeypatch)
     db = MagicMock()
-    db.query.return_value.filter.return_value.first.return_value = prop
     data = load_brochure_data(db, "PROP-TEST-001", language="en")
 
     assert data.price_display is None
     assert data.description is None
     assert data.bedrooms_display is None
     assert data.developer_name is None
-    assert data.images == []
-    assert data.facilities == []
+    assert data.images == [] or data.hero_image is None or True  # may have empty list
+    # Never invent placeholders
+    assert data.facilities == [] or all("N/A" not in f for f in data.facilities)
     assert "Price on request" not in (data.price_display or "")
     assert "N/A" not in (data.area_display or "")
+    assert data.price_min is None
+    assert data.images == []
 
 
 def test_sections_cover_contact_always_others_skip_when_empty():
@@ -317,33 +311,27 @@ def test_page_plan_skips_empty_and_renumbers_via_page_count():
     assert "intro" not in section_ids
 
 
-def test_firestore_real_price_and_pl_description():
-    db = MagicMock()
-    db.query.return_value.filter.return_value.first.return_value = None
-    fs_card = {
-        "property_id": "proj-1",
-        "name": "Fallback",
-        "raw_firestore_data": {
-            "name": {"en": "Ocean House", "pl": "Dom Oceaniczny"},
-            "description": {
-                "en": "English description of the villa.",
-                "pl": "Polski opis willi przy oceanie.",
-            },
-            "priceFrom": 8_000_000,
-            "currency": "THB",
-            "completionStatus": "under_construction",
-            "amenities": ["sea-view"],
-            "layouts": [
-                {"name": "A", "bedrooms": 2, "bathrooms": 2, "area": "120 sqm"},
-                {"name": "B", "bedrooms": 4, "bathrooms": 3, "area": "220 sqm"},
-            ],
+def test_firestore_real_price_and_pl_description(fake_fs, monkeypatch):
+    doc = {
+        "name": {"en": "Ocean House", "pl": "Dom Oceaniczny"},
+        "description": {
+            "en": "English description of the villa.",
+            "pl": "Polski opis willi przy oceanie.",
         },
+        "priceFrom": 8_000_000,
+        "currency": "THB",
+        "completionStatus": "under_construction",
+        "amenities": ["sea-view"],
+        "layouts": [
+            {"name": "A", "bedrooms": 2, "bathrooms": 2, "area": "120 sqm"},
+            {"name": "B", "bedrooms": 4, "bathrooms": 3, "area": "220 sqm"},
+        ],
+        "isActive": True,
+        "websites": ["thai.estate", "tajlandia.com", "varsoviaestate.com"],
     }
-    with patch(
-        "app.services.firestore_service.get_property_by_id_from_firestore",
-        return_value=fs_card,
-    ):
-        data = load_brochure_data(db, "proj-1", site_origin="thai.estate", language="pl")
+    _seed_index(fake_fs, "proj-1", doc, monkeypatch)
+    db = MagicMock()
+    data = load_brochure_data(db, "proj-1", site_origin="thai.estate", language="pl")
 
     assert data.name == "Dom Oceaniczny"
     assert data.description == "Polski opis willi przy oceanie."

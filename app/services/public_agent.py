@@ -1027,74 +1027,96 @@ def _sql_card_fallback(row: Property) -> Dict[str, Any]:
 
 def lookup_property_by_slug_or_name(token: str) -> Optional[Dict[str, Any]]:
     """
-    Resolve slug / exact name via Firestore id+slug fields and the name index.
+    Resolve slug / exact name via the in-memory property index (Firestore).
+    SQL only when STORE_PROPERTIES_READ_USER is sql|both — never silent firestore→SQL.
     Never invents a hit. Returns a normalized property card dict or None.
     """
     raw = (token or "").strip()
     if not raw or len(raw) < 2:
         return None
-    try:
-        from app.services.firestore_service import get_property_by_id_from_firestore
-        fs = get_property_by_id_from_firestore(raw)
-        if fs:
-            return fs
-    except Exception as e:
-        logger.warning(f"Firestore slug/name lookup failed for '{raw}': {e}")
+    from app.services.property_index import (
+        IndexUnavailable,
+        get_property_index,
+        public_store_mode,
+        sanitize_public_card,
+    )
+    mode = public_store_mode()
 
-    try:
-        from app.services.property_name_index import (
-            ensure_name_index_from_firestore,
-            match_property_name,
-        )
-        from app.services.firestore_service import get_property_by_id_from_firestore
-
-        ensure_name_index_from_firestore()
-        for q in (raw, raw.replace("-", " "), raw.replace("_", " ")):
-            mr = match_property_name(q)
-            if mr.confident and mr.confident.doc_id:
-                fs = get_property_by_id_from_firestore(mr.confident.doc_id)
-                if fs:
-                    return fs
-                try:
-                    from app.db.session import UserSessionLocal
-                    from app.services.property_search import get_property_by_id
-                    _db = UserSessionLocal()
-                    try:
-                        row = get_property_by_id(_db, mr.confident.doc_id)
-                        if row is not None:
-                            try:
-                                return format_property_card(row)
-                            except Exception:
-                                return _sql_card_fallback(row)
-                    finally:
-                        _db.close()
-                except Exception:
-                    pass
-    except Exception as e:
-        logger.warning(f"Name-index slug lookup failed for '{raw}': {e}")
-    try:
-        from app.db.session import UserSessionLocal
-        from app.db.models import Property
-        _db = UserSessionLocal()
+    if mode in ("firestore", "both"):
+        idx = None
         try:
-            from sqlalchemy import or_
-            row = (
-                _db.query(Property)
-                .filter(or_(
-                    Property.property_id == raw,
-                    Property.property_name.ilike(f"%{raw}%"),
-                ))
-                .first()
+            idx = get_property_index()
+            card = idx.get_by_id(raw)
+            if card:
+                return sanitize_public_card(card)
+            for q in (raw, raw.replace("-", " "), raw.replace("_", " ")):
+                hits = idx.find_name_candidates(q, limit=1)
+                if hits:
+                    for rec in idx.all_records():
+                        if str(rec.get("name") or "").strip().lower() == hits[0].lower():
+                            return sanitize_public_card(rec)
+        except IndexUnavailable as e:
+            logger.error("Property index unavailable for slug lookup '%s': %s", raw, e)
+            # Still try a direct Firestore document read (not SQL). Return None if missing.
+            idx = None
+        except Exception as e:
+            logger.warning("Property index slug lookup failed for '%s': %s", raw, e)
+
+        try:
+            from app.services.firestore_service import get_property_by_id_from_firestore
+            fs = get_property_by_id_from_firestore(raw)
+            if fs:
+                return sanitize_public_card(fs)
+        except Exception as e:
+            logger.warning("Firestore slug/name lookup failed for '%s': %s", raw, e)
+
+        try:
+            from app.services.property_name_index import (
+                ensure_name_index_from_firestore,
+                match_property_name,
             )
-            if row is not None:
-                try:
-                    return format_property_card(row)
-                except Exception:
-                    return _sql_card_fallback(row)
-        finally:
-            _db.close()
-    except Exception:
-        pass
+            ensure_name_index_from_firestore()
+            for q in (raw, raw.replace("-", " "), raw.replace("_", " ")):
+                mr = match_property_name(q)
+                if mr.confident and mr.confident.doc_id:
+                    if idx is not None:
+                        try:
+                            card = idx.get_by_id(mr.confident.doc_id)
+                            if card:
+                                return sanitize_public_card(card)
+                        except IndexUnavailable:
+                            pass
+                    from app.services.firestore_service import get_property_by_id_from_firestore
+                    fs = get_property_by_id_from_firestore(mr.confident.doc_id)
+                    if fs:
+                        return sanitize_public_card(fs)
+        except Exception as e:
+            logger.warning("Name-index slug lookup failed for '%s': %s", raw, e)
+
+    if mode in ("sql", "both"):
+        try:
+            from app.db.session import UserSessionLocal
+            from app.db.models import Property
+            from sqlalchemy import or_
+            _db = UserSessionLocal()
+            try:
+                row = (
+                    _db.query(Property)
+                    .filter(or_(
+                        Property.property_id == raw,
+                        Property.property_name.ilike(f"%{raw}%"),
+                    ))
+                    .first()
+                )
+                if row is not None:
+                    try:
+                        return format_property_card(row)
+                    except Exception:
+                        return _sql_card_fallback(row)
+            finally:
+                _db.close()
+        except Exception:
+            pass
     return None
 
 
@@ -1192,15 +1214,17 @@ def search_properties_unified(
                 cname = str(c.get("name") or "").strip().lower()
                 if cid not in exclude_set and cname not in exclude_set:
                     cards.append(sanitize_public_card(c))
-        except IndexUnavailable:
-            logger.warning("Property index unavailable; SQL fallback if a session is present")
+        except IndexUnavailable as e:
+            logger.error("Property index unavailable (STORE=%s): %s", mode, e)
+            if mode == "firestore":
+                raise
         except Exception as e:
-            logger.warning("Error querying property index in search_properties_unified: %s", e)
+            logger.error("Error querying property index in search_properties_unified: %s", e)
+            if mode == "firestore":
+                raise
 
-    # SQL fallback: explicit postgres/both, or firestore mode with empty/unavailable index + live db
-    # (keeps SQL-seeded unit tests working; production Firestore-only path raises IndexUnavailable above
-    # when no cache and no db).
-    if not cards and db is not None and mode in ("postgres", "both", "firestore"):
+    # SQL only when STORE_PROPERTIES_READ_USER is sql or both — never silent firestore→SQL fallback
+    if not cards and db is not None and mode in ("sql", "both"):
         try:
             from app.services.property_search import build_property_query
             query = build_property_query(db, params)
@@ -1212,10 +1236,6 @@ def search_properties_unified(
                     cards.append(format_property_card(p))
         except Exception as e:
             logger.warning("Error querying local database properties in search_properties_unified: %s", e)
-
-    if not cards and mode == "firestore" and db is None:
-        # No cache, no SQL — surface the busy path to the caller
-        raise IndexUnavailable("Property index empty and no SQL fallback session")
 
     return cards[:lim]
 
@@ -4686,11 +4706,11 @@ class PublicAgentService:
             extract_search_filters_deterministic,
         )
 
-        # Short / partial name matching several listings → Did you mean A, B or C? (max 3)
+        # Short / partial name matching one or more listings → Did you mean A, B or C? (max 3)
         _name_cands = [
             str(n).strip() for n in (args.get("name_candidates") or []) if str(n or "").strip()
         ][:3]
-        if args.get("name_uncertain") and len(_name_cands) >= 2:
+        if args.get("name_uncertain") and len(_name_cands) >= 1:
             from app.services.answer_policy import did_you_mean_reply
             from app.services.name_confirmation import store_pending_name_candidates
             reply_text = did_you_mean_reply(_name_cands)
@@ -5034,18 +5054,21 @@ class PublicAgentService:
             p_beds = _clean_field(p_beds)
             p_area = _clean_field(p_area)
             _ba = " | ".join(x for x in (p_beds, p_area) if x)  # "Bedrooms / Area" value, only what exists
+            # SQL enrichment only when STORE allows SQL — never silent firestore→SQL
             if isinstance(card, dict) and db is not None and (p_id or pid):
                 try:
-                    sql_row = get_property_by_id(db, str(p_id or pid))
-                    if sql_row is not None:
-                        if getattr(sql_row, "has_pool", None):
-                            card["has_pool"] = True
-                        if getattr(sql_row, "beach_access", None):
-                            card["beach_access"] = True
-                        for field in ("amenities", "features", "pool_type"):
-                            value = getattr(sql_row, field, None)
-                            if value and not card.get(field):
-                                card[field] = value
+                    from app.services.property_index import public_store_mode
+                    if public_store_mode() in ("sql", "both"):
+                        sql_row = get_property_by_id(db, str(p_id or pid))
+                        if sql_row is not None and not isinstance(sql_row, dict):
+                            if getattr(sql_row, "has_pool", None):
+                                card["has_pool"] = True
+                            if getattr(sql_row, "beach_access", None):
+                                card["beach_access"] = True
+                            for field in ("amenities", "features", "pool_type"):
+                                value = getattr(sql_row, field, None)
+                                if value and not card.get(field):
+                                    card[field] = value
                 except Exception:
                     pass
             amenity_facts = collect_property_amenities(card if isinstance(card, dict) else {})
@@ -6533,8 +6556,65 @@ class PublicAgentService:
                 search_relaxed_alts = alts
                 search_relaxed_filter = f"amenity:{required_amenities[0]}"
 
-            # Zero results only: exactly one relaxed filter (sub-district -> Phuket), never pad silently
-            if not cards and not amenity_none_match and loc in ["Bang Tao", "Choeng Thale", "Layan", "Kamala", "Surin", "Rawai", "Karon"]:
+            # Zero results: find which active filter removed all matches, then offer to relax it.
+            # Skip for "cheaper than shown" and "any under …" (those clear place filters on purpose).
+            from app.services.conversation_controls import opens_any_budget_search
+            if (
+                not cards
+                and not amenity_none_match
+                and not is_cheaper_request(user_message)
+                and not opens_any_budget_search(user_message)
+            ):
+                def _trial(**overrides):
+                    kw = dict(
+                        location=loc,
+                        property_type=p_type,
+                        bedrooms=bedrooms,
+                        min_bedrooms=min_bedrooms,
+                        max_bedrooms=max_bedrooms,
+                        min_price=min_p,
+                        max_price=max_p,
+                        max_price_exclusive=bool(applied.get("max_price_exclusive")),
+                        status=applied.get("status"),
+                        has_pool=has_pool,
+                        beach_access=beach_access,
+                        required_amenities=required_amenities or None,
+                        offset=0,
+                        limit=3,
+                    )
+                    kw.update(overrides)
+                    try:
+                        return search_properties_unified(
+                            db, PropertyFilterParams(**kw), limit=3, exclude_property_ids=None
+                        ) or []
+                    except Exception:
+                        return []
+
+                from app.services.conversation_controls import _money_short
+                diagnose = []
+                if min_p is not None or max_p is not None:
+                    diagnose.append((
+                        f"budget ({_money_short(min_p) if min_p is not None else '…'}"
+                        f"-{_money_short(max_p) if max_p is not None else '…'})",
+                        dict(min_price=None, max_price=None, max_price_exclusive=False),
+                    ))
+                if applied.get("status"):
+                    diagnose.append((f"status ({applied.get('status')})", dict(status=None)))
+                if p_type:
+                    diagnose.append((f"property type ({p_type})", dict(property_type=None)))
+                if loc:
+                    diagnose.append((f"location ({loc})", dict(location=None)))
+                for label, drops in diagnose:
+                    hit = _trial(**drops)
+                    if hit:
+                        search_relaxed_alts = hit[:3]
+                        search_relaxed_filter = label
+                        break
+
+            # Sub-district → Phuket relaxation when still empty
+            if not cards and not amenity_none_match and not search_relaxed_alts and loc in [
+                "Bang Tao", "Choeng Thale", "Layan", "Kamala", "Surin", "Rawai", "Karon"
+            ]:
                 broad_params = PropertyFilterParams(
                     location="Phuket",
                     property_type=p_type,
@@ -6928,12 +7008,26 @@ class PublicAgentService:
             criteria_bits.append(f"between {_money_short(min_p)} and {_money_short(max_p)}")
         elif max_p is not None:
             criteria_bits.append(format_budget_phrase(float(max_p), exclusive=bool(stored_prefs.get("max_price_exclusive")), with_usd=False))
+        validate_filters = dict(search_filters) if isinstance(search_filters, dict) else {}
+        # Alternatives from a single relaxed filter must not be rejected by the constraint we relaxed
+        if search_relaxed_filter:
+            rf = str(search_relaxed_filter).lower()
+            if "budget" in rf:
+                validate_filters.pop("min_price", None)
+                validate_filters.pop("max_price", None)
+                validate_filters.pop("max_price_exclusive", None)
+            if "status" in rf:
+                validate_filters.pop("status", None)
+            if "property type" in rf or "type (" in rf:
+                validate_filters.pop("property_type", None)
+            if "location" in rf:
+                validate_filters.pop("location", None)
         reply_text, cards = self._validate_or_fallback(
             reply_text,
             cards,
             language=language,
             site_origin=getattr(conversation, "site_origin", None),
-            applied_filters=search_filters if isinstance(search_filters, dict) else {},
+            applied_filters=validate_filters,
             criteria_summary=", ".join(criteria_bits) if criteria_bits else None,
             facts_text=catalogue_floor_facts,
         )

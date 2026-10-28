@@ -316,34 +316,42 @@ def test_tenant_theme_emails_never_cross():
 
 
 def test_firestore_only_and_missing_raises(monkeypatch):
-    db = MagicMock()
-    db.query.return_value.filter.return_value.first.return_value = None
+    from app.core.config import settings
+    from app.services.property_index import get_property_index, reset_property_index_for_tests
+    from tests.test_property_index_f1 import FakeFirestore
 
-    fs_card = {
-        "property_id": "isla-kata-sea-view-villa",
-        "name": "Isla Kata",
-        "raw_firestore_data": {
+    reset_property_index_for_tests()
+    fs = FakeFirestore()
+    fs.set(
+        "projects",
+        "isla-kata-sea-view-villa",
+        {
             "name": {"en": "Isla Kata Sea View Villa"},
             "cityId": "phuket",
             "priceFrom": 9_000_000,
             "currency": "THB",
             "amenities": ["pool"],
+            "isActive": True,
+            "websites": ["tajlandia.com", "thai.estate", "varsoviaestate.com"],
         },
-    }
-    with patch(
-        "app.services.firestore_service.get_property_by_id_from_firestore",
-        return_value=fs_card,
-    ):
-        data = load_brochure_data(db, "isla-kata-sea-view-villa", site_origin="tajlandia.com")
+    )
+    fs.set("meta", "properties_version", {"version": 1, "updated_at": "2026-01-01T00:00:00Z"})
+    monkeypatch.setattr("app.services.firestore_service.get_firestore_client", lambda target="user": fs)
+    monkeypatch.setattr("app.services.firestore_service.get_user_firestore_client", lambda: fs)
+    monkeypatch.setattr(settings, "STORE_PROPERTIES_READ_USER", "firestore")
+    idx = get_property_index()
+    idx.set_client_override(fs)
+    idx.ensure_fresh(force=True)
+
+    db = MagicMock()
+    db.query.side_effect = AssertionError("SQL must not be queried in firestore mode")
+
+    data = load_brochure_data(db, "isla-kata-sea-view-villa", site_origin="tajlandia.com")
     assert data.name == "Isla Kata Sea View Villa"
     assert data.price_min == 9_000_000
 
-    with patch(
-        "app.services.firestore_service.get_property_by_id_from_firestore",
-        return_value=None,
-    ):
-        with pytest.raises(ValueError, match="not found"):
-            load_brochure_data(db, "missing-id", site_origin="thai.estate")
+    with pytest.raises(ValueError, match="not found"):
+        load_brochure_data(db, "missing-id", site_origin="thai.estate")
 
     # Endpoint 404
     from app.api.v1.chat import download_property_brochure
@@ -363,6 +371,7 @@ def test_firestore_only_and_missing_raises(monkeypatch):
                 db=db,
             )
         assert ei.value.status_code == 404
+    reset_property_index_for_tests()
 
 
 def test_cache_renders_once(tmp_path, monkeypatch):

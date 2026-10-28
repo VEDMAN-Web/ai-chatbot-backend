@@ -14,7 +14,6 @@ import threading
 import time
 import unicodedata
 from copy import deepcopy
-from decimal import Decimal
 from typing import Any, Dict, List, Optional, Sequence, Set
 
 logger = logging.getLogger(__name__)
@@ -38,9 +37,15 @@ def _norm_text(text: Any) -> str:
 
 
 def public_store_mode() -> str:
+    """
+    Normalised public property store mode.
+    Allowed: firestore | sql | both. Legacy alias: postgres → sql.
+    """
     from app.core.config import settings
     mode = str(getattr(settings, "STORE_PROPERTIES_READ_USER", "firestore") or "firestore").strip().lower()
-    if mode not in {"firestore", "postgres", "both"}:
+    if mode == "postgres":
+        mode = "sql"
+    if mode not in {"firestore", "sql", "both"}:
         return "firestore"
     return mode
 
@@ -49,6 +54,7 @@ def sanitize_public_card(card: Dict[str, Any]) -> Dict[str, Any]:
     """Drop internal / admin-only fields before replies or cards."""
     out = dict(card or {})
     out.pop("raw_firestore_data", None)
+    out.pop("_raw", None)
     out.pop("admin_notes", None)
     out.pop("adminNotes", None)
     out.pop("_admin_notes", None)
@@ -151,6 +157,10 @@ def _enrich_index_record(card: Dict[str, Any], raw: Optional[Dict[str, Any]] = N
         rec.get("property_type"),
     ]
     rec["_search_blob"] = " ".join(_norm_text(p) for p in blob_parts if p)
+    if raw:
+        rec["_raw"] = dict(raw)
+        # Keep raw_firestore_data only for brochure loaders; public sanitize strips it.
+        rec["raw_firestore_data"] = dict(raw)
     return rec
 
 
@@ -169,6 +179,25 @@ def _location_matches(rec: Dict[str, Any], location: str) -> bool:
         val = _norm_text(rec.get(field))
         if loc in val or loc_h in val:
             return True
+    return False
+
+
+def _status_matches(listing_status: Any, wanted: Any) -> bool:
+    """Match Ready / Off-plan / Available-style status filters to listing status text."""
+    want = _norm_text(wanted)
+    have = _norm_text(listing_status)
+    if not want:
+        return True
+    if not have:
+        return False
+    if want in have or have in want:
+        return True
+    ready_tokens = ("ready", "ready to move", "completed", "available", "ready_to_move")
+    offplan_tokens = ("off-plan", "off plan", "offplan", "under construction", "pre-sale", "presale", "new")
+    if want in ("ready",) or "ready" in want:
+        return any(t in have for t in ready_tokens)
+    if "off" in want or want in ("new", "off-plan"):
+        return any(t in have for t in offplan_tokens)
     return False
 
 
@@ -374,7 +403,13 @@ class PropertyIndex:
             rows = [sanitize_public_card(r) for r in self._records if self._visible_for_site(r, site)]
         return rows
 
-    def get_by_id(self, property_id: str, *, site: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    def get_by_id(
+        self,
+        property_id: str,
+        *,
+        site: Optional[str] = None,
+        include_raw: bool = False,
+    ) -> Optional[Dict[str, Any]]:
         if not property_id:
             return None
         self.ensure_fresh()
@@ -392,7 +427,41 @@ class PropertyIndex:
                 return None
             if not self._visible_for_site(rec, site):
                 return None
+            if include_raw:
+                out = dict(rec)
+                raw = out.get("_raw") or out.get("raw_firestore_data")
+                out = sanitize_public_card(out)
+                if raw:
+                    out["raw_firestore_data"] = deepcopy(raw)
+                return out
             return sanitize_public_card(rec)
+
+    def find_name_candidates(self, fragment: str, *, limit: int = 3) -> List[str]:
+        """Closest listing display names containing a short / partial fragment."""
+        word = _norm_text(fragment)
+        if not word or len(word) < 2:
+            return []
+        try:
+            self.ensure_fresh()
+        except IndexUnavailable:
+            return []
+        hits: List[str] = []
+        seen = set()
+        with self._lock:
+            rows = list(self._records)
+        for r in rows:
+            name = str(r.get("name") or "").strip()
+            if not name:
+                continue
+            blob = _norm_text(name)
+            if word in blob or any(t.startswith(word) for t in blob.split() if len(t) >= 2):
+                key = name.lower()
+                if key not in seen:
+                    seen.add(key)
+                    hits.append(name)
+                if len(hits) >= limit:
+                    break
+        return hits
 
     def get_by_ids(
         self, property_ids: Sequence[str], *, site: Optional[str] = None
@@ -491,7 +560,7 @@ class PropertyIndex:
                 continue
             if not _type_matches(rec, property_type):
                 continue
-            if status and _norm_text(status) not in _norm_text(rec.get("status")):
+            if status and not _status_matches(rec.get("status"), status):
                 continue
 
             price = _price_of(rec)

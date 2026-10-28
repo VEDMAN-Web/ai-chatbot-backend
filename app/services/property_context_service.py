@@ -694,23 +694,26 @@ def fetch_authorized_property(db: Any, property_id: str) -> Tuple[Optional[Any],
             if card:
                 return card, sanitize_public_card(card), "firestore"
         except Exception as e:
-            logger.warning(f"Property index fetch failed for {pid}: {e}")
+            logger.error("Property index fetch failed for %s (STORE=%s): %s", pid, mode, e)
+            if mode == "firestore":
+                return None, None, "missing"
 
-    prop = get_property_by_id(db, pid) if db else None
-    if not prop:
-        prop = get_property_by_name(db, pid) if db else None
-    if prop:
-        if isinstance(prop, dict):
-            card = sanitize_public_card(prop)
-            return prop, card, "firestore"
-        try:
-            from app.services.public_agent import format_property_card
-            card = format_property_card(prop)
-        except Exception:
-            card = {
-                "property_id": getattr(prop, "property_id", pid),
-                "name": getattr(prop, "property_name", None),
-                "price": getattr(prop, "price_display", None),
-            }
-        return prop, card, "sql"
+    if mode in ("sql", "both"):
+        prop = get_property_by_id(db, pid) if db else None
+        if not prop:
+            prop = get_property_by_name(db, pid) if db else None
+        if prop:
+            if isinstance(prop, dict):
+                card = sanitize_public_card(prop)
+                return prop, card, "firestore"
+            try:
+                from app.services.public_agent import format_property_card
+                card = format_property_card(prop)
+            except Exception:
+                card = {
+                    "property_id": getattr(prop, "property_id", pid),
+                    "name": getattr(prop, "property_name", None),
+                    "price": getattr(prop, "price_display", None),
+                }
+            return prop, card, "sql"
     return None, None, "missing"

@@ -482,7 +482,8 @@ def build_no_match_reply(
     if alt_block and relaxed_filter:
         mid = (
             f"\n\nThis does not match your criteria, but it is the closest option "
-            f"(relaxed: {relaxed_filter}):\n{alt_block}"
+            f"(relaxed: {relaxed_filter}). "
+            f"That filter removed the exact matches — shall I relax it?\n{alt_block}"
         )
     else:
         mid = ""

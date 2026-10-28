@@ -335,23 +335,27 @@ def _properties_store_mode() -> str:
 def search_properties_safe(db: Session, filters: PropertyFilterParams) -> List[Any]:
     """
     Public property search. Default: in-memory Firestore property index.
-    STORE_PROPERTIES_READ_USER=postgres uses SQL; both = index first, SQL if empty.
+    STORE_PROPERTIES_READ_USER=sql uses SQL; both = index first, SQL if empty.
+    Firestore mode never falls back to SQL.
     """
     mode = _properties_store_mode()
     if mode in ("firestore", "both"):
         try:
-            from app.services.property_index import get_property_index
+            from app.services.property_index import get_property_index, IndexUnavailable
             cards = get_property_index().search(filters)
             if cards:
                 return [FirestorePropertyAdapter(c) for c in cards]
-            if mode == "firestore" and get_property_index().has_cache():
-                return []  # real empty result from a warm index
+            if mode == "firestore":
+                return []  # warm or empty — never SQL
+            # both: fall through to SQL when index returned nothing
         except Exception as e:
             from app.services.property_index import IndexUnavailable
-            if isinstance(e, IndexUnavailable) and mode == "firestore" and db is None:
-                raise
-            logger.debug("property index search fallback: %s", e)
-    if db is not None and mode in ("postgres", "both", "firestore"):
+            logger.error("property index search failed (STORE=%s): %s", mode, e)
+            if mode == "firestore":
+                if isinstance(e, IndexUnavailable):
+                    raise
+                raise IndexUnavailable(str(e)) from e
+    if db is not None and mode in ("sql", "both"):
         query = build_property_query(db, filters)
         return query.offset(filters.offset).limit(filters.limit).all()
     return []
@@ -365,27 +369,25 @@ def get_property_by_id(db: Session, property_id: str) -> Optional[Any]:
 
     if mode in ("firestore", "both"):
         try:
-            from app.services.property_index import get_property_index
+            from app.services.property_index import get_property_index, IndexUnavailable
             card = get_property_index().get_by_id(clean_id)
             if card:
                 return FirestorePropertyAdapter(card)
+            # Direct Firestore document when index has no row for this id
+            from app.services.firestore_service import get_property_by_id_from_firestore
+            from app.services.property_index import sanitize_public_card
+            fs_p = get_property_by_id_from_firestore(clean_id)
+            if fs_p:
+                return FirestorePropertyAdapter(sanitize_public_card(fs_p))
         except Exception as e:
-            try:
-                logger.debug("property index get_by_id: %s", e)
-            except Exception:
-                pass
+            from app.services.property_index import IndexUnavailable
+            logger.error("property index get_by_id failed (STORE=%s): %s", mode, e)
             if mode == "firestore":
-                # Last-chance: direct Firestore document (keeps older callers working)
-                try:
-                    from app.services.firestore_service import get_property_by_id_from_firestore
-                    fs_p = get_property_by_id_from_firestore(clean_id)
-                    if fs_p:
-                        from app.services.property_index import sanitize_public_card
-                        return FirestorePropertyAdapter(sanitize_public_card(fs_p))
-                except Exception:
-                    return None
+                if isinstance(e, IndexUnavailable):
+                    raise
+                return None
 
-    if mode in ("postgres", "both") and db is not None:
+    if mode in ("sql", "both") and db is not None:
         return db.query(Property).filter(
             Property.property_id == clean_id
         ).first()
@@ -400,7 +402,7 @@ def get_property_by_name(db: Session, name_query: str) -> Optional[Any]:
 
     if mode in ("firestore", "both"):
         try:
-            from app.services.property_index import get_property_index
+            from app.services.property_index import get_property_index, IndexUnavailable, sanitize_public_card
             from app.services.property_name_index import match_property_name
             idx = get_property_index()
             mr = match_property_name(clean_name)
@@ -408,29 +410,25 @@ def get_property_by_name(db: Session, name_query: str) -> Optional[Any]:
                 card = idx.get_by_id(mr.confident.doc_id)
                 if card:
                     return FirestorePropertyAdapter(card)
-            # Exact id / display-name scan
             card = idx.get_by_id(clean_name)
             if card:
                 return FirestorePropertyAdapter(card)
             for rec in idx.all_records():
                 if str(rec.get("name") or "").strip().lower() == clean_name.lower():
                     return FirestorePropertyAdapter(rec)
+            from app.services.firestore_service import get_property_by_id_from_firestore
+            fs_p = get_property_by_id_from_firestore(clean_name)
+            if fs_p:
+                return FirestorePropertyAdapter(sanitize_public_card(fs_p))
         except Exception as e:
-            try:
-                logger.debug("property index get_by_name: %s", e)
-            except Exception:
-                pass
+            from app.services.property_index import IndexUnavailable
+            logger.error("property index get_by_name failed (STORE=%s): %s", mode, e)
             if mode == "firestore":
-                try:
-                    from app.services.firestore_service import get_property_by_id_from_firestore
-                    from app.services.property_index import sanitize_public_card
-                    fs_p = get_property_by_id_from_firestore(clean_name)
-                    if fs_p:
-                        return FirestorePropertyAdapter(sanitize_public_card(fs_p))
-                except Exception:
-                    return None
+                if isinstance(e, IndexUnavailable):
+                    raise
+                return None
 
-    if mode in ("postgres", "both") and db is not None:
+    if mode in ("sql", "both") and db is not None:
         return db.query(Property).filter(
             Property.property_name.ilike(f"%{clean_name}%")
         ).first()

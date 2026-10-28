@@ -976,7 +976,16 @@ def _partial_name_multi_match_intent(msg_clean: str) -> Optional[Tuple[IntentTyp
                     if len(hits) >= 3:
                         break
             names = hits
-        if len(names) >= 2:
+        # Also scan the in-memory property index (covers generic tokens like "sea")
+        if len(names) < 2:
+            try:
+                from app.services.property_index import get_property_index
+                prop_hits = get_property_index().find_name_candidates(fragment, limit=3)
+                if prop_hits:
+                    names = prop_hits
+            except Exception:
+                pass
+        if len(names) >= 1:
             return IntentType.PROPERTY_DETAILS, {
                 "property_name": fragment,
                 "property_id": fragment,
