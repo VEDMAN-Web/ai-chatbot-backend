@@ -34,6 +34,10 @@ def get_snapshot_client():
 
 
 def _is_real_db_session(db: Any) -> bool:
+    from app.repositories import properties_store
+
+    if not properties_store.sql_enabled():
+        return False
     if db is None:
         return False
     return not type(db).__module__.startswith("unittest.mock")

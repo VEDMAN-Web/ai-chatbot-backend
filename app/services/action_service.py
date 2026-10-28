@@ -1041,10 +1041,16 @@ def _execute_update_listing(
         format_price_thb,
     )
 
-    resolve_source, resolved = resolve_existing_property(db, property_id)
-    prop = resolved if resolve_source == "postgres" else (
-        db.query(Property).filter(Property.property_id == property_id).first()
-    )
+    from app.repositories import properties_store
+
+    sql_on = properties_store.sql_enabled()
+    resolve_source, resolved = resolve_existing_property(db if sql_on else None, property_id)
+    if not sql_on:
+        prop = None
+    else:
+        prop = resolved if resolve_source == "postgres" else (
+            db.query(Property).filter(Property.property_id == property_id).first()
+        )
     if resolve_source == "firestore" and isinstance(resolved, dict):
         property_id = str(resolved.get("property_id") or resolved.get("_firestore_doc_id") or property_id)
         payload = dict(payload)
@@ -1098,7 +1104,10 @@ def _execute_update_listing(
 
     # Snapshot BEFORE mutation (6-day undo window) — chat confirm path only
     previous_state = _serialize_property_snapshot(prop) if prop else None
-    snapshot_action = "create" if not prop else ("delete" if mode == "delete" else "update")
+    # A listing that exists only in Firestore (no SQL row) is still an update, not a create:
+    # undo of a "create" deletes the document.
+    existing_listing = prop is not None or resolve_source is not None
+    snapshot_action = "create" if not existing_listing else ("delete" if mode == "delete" else "update")
     if authenticated_staff is not None:
         try:
             operation_id = record_crud_operation_snapshot(
@@ -1128,6 +1137,43 @@ def _execute_update_listing(
     norm_websites = normalize_website_list(target_websites) if target_websites else None
 
     firestore_only = (resolve_source == "firestore" and prop is None)
+
+    if not sql_on and not existing_listing:
+        # STORE_PROPERTIES_WRITE=firestore: brand-new listing goes straight to Firestore.
+        prop_name = str(fields.get("property_name") or payload.get("title") or property_id).strip()
+        ws = norm_websites or normalize_website_list([payload.get("site_origin") or get_current_env_domain()])
+        to_write = {k: v for k, v in fields.items() if k in allowed_fields and v is not None and k != "websites"}
+        to_write["property_name"] = prop_name
+        to_write["websites"] = ws
+        to_write["is_public"] = True
+        new_images = payload.get("images") or fields.get("images") or fields.get("image_urls") or []
+        if isinstance(new_images, str):
+            new_images = [i.strip() for i in new_images.split(",") if i.strip()]
+        from app.services.firestore_service import save_or_update_property_firestore
+        if not save_or_update_property_firestore(
+            property_id=property_id,
+            fields=to_write,
+            images=new_images,
+            cover_image=payload.get("cover_image") or fields.get("cover_image") or fields.get("coverImage"),
+            target="admin",
+        ):
+            raise RuntimeError(f"Firestore create failed for '{property_id}'")
+        from app.services.cache_service import search_cache
+        search_cache.invalidate()
+        return {
+            "property_id": property_id,
+            "title": prop_name,
+            "mode": "create",
+            "updated_fields": {k: v for k, v in to_write.items() if k != "is_public"},
+            "images_count": len(new_images),
+            "images": new_images,
+            "current_status": to_write.get("status"),
+            "operation_id": operation_id,
+            "undoable": bool(operation_id),
+            "undo_window_days": 6 if operation_id else None,
+            "resolve_source": "firestore",
+            "success": True,
+        }
 
     if firestore_only:
         # Firestore-only listing: write Firestore; do NOT invent an incomplete PG row
@@ -1358,6 +1404,10 @@ def name_slug(value: Optional[str]) -> str:
 
 
 def _is_real_db_session(db: Any) -> bool:
+    from app.repositories import properties_store
+
+    if not properties_store.sql_enabled():
+        return False  # STORE_PROPERTIES_WRITE=firestore: properties never touch SQL
     if db is None:
         return False
     return not type(db).__module__.startswith("unittest.mock")
@@ -1693,30 +1743,36 @@ def rest_create_property(
         allow_without_undo=allow_without_undo,
     )
 
-    fs_required = _fs_sync_enabled()
-    prop = Property(
-        property_id=property_id,
-        property_name=str(fields.get("property_name")).strip(),
-        is_public=True if fields.get("is_public") is None else bool(fields.get("is_public")),
-        created_at=datetime.now(timezone.utc),
-        updated_at=datetime.now(timezone.utc),
-        websites=list(websites or []),
-    )
-    _apply_sql_fields(prop, fields, websites=websites)
-    try:
-        db.add(prop)
-        db.commit()
-        db.refresh(prop)
-    except Exception as exc:
-        db.rollback()
-        _raise_store_failure(
-            message=f"Postgres write failed: {exc}",
-            sql_ok=False,
-            fs_ok=False,
-            failed="sql",
+    from app.repositories import properties_store
+
+    sql_on = properties_store.sql_enabled()
+    fs_required = _fs_sync_enabled() or not sql_on  # Firestore is the only store when SQL is off
+    is_public = True if fields.get("is_public") is None else bool(fields.get("is_public"))
+    prop = None
+    if sql_on:
+        prop = Property(
             property_id=property_id,
-            operation_id=operation_id,
+            property_name=str(fields.get("property_name")).strip(),
+            is_public=is_public,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+            websites=list(websites or []),
         )
+        _apply_sql_fields(prop, fields, websites=websites)
+        try:
+            db.add(prop)
+            db.commit()
+            db.refresh(prop)
+        except Exception as exc:
+            db.rollback()
+            _raise_store_failure(
+                message=f"Postgres write failed: {exc}",
+                sql_ok=False,
+                fs_ok=False,
+                failed="sql",
+                property_id=property_id,
+                operation_id=operation_id,
+            )
 
     fs_ok = False
     if fs_required:
@@ -1724,7 +1780,7 @@ def rest_create_property(
             from app.services.firestore_service import save_or_update_property_firestore
             wrote = save_or_update_property_firestore(
                 property_id=property_id,
-                fields={**fields, "websites": list(websites or []), "is_public": prop.is_public},
+                fields={**fields, "websites": list(websites or []), "is_public": is_public},
                 images=images or [],
                 cover_image=cover_image,
                 target="admin",
@@ -1733,16 +1789,20 @@ def rest_create_property(
                 raise RuntimeError("Firestore write returned failure")
             fs_ok = True
         except Exception as exc:
-            try:
-                db.query(Property).filter(Property.property_id == property_id).delete(
-                    synchronize_session="fetch"
-                )
-                db.commit()
-                db.expire_all()
-            except Exception:
-                db.rollback()
+            if sql_on:
+                try:
+                    db.query(Property).filter(Property.property_id == property_id).delete(
+                        synchronize_session="fetch"
+                    )
+                    db.commit()
+                    db.expire_all()
+                except Exception:
+                    db.rollback()
             _raise_store_failure(
-                message=f"Firestore write failed; Postgres row was rolled back. {exc}",
+                message=(
+                    f"Firestore write failed; Postgres row was rolled back. {exc}"
+                    if sql_on else f"Firestore write failed. {exc}"
+                ),
                 sql_ok=False,
                 fs_ok=False,
                 failed="firestore",
@@ -1751,20 +1811,20 @@ def rest_create_property(
             )
 
     _invalidate_search_cache()
-    stores = {"sql": True, "firestore": fs_ok}
+    stores = {"sql": sql_on, "firestore": fs_ok}
     after = {
-        "sql": _summary_sql(prop),
+        "sql": _summary_sql(prop) if sql_on else None,
         "firestore": _summary_fs(_read_raw_firestore(property_id)) if fs_ok else None,
     }
     audit = _audit_rest(db, staff, "create", property_id, operation_id, stores, None, after)
-    written = ["Postgres"] + (["Firestore"] if fs_ok else [])
+    written = (["Postgres"] if sql_on else []) + (["Firestore"] if fs_ok else [])
     return {
         "status": "CREATED",
         "message": f"Property '{property_id}' written to {' and '.join(written)}.",
         "property_id": property_id,
         "operation_id": operation_id,
         "undo_window_days": 6 if operation_id else None,
-        "sql": True,
+        "sql": sql_on,
         "firestore": fs_ok,
         "stores": stores,
         "websites": list(websites or []),

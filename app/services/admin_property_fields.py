@@ -560,8 +560,10 @@ def resolve_existing_property(
         return None, None
 
     aliases = {raw, raw.lower(), raw.upper()}
-    # 1) Postgres
-    if db is not None:
+    # 1) Postgres (skipped when STORE_PROPERTIES_WRITE=firestore)
+    from app.repositories import properties_store
+
+    if db is not None and properties_store.sql_enabled():
         try:
             from app.db.models import Property
 

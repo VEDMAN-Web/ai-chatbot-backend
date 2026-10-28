@@ -171,6 +171,8 @@ class Settings(BaseSettings):
     STORE_LEADS_USER: str = "firestore"
     # Stage F3: staff users + login sessions (admin_authentication / admin_sessions).
     STORE_USERS: str = "firestore"
+    # Stage F2: both | postgres | firestore. Firestore = properties never touch SQL.
+    STORE_PROPERTIES_WRITE: str = "both"
     # Local development only: accept "dev-token-<email>" and the bare X-Staff-Email header. Never in production.
     ALLOW_INSECURE_DEV_AUTH: bool = False
     ALLOW_HARD_DELETE: bool = False
