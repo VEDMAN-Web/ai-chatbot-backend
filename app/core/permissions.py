@@ -55,6 +55,8 @@ TOOL_PERMISSIONS: Dict[str, str] = {
     "ingest_property_from_url": PROPERTIES_IMPORT,
     "execute_batch_property_action": PROPERTIES_IMPORT,
     "undo_batch_property_operation": PROPERTIES_UNDO,
+    "archive_listing": PROPERTIES_WRITE,
+    "undo_operation": PROPERTIES_UNDO,
 }
 
 

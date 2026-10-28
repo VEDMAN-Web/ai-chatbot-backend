@@ -395,6 +395,7 @@ CLAUDE_ADMIN_TOOLS = [
         "input_schema": {
             "type": "object",
             "properties": {
+                "query": {"type": "string", "description": "A listing NAME or id to look up exactly (e.g. '3 Villas - Lamai'). Use this when the user names one listing; do not use location for a name."},
                 "location": {"type": "string", "description": "Location query (Phuket, Samui, Bang Tao, etc.)"},
                 "property_type": {"type": "string", "description": "Villa or Condominium"},
                 "min_price": {"type": "number", "description": "Minimum price in THB"},
@@ -413,7 +414,7 @@ CLAUDE_ADMIN_TOOLS = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "property_id": {"type": "string", "description": "Property identifier or slug (e.g. 15-sukhumvit-residences)"}
+                "property_id": {"type": "string", "description": "Property identifier, slug (e.g. 15-sukhumvit-residences) or the listing's exact name"}
             },
             "required": ["property_id"]
         }
@@ -540,6 +541,18 @@ CLAUDE_ADMIN_TOOLS = [
                     "description": "If true, use this calendar week (Mon–now) instead of a rolling N-day window. Set when the user says 'this calendar week'."
                 }
             }
+        }
+    },
+    {
+        "name": "search_drive_files",
+        "description": "Finds folders or files by name in the signed-in staff member's OWN Google Drive (read-only) and lists what is inside the folders found. Use for 'find folder X' / 'search my Drive for X'. Does not read file contents.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Part of the folder or file name"},
+                "kind": {"type": "string", "enum": ["folder", "file", "any"], "description": "What to look for (default any)"}
+            },
+            "required": ["query"]
         }
     },
     {
@@ -1319,6 +1332,44 @@ def process_admin_chat(
     action: Optional[str] = None,
     pending_action_id: Optional[str] = None
 ) -> Dict[str, Any]:
+    """Run one admin chat turn, then remember whether this turn proposed a change (see _remember_proposal)."""
+    result = _process_admin_chat_inner(
+        db=db, session_id=session_id, message=message, staff_user=staff_user, site_origin=site_origin,
+        requested_language=requested_language, action=action, pending_action_id=pending_action_id,
+    )
+    _remember_proposal(session_id, result)
+    return result
+
+
+def _remember_proposal(session_id, result) -> None:
+    """Record on the conversation which change (if any) the turn just proposed.
+
+    A plain 'yes' / 'ok' later only applies the proposal shown in the turn right before it; a proposal staged earlier needs
+    the Confirm button or its id, so an unrelated 'ok' can never apply an old change."""
+    try:
+        from app.services.conversation_service import update_conversation_preferences
+
+        if not isinstance(result, dict) or not session_id:
+            return
+        proposed = result.get("pending_action_id") if result.get("requires_confirmation") else None
+        updates = {"last_turn_proposed": bool(proposed)}
+        if proposed:
+            updates["last_proposed_action_id"] = str(proposed)
+        update_conversation_preferences(session_id, "admin", updates)
+    except Exception as exc:
+        logger.debug("Could not record the proposal on the conversation: %s", exc)
+
+
+def _process_admin_chat_inner(
+    db: Session,
+    session_id: str,
+    message: Optional[str] = None,
+    staff_user: Optional[AuthenticatedStaff] = None,
+    site_origin: str = "admin",
+    requested_language: Optional[str] = "en",
+    action: Optional[str] = None,
+    pending_action_id: Optional[str] = None
+) -> Dict[str, Any]:
     """
     Main processing entrypoint for Admin / Internal AI Agent.
     Unifies conversations, queries, reports, write action proposals,
@@ -1481,6 +1532,15 @@ def process_admin_chat(
             "language": active_lang,
         }
 
+    # "confirm <pending action id>" names the proposal to apply (used when a plain "yes" would be ambiguous or stale)
+    _named_confirm = re.match(
+        r"^\s*(?:confirm|yes|ok|okay|approve|apply|tak|zatwierdz)\s+"
+        r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\s*$",
+        clean_message or "", re.I,
+    )
+    if _named_confirm and not pending_action_id:
+        pending_action_id = _named_confirm.group(1).lower()
+
     target_action = None
     open_pending: List[Any] = []
     if pending_action_id:
@@ -1530,7 +1590,7 @@ def process_admin_chat(
             return ingest_turn
 
     # Explicit UI button/parameter OR short free-text only — never substring matches in long messages
-    has_confirm_intent = (action == "confirm") or (
+    has_confirm_intent = (action == "confirm") or bool(_named_confirm) or (
         bool(clean_message) and is_strict_confirm_message(clean_message)
     )
     has_reject_intent = (action == "reject") or (
@@ -1574,6 +1634,28 @@ def process_admin_chat(
             "download_link": None,
             "language": active_lang,
         }
+
+    # A0. A plain "yes"/"ok" applies only the proposal shown in the turn right before it
+    if (
+        target_action and has_confirm_intent and not has_reject_intent
+        and action != "confirm" and not pending_action_id
+        and str(target_action.id) not in (clean_message or "")
+    ):
+        _prefs = dict(getattr(conv, "preferences", None) or {})
+        if "last_turn_proposed" in _prefs and not (
+            _prefs.get("last_turn_proposed") and _prefs.get("last_proposed_action_id") == str(target_action.id)
+        ):
+            _stale = (
+                f"I did not apply anything. The proposal `{target_action.id}` (`{target_action.tool_name}`) was not the last thing I showed you, "
+                "so a plain 'yes' is not enough. Use the **Confirm** button on it, or reply `confirm "
+                f"{target_action.id}`, or ask me for the change again."
+            )
+            append_conversation_turn(db, conv, clean_message or "yes", _stale)
+            return {
+                "type": "text", "text": _stale, "session_id": conv.session_id, "conversation_id": str(conv.id),
+                "requires_confirmation": True, "pending_action_id": str(target_action.id), "action_status": "pending",
+                "tools_used": [], "download_link": None, "language": active_lang,
+            }
 
     # A. Execute Confirmation
     if target_action and has_confirm_intent and not has_reject_intent:
@@ -1769,6 +1851,29 @@ def process_admin_chat(
                         f"All specifications are saved, and the search index cache has been refreshed."
                         f"{verify_line}{undo_line}"
                     )
+                if raw_res.get("firestore_synced") is False:
+                    reply_text += (
+                        "\n\n\u26a0\ufe0f **Saved in the database, but the Firestore sync failed**, so the Admin Panel list may not show this "
+                        "change yet. Nothing was lost; retry, undo it, or ask a developer to re-sync."
+                    )
+            elif target_action.tool_name == "archive_listing":
+                _res = raw_exec if isinstance(raw_exec, dict) else {}
+                _stores = _res.get("stores") or {}
+                _undo = f"\n\nYou can undo this for 6 days: say `undo` or `undo {op_id}`." if op_id else ""
+                reply_text = (
+                    f"\u2705 **Listing archived.** **{_res.get('title') or _res.get('property_id')}** (`{_res.get('property_id')}`) is now "
+                    f"`Archived` and hidden from the public website. Nothing was erased.\n"
+                    f"- Database: {'saved' if _stores.get('sql', True) else 'not updated'}; "
+                    f"Firestore: {'saved' if _stores.get('firestore') else 'not updated or not used'}"
+                    f"{(chr(10) + '- Operation ID: `' + str(op_id) + '`') if op_id else ''}{_undo}"
+                )
+            elif target_action.tool_name == "undo_operation":
+                _res = raw_exec if isinstance(raw_exec, dict) else {}
+                _ids = (target_action.action_payload or {}).get("affected_ids") or _res.get("affected_ids") or []
+                reply_text = (
+                    f"\u2705 **Undone.** Operation `{(target_action.action_payload or {}).get('operation_id')}` was rolled back; "
+                    f"{len(_ids)} listing(s) are back to how they were: {', '.join('`' + str(i) + '`' for i in _ids[:10])}."
+                )
             elif target_action.tool_name in ("send_email", "create_calendar_event"):
                 payload = target_action.action_payload or {}
                 if target_action.tool_name == "send_email":
@@ -1932,6 +2037,17 @@ def process_admin_chat(
         ("Templates 1 to 7" in last_assistant_turn or "Warianty 1-7" in last_assistant_turn) or
         ("fetch them from the database & make everything myself" in last_assistant_turn or "pobrać je z bazy danych i dobrać resztę" in last_assistant_turn)
     )
+    # Create / archive / undo / add-a-lead commands are understood first, so the leads and search shortcuts below never take them
+    _crud_intent = _detect_crud_intent(clean_message)
+    if _crud_intent and staff_user is not None:
+        _crud_reply = _handle_crud_intent(db, conv, clean_message, _crud_intent, staff_user, active_lang)
+        if _crud_reply is not None:
+            return _attach_timing_debug(_crud_reply, timer)
+
+    _drive_search = _detect_drive_search(clean_message)
+    if _drive_search is not None and staff_user is not None:
+        return _attach_timing_debug(_handle_drive_search(db, conv, clean_message, _drive_search, staff_user, active_lang), timer)
+
     if not is_undo_request(clean_message) and not is_portfolio_followup_waiting:
         fast_res = try_admin_fast_path(
             db, conv, clean_message, staff_user,
@@ -2756,6 +2872,13 @@ def _run_deterministic_admin(
     # 1. Check for Property Knowledge / Specs (roof, foundation, flooring, walls, private notes)
     prop_id_match = re.search(r'(PROP-[A-Z0-9]+-[0-9]+)', message.upper())
     prop_id = prop_id_match.group(1) if prop_id_match else None
+    if not prop_id and staff_user is not None:
+        # "Show 3 Villas - Lamai" / "Specs for Pirak Villa" name one listing: look it up by name, not as an area
+        try:
+            from app.services.admin_chat_crud import resolve_listing_for_read
+            prop_id = resolve_listing_for_read(db, message, getattr(staff_user, "selected_websites", None))
+        except Exception as _name_exc:
+            logger.debug("Name lookup skipped: %s", _name_exc)
 
     # --- Shared filter extraction helpers (used across multiple branches) ------
     KNOWN_LOCATIONS = [
@@ -3030,26 +3153,35 @@ def _run_deterministic_admin(
             except Exception:
                 _stored_price = None
 
+        from app.services.admin_chat_crud import VALID_STATUS_LIST, extract_price, extract_status
+        _price_read = extract_price(message)
+        _status_read = extract_status(message)
+        for _problem in (_price_read.error, _status_read.error):
+            if _problem:
+                append_conversation_turn(db, conv, message, _problem)
+                return {
+                    "type": "text", "text": _problem,
+                    "session_id": conv.session_id, "conversation_id": str(conv.id),
+                    "requires_confirmation": False, "pending_action_id": None,
+                    "action_status": "invalid_value", "tools_used": [], "language": language,
+                }
         price_num = parse_relative_price_change(message, _stored_price)
         if price_num is None:
-            price_num = parse_price_amount(message)
+            price_num = _price_read.value
         if price_num is not None:
             price_masked = f"{price_num:,.0f} THB"
         else:
             price_masked = None
 
-        new_status = "Ready to move in" if "ready to move in" in msg_lower else "Under construction"
         fields = {}
-        if "ready to move in" in msg_lower or "under construction" in msg_lower or (
-            "status" in msg_lower and "price" not in msg_lower and "cena" not in msg_lower
-        ):
-            fields["status"] = new_status
+        if _status_read.value:
+            fields["status"] = _status_read.value
         if price_num is not None:
             fields["price_display"] = price_masked
             fields["price_numeric_min"] = price_num
         elif any(w in msg_lower for w in ["price", "cena"]) and re.search(
             r"\d", msg_lower
-        ) and not parse_price_amount(message):
+        ) and not _price_read.present:
             # Unclear amount — ask one short question
             ask = (
                 "What exact price should I set? (e.g. 5 million / 5M / 5,000,000 THB)"
@@ -3106,7 +3238,7 @@ def _run_deterministic_admin(
                     "language": language,
                 }
         elif not target_id:
-            resolved = resolve_admin_property_name(message, language=language)
+            resolved = resolve_admin_property_name(message, language=language, db=db)
             if resolved.kind == "resolved" and resolved.property_id:
                 target_id = resolved.property_id
                 official_name = resolved.official_name
@@ -3176,7 +3308,11 @@ def _run_deterministic_admin(
             }
 
         if not fields and not found_images:
-            reply = "What should I change on that listing? (e.g. price or status)."
+            reply = (
+                f"Which status should I set? Valid statuses: {VALID_STATUS_LIST}."
+                if "status" in msg_lower else
+                "What should I change on that listing? (e.g. price or status)."
+            )
             append_conversation_turn(db, conv, message, reply)
             return {
                 "type": "text",
@@ -3749,9 +3885,14 @@ def _run_deterministic_admin(
         )
         
         # Check if user is asking for a lead report or is in lead context
-        is_lead_context = any(
+        _names_listings = bool(prop_id or loc) or any(
+            w in msg_lower for w in ("propert", "listing", "villa", "condo", "apartment", "inventory", "portfolio", "oferty", "nieruchomo")
+        )
+        _says_lead = any(w in msg_lower for w in ["lead", "leads", "leadu", "leadów", "leadow"])
+        # What the user typed decides. The previous answer only counts for a bare "export this", never for "export Koh Samui listings".
+        is_lead_context = _says_lead or (not _names_listings and any(
             w in last_assistant_turn.lower() for w in ["lead", "alexander", "elena", "rostova", "michael chang", "buyer lead"]
-        ) or any(w in msg_lower for w in ["lead", "leads", "leadu", "leadów", "leadow"])
+        ))
 
         if is_lead_context:
             from app.services.admin_reply_helpers import parse_admin_leads_period
@@ -3786,6 +3927,23 @@ def _run_deterministic_admin(
         else:
             # Build filter params for report if location/filters mentioned
             report_prop_ids = [prop_id] if prop_id else None
+            if not prop_id and (loc or ptype):
+                # Only the listings that match the place/type asked for (the report tool takes ids, not a location)
+                _filter = {k: v for k, v in (("location", loc), ("property_type", ptype)) if v}
+                _filter["limit"] = 200
+                _found, _, _ = _execute_admin_tool(db, "search_properties_full", _filter, staff_user, str(conv.id))
+                _rows = _found.get("properties") if isinstance(_found, dict) else _found
+                report_prop_ids = [str(p.get("property_id") or p.get("id")) for p in (_rows or []) if p.get("property_id") or p.get("id")]
+                if not report_prop_ids:
+                    response_text = (
+                        f"I found no listings{' in ' + loc if loc else ''}{' of type ' + ptype if ptype else ''} on your selected websites, "
+                        "so I did not create an empty file."
+                    )
+                    append_conversation_turn(db, conv, message, response_text)
+                    return {
+                        "type": "text", "text": response_text, "session_id": conv.session_id, "conversation_id": str(conv.id),
+                        "requires_confirmation": False, "pending_action_id": None, "tools_used": [], "language": language,
+                    }
             args = {"format": fmt, "property_ids": report_prop_ids, "title": f"Tajlandia Property Report - {loc or 'All Areas'}"}
             t_res, _, _ = _execute_admin_tool(db, "generate_report", args, staff_user, str(conv.id))
             tool_calls.append({"name": "generate_report", "args": args})
@@ -4269,6 +4427,37 @@ def _run_deterministic_admin(
 
     # FIX 01/02/08 — Search Properties (improved: Bangkok + all locations + bedrooms + price + pool)
     else:
+        _asks_for_properties = bool(loc or ptype or bedrooms or max_price_val or has_pool) or any(
+            w in msg_lower for w in (
+                "propert", "listing", "villa", "condo", "apartment", "house", "real estate", "inventory", "portfolio",
+                "oferty", "nieruchomo", "willa", "available", "for sale", "price", "budget",
+            )
+        )
+        if not _asks_for_properties:
+            # Nothing in the message points at the property database: say what can be done instead of listing 10 random properties
+            if language == "pl":
+                response_text = (
+                    "Nie jestem pewien, o co chodzi, więc nie uruchomiłem wyszukiwania. Mogę: wyszukać oferty (np. `wille w Phuket do 10M`), "
+                    "pokazać jedną ofertę (`Specyfikacja <nazwa>`), zmienić cenę lub status, dodać lub zarchiwizować ofertę, cofnąć zmianę, "
+                    "wygenerować raport albo poszukać folderu na Dysku (`znajdź folder <nazwa>`). Co mam zrobić?"
+                )
+            else:
+                response_text = (
+                    f"I am not sure what you mean by \"{message.strip()[:80]}\", so I did not run a search. I can:\n"
+                    "- search listings (e.g. `villas in Phuket under 10M`)\n"
+                    "- show one listing (`Specs for <name>`)\n"
+                    "- change a price or status (`Change the price of <name> to 5M`)\n"
+                    "- add, archive or undo (`Add a new listing: ...`, `Delete <name>`, `Undo the last change`)\n"
+                    "- export a report (`Export Koh Samui listings to Excel`)\n"
+                    "- look in your Google Drive (`find folder named varsovia`, `read file <name> from Drive`)\n\n"
+                    "What would you like?"
+                )
+            append_conversation_turn(db, conv, message, response_text)
+            return {
+                "type": "text", "text": response_text, "session_id": conv.session_id, "conversation_id": str(conv.id),
+                "requires_confirmation": False, "pending_action_id": None, "action_status": "needs_clarification",
+                "tools_used": [], "language": language,
+            }
         search_args: dict = {}
         if loc:
             search_args["location"] = loc
@@ -4480,6 +4669,153 @@ def _granted_google_services(scopes: Any) -> List[str]:
     return services
 
 
+def _search_listing_by_name(db, query: str, selected_websites) -> Dict[str, Any]:
+    """Look one listing up by its name or id: exactly one match, a short list to choose from, or none. Never a generic top 10."""
+    from app.services.admin_property_fields import resolve_existing_property
+    from app.services.admin_property_resolver import resolve_admin_property_name
+    from app.services.property_search import property_belongs_to_websites
+
+    resolved = resolve_admin_property_name(query, already_extracted=True, db=db)
+    if resolved.kind == "resolved" and resolved.property_id:
+        source, record = resolve_existing_property(db, resolved.property_id)
+        if source and (not selected_websites or property_belongs_to_websites(record, selected_websites)):
+            cleaned = _clean_property_for_admin_tool(record) if isinstance(record, dict) else _prop_to_dict(record)
+            return {"count": 1, "matched_by": "name", "properties": [cleaned]}
+        return {"count": 0, "matched_by": "name", "properties": [],
+                "message": f"'{query}' exists but not on the website(s) you selected: {selected_websites}."}
+    if resolved.kind == "ambiguous":
+        return {"count": 0, "matched_by": "name", "properties": [], "needs_clarification": True,
+                "candidates": resolved.candidates, "message": resolved.message}
+    return {"count": 0, "matched_by": "name", "properties": [], "message": f"No listing named '{query}' was found.",
+            "suggestions": resolved.suggestions}
+
+
+def _detect_drive_search(message: str):
+    from app.services.admin_drive_chat import detect_drive_search
+    return detect_drive_search(message)
+
+
+def _handle_drive_search(db, conv, message: str, search, staff_user, language: str) -> Dict[str, Any]:
+    """'find this folder named varsovia': look in the asker's own Drive (read-only) and say what was found."""
+    from app.services import admin_drive_chat as drive_chat
+
+    staff_email = getattr(staff_user, "email", None) or ""
+    tools = []
+    if search.query is None:
+        text = ("Which folder or file should I look for? Give me a name, for example `find folder named varsovia` "
+                "or `search my Drive for Oferta`. I did not search anything.")
+    else:
+        result = drive_chat.search_drive(search.query, search.kind, staff_email, db)
+        text = drive_chat.format_drive_reply(result, search.query, search.kind)
+        tools = [{"name": "search_drive_files", "args": {"query": search.query, "kind": search.kind}}]
+        try:
+            record_audit_log(
+                db=db, staff_user_id=staff_email, tool_name="search_drive_files",
+                tool_arguments={"query": search.query, "kind": search.kind},
+                status="SUCCESS" if result["status"] == "ok" else "FAILED",
+                error_message=None if result["status"] == "ok" else result.get("message"),
+                conversation_id=str(conv.id),
+            )
+        except Exception:
+            pass
+    append_conversation_turn(db, conv, message, text, tool_calls=tools or None)
+    return {
+        "type": "text", "text": text, "session_id": conv.session_id, "conversation_id": str(conv.id),
+        "requires_confirmation": False, "pending_action_id": None, "action_status": None,
+        "tools_used": tools, "language": language,
+    }
+
+
+def _detect_crud_intent(message: str) -> Optional[str]:
+    from app.services.admin_chat_crud import detect_crud_intent
+    return detect_crud_intent(message)
+
+
+def _handle_crud_intent(db, conv, message: str, intent: str, staff_user, language: str):
+    """Create a listing, archive one, undo an operation, or explain that leads are not added by chat. Each change is staged for a yes."""
+    from app.core.permissions import tool_denial
+    from app.services import admin_chat_crud as crud
+    from app.services.admin_property_resolver import resolve_admin_property_name
+
+    role = getattr(staff_user, "role", None)
+    selected = list(getattr(staff_user, "selected_websites", None) or [])
+    staff_email = getattr(staff_user, "email", None) or ""
+
+    def reply(text, *, pending=None, status=None, tools=None):
+        append_conversation_turn(db, conv, message, text, tool_calls=tools or None)
+        return {
+            "type": "text", "text": text, "session_id": conv.session_id, "conversation_id": str(conv.id),
+            "requires_confirmation": bool(pending), "pending_action_id": pending, "action_status": status,
+            "tools_used": tools or [], "language": language,
+        }
+
+    if intent == "create_lead":
+        saving = "ON" if getattr(settings, "ENABLE_LEAD_SAVING", False) else "OFF"
+        return reply(
+            "I cannot add a lead by chat. Leads are saved automatically when a visitor shares contact details with the website "
+            f"chatbot (lead saving is currently {saving}). Ask a developer if you need manual lead entry. "
+            "I did not search or change anything.", status="not_supported")
+
+    if intent == "undo":
+        denial = tool_denial(role, "undo_operation")
+        if denial:
+            return reply(denial, status="forbidden")
+        out = crud.propose_undo(db, staff_user, staff_email, str(conv.id), crud.operation_id_in(message))
+        return reply(out["text"], pending=out.get("pending_action_id"), status=out["status"],
+                     tools=[{"name": "undo_operation", "args": {"operation_id": out.get("operation_id")}}] if out["ok"] else None)
+
+    if intent == "delete":
+        denial = tool_denial(role, "archive_listing")
+        if denial:
+            return reply(denial, status="forbidden")
+        if crud.wants_permanent_delete(message):
+            return reply("Permanent deletes are not allowed. I can archive the listing instead (hidden from the public website, "
+                         "undoable for 6 days): say `archive <name>`.", status="refused")
+        resolved = resolve_admin_property_name(message, language=language, db=db)
+        if resolved.kind == "resolved" and resolved.property_id:
+            out = crud.propose_archive(db, staff_user, staff_email, str(conv.id), resolved.property_id, selected)
+            return reply(out["text"], pending=out.get("pending_action_id"), status=out["status"],
+                         tools=[{"name": "archive_listing", "args": {"property_id": resolved.property_id}}] if out["ok"] else None)
+        if resolved.kind == "ambiguous":
+            return reply((resolved.message or "Which one?") + "\n\nRepeat the command with the exact name or id, so I archive the right listing.",
+                         status="needs_clarification")
+        return reply(resolved.message or "I could not find that listing. Name a real listing before I stage an archive.",
+                     status=resolved.kind)
+
+    # create_listing
+    denial = tool_denial(role, "create_or_update_listing")
+    if denial:
+        return reply(denial, status="forbidden")
+    new = crud.parse_new_listing(message)
+    if new.errors:
+        return reply("I did not stage a new listing:\n- " + "\n- ".join(new.errors), status="invalid_value")
+    if new.missing:
+        known = ", ".join(f"{k.replace('_', ' ')}: {v}" for k, v in new.fields.items() if k != "price_display")
+        return reply(
+            ("So far I have " + known + ". " if known else "") + "To add the listing I still need:\n- " + "\n- ".join(new.missing)
+            + "\n\nExample: `Add a new listing: Sunset Pearl, villa, Phuket, 12,000,000 THB, available`",
+            status="needs_clarification")
+    if not selected:
+        return reply("Select the website for this listing first (the chat-bot selector at the top), then ask again.", status="needs_clarification")
+    from app.services.action_service import _duplicate_property_message
+    from app.services.admin_property_fields import resolve_existing_property
+    source, existing = resolve_existing_property(db, new.property_id)
+    if source:
+        return reply(f"A listing with id `{new.property_id}` already exists, so I did not create a second one. "
+                     "To change it, say `update <name> ...`.", status="duplicate")
+    duplicate = _duplicate_property_message(db, new.property_id, str(new.fields.get("property_name")))
+    if duplicate:
+        return reply(duplicate, status="duplicate")
+    args = {"property_id": new.property_id, "mode": "create", "fields_to_update": new.fields, "_user_message": message}
+    result, staged, pending_id = _execute_admin_tool(db, "create_or_update_listing", dict(args), staff_user, str(conv.id))
+    if not staged or not pending_id:
+        return reply((result or {}).get("message") or "I could not stage that listing.", status=str((result or {}).get("status") or "refused").lower())
+    diff = (result or {}).get("diff_table") or (result or {}).get("message") or ""
+    return reply(f"**New listing** `{new.property_id}`\n\n{diff}\n\n**IMPORTANT:** Pending proposal (ID: `{pending_id}`). "
+                 "Confirm to apply exactly the previewed changes, or cancel.",
+                 pending=pending_id, status="proposed", tools=[{"name": "create_or_update_listing", "args": args}])
+
+
 _WORKSPACE_WORDS = re.compile(r"\b(drive|google|gmail|calendar|workspace)\b", re.I)
 _WORKSPACE_STATUS_WORDS = re.compile(
     r"\b(connect(?:ed|ion)?|linked?|status|log(?:ged)?\s*in|sign(?:ed)?\s*in|authori[sz]ed|access|po[łl]{1,2}czon\w*|pod[łl]{1,2}czon\w*)\b", re.I)
@@ -4542,8 +4878,13 @@ def _execute_admin_tool(
     )
     ttl = float(getattr(settings, "ADMIN_TOOL_CACHE_TTL_SEC", 60.0) or 60.0)
     args_key = tool_args if isinstance(tool_args, dict) else {}
+    # Results depend on who asks: their role and the websites they selected. Two admins on different websites never share an entry.
+    cache_scope = "|".join([
+        str(getattr(staff_user, "role", "") or ""),
+        ",".join(sorted(str(s) for s in (getattr(staff_user, "selected_websites", None) or []))),
+    ])
     if tool_name in CACHEABLE_TOOLS and ttl > 0:
-        hit = tool_cache_get(tool_name, args_key, ttl)
+        hit = tool_cache_get(tool_name, args_key, ttl, cache_scope)
         if hit is not None:
             return hit
 
@@ -4553,7 +4894,7 @@ def _execute_admin_tool(
     if tool_name in CACHEABLE_TOOLS and ttl > 0:
         # Only cache successful read results (no pending confirmation)
         if isinstance(result_tuple, tuple) and len(result_tuple) >= 2 and not result_tuple[1]:
-            tool_cache_set(tool_name, args_key, result_tuple)
+            tool_cache_set(tool_name, args_key, result_tuple, cache_scope)
     return result_tuple
 
 
@@ -4575,6 +4916,9 @@ def _execute_admin_tool_uncached(
     # 1. Read Tool: search_properties_full
     if tool_name == "search_properties_full":
         selected_websites = getattr(staff_user, "selected_websites", None)
+        _name_query = str(tool_args.get("query") or "").strip()
+        if _name_query:
+            return _search_listing_by_name(db, _name_query, selected_websites), False, None
         res = []
         try:
             from app.services.firestore_service import search_properties_firestore
@@ -4718,6 +5062,14 @@ def _execute_admin_tool_uncached(
         res = get_property_knowledge(
             db, prop_id, include_internal_notes=want_internal
         )
+        if not res and prop_id:
+            # The model may pass the listing's name instead of its id
+            from app.services.admin_property_resolver import resolve_admin_property_name
+            _named = resolve_admin_property_name(str(prop_id), already_extracted=True, db=db)
+            if _named.kind == "resolved" and _named.property_id:
+                res = get_property_knowledge(db, _named.property_id, include_internal_notes=want_internal)
+            elif _named.kind == "ambiguous":
+                res = {"needs_clarification": True, "message": _named.message, "candidates": _named.candidates}
         record_audit_log(
             db=db,
             staff_user_id=staff_email,
@@ -4975,6 +5327,16 @@ def _execute_admin_tool_uncached(
             "lead_saving_note": saving_note,
             "most_recent_lead_date": most_recent_date,
         }, False, None
+
+    elif tool_name == "search_drive_files":
+        from app.services.admin_drive_chat import search_drive
+        _kind = tool_args.get("kind") if tool_args.get("kind") in ("folder", "file", "any") else "any"
+        res = search_drive(str(tool_args.get("query") or "").strip(), _kind, staff_email, db)
+        record_audit_log(
+            db=db, staff_user_id=staff_email, tool_name="search_drive_files", tool_arguments=tool_args,
+            status="SUCCESS" if res.get("status") == "ok" else "FAILED", conversation_id=conversation_id,
+        )
+        return res, False, None
 
     # 6. Read Tool: check_google_workspace_status
     elif tool_name == "check_google_workspace_status":
@@ -5391,12 +5753,12 @@ def _execute_admin_tool_uncached(
 
     elif tool_name == "undo_batch_property_operation":
         from app.services.admin_batch_service import undo_batch_property_operation
-        op_id = tool_args.get("operation_id", "")
-        try:
-            undo_res = undo_batch_property_operation(op_id, staff_user, db_session=db)
-            return undo_res, False, None
-        except Exception as e:
-            return {"success": False, "error": str(e)}, False, None
+        from app.services.admin_chat_crud import propose_undo
+        out = propose_undo(db, staff_user, staff_email, conversation_id, (tool_args.get("operation_id") or "").strip() or None)
+        if out["ok"]:
+            return {"status": "PROPOSED", "pending_action_id": out["pending_action_id"], "requires_confirmation": True,
+                    "message": out["text"]}, True, out["pending_action_id"]
+        return {"status": str(out["status"]).upper(), "success": False, "message": out["text"]}, False, None
 
     elif tool_name == "get_batch_operations_history":
         from app.services.admin_batch_service import get_batch_operations_history

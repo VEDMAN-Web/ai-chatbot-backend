@@ -172,6 +172,7 @@ def _apply(who, content, name, action, *sites):
     assert up.status_code == 202, up.text
     done = _confirm(who, up.json()["pending_action_id"])
     assert done.status_code == 200, done.text
+    assert "execution_result" in done.json(), done.text
     return done.json()["execution_result"]
 
 

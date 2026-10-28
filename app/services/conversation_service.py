@@ -115,6 +115,29 @@ def get_or_create_conversation(
     return bind_conversation_site_origin(conversation, clean_site_origin)
 
 
+def update_conversation_preferences(session_id: str, agent_type: str, updates: Dict[str, Any]) -> bool:
+    """Set preference keys on a conversation already loaded in this process, and merge them into Firestore when it is in use."""
+    key = f"{agent_type}:{(session_id or 'anonymous').strip()}"
+    conversation = _IN_SESSION_CONVERSATIONS.get(key)
+    if conversation is None:
+        return False
+    prefs = dict(getattr(conversation, "preferences", None) or {})
+    prefs.update(updates)
+    conversation.preferences = prefs
+    if _firestore_sync_enabled(agent_type):
+        try:
+            from app.services.firestore_service import get_firestore_client
+
+            client = get_firestore_client(target="admin" if agent_type == "admin" else "user")
+            if client:
+                client.collection("conversations").document(str(getattr(conversation, "id", "") or key)).set(
+                    {"preferences": prefs, "updatedAt": datetime.now(timezone.utc).isoformat()}, merge=True
+                )
+        except Exception as exc:
+            logger.debug("Could not persist conversation preferences: %s", exc)
+    return True
+
+
 def append_conversation_turn(
     db=None,
     conversation=None,
