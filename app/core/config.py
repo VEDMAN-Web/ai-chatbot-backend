@@ -569,15 +569,15 @@ def get_admin_config_status() -> Dict[str, Any]:
             },
             "STORE_PENDING_ACTIONS": {
                 "value": store_pending,
-                "what_it_does": "Where pending_actions are stored: postgres, firestore, or both.",
+                "what_it_does": "Where pending_actions are stored (default firestore; postgres/both are temporary overrides).",
             },
             "STORE_AUDIT": {
                 "value": store_audit,
-                "what_it_does": "Where audit_logs are stored: postgres, firestore, or both.",
+                "what_it_does": "Where audit_logs are stored (default firestore; postgres/both are temporary overrides).",
             },
             "STORE_LEADS_READ": {
                 "value": store_leads,
-                "what_it_does": "Where admin lead reads come from: postgres, firestore, or both.",
+                "what_it_does": "Where admin lead reads come from (default firestore; postgres/both are temporary overrides).",
             },
         },
         "firestore_project_shared": not bool(admin_fs),

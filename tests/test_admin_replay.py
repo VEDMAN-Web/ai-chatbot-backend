@@ -266,7 +266,14 @@ def world(monkeypatch):
     })
     monkeypatch.setattr("app.services.firestore_service.get_admin_firestore_client", lambda: admin_fs)
     monkeypatch.setattr("app.services.firestore_service.get_user_firestore_client", lambda: admin_fs)
+    monkeypatch.setattr(
+        "app.services.firestore_service.get_firestore_client",
+        lambda target="user", *a, **k: admin_fs,
+    )
     monkeypatch.setattr("app.services.firestore_service.search_properties_firestore", lambda **kwargs: [])
+    monkeypatch.setattr(settings, "STORE_PENDING_ACTIONS", "both")
+    monkeypatch.setattr(settings, "STORE_AUDIT", "both")
+    monkeypatch.setattr(settings, "STORE_LEADS_READ", "both")
     monkeypatch.setattr(settings, "ENABLE_FIRESTORE_SYNC", True)
     monkeypatch.setattr(settings, "ADMIN_ENABLE_FIRESTORE_SYNC", True)
     monkeypatch.setattr(settings, "ENABLE_AUDIT_LOGGING", True)
@@ -644,10 +651,13 @@ def test_dossier_greeting_is_not_the_client(world, monkeypatch):
     assert "Client Name" in asked["text"]
     hello = _say(world, "hello")
     thanks = _say(world, "thanks")
-    assert "have not generated" in hello["text"].lower()
-    assert "have not generated" in thanks["text"].lower()
+    # Small talk must not re-prompt dossier details or invent a PDF.
+    assert "still need client details" not in hello["text"].lower()
+    assert "1. **Client Name**" not in hello["text"]
+    assert "still need client details" not in thanks["text"].lower()
     assert "8-Page" not in hello["text"]
     assert "8-Page" not in thanks["text"]
+    assert "hello" in hello["text"].lower() or "online" in hello["text"].lower() or "assist" in hello["text"].lower()
     continued = _say(world, "assume the rest")
     assert "Alexander Smith" in continued["text"]
     assert "Client Name**: `Probe Villa`" not in continued["text"]

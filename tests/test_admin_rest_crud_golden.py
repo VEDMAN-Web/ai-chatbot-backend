@@ -191,6 +191,13 @@ def world(monkeypatch):
         "app.services.firestore_service.get_user_firestore_client",
         lambda: user_fs,
     )
+    monkeypatch.setattr(
+        "app.services.firestore_service.get_firestore_client",
+        lambda target="user", *a, **k: admin_fs if target == "admin" else user_fs,
+    )
+    monkeypatch.setattr(settings, "STORE_PENDING_ACTIONS", "both")
+    monkeypatch.setattr(settings, "STORE_AUDIT", "both")
+    monkeypatch.setattr(settings, "STORE_LEADS_READ", "both")
     monkeypatch.setattr(settings, "ENABLE_FIRESTORE_SYNC", True)
     monkeypatch.setattr(settings, "ADMIN_ENABLE_FIRESTORE_SYNC", True)
     monkeypatch.setattr(settings, "ENABLE_AUDIT_LOGGING", True)

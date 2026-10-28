@@ -209,6 +209,14 @@ def world(monkeypatch):
     admin_fs = FakeFirestore()
     monkeypatch.setattr("app.services.firestore_service.get_admin_firestore_client", lambda: admin_fs)
     monkeypatch.setattr("app.services.firestore_service.get_user_firestore_client", lambda: admin_fs)
+    monkeypatch.setattr(
+        "app.services.firestore_service.get_firestore_client",
+        lambda target="user", *a, **k: admin_fs,
+    )
+    # Dual-write so legacy SQL assertions on PendingAction/AuditLog still see rows
+    monkeypatch.setattr(settings, "STORE_PENDING_ACTIONS", "both")
+    monkeypatch.setattr(settings, "STORE_AUDIT", "both")
+    monkeypatch.setattr(settings, "STORE_LEADS_READ", "both")
     monkeypatch.setattr(settings, "ENABLE_FIRESTORE_SYNC", True)
     monkeypatch.setattr(settings, "ADMIN_ENABLE_FIRESTORE_SYNC", True)
     monkeypatch.setattr(settings, "ENABLE_AUDIT_LOGGING", True)

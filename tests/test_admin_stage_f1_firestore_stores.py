@@ -530,3 +530,24 @@ def test_invalidate_search_cache_bumps_version(fake_fs, monkeypatch):
         sc.invalidate = MagicMock()
         _invalidate_search_cache()
     assert fake_fs.docs[("meta", "properties_version")]["version"] >= 1
+
+
+def test_firestore_mode_missing_client_raises_no_sql_fallback(db, monkeypatch):
+    """STORE=firestore with no client must raise — never fall back to SQL silently."""
+    _modes(monkeypatch, pending="firestore", audit="firestore")
+    monkeypatch.setattr(
+        "app.services.firestore_service.get_firestore_client",
+        lambda *a, **k: None,
+    )
+    monkeypatch.setattr(
+        "app.services.firestore_service.get_admin_firestore_client",
+        lambda *a, **k: None,
+        raising=False,
+    )
+    with pytest.raises(RuntimeError, match="Firestore client unavailable"):
+        create_pending_action(
+            db,
+            staff_user_id="admin@tajlandia.com",
+            tool_name="send_email",
+            action_payload={"to": "a@b.com", "subject": "x", "body": "y"},
+        )

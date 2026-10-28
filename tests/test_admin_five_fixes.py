@@ -74,6 +74,8 @@ def test_is_read_only_audit_tool_classification():
 
 def test_record_audit_read_only_does_not_raise_on_db_error(monkeypatch):
     monkeypatch.setattr("app.core.config.settings.ENABLE_AUDIT_LOGGING", True)
+    # Exercise Postgres failure path (default STORE_AUDIT is firestore)
+    monkeypatch.setattr("app.core.config.settings.STORE_AUDIT", "postgres")
     db = MagicMock()
     db.commit.side_effect = RuntimeError("relation audit_logs does not exist")
 
@@ -90,6 +92,7 @@ def test_record_audit_read_only_does_not_raise_on_db_error(monkeypatch):
 
 def test_record_audit_write_raises_fixed_message(monkeypatch):
     monkeypatch.setattr("app.core.config.settings.ENABLE_AUDIT_LOGGING", True)
+    monkeypatch.setattr("app.core.config.settings.STORE_AUDIT", "postgres")
     db = MagicMock()
     db.commit.side_effect = RuntimeError("missing table")
 
@@ -296,7 +299,74 @@ def test_secret_and_config_refusal_fixed_text(monkeypatch, message):
     assert "specialize" not in (res.get("text") or "").lower()
 
 
-# ----- 5. Empty Not understood omitted -----
+# ----- 5. Dossier waiting: small talk must not re-prompt -----
+
+
+def test_dossier_waiting_hello_does_not_repeat_prompt(monkeypatch):
+    conv = _conv("s-dossier-wait")
+    conv.message_history = [
+        {"role": "user", "content": "generate offer dossier"},
+        {
+            "role": "assistant",
+            "content": (
+                "I can generate that offer dossier once I have: Client Name and Budget. "
+                "Or say **'assume the rest'** to continue with defaults.\n\n"
+                "1. **Client Name**\n2. **Budget**"
+            ),
+        },
+    ]
+    _patch_chat(monkeypatch, conv)
+    db = MagicMock()
+    db.query.return_value.filter.return_value.order_by.return_value.all.return_value = []
+    db.query.return_value.all.return_value = []
+
+    res = process_admin_chat(
+        db=db,
+        session_id="s-dossier-wait",
+        message="hello",
+        staff_user=_staff(),
+    )
+    text = res.get("text") or ""
+    assert "still need client details" not in text.lower()
+    assert "1. **Client Name**" not in text
+    assert "hello" in text.lower() or "online" in text.lower() or "welcome" in text.lower() or "assist" in text.lower()
+
+
+def test_dossier_waiting_assume_rest_continues(monkeypatch):
+    conv = _conv("s-dossier-assume")
+    conv.message_history = [
+        {"role": "user", "content": "generate offer dossier"},
+        {
+            "role": "assistant",
+            "content": "1. **Client Name**\n2. **Budget**\nOr say assume the rest.",
+        },
+    ]
+    _patch_chat(monkeypatch, conv)
+    db = MagicMock()
+    db.query.return_value.filter.return_value.order_by.return_value.all.return_value = []
+    called = {}
+
+    def _tool(db, tool_name, tool_args, staff_user, conversation_id):
+        called["tool"] = tool_name
+        return {
+            "filename": "offer.pdf",
+            "file_url": "https://cdn.example.com/offer.pdf",
+            "template_used": "Classic",
+            "properties_included": [],
+        }, False, None
+
+    monkeypatch.setattr("app.services.admin_agent._execute_admin_tool", _tool)
+    res = process_admin_chat(
+        db=db,
+        session_id="s-dossier-assume",
+        message="assume the rest",
+        staff_user=_staff(),
+    )
+    assert called.get("tool") == "generate_client_offer_dossier"
+    assert "still need client details" not in (res.get("text") or "").lower()
+
+
+# ----- 6. Empty Not understood omitted -----
 
 
 def test_edit_report_omits_empty_not_understood():
