@@ -66,10 +66,17 @@ def is_capabilities_question(message: Optional[str]) -> bool:
 
 
 def is_undo_request(message: Optional[str]) -> bool:
+    """True for undo / undo the last change / undo that / rollback / revert."""
     raw = (message or "").strip().lower()
-    return bool(
-        re.search(r"\b(undo|rollback|revert|cofnij|cofnąć|cofniecie)\b", raw)
-    )
+    if not raw:
+        return False
+    if re.search(
+        r"\b(undo|rollback|revert|cofnij|cofnąć|cofniecie)\b"
+        r"(?:\s+(?:the\s+)?(?:last\s+)?(?:change|update|edit|that|it))?\b",
+        raw,
+    ):
+        return True
+    return bool(re.match(r"^(undo|rollback|revert)(\s+.+)?$", raw))
 
 
 def build_admin_structured_state(

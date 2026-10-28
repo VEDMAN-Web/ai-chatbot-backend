@@ -240,6 +240,10 @@ def test_undo_restores_old_values_second_undo_refused(staff, monkeypatch):
 
 
 def test_change_price_confirm_undo_restores_price(staff, db, monkeypatch):
+    """Change price → confirm → undo (chat) → price restored + UNDO audit written."""
+    from app.services.admin_reply_helpers import is_undo_request
+    from app.services.admin_turn_rules import _undo_last
+
     fake = patch_firestore(monkeypatch)
     set_store_modes(monkeypatch)
     original_price = 10_000_000
@@ -285,12 +289,32 @@ def test_change_price_confirm_undo_restores_price(staff, db, monkeypatch):
     operation_id = out["execution_result"].get("operation_id")
     assert operation_id
     assert fake.docs[("projects", "prop-1")]["priceFrom"] == new_price
+    snap = fake.docs.get(("admin_batch_operations", operation_id)) or {}
+    assert snap.get("conversation_id") == "c1"
 
-    undo_batch_property_operation(operation_id, staff, db_session=db)
+    assert is_undo_request("undo")
+    assert is_undo_request("undo the last change")
+    assert is_undo_request("undo that")
+
+    conv = SimpleNamespace(id="c1", session_id="s1", message_history=[], preferences={})
+    with patch("app.services.cache_service.search_cache.invalidate"):
+        undo_reply = _undo_last(db, conv, staff)
+    assert "Undone" in (undo_reply.get("text") or "")
     assert fake.docs[("projects", "prop-1")]["priceFrom"] == original_price
     prop = db.query(Property).filter(Property.property_id == "prop-1").first()
     db.refresh(prop)
     assert float(prop.price_numeric_min) == float(original_price)
+
+    undo_audits = [
+        d for d in audit_docs(fake)
+        if str(d.get("tool_name") or "").upper() == "UNDO"
+    ]
+    assert undo_audits, "UNDO must write an audit entry"
+    assert any(
+        (d.get("tool_arguments") or {}).get("operation_id") == operation_id
+        or (d.get("proposed_payload") or {}).get("original_operation_id") == operation_id
+        for d in undo_audits
+    )
 
 
 def test_undo_after_6_days_refused(staff):

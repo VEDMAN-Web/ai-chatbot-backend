@@ -171,10 +171,18 @@ def test_create_contradicting_rule_returns_conflict_report(store):
         "super@tajlandia.com",
     )
     assert opposing["status"] == "needs_clarification"
-    assert opposing.get("conflict_report")
-    assert first["id"] in opposing["conflict_report"]["against"]
+    report = opposing.get("conflict_report")
+    assert report, "contradicting rule must return a conflict_report"
+    assert first["id"] in report["against"], "conflict_report must name the conflicting rule"
+    assert report.get("reason")
+    # Must stay non-active until resolved
+    assert opposing["status"] != "active"
     assert store.get(opposing["id"])["status"] == "needs_clarification"
     assert store.get(first["id"])["status"] == "active"
+    # Activating again still cannot silently go active while conflict remains
+    again = store.activate(opposing["id"], "super@tajlandia.com")
+    assert again["status"] == "needs_clarification"
+    assert first["id"] in (again.get("conflict_report") or {}).get("against", [])
 
 
 def test_round_trip_writes_a_version_every_change(store):

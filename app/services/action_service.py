@@ -513,7 +513,26 @@ def _action_target_websites(payload: Optional[Dict[str, Any]]) -> list:
 
 
 def _assert_confirm_authorized(action, staff: AuthenticatedStaff, confirmation_token: Optional[str]) -> None:
-    """Token is mandatory. Only the proposer or a super admin may confirm, and only on allowed websites."""
+    """
+    Ownership first, then token, then website access.
+
+    A different admin gets 403 before any token check. Missing/invalid token
+    returns 400 only for the proposer or a super admin.
+    """
+    role = (getattr(staff, "role", None) or "").strip().lower()
+    actor = (getattr(staff, "email", None) or "").strip().lower()
+    proposer = (
+        getattr(action, "staff_user_id", None)
+        or getattr(action, "staff_email", None)
+        or ""
+    )
+    proposer = str(proposer).strip().lower()
+    if role != "super_admin" and proposer and actor != proposer:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the staff member who proposed this action, or a super admin, can confirm it.",
+        )
+
     token = (confirmation_token or "").strip()
     expected = (getattr(action, "confirmation_token", None) or "").strip()
     if not token:
@@ -527,14 +546,6 @@ def _assert_confirm_authorized(action, staff: AuthenticatedStaff, confirmation_t
             detail="Invalid confirmation token. Nothing was executed.",
         )
 
-    role = (getattr(staff, "role", None) or "").strip().lower()
-    actor = (getattr(staff, "email", None) or "").strip().lower()
-    proposer = (getattr(action, "staff_user_id", None) or "").strip().lower()
-    if role != "super_admin" and proposer and actor != proposer:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only the staff member who proposed this action, or a super admin, can confirm it.",
-        )
     if role == "super_admin":
         return
 
@@ -784,7 +795,11 @@ def confirm_and_execute_action(
             )
         if action.tool_name in ["create_or_update_listing", "ingest_property_from_drive"]:
             result_data = _execute_update_listing(
-                db, payload, authenticated_staff=authenticated_staff
+                db,
+                payload,
+                authenticated_staff=authenticated_staff,
+                conversation_id=getattr(action, "conversation_id", None),
+                pending_action_id=str(action.id),
             )
         elif action.tool_name == "send_email":
             result_data = _execute_send_email(
@@ -1124,6 +1139,8 @@ def _execute_update_listing(
     db: Session,
     payload: Dict[str, Any],
     authenticated_staff: Optional[AuthenticatedStaff] = None,
+    conversation_id: Optional[str] = None,
+    pending_action_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Safely creates or updates property listings in PostgreSQL via parameterized ORM.
@@ -1227,6 +1244,8 @@ def _execute_update_listing(
                 created_id=property_id if snapshot_action == "create" else None,
                 db_session=db,
                 confirmed_by_staff=True,
+                conversation_id=conversation_id or payload.get("conversation_id"),
+                pending_action_id=pending_action_id or payload.get("pending_action_id"),
             )
         except Exception as snap_exc:
             logger.warning(f"Failed to save CRUD undo snapshot before listing write: {snap_exc}")

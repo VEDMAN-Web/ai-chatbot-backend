@@ -38,10 +38,20 @@ coverage.xml
 !tests/
 tests/*
 !tests/test_*.py
+!tests/conftest.py
+!tests/fake_firestore.py
+!tests/__init__.py
 !tests/fixtures/
 !tests/fixtures/**
 !tests/fixtures/**/*.csv
 *.cover
+
+# Generated pytest / suite artifacts (never commit)
+junit_out.xml
+suite_junit.xml
+suite_out.txt
+test_full_out.txt
+*.junit.xml
 
 # 3. Python & Virtual Environments
 __pycache__/

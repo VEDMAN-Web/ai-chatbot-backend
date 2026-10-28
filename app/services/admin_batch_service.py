@@ -755,6 +755,8 @@ def record_crud_operation_snapshot(
     db_session: Optional[Any] = None,
     confirmed_by_staff: bool = False,
     skip_audit: bool = False,
+    conversation_id: Optional[str] = None,
+    pending_action_id: Optional[str] = None,
 ) -> Optional[str]:
     """
     Saves a 6-day pre-modification snapshot for individual admin CRUD operations.
@@ -816,6 +818,8 @@ def record_crud_operation_snapshot(
         "created_at": now.isoformat(),
         "expire_at": expire_at_iso,
         "expires_at": expire_at_iso,
+        "conversation_id": conversation_id,
+        "pending_action_id": pending_action_id,
         "details": [{
             "property_id": property_id,
             "action": action_clean
@@ -1132,6 +1136,8 @@ def undo_batch_property_operation(
                     f"UNDO of operation {operation_id} by {actor}. "
                     f"restored_ok={restored_ok}."
                 ),
+                conversation_id=data.get("conversation_id") or data.get("conversationId"),
+                pending_action_id=data.get("pending_action_id") or data.get("pendingActionId"),
             )
             if (
                 getattr(settings, "ENABLE_AUDIT_LOGGING", False)

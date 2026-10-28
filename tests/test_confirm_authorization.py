@@ -64,11 +64,28 @@ def _confirm(action, staff, token="act_secret"):
 
 
 def test_other_admin_cannot_confirm():
+    """Ownership is checked before the token — 403 even with a valid token."""
     action = _action()
     other = _staff("other@example.com", "admin", ["tajlandia.com"])
     with pytest.raises(HTTPException) as exc:
         _confirm(action, other)
     assert exc.value.status_code == 403
+    assert "Only the staff member who proposed this action, or a super admin, can confirm it" in str(
+        exc.value.detail
+    )
+    assert action.status == ACTION_STATUS_PENDING
+
+
+def test_other_admin_gets_403_before_token_check():
+    """A different admin with a missing token still gets 403 (not 400)."""
+    action = _action()
+    other = _staff("other@example.com", "admin", ["tajlandia.com"])
+    with pytest.raises(HTTPException) as exc:
+        _confirm(action, other, token=None)
+    assert exc.value.status_code == 403
+    assert "Only the staff member who proposed this action, or a super admin, can confirm it" in str(
+        exc.value.detail
+    )
     assert action.status == ACTION_STATUS_PENDING
 
 
@@ -81,6 +98,7 @@ def test_super_admin_can_confirm():
 
 
 def test_missing_token_is_rejected():
+    """Missing token returns 400 only for the owner (or super admin)."""
     action = _action()
     proposer = _staff("proposer@example.com", "admin", ["tajlandia.com"])
     with pytest.raises(HTTPException) as exc:
@@ -88,6 +106,15 @@ def test_missing_token_is_rejected():
     assert exc.value.status_code == 400
     assert "required" in str(exc.value.detail).lower()
     assert action.status == ACTION_STATUS_PENDING
+
+
+def test_super_admin_missing_token_is_400():
+    action = _action()
+    boss = _staff("boss@example.com", "super_admin", ["tajlandia.com"])
+    with pytest.raises(HTTPException) as exc:
+        _confirm(action, boss, token=None)
+    assert exc.value.status_code == 400
+    assert "required" in str(exc.value.detail).lower()
 
 
 def test_wrong_website_is_rejected():
