@@ -201,8 +201,19 @@ def test_lead_pdf_report_generation():
     mock_lead.created_at = None
 
     mock_db = MagicMock()
-    # filter(...).order_by(...).all()
-    mock_db.query.return_value.filter.return_value.order_by.return_value.all.return_value = [mock_lead]
+    # SQL read path: query().filter().filter()...order_by().limit().all()
+    chain = mock_db.query.return_value
+    chain.filter.return_value = chain
+    chain.order_by.return_value = chain
+    chain.limit.return_value = chain
+    chain.all.return_value = [mock_lead]
+    chain.count.return_value = 1
+    import app.core.config as _cfg
+    _old_mode = getattr(_cfg.settings, "STORE_LEADS_READ", "both")
+    _cfg.settings.STORE_LEADS_READ = "postgres"
+    import app.services.report_service as _rs
+    _old_s3 = _rs.is_s3_configured
+    _rs.is_s3_configured = lambda: False  # independent of AWS env vars
 
     res = generate_report(
         db=mock_db,
@@ -213,6 +224,8 @@ def test_lead_pdf_report_generation():
         storage=InMemoryStorageProvider(),
     )
 
+    _cfg.settings.STORE_LEADS_READ = _old_mode
+    _rs.is_s3_configured = _old_s3
     assert res["format"] == "pdf"
     assert res["total_leads"] == 1
     assert "tajlandia_lead_report_" in res["filename"]

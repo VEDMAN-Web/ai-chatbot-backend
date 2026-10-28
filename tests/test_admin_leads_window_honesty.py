@@ -166,6 +166,7 @@ def test_leads_report_no_filters_includes_all(monkeypatch, tmp_path):
 
     monkeypatch.setattr(rs.settings, "REPORT_STORAGE_DIR", str(tmp_path / "reports"))
     monkeypatch.setattr(rs.settings, "STORE_LEADS_READ", "postgres")
+    monkeypatch.setattr(rs, "is_s3_configured", lambda: False)  # independent of AWS env vars
     monkeypatch.setattr(
         "app.services.firestore_service.get_firestore_client",
         lambda *a, **k: None,
