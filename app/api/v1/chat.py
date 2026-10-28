@@ -346,19 +346,47 @@ def handle_public_chat(
             response["message_limit"] = None
             response["session_limit_warning"] = False
 
-        # Log query turn to Firestore (only if ENABLE_CHAT_LOGGING is True)
-        if getattr(settings, "ENABLE_CHAT_LOGGING", False) and getattr(settings, "ENABLE_FIRESTORE_SYNC", False) and user_msg:
+        # Query log after the reply is ready — never slow or break the response
+        if user_msg and getattr(settings, "ENABLE_CHAT_LOGGING", True):
             try:
-                from app.services.firestore_service import log_query_to_firestore
+                from app.services.firestore_service import (
+                    infer_chat_fallback_type,
+                    log_query_to_firestore,
+                )
                 matched_pids = [
-                    p.get("property_id") for p in response.get("properties", [])
+                    p.get("property_id") for p in (response.get("properties") or [])
                     if isinstance(p, dict) and p.get("property_id")
                 ]
+                prefs = response.get("preferences") or conversation.preferences or {}
+                intent_label = (
+                    response.get("intent")
+                    or prefs.get("last_intent")
+                    or ("llm" if response.get("used_llm") else None)
+                    or "llm"
+                )
+                fallback = response.get("fallback_type") or infer_chat_fallback_type(
+                    reply_text=response.get("text"),
+                    response_type=response.get("type"),
+                    intent=str(intent_label),
+                )
+                latency_ms = int((time.monotonic() - req_t0) * 1000)
+                turn_index = int(prefs.get("session_message_count") or new_count or 1)
                 log_query_to_firestore(
                     session_id=req.session_id,
                     user_question=user_msg,
                     ai_response=response.get("text", ""),
-                    matched_properties=matched_pids
+                    matched_properties=matched_pids,
+                    latency_ms=latency_ms,
+                    conversation_id=str(conversation.id),
+                    site_origin=req.site_origin,
+                    language=response.get("language") or req.language or "en",
+                    turn_index=turn_index,
+                    response_type=response.get("type") or "text",
+                    intent=str(intent_label),
+                    cards_count=len(matched_pids),
+                    quick_replies=list(response.get("quick_replies") or []),
+                    used_llm=bool(response.get("used_llm")),
+                    fallback_type=fallback,
                 )
             except Exception as e:
                 logger.warning(f"Firestore query logging error: {e}")
@@ -385,6 +413,29 @@ def handle_public_chat(
             site_origin=req.site_origin,
         )
 
+        try:
+            if getattr(settings, "ENABLE_CHAT_LOGGING", True) and (req.message or "").strip():
+                from app.services.firestore_service import log_query_to_firestore
+                log_query_to_firestore(
+                    session_id=req.session_id,
+                    user_question=req.message or "",
+                    ai_response=err_text,
+                    matched_properties=[],
+                    error=str(e),
+                    latency_ms=int((time.monotonic() - req_t0) * 1000),
+                    conversation_id=str(getattr(conversation, "id", "")),
+                    site_origin=req.site_origin,
+                    language=lang,
+                    turn_index=1,
+                    response_type="text",
+                    intent="error",
+                    cards_count=0,
+                    quick_replies=[],
+                    used_llm=False,
+                    fallback_type="error",
+                )
+        except Exception:
+            pass
         return {
             "type": "text",
             "text": err_text,
@@ -395,8 +446,20 @@ def handle_public_chat(
             "session_id": getattr(conversation, "session_id", req.session_id),
             "conversation_id": str(getattr(conversation, "id", "")),
             "language": lang,
-            "brochure_property_id": None
+            "brochure_property_id": None,
+            "fallback_type": "error",
         }
+
+
+@router.get(
+    "/config-status",
+    summary="Public chatbot config flags",
+    description="Non-secret public chatbot flags (logging, lead saving, fallback types).",
+)
+def public_chat_config_status():
+    from app.core.config import get_public_config_status
+    return get_public_config_status()
+
 
 @router.get(
     "/history/{session_id}",

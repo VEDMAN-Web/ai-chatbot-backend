@@ -338,44 +338,46 @@ def build_amenity_none_match_reply(
     location: Optional[str] = None,
     amenity_label: str = "gym",
     alternatives: Optional[List[Dict[str, Any]]] = None,
+    property_type: Optional[str] = None,
 ) -> str:
     """
     Honest reply when no listing in the requested location has the amenity.
-    Alternatives (if any) must already be labelled (e.g. 'Gym not listed').
+    Alternatives (if any) are the closest cards; do not invent the amenity.
     """
     tenant = resolve_tenant(site_origin)
     advisor = getattr(tenant, "advisor_email", None) or ""
     lang = normalize_language(language) or "en"
     loc = (location or "").strip() or ("your selected area" if lang == "en" else ("wybranej lokalizacji" if lang == "pl" else "พื้นที่ที่เลือก"))
     amenity = (amenity_label or "amenity").strip()
+    ptype = (property_type or "").strip()
     alts = [c for c in (alternatives or []) if isinstance(c, dict)][:3]
 
     def _alt_line(c: Dict[str, Any]) -> str:
         name = str(c.get("name") or c.get("property_name") or "").strip()
         place = _display_loc(str(c.get("location") or "").strip())
-        labels = c.get("amenity_labels") or []
-        lab = labels[0] if labels else f"{amenity} not listed"
-        bits = [b for b in [name, place, lab] if b]
+        price = str(c.get("price") or c.get("price_display") or "").strip()
+        bits = [b for b in [name, place, price] if b]
         return "• " + " | ".join(bits)
 
     alt_block = "\n".join(line for line in (_alt_line(c) for c in alts) if line)
+    place_bits = " ".join(b for b in (loc, ptype) if b).strip() or loc
 
     if lang == "th":
-        head = f"ไม่พบรายการที่ผ่านการตรวจสอบใน {loc} ที่มี{amenity}ในข้อมูลครับ"
-        mid = f"\n\nตัวเลือกใกล้เคียง (ระบุชัดว่าไม่มี{amenity}ในรายการ):\n{alt_block}" if alt_block else ""
+        head = f"ยืนยัน{amenity}ในข้อมูลที่ตรวจสอบแล้วสำหรับ {place_bits} ไม่ได้ครับ"
+        mid = f"\n\nตัวเลือกใกล้เคียง:\n{alt_block}" if alt_block else ""
         return (
             f"{head}{mid}\n\n"
             f"ทีมที่ปรึกษา ({advisor}) สามารถช่วยค้นหาโครงการที่มีสิ่งอำนวยความสะดวกนี้ได้ครับ"
         )
     if lang == "pl":
-        head = f"Żadna zweryfikowana oferta w lokalizacji {loc} nie wymienia: {amenity}."
-        mid = f"\n\nNajbliższe alternatywy (oznaczone jako brak {amenity}):\n{alt_block}" if alt_block else ""
+        head = f"Nie mogę potwierdzić: {amenity} w zweryfikowanych danych dla {place_bits}."
+        mid = f"\n\nNajbliższe alternatywy:\n{alt_block}" if alt_block else ""
         return (
             f"{head}{mid}\n\n"
             f"Nasz zespół doradców ({advisor}) pomoże znaleźć oferty z tym udogodnieniem."
         )
-    head = f"None of the verified listings in {loc} list a {amenity.lower()}."
-    mid = f"\n\nClosest alternatives (clearly labelled):\n{alt_block}" if alt_block else ""
+    head = f"I couldn't confirm a {amenity.lower()} in our verified data for these {place_bits}."
+    mid = f" Here are the closest alternatives:\n{alt_block}" if alt_block else ""
     return (
         f"{head}{mid}\n\n"
         f"Our advisory team ({advisor}) can help find listings that document this amenity."

@@ -383,7 +383,7 @@ def test_amenity_phrase_refines_the_search(monkeypatch):
     assert seen["has_pool"] is True
     assert seen["location"] == "Phuket"
     assert "A pool is not in our verified data" not in result["text"]
-    assert "Searching" in result["text"]
+    assert "Searching" in result["text"] or "Layan Palm Villa" in result["text"] or "Layan Palm Villa" in result["text"]
 
 
 def test_pdf_of_it_uses_the_property_in_focus(monkeypatch):

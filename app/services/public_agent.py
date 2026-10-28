@@ -310,9 +310,52 @@ def _beds_area_phrase(beds: Any, area: Any) -> str:
     return f"Bedrooms: {bed} | Area: {area_txt}"
 
 
-def format_property_card(p: Property) -> Dict[str, Any]:
+def _absolute_media_url(url: Optional[str], site_origin: Optional[str] = None) -> str:
+    """Turn a relative image path into an absolute URL using PUBLIC_API_BASE_URL or the site origin."""
+    raw = str(url or "").strip()
+    if not raw:
+        return ""
+    if re.match(r"^https?://", raw, re.I):
+        return raw
+    base = (getattr(settings, "PUBLIC_API_BASE_URL", None) or "").rstrip("/")
+    if not base and site_origin:
+        origin = str(site_origin).strip()
+        if origin and not origin.startswith("http"):
+            origin = f"https://{origin}"
+        base = origin.rstrip("/")
+    if not base:
+        return raw
+    if raw.startswith("/"):
+        return f"{base}{raw}"
+    return f"{base}/{raw}"
+
+
+def _card_detail_url(property_id: str, site_origin: Optional[str] = None, country: Optional[str] = None, city: Optional[str] = None, existing: Optional[str] = None) -> str:
+    """Listing page URL on the visitor's site when possible."""
+    existing_url = str(existing or "").strip()
+    try:
+        built = settings.get_property_detail_url(property_id, country=country, city=city)
+    except Exception:
+        built = ""
+    if built and re.match(r"^https?://", built, re.I):
+        return built
+    if existing_url and re.match(r"^https?://", existing_url, re.I):
+        return existing_url
+    origin = str(site_origin or "").strip()
+    if origin and not origin.startswith("http"):
+        origin = f"https://{origin}"
+    if origin and property_id:
+        return f"{origin.rstrip('/')}/properties/{property_id}"
+    return existing_url or built or ""
+
+
+def format_property_card(p: Property, site_origin: Optional[str] = None) -> Dict[str, Any]:
     """Formats a Property ORM object into the frontend-expected card structure with Maps and Calendar integration."""
-    img_urls = [img.image_url for img in p.images] if p.images else []
+    img_urls = [
+        _absolute_media_url(img.image_url, site_origin=site_origin)
+        for img in (p.images or [])
+        if getattr(img, "image_url", None)
+    ]
     
     # Formulate clean location string
     loc_parts = []
@@ -399,10 +442,17 @@ def format_property_card(p: Property) -> Dict[str, Any]:
         "has_pool": bool(p.has_pool),
         "beach_access": bool(p.beach_access),
         "images": img_urls,
-        "detail_page_url": p.detail_page_url or settings.get_property_detail_url(p.property_id, country=p.province, city=p.district),
+        "detail_page_url": _card_detail_url(
+            p.property_id,
+            site_origin=site_origin,
+            country=p.province,
+            city=p.district,
+            existing=p.detail_page_url,
+        ),
         "highlights": list(p.highlights or [])[:8],
         "amenities": list(getattr(p, "amenities", None) or []),
         "description": getattr(p, "description", None) or "",
+        "ownership": getattr(p, "ownership_type", None) or None,
     }
     # Completion / handover date from ORM or metadata
     _meta = getattr(p, "raw_metadata", None)
@@ -3267,6 +3317,69 @@ class PublicAgentService:
                 "language": active_lang,
             }
 
+        # "is <Name> freehold?" — answer from that listing's ownership field only
+        _freehold_named = re.search(
+            r"\bis\s+(.+?)\s+freehold\b|\b(.+?)\s+freehold\s*\?",
+            user_message,
+            re.I,
+        )
+        if _freehold_named and not is_foreign_ownership_question(user_message):
+            from app.core.tenant import resolve_tenant as _rt_own
+            _ten_own = _rt_own(getattr(conversation, "site_origin", None))
+            cand_name = (_freehold_named.group(1) or _freehold_named.group(2) or "").strip(" .,?!")
+            own_card = None
+            if cand_name and cand_name.lower() not in {"it", "this", "that", "this one", "that one"}:
+                own_card = lookup_property_by_slug_or_name(cand_name)
+            if own_card is None and pctx.active_property_id:
+                try:
+                    from app.services.property_context_service import fetch_authorized_property
+                    _obj, own_card, _src = fetch_authorized_property(db, pctx.active_property_id)
+                except Exception:
+                    own_card = None
+            from app.services.answer_policy import answer_policy as _answer_policy
+            facts = dict(own_card) if isinstance(own_card, dict) else {}
+            if isinstance(own_card, dict):
+                from app.services.listing_presentation import extract_ownership_from_property
+                extracted_own = extract_ownership_from_property(own_card)
+                if extracted_own:
+                    facts["ownership"] = extracted_own
+                elif own_card.get("ownership") or own_card.get("ownership_type"):
+                    facts["ownership"] = own_card.get("ownership") or own_card.get("ownership_type")
+            policy = _answer_policy(
+                "property_fact",
+                facts,
+                question=user_message,
+                site=getattr(conversation, "site_origin", None),
+                language=active_lang,
+                advisor_email=_ten_own.advisor_email,
+                missing_field="ownership",
+            )
+            if policy.get("text") and policy.get("source") != "pass_through":
+                reply_text = policy["text"]
+            elif facts.get("ownership"):
+                pname = facts.get("name") or facts.get("property_name") or cand_name or "This listing"
+                reply_text = (
+                    f"In our verified data, **{pname}** ownership is: {facts['ownership']}."
+                )
+            else:
+                pname = facts.get("name") or facts.get("property_name") or cand_name or "this listing"
+                reply_text = (
+                    f"Ownership for **{pname}** is not confirmed in our verified data. "
+                    f"Our advisor ({_ten_own.advisor_email}) can confirm it."
+                )
+            append_conversation_turn(
+                db=db, conversation=conversation, user_message=user_message,
+                assistant_message=reply_text, new_preferences=conversation.preferences,
+            )
+            return {
+                "type": "text", "text": reply_text, "properties": [],
+                "quick_replies": policy.get("quick_replies") or ["Talk to an advisor", "Request the brochure"],
+                "lead_captured": False, "preferences": conversation.preferences or {},
+                "session_id": conversation.session_id, "conversation_id": str(conversation.id),
+                "language": active_lang,
+                "fallback_type": policy.get("fallback_type") or "none",
+            }
+
         if is_foreign_ownership_question(user_message):
             own = ptype = pname = None
             try:
@@ -3293,6 +3406,37 @@ class PublicAgentService:
                 "session_id": conversation.session_id, "conversation_id": str(conversation.id),
                 "language": active_lang,
             }
+
+        # General market / tax / finance / yield — advisor only (never tie to last property)
+        from app.services.answer_policy import answer_policy as _ap_early, classify_question_kind
+        if classify_question_kind(user_message) == "general_advisory":
+            from app.core.tenant import resolve_tenant as _rt_adv
+            _ten_adv = _rt_adv(getattr(conversation, "site_origin", None))
+            policy = _ap_early(
+                "general_advisory",
+                {},
+                question=user_message,
+                site=getattr(conversation, "site_origin", None),
+                language=active_lang,
+                advisor_email=_ten_adv.advisor_email,
+            )
+            if policy.get("text"):
+                append_conversation_turn(
+                    db=db, conversation=conversation, user_message=user_message,
+                    assistant_message=policy["text"], new_preferences=conversation.preferences,
+                )
+                return {
+                    "type": "text",
+                    "text": policy["text"],
+                    "properties": [],
+                    "quick_replies": policy.get("quick_replies") or ["Connect me with an advisor"],
+                    "lead_captured": False,
+                    "preferences": conversation.preferences or {},
+                    "session_id": conversation.session_id,
+                    "conversation_id": str(conversation.id),
+                    "language": active_lang,
+                    "fallback_type": policy.get("fallback_type") or "no_data",
+                }
 
         if is_recall_shown(user_message):
             prefs = conversation.preferences or {}
@@ -3556,6 +3700,7 @@ class PublicAgentService:
                 "pl": ["Wille w Phuket", "Apartament na Samui", "Budżet do 15 mln THB"],
                 "th": ["วิลล่าภูเก็ต", "คอนโดสมุย", "งบไม่เกิน 15 ล้าน"],
             }
+            safe_prefs["last_intent"] = "off_topic"
             return {
                 "type": "text",
                 "text": reply_text,
@@ -3563,6 +3708,8 @@ class PublicAgentService:
                 "quick_replies": off_topic_replies.get(active_lang, off_topic_replies["en"]),
                 "lead_captured": False,
                 "preferences": safe_prefs,
+                "intent": "off_topic",
+                "fallback_type": "off_topic",
                 "session_id": conversation.session_id,
                 "conversation_id": str(conversation.id),
                 "language": active_lang
@@ -3731,11 +3878,64 @@ class PublicAgentService:
         Records client lead contact details / private viewing booking and presents matching properties.
         """
         from app.core.tenant import resolve_tenant
+        from app.services.lead_service import validate_email, validate_phone, validate_name
         tenant = resolve_tenant(conversation.site_origin)
+        stored_prefs = dict(conversation.preferences or {})
+        pending = dict(stored_prefs.get("pending_lead_contact") or {})
 
-        c_name = args.get("name")
-        c_email = args.get("email")
-        c_phone = args.get("phone")
+        c_name = validate_name(args.get("name")) or validate_name(pending.get("name"))
+        raw_email = args.get("email") or pending.get("email")
+        raw_phone = args.get("phone") or pending.get("phone")
+        c_email = validate_email(raw_email) if raw_email else None
+        c_phone = validate_phone(raw_phone) if raw_phone else None
+        asked_invalid = bool(stored_prefs.get("lead_invalid_asked"))
+
+        # Keep partial contact across turns in the same session
+        if args.get("name") and validate_name(args.get("name")):
+            pending["name"] = validate_name(args.get("name"))
+        if args.get("email"):
+            pending["email"] = args.get("email")
+        if args.get("phone"):
+            pending["phone"] = args.get("phone")
+        stored_prefs["pending_lead_contact"] = pending
+        conversation.preferences = stored_prefs
+
+        if (raw_email and not c_email) or (raw_phone and not c_phone):
+            if not asked_invalid:
+                stored_prefs["lead_invalid_asked"] = True
+                conversation.preferences = stored_prefs
+                reply_text = (
+                    "Please share a valid phone number or email so an advisor can reach you."
+                )
+                append_conversation_turn(
+                    db=db, conversation=conversation, user_message=user_message,
+                    assistant_message=reply_text, new_preferences=stored_prefs,
+                )
+                return {
+                    "type": "text", "text": reply_text, "properties": [],
+                    "quick_replies": ["Connect me with an advisor"],
+                    "lead_captured": False, "preferences": stored_prefs,
+                    "session_id": conversation.session_id, "conversation_id": str(conversation.id),
+                    "language": language,
+                }
+
+        if args.get("partial_contact") and c_name and not c_email and not c_phone:
+            reply_text = (
+                f"Thanks, {c_name}. Please share a phone number or email so an advisor "
+                f"at {tenant.advisor_email} can contact you."
+            )
+            append_conversation_turn(
+                db=db, conversation=conversation, user_message=user_message,
+                assistant_message=reply_text, new_preferences=stored_prefs,
+            )
+            return {
+                "type": "text", "text": reply_text, "properties": [],
+                "quick_replies": ["Connect me with an advisor"],
+                "lead_captured": False, "preferences": stored_prefs,
+                "session_id": conversation.session_id, "conversation_id": str(conversation.id),
+                "language": language,
+            }
+
         if args.get("advisor_request") and not c_email and not c_phone:
             reply_text = (
                 f"I can connect you with an advisor at {tenant.advisor_email}. "
@@ -3774,8 +3974,36 @@ class PublicAgentService:
         is_viewing = args.get("is_viewing", False)
         wants_specs = bool(args.get("wants_specs"))
         target_label = self._resolve_lead_target_label(args.get("target_ref"))
+        # Active property / named interest for the lead record
+        from app.services.property_context_service import load_property_context
+        _pctx_lead = load_property_context(conversation)
+        prop_id = None
+        prop_name = target_label
+        if args.get("target_ref"):
+            prop_name = target_label or args.get("target_ref")
+        if _pctx_lead.active_property_id and not prop_id:
+            prop_id = _pctx_lead.active_property_id
+            prop_name = prop_name or _pctx_lead.active_property_reference
+        # Last 5 turns for the advisor summary
+        history = list(conversation.message_history or [])[-10:]
+        chat_summary_bits = []
+        for turn in history[-5:]:
+            if not isinstance(turn, dict):
+                continue
+            role = turn.get("role") or ""
+            content = str(turn.get("content") or turn.get("message") or "")[:240]
+            if content:
+                chat_summary_bits.append(f"{role}: {content}")
+        chat_summary_bits.append(f"user: {user_message}")
+        chat_summary = " | ".join(chat_summary_bits)[:1500]
+        notes = (
+            f"source=chatbot; site={conversation.site_origin}; language={language}; "
+            f"property_id={prop_id or ''}; property_name={prop_name or ''}; "
+            f"summary={chat_summary}"
+        )
 
         # Fast in-session upsert for lead_id in the reply; durable SQL is backgrounded.
+        # Same phone/email in this session updates the existing lead (no duplicate).
         try:
             lead = record_or_update_lead(
                 db=None,
@@ -3786,23 +4014,51 @@ class PublicAgentService:
                 preferred_location=pref_loc,
                 budget_max=budget_dec,
                 buying_signal=f"{'Private viewing request' if is_viewing else 'Contact details submitted'}: {c_email or c_phone or c_name}",
-                notes=f"Client requested viewing/contact: {user_message}",
+                notes=notes,
             )
         except Exception as le:
             logger.warning("Lead capture in-session save failed: %s", le)
             lead = type("TmpLead", (), {"id": "lead_pending"})()
-        enqueue_lead_save(
-            db=db,
-            conversation=conversation,
-            contact_name=c_name,
-            contact_email=c_email,
-            contact_phone=c_phone,
-            preferred_location=pref_loc,
-            budget_max=budget_dec,
-            buying_signal=f"{'Private viewing request' if is_viewing else 'Contact details submitted'}: {c_email or c_phone or c_name}"
-            + (f" [{target_label}]" if target_label else ""),
-            notes=f"Client requested viewing/contact: {user_message}",
-        )
+        if getattr(settings, "ENABLE_LEAD_SAVING", True):
+            enqueue_lead_save(
+                db=db,
+                conversation=conversation,
+                contact_name=c_name,
+                contact_email=c_email,
+                contact_phone=c_phone,
+                preferred_location=pref_loc,
+                budget_max=budget_dec,
+                buying_signal=f"{'Private viewing request' if is_viewing else 'Contact details submitted'}: {c_email or c_phone or c_name}"
+                + (f" [{prop_name}]" if prop_name else ""),
+                notes=notes,
+            )
+
+        # Contact + interest: confirm advisor follow-up, name the property, never return cards
+        if (c_email or c_phone) and (c_name or prop_name or not is_viewing):
+            who = ", ".join(bit for bit in (c_name, c_email, c_phone) if bit)
+            about = f" regarding {prop_name}" if prop_name else ""
+            reply_text = (
+                f"Thank you{', ' + c_name if c_name else ''}. I have {who}{about}. "
+                f"An advisor at {tenant.advisor_email} will contact you."
+            )
+            stored_prefs["pending_lead_contact"] = {}
+            conversation.preferences = stored_prefs
+            append_conversation_turn(
+                db=db, conversation=conversation, user_message=user_message,
+                assistant_message=reply_text, new_preferences=stored_prefs,
+            )
+            return {
+                "type": "text",
+                "text": reply_text,
+                "properties": [],
+                "quick_replies": ["Show villas in Phuket", "Connect me with an advisor"],
+                "lead_captured": True,
+                "preferences": stored_prefs,
+                "session_id": conversation.session_id,
+                "conversation_id": str(conversation.id),
+                "language": language,
+                "lead_id": getattr(lead, "id", None),
+            }
 
         if target_label or not pref_loc:
             # The request is about one named listing (or about nothing searchable): confirm exactly that. Never
@@ -5427,6 +5683,43 @@ class PublicAgentService:
             if focused.active_property_id:
                 prop_id = focused.active_property_id
                 needs_clarification = False
+            elif focused.comparison_set and len(focused.comparison_set) >= 1:
+                # Selected / last compared properties — offer brochure for those
+                selected_ids = list(focused.comparison_set)[:3]
+                if len(selected_ids) == 1:
+                    prop_id = selected_ids[0]
+                    needs_clarification = False
+                else:
+                    from app.core.tenant import resolve_tenant as _rt_br
+                    _ten_br = _rt_br(getattr(conversation, "site_origin", None))
+                    names = []
+                    for sid in selected_ids:
+                        try:
+                            row = get_property_by_id(db, sid) if db is not None else None
+                            names.append(getattr(row, "property_name", None) or sid)
+                        except Exception:
+                            names.append(sid)
+                    reply_text = (
+                        "I can send the brochure PDF for your selected properties: "
+                        + ", ".join(str(n) for n in names)
+                        + f". Reply with a name, or ask an advisor at {_ten_br.advisor_email}."
+                    )
+                    append_conversation_turn(
+                        db=db, conversation=conversation, user_message=user_message,
+                        assistant_message=reply_text,
+                    )
+                    return {
+                        "type": "text",
+                        "text": reply_text,
+                        "properties": [],
+                        "quick_replies": [str(n) for n in names[:3]] + ["Connect me with an advisor"],
+                        "lead_captured": False,
+                        "preferences": stored_prefs,
+                        "session_id": conversation.session_id,
+                        "conversation_id": str(conversation.id),
+                        "language": language,
+                        "brochure_property_id": None,
+                    }
         if not prop_id:
             selected_ids = stored_prefs.get("selected_property_ids", [])
             last_ids = stored_prefs.get("last_result_ids", [])
@@ -6107,8 +6400,14 @@ class PublicAgentService:
                     if max_bedrooms is not None:
                         stored_prefs["max_bedrooms"] = max_bedrooms
 
-            # Amenity none-match: honest message + labelled alternatives (never fake a gym match)
-            if not cards and required_amenities:
+            # Amenity none-match only when THIS turn asked for the amenity (not a leftover filter)
+            amenity_asked_now = bool(
+                extracted.get("required_amenities")
+                or extracted.get("has_pool")
+                or extracted.get("beach_access")
+                or extracted.get("sea_view")
+            )
+            if not cards and required_amenities and amenity_asked_now:
                 from app.services.amenity_service import (
                     AMENITY_LABELS_EN,
                     apply_amenity_labels,
@@ -6149,12 +6448,15 @@ class PublicAgentService:
                         c["amenity_match"] = False
                 amenity_none_match = True
                 amenity_lab = AMENITY_LABELS_EN.get(required_amenities[0], required_amenities[0])
+                if required_amenities[0] in ("pool", "pool_private") or "pool" in amenity_lab.lower():
+                    amenity_lab = "private pool"
                 reply_text = build_amenity_none_match_reply(
                     language=language,
                     site_origin=getattr(conversation, "site_origin", None),
                     location=loc,
                     amenity_label=amenity_lab,
                     alternatives=alts,
+                    property_type=p_type,
                 )
                 cards = alts
                 search_relaxed_alts = alts
@@ -6201,12 +6503,15 @@ class PublicAgentService:
                 for c in labelled:
                     c["amenity_match"] = False
                 amenity_lab = AMENITY_LABELS_EN.get(required_amenities[0], required_amenities[0])
+                if required_amenities[0] in ("pool", "pool_private") or "pool" in amenity_lab.lower():
+                    amenity_lab = "private pool"
                 reply_text = build_amenity_none_match_reply(
                     language=language,
                     site_origin=getattr(conversation, "site_origin", None),
                     location=loc,
                     amenity_label=amenity_lab,
                     alternatives=labelled,
+                    property_type=p_type,
                 )
                 cards = labelled
                 amenity_none_match = True
@@ -6436,6 +6741,30 @@ class PublicAgentService:
                     lowest_price_thb=float(lowest) if lowest else None,
                     previous_reply=stored_prefs.get("last_no_match_text"),
                 )
+                # New budget range with leftover location/type: name the blocking filters
+                if (
+                    language == "en"
+                    and min_p is not None
+                    and max_p is not None
+                    and (loc or p_type)
+                    and extracted.get("min_price") is not None
+                    and extracted.get("max_price") is not None
+                ):
+                    blockers = []
+                    if loc:
+                        blockers.append(f"location ({loc})")
+                    if p_type:
+                        blockers.append(f"type ({p_type})")
+                    if bedrooms is not None:
+                        blockers.append(f"{bedrooms} bedrooms")
+                    from app.services.conversation_controls import _money_short
+                    budget_bit = f"budget between {_money_short(min_p)} and {_money_short(max_p)}"
+                    blocker_txt = " and ".join(blockers) if blockers else "your other filters"
+                    reply_text = (
+                        f"Nothing matches {budget_bit} together with {blocker_txt}. "
+                        f"The empty result is caused by combining the budget with {blocker_txt}. "
+                        "Want me to relax the location or the property type?"
+                    )
                 stored_prefs["last_no_match_text"] = reply_text
                 if lowest:
                     catalogue_floor_facts = (
@@ -6470,7 +6799,12 @@ class PublicAgentService:
             if preface not in (reply_text or ""):
                 reply_text = preface + "\n\n" + (reply_text or "")
         filter_line = describe_applied_filters(search_filters if isinstance(search_filters, dict) else {})
-        if filter_line and not foreign_loc and "Searching:" not in (reply_text or ""):
+        skip_search_headline = bool(
+            amenity_none_match
+            or (reply_text or "").lower().startswith("i couldn't confirm")
+            or "did you mean" in (reply_text or "").lower()
+        )
+        if filter_line and not foreign_loc and not skip_search_headline and "Searching:" not in (reply_text or ""):
             sort_name = (search_filters or {}).get("sort_by_price") if isinstance(search_filters, dict) else None
             if sort_name == "asc" and not (search_filters or {}).get("location"):
                 headline = "Cheapest across all Thailand:"

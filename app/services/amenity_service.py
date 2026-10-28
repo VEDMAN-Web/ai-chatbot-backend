@@ -293,6 +293,11 @@ def property_has_amenity(prop: Optional[Dict[str, Any]], canonical: str) -> bool
     # pool_private request also satisfied by pool when asking generically handled by caller
     if canonical == "pool" and facts.get("pool_private") and facts["pool_private"].present:
         return True
+    # Verified has_pool satisfies a private-pool filter when pool_private is not separately stored
+    if canonical == "pool_private" and facts.get("pool") and facts["pool"].present:
+        return True
+    if canonical in ("pool", "pool_private") and isinstance(prop, dict) and prop.get("has_pool") in (True, 1, "true", "True"):
+        return True
     return False
 
 

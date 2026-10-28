@@ -978,13 +978,35 @@ def detect_deterministic_intent(
             "location": None,
         }
 
+    name_match = re.search(
+        r"(?:my name is|i am|nazywam się|imię:|name:)\s+([A-Z][a-zA-Z\'-]+(?:\s+[A-Z][a-zA-Z\'-]+)?)",
+        message,
+        re.I,
+    )
+    # Name alone (no phone/email yet) — stash for multi-turn lead capture
+    if name_match and not email_match and not phone_match and not has_viewing_intent:
+        if re.search(r"\b(?:my name is|nazywam się|imię:|name:)\b", msg_low):
+            return IntentType.LEAD_CAPTURE, {
+                "email": None,
+                "phone": None,
+                "name": name_match.group(1).strip(),
+                "advisor_request": False,
+                "is_viewing": False,
+                "location": None,
+                "partial_contact": True,
+            }
+
     if email_match or phone_match or (has_viewing_intent and any(k in msg_low for k in ["name", "email", "phone", "contact", "telefon", "mail"])):
-        name_match = re.search(r"(?:my name is|i am|nazywam się|imię:|name:)\s+([A-Z][a-zA-Z\'-]+(?:\s+[A-Z][a-zA-Z\'-]+)+)", message, re.I)
         search_f = extract_search_filters_deterministic(message)
+        # Merge name already stored from an earlier turn in this session
+        prior_name = None
+        pending = state.get("pending_lead_contact") if isinstance(state.get("pending_lead_contact"), dict) else {}
+        if pending.get("name"):
+            prior_name = pending.get("name")
         return IntentType.LEAD_CAPTURE, {
             "email": email_match.group(0) if email_match else None,
             "phone": phone_match.group(0).strip() if phone_match else None,
-            "name": name_match.group(1).strip() if name_match else None,
+            "name": (name_match.group(1).strip() if name_match else None) or prior_name,
             "advisor_request": bool(is_advisor_request(msg_clean)),
             "location": search_f.get("location"),
             "property_type": search_f.get("property_type", "Villa"),

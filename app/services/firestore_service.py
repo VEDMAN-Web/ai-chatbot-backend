@@ -1502,40 +1502,126 @@ def create_lead_in_firestore(lead_data: Dict[str, Any]) -> Optional[str]:
 # 3. Query & Interaction Logging
 # ==============================================================================
 
+_PII_EMAIL_RE = re.compile(r"[\w.+-]+@[\w.-]+\.\w+")
+_PII_PHONE_RE = re.compile(
+    r"(?<!\d)(\+?\d[\d\s().-]{6,}\d)(?!\d)"
+)
+
+
+def mask_pii_for_chat_log(text: Optional[str]) -> str:
+    """Keep first 2 and last 2 characters of emails and phone numbers. Never invent."""
+    raw = str(text or "")
+
+    def _mask_token(token: str) -> str:
+        clean = token.strip()
+        if len(clean) <= 4:
+            return "*" * len(clean)
+        return f"{clean[:2]}{'*' * max(1, len(clean) - 4)}{clean[-2:]}"
+
+    out = _PII_EMAIL_RE.sub(lambda m: _mask_token(m.group(0)), raw)
+    out = _PII_PHONE_RE.sub(lambda m: _mask_token(m.group(0)), out)
+    return out
+
+
+def infer_chat_fallback_type(
+    *,
+    reply_text: Optional[str] = None,
+    response_type: Optional[str] = None,
+    intent: Optional[str] = None,
+    error: Optional[str] = None,
+) -> str:
+    """Map the public reply to one of: none | no_data | off_topic | did_you_mean | error."""
+    if error or response_type in {"error", "session_limit"}:
+        return "error"
+    text = (reply_text or "").lower()
+    if intent in {"off_topic", "OFF_TOPIC"} or "can't answer general knowledge" in text or "off-topic" in text:
+        return "off_topic"
+    if "did you mean" in text or "czy chodziło" in text or "คุณหมายถึง" in text:
+        return "did_you_mean"
+    if (
+        "not in our verified data" in text
+        or "i don't have that detail" in text
+        or "i do not have that detail" in text
+        or "couldn't confirm" in text
+        or "could not confirm" in text
+        or "no verified listing matches" in text
+    ):
+        return "no_data"
+    return "none"
+
+
 def log_query_to_firestore(
     session_id: str,
     user_question: str,
     ai_response: str,
     matched_properties: Optional[List[str]] = None,
     error: Optional[str] = None,
-    latency_ms: Optional[int] = None
+    latency_ms: Optional[int] = None,
+    *,
+    conversation_id: Optional[str] = None,
+    site_origin: Optional[str] = None,
+    language: Optional[str] = None,
+    turn_index: Optional[int] = None,
+    response_type: Optional[str] = None,
+    intent: Optional[str] = None,
+    cards_count: Optional[int] = None,
+    quick_replies: Optional[List[str]] = None,
+    used_llm: Optional[bool] = None,
+    fallback_type: Optional[str] = None,
 ) -> Optional[str]:
     """
-    Logs every chatbot conversation turn to Firestore `chat_query_logs`.
-    Tracks user question, AI response, timestamps, matched properties, and errors.
+    Logs every public chat turn to Firestore `chat_query_logs`.
+    Must never raise to the caller; returns None when Firestore is unavailable.
     """
-    client = get_firestore_client()
-    if not client:
+    if not getattr(settings, "ENABLE_CHAT_LOGGING", True):
         return None
-
     try:
+        client = get_firestore_client()
+        if not client:
+            return None
+        import uuid as _uuid
         now_iso = datetime.now(timezone.utc).isoformat()
+        mask = bool(getattr(settings, "CHAT_LOG_MASK_PII", True))
+        user_msg = str(user_question or "")
+        bot_reply = str(ai_response or "")[:4000]
+        if mask:
+            user_msg = mask_pii_for_chat_log(user_msg)
+            bot_reply = mask_pii_for_chat_log(bot_reply)
+        fb = fallback_type or infer_chat_fallback_type(
+            reply_text=ai_response,
+            response_type=response_type,
+            intent=intent,
+            error=error,
+        )
+        if error and fb == "none":
+            fb = "error"
+        log_id = str(_uuid.uuid4())
         payload = {
-            "sessionId": session_id,
-            "userQuestion": user_question,
-            "aiResponse": ai_response,
-            "matchedProperties": matched_properties or [],
-            "hasError": bool(error),
-            "errorMessage": str(error) if error else None,
-            "latencyMs": latency_ms,
-            "timestamp": now_iso,
-            "source": "public_chatbot",
-            "clientPlatform": "web"
+            "log_id": log_id,
+            "session_id": session_id,
+            "conversation_id": str(conversation_id or ""),
+            "site_origin": site_origin or "",
+            "language": language or "en",
+            "created_at": now_iso,
+            "turn_index": int(turn_index or 1),
+            "user_message": user_msg,
+            "bot_reply": bot_reply,
+            "response_type": response_type or "text",
+            "intent": intent or "llm",
+            "matched_property_ids": list(matched_properties or []),
+            "cards_count": int(cards_count if cards_count is not None else len(matched_properties or [])),
+            "quick_replies": list(quick_replies or [])[:20],
+            "used_llm": bool(used_llm),
+            "fallback_type": fb,
+            "latency_ms": latency_ms,
+            "flagged": fb in {"no_data", "error"},
+            "corrected": False,
+            "correction_id": None,
         }
 
-        doc_ref = client.collection("chat_query_logs").document()
+        doc_ref = client.collection("chat_query_logs").document(log_id)
         doc_ref.set(payload)
-        return doc_ref.id
+        return log_id
 
     except Exception as e:
         logger.error(f"Failed to log query to Firestore: {e}")

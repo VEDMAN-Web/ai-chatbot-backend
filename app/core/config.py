@@ -155,16 +155,19 @@ class Settings(BaseSettings):
     PROPERTY_CONTEXT_RECENT_MESSAGES: int = 20
     PROPERTY_CONTEXT_SUMMARY_CHARS: int = 4000
     # User-only turns fed to the public LLM (never prior assistant prose)
-    PUBLIC_LLM_HISTORY_USER_TURNS: int = 3
-    # Cap temperature for factual / tool-required public turns
-    PUBLIC_LLM_FACTUAL_TEMPERATURE: float = 0.2
+    PUBLIC_LLM_HISTORY_USER_TURNS: int = 6
+    # Cap temperature for factual / tool-required public turns (0 = phrase from facts only)
+    PUBLIC_LLM_FACTUAL_TEMPERATURE: float = 0.0
     # Chat history + property_context always go to Firestore (not Postgres)
     ENABLE_PROPERTY_CONTEXT_PERSISTENCE: bool = True
 
     # Lead/audit permanent writes (separate from chat memory which is always Firestore when sync is on)
-    ENABLE_LEAD_SAVING: bool = False
-    ENABLE_CHAT_LOGGING: bool = False  # legacy flag — chat memory uses Firestore via ENABLE_FIRESTORE_SYNC
+    ENABLE_LEAD_SAVING: bool = True
+    ENABLE_CHAT_LOGGING: bool = True
+    CHAT_LOG_MASK_PII: bool = True
     ENABLE_AUDIT_LOGGING: bool = False
+    # Absolute base for relative listing image URLs on property cards
+    PUBLIC_API_BASE_URL: str = ""
 
     # Action Confirmation & Security
     ACTION_EXPIRATION_MINUTES: int = 30
@@ -469,4 +472,14 @@ def get_admin_config_status() -> Dict[str, Any]:
         "ingest_timeout_sec": float(getattr(settings, "INGEST_TIMEOUT_SEC", 10.0) or 10.0),
         "ingest_max_urls_per_hour": int(getattr(settings, "INGEST_MAX_URLS_PER_HOUR", 10) or 10),
         **_instruction_status(),
+    }
+
+
+def get_public_config_status() -> Dict[str, Any]:
+    """Non-secret public-chatbot flags for ops / status pages. Never includes secrets."""
+    return {
+        "chat_logging": bool(getattr(settings, "ENABLE_CHAT_LOGGING", True)),
+        "chat_log_mask_pii": bool(getattr(settings, "CHAT_LOG_MASK_PII", True)),
+        "lead_saving": bool(getattr(settings, "ENABLE_LEAD_SAVING", True)),
+        "fallback_types": ["none", "no_data", "off_topic", "did_you_mean", "error"],
     }

@@ -226,12 +226,15 @@ def build_grounded_llm_messages(
     system + STRUCTURED STATE + optional FACTS + last N USER messages + current user.
     Never includes earlier assistant prose.
     """
-    n = int(getattr(settings, "PUBLIC_LLM_HISTORY_USER_TURNS", 3) or 3)
+    n = int(getattr(settings, "PUBLIC_LLM_HISTORY_USER_TURNS", 6) or 6)
     history = list(getattr(conversation, "message_history", None) or [])
     messages: List[Dict[str, str]] = [
         {"role": "system", "content": system_prompt},
         {"role": "system", "content": build_structured_state_block(conversation, language=language)},
     ]
+    memory = build_running_memory_summary(conversation)
+    if memory:
+        messages.append({"role": "system", "content": memory})
     if facts_block:
         messages.append({"role": "system", "content": facts_block})
     if include_listing_hint:
@@ -251,8 +254,39 @@ def build_grounded_llm_messages(
 
 
 def factual_temperature() -> float:
-    t = float(getattr(settings, "PUBLIC_LLM_FACTUAL_TEMPERATURE", 0.2) or 0.2)
+    t = float(getattr(settings, "PUBLIC_LLM_FACTUAL_TEMPERATURE", 0.0) or 0.0)
     return min(0.2, max(0.0, t))
+
+
+def build_running_memory_summary(conversation: Any) -> str:
+    """Short filter / seen / answered summary for the LLM (not raw assistant prose)."""
+    prefs = getattr(conversation, "preferences", None) or {}
+    if not isinstance(prefs, dict):
+        return ""
+    bits: List[str] = []
+    filters = prefs.get("active_filters") or {}
+    if isinstance(filters, dict) and filters:
+        parts = [f"{k}={v}" for k, v in filters.items() if v not in (None, "", [], False)]
+        if parts:
+            bits.append("filters: " + ", ".join(parts[:12]))
+    seen = prefs.get("seen_property_ids") or prefs.get("last_result_ids") or []
+    if seen:
+        bits.append("seen_ids: " + ", ".join(str(x) for x in list(seen)[:12]))
+    names = prefs.get("last_shown_names") or []
+    if names:
+        bits.append("shown: " + ", ".join(str(n) for n in list(names)[:8]))
+    answered = prefs.get("answered_slots") or prefs.get("asked_slots") or []
+    if answered:
+        bits.append("answered: " + ", ".join(str(a) for a in list(answered)[:8]))
+    rolling = ""
+    ctx = prefs.get("property_context") if isinstance(prefs.get("property_context"), dict) else {}
+    if ctx.get("rolling_summary"):
+        rolling = str(ctx.get("rolling_summary"))[:400]
+    if rolling:
+        bits.append("summary: " + rolling)
+    if not bits:
+        return ""
+    return "Running memory (filters, seen listings, answered questions): " + " | ".join(bits)
 
 
 def log_grounding_metrics(

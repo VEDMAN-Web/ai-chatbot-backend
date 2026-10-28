@@ -330,8 +330,15 @@ def verify_claims(
         elif "foreign" in claim and "foreign" not in own_blob and "freehold" not in own_blob:
             reasons.append(f"ownership_not_in_facts:{m.group(0)[:40]}")
 
-    # --- Yield / ROI / appreciation / stray % — never unless in verified yield data ---
+    # --- Yield / ROI words without a verified yield figure ---
     from app.services.approved_statements import DEVELOPER_MARKETING_CLAIM_LABEL
+    if _YIELD_CLAIM.search(text) or re.search(r"\b(?:roi|rental\s+yield|guaranteed\s+return)\b", text, re.I):
+        window_all = text.lower()
+        if not any(k in facts_low for k in ("yield", "roi", "return")) and "advisor" not in window_all:
+            if not any(x in window_all for x in ("don't quote", "do not quote", "not quote", "can't guarantee", "cannot guarantee")):
+                reasons.append("yield_or_roi_not_in_facts:advisory")
+
+    # --- Yield / ROI / appreciation / stray % — never unless in verified yield data ---
     for m in re.finditer(r"(\d+(?:[.,]\d+)?)\s*%", text):
         window = text[max(0, m.start() - 48): m.end() + 48].lower()
         pct_token = m.group(0).lower().replace(" ", "")
