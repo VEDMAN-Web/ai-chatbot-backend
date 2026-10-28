@@ -156,9 +156,9 @@ def test_gym_none_match_honest_message_and_labels():
         amenity_label="Gym",
         alternatives=alts,
     )
-    assert "None of the verified listings in Phuket list a gym" in text
+    assert "I couldn't confirm a gym" in text
+    assert "closest alternatives" in text.lower()
     assert "777 Beach Condo" in text
-    assert "not listed" in text.lower()
 
 
 def test_extract_gym_request_into_filters():

@@ -236,23 +236,8 @@ def handle_public_chat(
                     logger.warning("Lead save failed (chat reply unaffected): %s", lead_err)
                     recorded_lead_id = None
 
-                # Sync lead to Firestore
-                if getattr(settings, "ENABLE_FIRESTORE_SYNC", False):
-                    try:
-                        from app.services.firestore_service import create_lead_in_firestore
-                        from app.core.tenant import resolve_tenant
-                        _tenant = resolve_tenant(req.site_origin)
-                        create_lead_in_firestore({
-                            "name": req.contact_name,
-                            "email": req.contact_email,
-                            "phone": req.contact_phone,
-                            "brand": _tenant.brand_name,
-                            "source_url": _tenant.website_url,
-                            "message": req.notes or user_msg,
-                            "property_id": req.property_id or req.preferred_location or ""
-                        })
-                    except Exception as e:
-                        logger.warning(f"Firestore lead sync error: {e}")
+                # Firestore lead upsert is handled inside record_or_update_lead
+                # when STORE_LEADS_USER is firestore|both (dedupe_key transaction).
             else:
                 import uuid
                 recorded_lead_id = f"lead_session_{uuid.uuid4().hex[:8]}"
@@ -560,20 +545,7 @@ def submit_direct_lead(
             )
         except Exception as lead_err:
             logger.warning("Direct lead save failed (response unaffected): %s", lead_err)
-
-        if getattr(settings, "ENABLE_FIRESTORE_SYNC", False):
-            try:
-                from app.services.firestore_service import create_lead_in_firestore
-                create_lead_in_firestore({
-                    "name": req.contact_name,
-                    "email": req.contact_email,
-                    "phone": req.contact_phone,
-                    "property_id": req.preferred_location or "",
-                    "message": req.notes or "Direct frontend lead submission",
-                    "brand": conversation.site_origin or "tajlandia"
-                })
-            except Exception as e:
-                logger.warning(f"Firestore direct lead sync error: {e}")
+        # Firestore upsert (dedupe_key) runs inside record_or_update_lead when STORE_LEADS_USER allows it.
 
     return {
         "status": "success",
@@ -643,14 +615,22 @@ def download_property_brochure(
             try:
                 from app.services.lead_service import enqueue_lead_save
                 conv = get_or_create_conversation(db=db, session_id=session_id, site_origin=tenant.site_origin)
-                prop = db.query(Property).filter(Property.property_id == property_id.upper()).first()
-                pref_loc = f"{prop.district}, {prop.province}" if prop and prop.district else (prop.province if prop else None)
+                from app.services.property_search import get_property_by_id
+                prop = get_property_by_id(db, property_id)
+                district = getattr(prop, "district", None) if prop else None
+                province = getattr(prop, "province", None) if prop else None
+                pname = (
+                    (getattr(prop, "property_name", None) or getattr(prop, "name", None))
+                    if prop else None
+                )
+                ptype = getattr(prop, "property_type", None) if prop else None
+                pref_loc = f"{district}, {province}" if prop and district else (province if prop else None)
                 enqueue_lead_save(
                     db=db,
                     conversation=conv,
                     preferred_location=pref_loc,
-                    preferred_type=prop.property_type if prop else None,
-                    buying_signal=f"Downloaded brochure for {property_id.upper()} ({prop.property_name if prop else ''})",
+                    preferred_type=ptype,
+                    buying_signal=f"Downloaded brochure for {property_id.upper()} ({pname or ''})",
                     notes=f"Customer downloaded brochure PDF via {tenant.brand_name} ({tenant.domain})",
                 )
             except Exception as le:

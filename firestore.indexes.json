@@ -1,0 +1,28 @@
+{
+  "indexes": [
+    {
+      "collectionGroup": "leads",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "dedupe_key", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "chat_query_logs",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "session_id", "order": "ASCENDING" },
+        { "fieldPath": "turn_index", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "chat_query_logs",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "site_origin", "order": "ASCENDING" },
+        { "fieldPath": "created_at", "order": "DESCENDING" }
+      ]
+    }
+  ],
+  "fieldOverrides": []
+}

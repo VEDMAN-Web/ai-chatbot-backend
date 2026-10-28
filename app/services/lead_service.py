@@ -286,6 +286,14 @@ def record_or_update_lead(
         _IN_SESSION_LEADS[key] = existing
         session_lead = SessionLead(deepcopy(existing))
 
+    # Durable write according to STORE_LEADS_USER (never blocks on failure)
+    mode = leads_store_mode()
+    if mode in ("firestore", "both") and getattr(settings, "ENABLE_LEAD_SAVING", True):
+        try:
+            persist_lead_to_firestore(session_lead, conversation, notes=notes)
+        except Exception as fe:
+            logger.warning("Firestore lead write skipped: %s", fe)
+
     return session_lead
 
 
@@ -294,6 +302,179 @@ def get_session_lead(conversation: Any) -> Optional[SessionLead]:
     with _SESSION_LOCK:
         data = _IN_SESSION_LEADS.get(key)
         return SessionLead(deepcopy(data)) if data else None
+
+
+def leads_store_mode() -> str:
+    mode = str(getattr(settings, "STORE_LEADS_USER", "firestore") or "firestore").strip().lower()
+    if mode not in {"firestore", "postgres", "both"}:
+        return "firestore"
+    return mode
+
+
+def make_lead_dedupe_key(
+    *,
+    email: Optional[str] = None,
+    phone: Optional[str] = None,
+    site: Optional[str] = None,
+) -> Optional[str]:
+    """Normalised phone/email + site. Prefer phone when both present."""
+    from app.core.tenant import normalize_tenant_domain_key
+    site_key = normalize_tenant_domain_key(site) or str(site or "").strip().lower() or "unknown"
+    digits = re.sub(r"\D", "", str(phone or ""))
+    if len(digits) >= _PHONE_MIN_DIGITS:
+        return f"p:{digits}|{site_key}"
+    em = validate_email(email)
+    if em:
+        return f"e:{em}|{site_key}"
+    return None
+
+
+def _parse_notes_meta(notes: Optional[str]) -> Dict[str, str]:
+    raw = str(notes or "")
+    out: Dict[str, str] = {}
+    for key in ("property_id", "property_name", "language", "summary", "site"):
+        m = re.search(rf"{key}=([^;|]*)", raw)
+        if m:
+            out[key] = m.group(1).strip()
+    return out
+
+
+def persist_lead_to_firestore(
+    session_lead: SessionLead,
+    conversation: Any,
+    *,
+    notes: Optional[str] = None,
+    property_id: Optional[str] = None,
+    property_name: Optional[str] = None,
+    language: Optional[str] = None,
+    summary: Optional[str] = None,
+    client_override: Any = None,
+) -> Optional[str]:
+    """
+    Upsert into Firestore `leads` on dedupe_key (phone/email + site).
+    Updates summary/property when the same visitor contacts again. Returns doc id.
+    """
+    from datetime import datetime, timezone
+
+    site = getattr(conversation, "site_origin", None) or ""
+    meta = _parse_notes_meta(notes)
+    pid = property_id or meta.get("property_id") or ""
+    pname = property_name or meta.get("property_name") or ""
+    lang = language or meta.get("language") or ""
+    summ = summary or meta.get("summary") or (notes or "")
+    if meta.get("site"):
+        site = meta.get("site") or site
+
+    dedupe = make_lead_dedupe_key(
+        email=session_lead.contact_email,
+        phone=session_lead.contact_phone,
+        site=site,
+    )
+    if not dedupe:
+        # No durable contact key — skip Firestore write (still kept in-session)
+        return None
+
+    client = client_override
+    if client is None:
+        try:
+            from app.services.firestore_service import get_firestore_client
+            client = get_firestore_client("user")
+        except Exception:
+            client = None
+    if not client:
+        logger.warning("Firestore client unavailable; lead not written to Firestore")
+        return None
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    payload = {
+        "id": None,  # filled below
+        "name": session_lead.contact_name or "",
+        "email": session_lead.contact_email or "",
+        "phone": session_lead.contact_phone or "",
+        "status": session_lead.status or "new",
+        "site": site,
+        "source": "chatbot",
+        "property_id": pid,
+        "property_name": pname,
+        "session_id": getattr(conversation, "session_id", None) or session_lead.session_id or "",
+        "language": lang,
+        "summary": (summ or "")[:2000],
+        "dedupe_key": dedupe,
+        "updated_at": now_iso,
+    }
+
+    try:
+        col = client.collection("leads")
+        existing_id = None
+        existing_data = None
+        # Prefer query by dedupe_key (requires composite index in production)
+        try:
+            query = col.where("dedupe_key", "==", dedupe).limit(1)
+            for snap in query.stream():
+                existing_id = getattr(snap, "id", None)
+                existing_data = snap.to_dict() if hasattr(snap, "to_dict") else None
+                break
+        except Exception as qe:
+            logger.debug("leads dedupe query failed (falling back to scan): %s", qe)
+            try:
+                for snap in col.stream():
+                    data = snap.to_dict() if hasattr(snap, "to_dict") else None
+                    if isinstance(data, dict) and data.get("dedupe_key") == dedupe:
+                        existing_id = getattr(snap, "id", None)
+                        existing_data = data
+                        break
+            except Exception:
+                pass
+
+        # Transactional when the client exposes .transaction(); otherwise atomic-enough upsert.
+        def _upsert():
+            nonlocal existing_id, existing_data
+            if existing_id:
+                doc_ref = col.document(existing_id)
+                update = {
+                    "updated_at": now_iso,
+                    "summary": payload["summary"] or (existing_data or {}).get("summary") or "",
+                    "property_id": pid or (existing_data or {}).get("property_id") or "",
+                    "property_name": pname or (existing_data or {}).get("property_name") or "",
+                    "session_id": payload["session_id"],
+                    "language": lang or (existing_data or {}).get("language") or "",
+                    "status": payload["status"],
+                    "dedupe_key": dedupe,
+                }
+                if payload["name"]:
+                    update["name"] = payload["name"]
+                if payload["email"]:
+                    update["email"] = payload["email"]
+                if payload["phone"]:
+                    update["phone"] = payload["phone"]
+                doc_ref.update(update)
+                return existing_id
+            doc_ref = col.document()
+            new_id = getattr(doc_ref, "id", None) or f"lead_{uuid4().hex[:12]}"
+            body = dict(payload)
+            body["id"] = new_id
+            body["created_at"] = now_iso
+            doc_ref.set(body)
+            return new_id
+
+        if hasattr(client, "transaction"):
+            try:
+                from google.cloud import firestore as gcf  # type: ignore
+                transaction = client.transaction()
+
+                @gcf.transactional
+                def _txn_body(transaction):
+                    # Re-read inside the transaction when possible
+                    return _upsert()
+
+                return _txn_body(transaction)
+            except Exception as te:
+                logger.debug("Lead Firestore transaction fallback to direct upsert: %s", te)
+                return _upsert()
+        return _upsert()
+    except Exception as e:
+        logger.warning("Firestore lead upsert failed: %s", e)
+        return None
 
 
 def _persist_sql_lead(db: Session, conversation: Any, session_lead: SessionLead) -> None:
@@ -378,17 +559,20 @@ def enqueue_lead_save(
         local_db = None
         try:
             lead = record_or_update_lead(db=None, conversation=snap, **payload)
-            if getattr(settings, "ENABLE_LEAD_SAVING", False):
-                try:
-                    from app.db.session import UserSessionLocal
-                    local_db = UserSessionLocal()
-                except Exception:
-                    local_db = None
-                if local_db is not None and lead is not None:
+            if getattr(settings, "ENABLE_LEAD_SAVING", False) and lead is not None:
+                mode = leads_store_mode()
+                if mode in ("postgres", "both"):
                     try:
-                        _persist_sql_lead(local_db, snap, lead)
-                    except Exception as pe:
-                        logger.warning("Lead SQL persist failed (session lead kept): %s", pe)
+                        from app.db.session import UserSessionLocal
+                        local_db = UserSessionLocal()
+                    except Exception:
+                        local_db = None
+                    if local_db is not None:
+                        try:
+                            _persist_sql_lead(local_db, snap, lead)
+                        except Exception as pe:
+                            logger.warning("Lead SQL persist failed (session lead kept): %s", pe)
+                # Firestore write already attempted inside record_or_update_lead for firestore/both
         except Exception as e:
             logger.warning("Background lead save failed (chat reply unaffected): %s", e)
         finally:

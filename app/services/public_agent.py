@@ -1153,12 +1153,20 @@ def search_properties_unified(
     exclude_property_ids: Optional[List[str]] = None
 ) -> List[Dict[str, Any]]:
     """
-    Unified property search engine that combines local PostgreSQL database records
-    with live Cloud Firestore records (from projects collection).
-    Excludes any property IDs already recommended in this chat session to prevent duplicate suggestions.
+    Unified public property search via the in-memory Firestore property index
+    (STORE_PROPERTIES_READ_USER). Optional SQL fallback when mode is postgres/both.
+    Excludes property IDs already recommended in this chat session.
     """
+    from app.services.property_index import (
+        IndexUnavailable,
+        get_property_index,
+        public_store_mode,
+        sanitize_public_card,
+    )
+
     lim = limit or params.limit or 6
     cards: List[Dict[str, Any]] = []
+    mode = public_store_mode()
 
     # If this is a specific direct search by name/query, do NOT exclude it
     if getattr(params, "query", None):
@@ -1166,60 +1174,48 @@ def search_properties_unified(
     else:
         exclude_set = {str(eid).strip().lower() for eid in (exclude_property_ids or []) if eid}
 
-    # 1. Search live Cloud Firestore (Primary Datastore)
-    if getattr(settings, "ENABLE_FIRESTORE_SYNC", True):
-        try:
-            from app.services.firestore_service import search_properties_firestore
-            req_am = list(getattr(params, "required_amenities", None) or [])
-            # Legacy pool/beach flags also implied by canonical amenity requests
-            has_pool_flag = params.has_pool
-            beach_flag = params.beach_access
-            if "pool" in req_am or "pool_private" in req_am:
-                has_pool_flag = True
-            if "beach_access" in req_am:
-                beach_flag = True
-            fs_cards = search_properties_firestore(
-                location=params.location,
-                property_type=params.property_type,
-                min_price=float(params.min_price) if params.min_price else None,
-                max_price=float(params.max_price) if params.max_price else None,
-                bedrooms=int(params.bedrooms) if params.bedrooms and str(params.bedrooms).isdigit() else None,
-                min_bedrooms=int(params.min_bedrooms) if getattr(params, "min_bedrooms", None) is not None else None,
-                max_bedrooms=int(params.max_bedrooms) if getattr(params, "max_bedrooms", None) is not None else None,
-                has_pool=has_pool_flag,
-                beach_access=beach_flag,
-                required_amenities=req_am or None,
-                query=getattr(params, "query", None),
-                websites=getattr(params, "websites", None),
-                target="user",
-                limit=lim + len(exclude_set),
-                exclude_property_ids=list(exclude_set),
-                sort_by_price=getattr(params, "sort_by_price", None),
-                max_price_exclusive=bool(getattr(params, "max_price_exclusive", False)),
-                status=getattr(params, "status", None),
-            )
-            if fs_cards:
-                for c in fs_cards:
-                    cid = str(c.get("property_id") or c.get("id") or "").strip().lower()
-                    cname = str(c.get("name") or "").strip().lower()
-                    if cid not in exclude_set and cname not in exclude_set:
-                        cards.append(c)
-        except Exception as e:
-            logger.warning(f"Error querying Firestore properties in search_properties_unified: {e}")
+    req_am = list(getattr(params, "required_amenities", None) or [])
+    if "pool" in req_am or "pool_private" in req_am:
+        params.has_pool = True
+    if "beach_access" in req_am:
+        params.beach_access = True
 
-    # 2. Local database fallback (only if Firestore client is completely unavailable/uninitialized, e.g. offline testing)
-    if not cards and db is not None:
+    if mode in ("firestore", "both"):
         try:
-            from app.services.firestore_service import get_firestore_client
-            if not get_firestore_client("user"):
-                db_props = search_properties_safe(db, params)
-                for p in db_props:
-                    pid = str(p.property_id or "").strip().lower()
-                    pname = str(p.property_name or "").strip().lower()
-                    if pid not in exclude_set and pname not in exclude_set:
-                        cards.append(format_property_card(p))
+            idx_cards = get_property_index().search(
+                params,
+                exclude_property_ids=list(exclude_set) if exclude_set else None,
+                limit=lim + len(exclude_set),
+            )
+            for c in idx_cards:
+                cid = str(c.get("property_id") or c.get("id") or "").strip().lower()
+                cname = str(c.get("name") or "").strip().lower()
+                if cid not in exclude_set and cname not in exclude_set:
+                    cards.append(sanitize_public_card(c))
+        except IndexUnavailable:
+            logger.warning("Property index unavailable; SQL fallback if a session is present")
         except Exception as e:
-            logger.warning(f"Error querying local database properties in search_properties_unified: {e}")
+            logger.warning("Error querying property index in search_properties_unified: %s", e)
+
+    # SQL fallback: explicit postgres/both, or firestore mode with empty/unavailable index + live db
+    # (keeps SQL-seeded unit tests working; production Firestore-only path raises IndexUnavailable above
+    # when no cache and no db).
+    if not cards and db is not None and mode in ("postgres", "both", "firestore"):
+        try:
+            from app.services.property_search import build_property_query
+            query = build_property_query(db, params)
+            db_props = query.offset(params.offset or 0).limit(lim + len(exclude_set)).all()
+            for p in db_props or []:
+                pid = str(getattr(p, "property_id", "") or "").strip().lower()
+                pname = str(getattr(p, "property_name", "") or getattr(p, "name", "") or "").strip().lower()
+                if pid not in exclude_set and pname not in exclude_set:
+                    cards.append(format_property_card(p))
+        except Exception as e:
+            logger.warning("Error querying local database properties in search_properties_unified: %s", e)
+
+    if not cards and mode == "firestore" and db is None:
+        # No cache, no SQL — surface the busy path to the caller
+        raise IndexUnavailable("Property index empty and no SQL fallback session")
 
     return cards[:lim]
 
@@ -3067,6 +3063,31 @@ class PublicAgentService:
                 requested_language=requested_language
             )
             return self._post_process_response(res, user_message=user_message)
+        except Exception as exc:
+            from app.services.property_index import IndexUnavailable
+            if not isinstance(exc, IndexUnavailable):
+                raise
+            from app.services.i18n_service import get_service_busy_text
+            lang, _ = resolve_language(
+                requested_language=requested_language,
+                user_message=user_message,
+                stored_preferences=getattr(conversation, "preferences", None) or {},
+            )
+            busy = get_service_busy_text(lang, site_origin=getattr(conversation, "site_origin", None))
+            logger.warning("Property index unavailable for public chat: %s", exc)
+            return {
+                "type": "text",
+                "text": busy,
+                "properties": [],
+                "quick_replies": ["Show villas in Phuket", "Connect me with an advisor"],
+                "lead_captured": False,
+                "preferences": getattr(conversation, "preferences", None) or {},
+                "session_id": getattr(conversation, "session_id", None),
+                "conversation_id": str(getattr(conversation, "id", "") or ""),
+                "language": lang,
+                "fallback_type": "error",
+                "intent": "error",
+            }
         finally:
             reset_request_site(_site_token)
             logger.info(
@@ -4035,12 +4056,27 @@ class PublicAgentService:
 
         # Contact + interest: confirm advisor follow-up, name the property, never return cards
         if (c_email or c_phone) and (c_name or prop_name or not is_viewing):
-            who = ", ".join(bit for bit in (c_name, c_email, c_phone) if bit)
-            about = f" regarding {prop_name}" if prop_name else ""
-            reply_text = (
-                f"Thank you{', ' + c_name if c_name else ''}. I have {who}{about}. "
-                f"An advisor at {tenant.advisor_email} will contact you."
-            )
+            contact_bits = ", ".join(bit for bit in (c_email, c_phone) if bit)
+            if wants_specs and prop_name:
+                interest = f"the specifications of {prop_name}"
+            elif is_viewing and prop_name:
+                interest = f"private viewing of {prop_name}"
+            elif prop_name:
+                interest = f"a call back about {prop_name}"
+            else:
+                interest = None
+            # Name only in the thank-you — never "Thank you, John. I have John, ..."
+            have_bits = contact_bits
+            if interest:
+                reply_text = (
+                    f"Thank you{', ' + c_name if c_name else ''}. I have {have_bits} for {interest}. "
+                    f"An advisor at {tenant.advisor_email} will contact you."
+                )
+            else:
+                reply_text = (
+                    f"Thank you{', ' + c_name if c_name else ''}. I have {have_bits}. "
+                    f"An advisor at {tenant.advisor_email} will contact you."
+                )
             stored_prefs["pending_lead_contact"] = {}
             conversation.preferences = stored_prefs
             append_conversation_turn(
@@ -4243,10 +4279,14 @@ class PublicAgentService:
                     f"{' ทาง **' + contact + '**' if contact else ''}")
         else:
             subject = f"**{target_label}**" if target_label else "the property you asked about"
-            what = ("the verified specifications" if wants_specs
-                    else ("a private viewing" if is_viewing else "contact"))
+            if wants_specs:
+                what = f"the specifications of {subject}"
+            elif is_viewing:
+                what = f"private viewing of {subject}"
+            else:
+                what = f"a call back about {subject}"
             slot = f" Preferred time: {requested_slot}." if requested_slot else ""
-            text = (f"Thank you{who}! We have registered your request for {what} of {subject}.{slot} "
+            text = (f"Thank you{who}! We have registered your request for {what}.{slot} "
                     f"An advisor from {tenant.brand_name} ({tenant.advisor_email}) will contact you"
                     f"{' via **' + contact + '**' if contact else ''} to follow up.")
 
@@ -4645,6 +4685,37 @@ class PublicAgentService:
             message_looks_like_filter_search,
             extract_search_filters_deterministic,
         )
+
+        # Short / partial name matching several listings → Did you mean A, B or C? (max 3)
+        _name_cands = [
+            str(n).strip() for n in (args.get("name_candidates") or []) if str(n or "").strip()
+        ][:3]
+        if args.get("name_uncertain") and len(_name_cands) >= 2:
+            from app.services.answer_policy import did_you_mean_reply
+            from app.services.name_confirmation import store_pending_name_candidates
+            reply_text = did_you_mean_reply(_name_cands)
+            cand_dicts = [{"property_id": n, "name": n} for n in _name_cands]
+            conversation.preferences = store_pending_name_candidates(
+                conversation.preferences,
+                query=str(args.get("property_name") or user_message),
+                candidates=cand_dicts,
+            )
+            append_conversation_turn(
+                db=db, conversation=conversation, user_message=user_message,
+                assistant_message=reply_text, new_preferences=conversation.preferences,
+            )
+            return {
+                "type": "text",
+                "text": reply_text,
+                "properties": [],
+                "quick_replies": _name_cands,
+                "lead_captured": False,
+                "preferences": conversation.preferences or {},
+                "session_id": conversation.session_id,
+                "conversation_id": str(conversation.id),
+                "language": language,
+                "fallback_type": "did_you_mean",
+            }
 
         # Never name-not-found on stop words ("you", "there anything") — re-route to search
         _cand = str(args.get("property_name") or args.get("property_id") or "").strip()
@@ -6933,6 +7004,35 @@ class PublicAgentService:
         comp_tokens = 0
         llm_calls = 0
         reply_text = ""
+
+        # Advisor / canned policy first (mortgage, buying process, foreign ownership)
+        from app.services.answer_policy import answer_policy as _ap_gq, classify_question_kind
+        from app.core.tenant import resolve_tenant as _rt_gq
+        _kind_gq = classify_question_kind(user_message)
+        if _kind_gq in ("general_advisory", "foreign_ownership"):
+            _ten_gq = _rt_gq(getattr(conversation, "site_origin", None))
+            policy = _ap_gq(
+                _kind_gq, {}, question=user_message,
+                site=getattr(conversation, "site_origin", None),
+                language=language, advisor_email=_ten_gq.advisor_email,
+            )
+            if policy.get("text"):
+                append_conversation_turn(
+                    db=db, conversation=conversation, user_message=user_message,
+                    assistant_message=policy["text"], new_preferences=conversation.preferences,
+                )
+                return {
+                    "type": "text",
+                    "text": policy["text"],
+                    "properties": [],
+                    "quick_replies": policy.get("quick_replies") or ["Connect me with an advisor"],
+                    "lead_captured": False,
+                    "preferences": conversation.preferences or {},
+                    "session_id": conversation.session_id,
+                    "conversation_id": str(conversation.id),
+                    "language": language,
+                    "fallback_type": policy.get("fallback_type") or "no_data",
+                }
 
         u_low = user_message.lower()
         if any(k in u_low for k in ["pdf", "report", "export", "broszura", "dossier", "โบรชัวร์", "รายงาน", "เอกสาร"]) and any(k in u_low for k in ["generate", "export", "download", "send", "wygeneruj", "pobierz", "daj", "create", "สร้าง", "ดาวน์โหลด", "ส่ง", "ขอ", "want", "have", "get"]):

@@ -166,6 +166,9 @@ class Settings(BaseSettings):
     ENABLE_CHAT_LOGGING: bool = True
     CHAT_LOG_MASK_PII: bool = True
     ENABLE_AUDIT_LOGGING: bool = False
+    # Public chatbot datastore modes: firestore | postgres | both (Firestore first, SQL if index empty)
+    STORE_PROPERTIES_READ_USER: str = "firestore"
+    STORE_LEADS_USER: str = "firestore"
     # Absolute base for relative listing image URLs on property cards
     PUBLIC_API_BASE_URL: str = ""
 
@@ -370,6 +373,13 @@ def log_config_warnings() -> None:
     """
     Emit WARNING logs once at startup for risky/off flags. Never logs secret values.
     """
+    prop_mode = str(getattr(settings, "STORE_PROPERTIES_READ_USER", "firestore") or "firestore").strip().lower()
+    lead_mode = str(getattr(settings, "STORE_LEADS_USER", "firestore") or "firestore").strip().lower()
+    logger.info(
+        "Public chatbot store modes: STORE_PROPERTIES_READ_USER=%s STORE_LEADS_USER=%s",
+        prop_mode,
+        lead_mode,
+    )
     if not getattr(settings, "ENABLE_AUDIT_LOGGING", False):
         logger.warning("Admin audit logging is OFF")
     if not getattr(settings, "ENABLE_LEAD_SAVING", False):
@@ -481,5 +491,11 @@ def get_public_config_status() -> Dict[str, Any]:
         "chat_logging": bool(getattr(settings, "ENABLE_CHAT_LOGGING", True)),
         "chat_log_mask_pii": bool(getattr(settings, "CHAT_LOG_MASK_PII", True)),
         "lead_saving": bool(getattr(settings, "ENABLE_LEAD_SAVING", True)),
+        "store_properties_read_user": str(
+            getattr(settings, "STORE_PROPERTIES_READ_USER", "firestore") or "firestore"
+        ).strip().lower(),
+        "store_leads_user": str(
+            getattr(settings, "STORE_LEADS_USER", "firestore") or "firestore"
+        ).strip().lower(),
         "fallback_types": ["none", "no_data", "off_topic", "did_you_mean", "error"],
     }

@@ -977,7 +977,8 @@ def load_brochure_data(
     language: str = "en",
 ) -> BrochureData:
     """
-    Load BrochureData from PostgreSQL first, then Firestore (read-only).
+    Load BrochureData from the public property index (Firestore), with optional SQL
+    when STORE_PROPERTIES_READ_USER is postgres/both.
     Raises ValueError if the property exists in neither store.
     Never invents missing values.
     """
@@ -986,18 +987,25 @@ def load_brochure_data(
         raise ValueError("Property with ID '' not found.")
 
     lang = _normalize_lang(language)
-    prop = _load_postgres_property(db, pid)
-    if prop is not None:
-        return _from_postgres(prop, lang, site_origin)
+    from app.services.property_index import get_property_index, public_store_mode, sanitize_public_card
+    mode = public_store_mode()
 
-    try:
-        from app.services.firestore_service import get_property_by_id_from_firestore
-        fs_card = get_property_by_id_from_firestore(pid)
-    except Exception as e:
-        logger.warning(f"Firestore brochure data lookup failed for '{pid}': {e}")
-        fs_card = None
+    if mode in ("firestore", "both"):
+        try:
+            fs_card = get_property_index().get_by_id(pid, site=site_origin)
+            if not fs_card:
+                from app.services.firestore_service import get_property_by_id_from_firestore
+                fs_card = get_property_by_id_from_firestore(pid)
+                if fs_card:
+                    fs_card = sanitize_public_card(fs_card)
+            if fs_card and isinstance(fs_card, dict):
+                return _from_firestore_card(fs_card, lang, site_origin)
+        except Exception as e:
+            logger.warning(f"Index/Firestore brochure data lookup failed for '{pid}': {e}")
 
-    if fs_card and isinstance(fs_card, dict):
-        return _from_firestore_card(fs_card, lang, site_origin)
+    if mode in ("postgres", "both"):
+        prop = _load_postgres_property(db, pid)
+        if prop is not None:
+            return _from_postgres(prop, lang, site_origin)
 
     raise ValueError(f"Property with ID '{property_id}' not found.")

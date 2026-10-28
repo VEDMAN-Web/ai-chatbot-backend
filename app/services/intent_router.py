@@ -853,6 +853,142 @@ def _looks_like_phone(text: str) -> bool:
     return True
 
 
+_LEAD_NAME_RE = re.compile(
+    r"(?:(?:my\s+name\s+is|i(?:['’]?m|\s+am)|this\s+is|nazywam\s+się|imię:|name:)\s+)"
+    r"([A-Z][a-zA-Z\'’-]+(?:\s+[A-Z][a-zA-Z\'’-]+)?)",
+    re.I,
+)
+_PHONE_KW_NUMBER_RE = re.compile(
+    r"(?:(?:my\s+)?(?:phone|number|mobile|cell)(?:\s*(?:number|is|:))?|"
+    r"call\s+me\s+(?:on|at)|reach\s+me\s+(?:on|at)|"
+    r"(?:phone|tel|mobile|number)\s*[:=])\s*"
+    r"(\+?[\d][\d\s\-().]{0,18}\d|\d{2,})",
+    re.I,
+)
+_LONG_PHONE_RE = re.compile(
+    r"(\+?\d{1,4}[-.\s]?(?:\(?\d{1,4}\)?[-.\s]?)?(?:\d{2,4}[-.\s]?){2,4}\d{2,4})"
+)
+_EMAIL_RE_LEAD = re.compile(r"[\w\.-]+@[\w\.-]+\.\w+")
+_ABOUT_NAME_FRAGMENT_RE = re.compile(
+    r"^(?:(?:can\s+you\s+)?tell\s+me\s+(?:more\s+)?about|"
+    r"(?:more\s+)?(?:details?|info(?:rmation)?)\s+(?:about|on|for)|"
+    r"what\s+about|how\s+about)\s+(.+?)\s*[?.!]*$",
+    re.I,
+)
+
+
+def _extract_lead_name(message: str) -> Optional[str]:
+    m = _LEAD_NAME_RE.search(message or "")
+    if not m:
+        return None
+    return m.group(1).strip()
+
+
+def _extract_phone_from_message(message: str) -> Tuple[Optional[str], bool]:
+    """
+    Return (raw_phone, looks_valid).
+    Catches short invalid numbers after phone/call keywords ("my phone is 12", "call me on 123").
+    Dates like 2026-11-02 are not treated as invalid-phone attempts.
+    """
+    text = message or ""
+    long_m = _LONG_PHONE_RE.search(text)
+    if long_m:
+        raw = long_m.group(0).strip()
+        if _looks_like_phone(raw):
+            return raw, True
+        # Non-phone digit run (ISO date, price fragment): ignore unless a phone keyword wraps it
+    kw_m = _PHONE_KW_NUMBER_RE.search(text)
+    if kw_m:
+        raw = kw_m.group(1).strip()
+        # Still reject pure dates even after a keyword
+        if re.fullmatch(r"\d{4}[-/.]\d{1,2}[-/.]\d{1,2}(?:\s+\d{1,2}[:.]\d{2})?", raw):
+            return None, False
+        return raw, _looks_like_phone(raw)
+    return None, False
+
+
+def _should_skip_mention_for_lead(message: str) -> bool:
+    """Lead capture must win over property-name mention when contact (or name+contact) is present."""
+    if _EMAIL_RE_LEAD.search(message or ""):
+        return True
+    phone_raw, phone_ok = _extract_phone_from_message(message or "")
+    if phone_raw and phone_ok:
+        return True
+    name = _extract_lead_name(message or "")
+    if name and (phone_raw or _EMAIL_RE_LEAD.search(message or "")):
+        return True
+    if phone_raw and not phone_ok:
+        return True  # invalid phone attempt — still lead, never mention
+    return False
+
+
+def _partial_name_multi_match_intent(msg_clean: str) -> Optional[Tuple[IntentType, Dict[str, Any]]]:
+    """
+    One-word / short fragment that hits several listings ("tell me about Sea")
+    → PROPERTY_DETAILS with name_candidates for Did you mean A, B or C?
+    """
+    m = _ABOUT_NAME_FRAGMENT_RE.match((msg_clean or "").strip())
+    if not m:
+        return None
+    fragment = m.group(1).strip(" .,?!'\"")
+    fragment = re.sub(r"^(?:the|a|an)\s+", "", fragment, flags=re.I).strip()
+    if not fragment or len(fragment) > 40:
+        return None
+    if message_looks_like_filter_search(msg_clean):
+        return None
+    try:
+        from app.services.property_name_index import (
+            get_property_name_index,
+            normalize_property_name,
+        )
+        idx = get_property_name_index()
+        word = normalize_property_name(fragment)
+        if not word:
+            return None
+        mention = idx.find_mention(msg_clean)
+        if mention.confident:
+            return None
+        names: List[str] = []
+        if mention.candidates:
+            names = [
+                c.display_name for c in mention.candidates[:3]
+                if getattr(c, "display_name", None)
+            ]
+        if len(names) < 2:
+            hits: List[str] = []
+            seen = set()
+            with idx._lock:
+                entries = list(idx._entries)
+            for e in entries:
+                aliases = getattr(e, "aliases_norm", None) or []
+                if any(
+                    (" " + word + " ") in (" " + a + " ")
+                    or a == word
+                    or a.startswith(word + " ")
+                    or a.endswith(" " + word)
+                    for a in aliases
+                ):
+                    label = e.display_name
+                    key = (label or "").lower()
+                    if key and key not in seen:
+                        seen.add(key)
+                        hits.append(label)
+                    if len(hits) >= 3:
+                        break
+            names = hits
+        if len(names) >= 2:
+            return IntentType.PROPERTY_DETAILS, {
+                "property_name": fragment,
+                "property_id": fragment,
+                "focus_question": msg_clean,
+                "name_uncertain": True,
+                "name_candidates": names[:3],
+            }
+    except Exception:
+        return None
+    return None
+
+
 def _lead_target_ref(msg_clean: str) -> Optional[str]:
     """The listing a viewing / email request is about: a listing id in the message, else a confidently named listing."""
     m = _PROPERTY_ID_RE.search(msg_clean)
@@ -925,16 +1061,95 @@ def detect_deterministic_intent(
     msg_clean = normalize_command_text(msg_clean)
     msg_low = msg_clean.lower()
 
-    # Sort requests are not property names ("most expensive ones").
+    # 0.1 Lead Contact & Private Viewing — evaluated before name-mention so lead wins any turn
+    email_match = _EMAIL_RE_LEAD.search(message)
+    phone_raw, phone_ok = _extract_phone_from_message(message)
+    phone_match_valid = phone_raw if (phone_raw and phone_ok) else None
+    phone_match_invalid = phone_raw if (phone_raw and not phone_ok) else None
+    lead_name = _extract_lead_name(message)
+    viewing_keywords = [
+        "viewing", "arrange a viewing", "schedule a viewing", "visit next month", "private viewing",
+        "book a viewing", "tour the villa", "prezentacj", "oglądani", "umówić spotkanie",
+        "นัดชม", "เข้าชม", "จองคิวชม"
+    ]
+    has_viewing_intent = any(k in msg_low for k in viewing_keywords)
+    if is_weather_question(msg_clean):
+        return None, {"weather": True}
+
+    # Invalid phone ("my phone is 12", "call me on 123") → lead capture ask, never off-topic / mention
+    if phone_match_invalid and not email_match and not phone_match_valid:
+        prior_name = None
+        pending = state.get("pending_lead_contact") if isinstance(state.get("pending_lead_contact"), dict) else {}
+        if pending.get("name"):
+            prior_name = pending.get("name")
+        return IntentType.LEAD_CAPTURE, {
+            "email": None,
+            "phone": phone_match_invalid,
+            "name": lead_name or prior_name,
+            "advisor_request": bool(is_advisor_request(msg_clean)),
+            "is_viewing": has_viewing_intent,
+            "location": None,
+            "invalid_phone": True,
+            "target_ref": _lead_target_ref(msg_clean),
+        }
+
+    if is_advisor_request(msg_clean) and not (email_match or phone_match_valid):
+        return IntentType.LEAD_CAPTURE, {
+            "email": None,
+            "phone": None,
+            "name": lead_name,
+            "advisor_request": True,
+            "is_viewing": False,
+            "location": None,
+        }
+
+    # Name alone (no phone/email yet) — stash for multi-turn lead capture
+    if lead_name and not email_match and not phone_match_valid and not has_viewing_intent:
+        if re.search(r"\b(?:my name is|nazywam się|imię:|name:)\b", msg_low) or re.search(
+            r"\b(?:i(?:['’]?m|\s+am)|this\s+is)\b", msg_low
+        ):
+            # Bare "I'm John" / "this is Mary" without contact → partial; "my name is" always partial
+            if re.search(r"\b(?:my name is|nazywam się|imię:|name:)\b", msg_low):
+                return IntentType.LEAD_CAPTURE, {
+                    "email": None,
+                    "phone": None,
+                    "name": lead_name,
+                    "advisor_request": False,
+                    "is_viewing": False,
+                    "location": None,
+                    "partial_contact": True,
+                }
+
+    if email_match or phone_match_valid or (has_viewing_intent and any(k in msg_low for k in ["name", "email", "phone", "contact", "telefon", "mail"])):
+        search_f = extract_search_filters_deterministic(message)
+        prior_name = None
+        pending = state.get("pending_lead_contact") if isinstance(state.get("pending_lead_contact"), dict) else {}
+        if pending.get("name"):
+            prior_name = pending.get("name")
+        return IntentType.LEAD_CAPTURE, {
+            "email": email_match.group(0) if email_match else None,
+            "phone": phone_match_valid,
+            "name": lead_name or prior_name,
+            "advisor_request": bool(is_advisor_request(msg_clean)),
+            "location": search_f.get("location"),
+            "property_type": search_f.get("property_type", "Villa"),
+            "budget": search_f.get("max_price"),
+            "is_viewing": has_viewing_intent,
+            "wants_specs": bool(re.search(r"\b(?:e-?mail|send)\b.*\b(?:brochure|specs?|specifications|floor\s*plans?|details)\b", msg_low)),
+            "target_ref": _lead_target_ref(msg_clean),
+        }
+
+    # Sort / weather already handled above; listing-name mention (unless lead contact wins)
     if is_sort_only_request(msg_clean) or is_weather_question(msg_clean):
         pass
-    # A listing named anywhere in the message (typos allowed) decides the intent before any pattern guessing --
-    # except card actions (PDF / email / tour / inquiry), which carry the name only to say WHICH listing.
-    elif len(msg_clean) >= 4 and not _is_card_action_message(msg_clean):
+    elif len(msg_clean) >= 4 and not _is_card_action_message(msg_clean) and not _should_skip_mention_for_lead(message):
         _pc0 = state.get("property_context") if isinstance(state.get("property_context"), dict) else {}
         _by_mention = _mention_intent(msg_clean, reference_map=_pc0.get("reference_map"))
         if _by_mention:
             return _by_mention
+        _partial = _partial_name_multi_match_intent(msg_clean)
+        if _partial:
+            return _partial
     selected_ids = list(state.get("selected_property_ids") or [])
 
     # Hydrate from persistent property_context (survives long chats / restarts)
@@ -953,68 +1168,6 @@ def detect_deterministic_intent(
             last_result_ids = batch or list(pctx.get("recently_discussed_ids") or [])
             state = dict(state)
             state["last_result_ids"] = last_result_ids
-
-    # 0.1 Lead Contact & Private Viewing Request Detection
-    email_match = re.search(r"[\w\.-]+@[\w\.-]+\.\w+", message)
-    phone_match = re.search(r"(\+?\d{1,4}[-.\s]?(?:\(?\d{1,4}\)?[-.\s]?)?(?:\d{2,4}[-.\s]?){2,4}\d{2,4})", message)
-    viewing_keywords = [
-        "viewing", "arrange a viewing", "schedule a viewing", "visit next month", "private viewing",
-        "book a viewing", "tour the villa", "prezentacj", "oglądani", "umówić spotkanie",
-        "นัดชม", "เข้าชม", "จองคิวชม"
-    ]
-    has_viewing_intent = any(k in msg_low for k in viewing_keywords)
-    if phone_match and not _looks_like_phone(phone_match.group(0)):
-        phone_match = None  # "2026-11-02", "10:00", a price: not a phone number
-    if is_weather_question(msg_clean):
-        return None, {"weather": True}
-
-    if is_advisor_request(msg_clean) and not (email_match or phone_match):
-        return IntentType.LEAD_CAPTURE, {
-            "email": None,
-            "phone": None,
-            "name": None,
-            "advisor_request": True,
-            "is_viewing": False,
-            "location": None,
-        }
-
-    name_match = re.search(
-        r"(?:my name is|i am|nazywam się|imię:|name:)\s+([A-Z][a-zA-Z\'-]+(?:\s+[A-Z][a-zA-Z\'-]+)?)",
-        message,
-        re.I,
-    )
-    # Name alone (no phone/email yet) — stash for multi-turn lead capture
-    if name_match and not email_match and not phone_match and not has_viewing_intent:
-        if re.search(r"\b(?:my name is|nazywam się|imię:|name:)\b", msg_low):
-            return IntentType.LEAD_CAPTURE, {
-                "email": None,
-                "phone": None,
-                "name": name_match.group(1).strip(),
-                "advisor_request": False,
-                "is_viewing": False,
-                "location": None,
-                "partial_contact": True,
-            }
-
-    if email_match or phone_match or (has_viewing_intent and any(k in msg_low for k in ["name", "email", "phone", "contact", "telefon", "mail"])):
-        search_f = extract_search_filters_deterministic(message)
-        # Merge name already stored from an earlier turn in this session
-        prior_name = None
-        pending = state.get("pending_lead_contact") if isinstance(state.get("pending_lead_contact"), dict) else {}
-        if pending.get("name"):
-            prior_name = pending.get("name")
-        return IntentType.LEAD_CAPTURE, {
-            "email": email_match.group(0) if email_match else None,
-            "phone": phone_match.group(0).strip() if phone_match else None,
-            "name": (name_match.group(1).strip() if name_match else None) or prior_name,
-            "advisor_request": bool(is_advisor_request(msg_clean)),
-            "location": search_f.get("location"),
-            "property_type": search_f.get("property_type", "Villa"),
-            "budget": search_f.get("max_price"),
-            "is_viewing": has_viewing_intent,
-            "wants_specs": bool(re.search(r"\b(?:e-?mail|send)\b.*\b(?:brochure|specs?|specifications|floor\s*plans?|details)\b", msg_low)),
-            "target_ref": _lead_target_ref(msg_clean),
-        }
 
     # 0.2 Inventory asks: "Do you have …?", "Is there …?", "Have you got …?"
     # Never treat "you" / "there" / "anything" as a property name.

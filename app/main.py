@@ -51,7 +51,21 @@ if os.path.exists(static_dir):
 
 
 def _prewarm_caches_background() -> None:
-    """Load catalog + name index without blocking startup; never raise."""
+    """Load property index + name index without blocking startup; never raise."""
+    try:
+        from app.core.config import settings as _settings
+        logger.info(
+            "STORE_PROPERTIES_READ_USER=%s STORE_LEADS_USER=%s",
+            getattr(_settings, "STORE_PROPERTIES_READ_USER", "firestore"),
+            getattr(_settings, "STORE_LEADS_USER", "firestore"),
+        )
+    except Exception:
+        pass
+    try:
+        from app.services.property_index import get_property_index
+        get_property_index().ensure_fresh(force=True)
+    except Exception as e:
+        logger.warning("Startup property index pre-warm failed (non-fatal): %s", e)
     try:
         from app.services.firestore_service import prewarm_property_catalog
         prewarm_property_catalog(target="user")

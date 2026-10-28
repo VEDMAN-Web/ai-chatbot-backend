@@ -108,31 +108,35 @@ def _firestore_card_to_brochure_prop(card: Dict[str, Any]) -> SimpleNamespace:
 
 def _load_property_for_brochure(db: Session, property_id: str) -> Any:
     """
-    Load property for brochure: PostgreSQL first, then Firestore (read-only).
+    Load property for brochure via the public property index (Firestore), with optional SQL.
     Raises ValueError if missing from both.
     """
-    prop = None
-    if db is not None:
+    from app.services.property_index import get_property_index, public_store_mode, sanitize_public_card
+    mode = public_store_mode()
+    pid = str(property_id or "").strip()
+
+    if mode in ("firestore", "both"):
+        try:
+            fs_card = get_property_index().get_by_id(pid)
+            if not fs_card:
+                from app.services.firestore_service import get_property_by_id_from_firestore
+                fs_card = get_property_by_id_from_firestore(pid)
+                if fs_card:
+                    fs_card = sanitize_public_card(fs_card)
+            if fs_card and isinstance(fs_card, dict):
+                return _firestore_card_to_brochure_prop(fs_card)
+        except Exception as e:
+            logger.warning(f"Index/Firestore brochure lookup failed for '{property_id}': {e}")
+
+    if mode in ("postgres", "both") and db is not None:
         try:
             prop = db.query(Property).filter(Property.property_id == property_id.upper()).first()
             if not prop:
                 prop = db.query(Property).filter(Property.property_id.ilike(property_id.strip())).first()
+            if prop:
+                return prop
         except Exception as e:
             logger.warning(f"PostgreSQL brochure lookup failed for '{property_id}': {e}")
-            prop = None
-
-    if prop:
-        return prop
-
-    try:
-        from app.services.firestore_service import get_property_by_id_from_firestore
-        fs_card = get_property_by_id_from_firestore(str(property_id).strip())
-    except Exception as e:
-        logger.warning(f"Firestore brochure lookup failed for '{property_id}': {e}")
-        fs_card = None
-
-    if fs_card and isinstance(fs_card, dict):
-        return _firestore_card_to_brochure_prop(fs_card)
 
     raise ValueError(f"Property with ID '{property_id}' not found.")
 

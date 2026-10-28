@@ -20,6 +20,30 @@ SUPPORTED_LANGUAGES = ["en", "pl", "th"]
 DEFAULT_LANGUAGE = "en"
 
 
+def get_service_busy_text(
+    language: str = "en",
+    site_origin: Optional[str] = None,
+) -> str:
+    """Safe reply when the property index has no cache and Firestore is down."""
+    tenant = resolve_tenant(site_origin)
+    advisor = getattr(tenant, "advisor_email", None) or ""
+    lang = normalize_language(language) or "en"
+    if lang == "th":
+        return (
+            "ขออภัยครับ ขณะนี้ระบบรายการอสังหาฯ ไม่ว่างชั่วคราว "
+            f"กรุณาลองใหม่อีกครั้งในสักครู่ หรือติดต่อที่ปรึกษาที่ {advisor}"
+        )
+    if lang == "pl":
+        return (
+            "Przepraszamy. Usługa katalogu nieruchomości jest chwilowo zajęta. "
+            f"Spróbuj ponownie za chwilę albo napisz do doradcy: {advisor}."
+        )
+    return (
+        "I'm sorry. Our property service is temporarily busy. "
+        f"Please try again in a moment, or contact {advisor}."
+    )
+
+
 def get_data_unavailable_fallback(
     language: str = "en",
     site_origin: Optional[str] = None,

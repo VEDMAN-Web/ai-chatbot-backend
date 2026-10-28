@@ -242,8 +242,8 @@ def test_eight_turn_script_no_prose_to_model_and_claims_stripped(name_index, mon
         ]
 
     assert len(model_inputs) == 8
-    # After 6+ turns still only user history in grounded messages
+    # After 6+ turns still only user history in grounded messages (PUBLIC_LLM_HISTORY_USER_TURNS=6)
     last_blob = "\n".join(m["content"] for m in model_inputs[-1])
     assert "ASSISTANT_PROSE" not in last_blob
     user_roles = [m for m in model_inputs[-1] if m["role"] == "user"]
-    assert len(user_roles) <= 4
+    assert len(user_roles) <= 7

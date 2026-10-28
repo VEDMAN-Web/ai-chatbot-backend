@@ -1,3 +1,4 @@
+import logging
 import re
 from typing import Optional, List, Dict, Any
 from decimal import Decimal
@@ -6,6 +7,8 @@ from sqlalchemy import and_, or_, cast, String
 from pydantic import BaseModel, Field, field_validator
 from app.db.models import Property, PropertyImage, PropertySpec
 from app.core.tenant import normalize_website_list, normalize_website_domain, normalize_tenant_domain_key
+
+logger = logging.getLogger(__name__)
 
 class PropertyFilterParams(BaseModel):
     location: Optional[str] = Field(None, max_length=100)
@@ -324,52 +327,110 @@ class FirestorePropertyAdapter:
         return item in self._data
 
 
+def _properties_store_mode() -> str:
+    from app.services.property_index import public_store_mode
+    return public_store_mode()
+
+
 def search_properties_safe(db: Session, filters: PropertyFilterParams) -> List[Any]:
-    """Execute the safe query and fetch matched records with images."""
-    if db is None:
-        return []
-    query = build_property_query(db, filters)
-    return query.offset(filters.offset).limit(filters.limit).all()
+    """
+    Public property search. Default: in-memory Firestore property index.
+    STORE_PROPERTIES_READ_USER=postgres uses SQL; both = index first, SQL if empty.
+    """
+    mode = _properties_store_mode()
+    if mode in ("firestore", "both"):
+        try:
+            from app.services.property_index import get_property_index
+            cards = get_property_index().search(filters)
+            if cards:
+                return [FirestorePropertyAdapter(c) for c in cards]
+            if mode == "firestore" and get_property_index().has_cache():
+                return []  # real empty result from a warm index
+        except Exception as e:
+            from app.services.property_index import IndexUnavailable
+            if isinstance(e, IndexUnavailable) and mode == "firestore" and db is None:
+                raise
+            logger.debug("property index search fallback: %s", e)
+    if db is not None and mode in ("postgres", "both", "firestore"):
+        query = build_property_query(db, filters)
+        return query.offset(filters.offset).limit(filters.limit).all()
+    return []
 
 def get_property_by_id(db: Session, property_id: str) -> Optional[Any]:
-    """Retrieve full public record for a specific Property ID, checking live Cloud Firestore first."""
+    """Retrieve a public property by id via the property index (or SQL when configured)."""
     if not property_id or not isinstance(property_id, str):
         return None
     clean_id = property_id.strip()
+    mode = _properties_store_mode()
 
-    # 1. Primary check: live Cloud Firestore
-    try:
-        from app.services.firestore_service import get_property_by_id_from_firestore
-        fs_p = get_property_by_id_from_firestore(clean_id)
-        if fs_p:
-            return FirestorePropertyAdapter(fs_p)
-    except Exception as e:
-        logger.debug(f"Firestore get_property_by_id fallback: {e}")
+    if mode in ("firestore", "both"):
+        try:
+            from app.services.property_index import get_property_index
+            card = get_property_index().get_by_id(clean_id)
+            if card:
+                return FirestorePropertyAdapter(card)
+        except Exception as e:
+            try:
+                logger.debug("property index get_by_id: %s", e)
+            except Exception:
+                pass
+            if mode == "firestore":
+                # Last-chance: direct Firestore document (keeps older callers working)
+                try:
+                    from app.services.firestore_service import get_property_by_id_from_firestore
+                    fs_p = get_property_by_id_from_firestore(clean_id)
+                    if fs_p:
+                        from app.services.property_index import sanitize_public_card
+                        return FirestorePropertyAdapter(sanitize_public_card(fs_p))
+                except Exception:
+                    return None
 
-    # 2. SQL fallback when Firestore is down or has no row for this id.
-    if db is not None:
+    if mode in ("postgres", "both") and db is not None:
         return db.query(Property).filter(
             Property.property_id == clean_id
         ).first()
     return None
 
 def get_property_by_name(db: Session, name_query: str) -> Optional[Any]:
-    """Fuzzy lookup property by name, checking live Cloud Firestore first."""
+    """Fuzzy lookup property by name via the property index (or SQL when configured)."""
     if not name_query or not isinstance(name_query, str):
         return None
     clean_name = name_query.strip()
+    mode = _properties_store_mode()
 
-    # 1. Primary check: live Cloud Firestore
-    try:
-        from app.services.firestore_service import get_property_by_id_from_firestore
-        fs_p = get_property_by_id_from_firestore(clean_name)
-        if fs_p:
-            return FirestorePropertyAdapter(fs_p)
-    except Exception as e:
-        logger.debug(f"Firestore get_property_by_name fallback: {e}")
+    if mode in ("firestore", "both"):
+        try:
+            from app.services.property_index import get_property_index
+            from app.services.property_name_index import match_property_name
+            idx = get_property_index()
+            mr = match_property_name(clean_name)
+            if mr.confident:
+                card = idx.get_by_id(mr.confident.doc_id)
+                if card:
+                    return FirestorePropertyAdapter(card)
+            # Exact id / display-name scan
+            card = idx.get_by_id(clean_name)
+            if card:
+                return FirestorePropertyAdapter(card)
+            for rec in idx.all_records():
+                if str(rec.get("name") or "").strip().lower() == clean_name.lower():
+                    return FirestorePropertyAdapter(rec)
+        except Exception as e:
+            try:
+                logger.debug("property index get_by_name: %s", e)
+            except Exception:
+                pass
+            if mode == "firestore":
+                try:
+                    from app.services.firestore_service import get_property_by_id_from_firestore
+                    from app.services.property_index import sanitize_public_card
+                    fs_p = get_property_by_id_from_firestore(clean_name)
+                    if fs_p:
+                        return FirestorePropertyAdapter(sanitize_public_card(fs_p))
+                except Exception:
+                    return None
 
-    # 2. SQL fallback when Firestore is down or has no row for this name.
-    if db is not None:
+    if mode in ("postgres", "both") and db is not None:
         return db.query(Property).filter(
             Property.property_name.ilike(f"%{clean_name}%")
         ).first()

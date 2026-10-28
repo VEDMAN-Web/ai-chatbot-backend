@@ -30,7 +30,10 @@ _GENERAL_ADVISORY_RE = re.compile(
     r"rental\s+yield|yield|roi|return\s+on\s+investment|appreciation|"
     r"transfer\s+tax|stamp\s+duty|mortgage|loan|financing|visa|residency|"
     r"is\s+it\s+a\s+good\s+investment|good\s+investment|worth\s+(?:buying|investing)|"
-    r"market\s+(?:outlook|trend)|tax\s+(?:rate|rates)|capital\s+gains"
+    r"market\s+(?:outlook|trend)|tax\s+(?:rate|rates)|capital\s+gains|"
+    r"how\s+(?:does|do)\s+buying\s+(?:property|a\s+(?:home|house|villa|condo|property))|"
+    r"buying\s+property\s+in\s+thailand\s+work|buying\s+process|"
+    r"how\s+(?:to\s+)?buy\s+(?:property|a\s+(?:home|house|villa|condo))\s+in\s+thailand"
     r")\b",
     re.I,
 )
@@ -59,10 +62,13 @@ def classify_question_kind(question: str) -> str:
     q = (question or "").strip()
     if not q:
         return QUESTION_PROPERTY_FACT
-    if _FOREIGN_OWNERSHIP_RE.search(q) and not re.search(r"\bis\s+.+\s+freehold\b", q, re.I):
-        return QUESTION_FOREIGN_OWNERSHIP
+    # Mortgage / financing always advisory — never the foreign-ownership canned answer
+    if re.search(r"\b(mortgage|loan|financ(?:e|ing))\b", q, re.I):
+        return QUESTION_GENERAL_ADVISORY
     if _GENERAL_ADVISORY_RE.search(q):
         return QUESTION_GENERAL_ADVISORY
+    if _FOREIGN_OWNERSHIP_RE.search(q) and not re.search(r"\bis\s+.+\s+freehold\b", q, re.I):
+        return QUESTION_FOREIGN_OWNERSHIP
     return QUESTION_PROPERTY_FACT
 
 

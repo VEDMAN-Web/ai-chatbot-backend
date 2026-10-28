@@ -1,9 +1,12 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Super-admin instructions are backend-only.
-    // The client SDK (web, mobile, admin UI) must not read or write these
-    // collections. The API uses the Firestore service account.
+    // Deny all client SDK access. The API uses the Firestore service account.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Super-admin instructions are backend-only (explicit deny kept for clarity).
     match /superadmin_instructions/{instructionId} {
       allow read, write: if false;
       match /versions/{versionId} {

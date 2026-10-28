@@ -293,9 +293,12 @@ def is_foreign_ownership_question(message: str) -> bool:
     low = _low(message)
     if not low:
         return False
+    # Mortgage / loan / financing → advisor (answer_policy), never the ownership canned reply
+    if re.search(r"\b(mortgage|loan|financ(?:e|ing)|credit)\b|จำนอง", low):
+        return False
     buy = bool(re.search(
-        r"\b(buy|own|purchase|mortgage|tax|taxes|residency|residence|freehold|leasehold)\b"
-        r"|kupić|kupic|cudzoziem|ภาษี|จำนอง|วีซ่า|ซื้อได้",
+        r"\b(buy|own|purchase|tax|taxes|residency|residence|freehold|leasehold)\b"
+        r"|kupić|kupic|cudzoziem|ภาษี|วีซ่า|ซื้อได้",
         low,
     ))
     who = bool(re.search(

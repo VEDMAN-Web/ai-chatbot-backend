@@ -680,27 +680,31 @@ def fetch_authorized_property(db: Any, property_id: str) -> Tuple[Optional[Any],
     Returns (orm_or_adapter, card_dict, source_label).
     Never invents data.
     """
-    from app.services.property_search import get_property_by_id, get_property_by_name, format_property_card
+    from app.services.property_search import get_property_by_id, get_property_by_name
+    from app.services.property_index import get_property_index, public_store_mode, sanitize_public_card
 
     pid = _normalize_id(property_id)
     if not pid:
         return None, None, "none"
 
-    # Firestore first (production authority)
-    if getattr(settings, "ENABLE_FIRESTORE_SYNC", True):
+    mode = public_store_mode()
+    if mode in ("firestore", "both"):
         try:
-            from app.services.firestore_service import get_property_by_id_from_firestore
-            fs = get_property_by_id_from_firestore(pid)
-            if fs:
-                return fs, fs if isinstance(fs, dict) else None, "firestore"
+            card = get_property_index().get_by_id(pid)
+            if card:
+                return card, sanitize_public_card(card), "firestore"
         except Exception as e:
-            logger.warning(f"Firestore property fetch failed for {pid}: {e}")
+            logger.warning(f"Property index fetch failed for {pid}: {e}")
 
     prop = get_property_by_id(db, pid) if db else None
     if not prop:
         prop = get_property_by_name(db, pid) if db else None
     if prop:
+        if isinstance(prop, dict):
+            card = sanitize_public_card(prop)
+            return prop, card, "firestore"
         try:
+            from app.services.public_agent import format_property_card
             card = format_property_card(prop)
         except Exception:
             card = {
