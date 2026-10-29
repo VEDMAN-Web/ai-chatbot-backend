@@ -492,9 +492,9 @@ def _usable_record(record: Any) -> bool:
 
 def _property_name_rows(db: Any) -> List[Any]:
     try:
-        from app.db.models import Property
+        from app.repositories import properties_store
 
-        rows = db.query(Property).all()
+        rows = properties_store.list_rows(db)
     except Exception:
         return []
     if not isinstance(rows, list):
@@ -519,6 +519,15 @@ def _closest_property_names(db: Any, query: str, limit: int = 3) -> List[str]:
 
 
 def _name_matches(db: Any, name: str) -> List[Any]:
+    from app.repositories import properties_store
+
+    if not properties_store.sql_enabled():
+        folded = (name or "").casefold()
+        rows = _property_name_rows(db)
+        exact = [r for r in rows if r.property_name.casefold() == folded]
+        if exact:
+            return exact[:6]
+        return [r for r in rows if folded and folded in r.property_name.casefold()][:6]
     try:
         from app.db.models import Property
 

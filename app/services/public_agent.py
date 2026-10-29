@@ -2727,6 +2727,45 @@ class PublicAgentService:
                 "language": active_lang,
             }
 
+        # 1a2. Admin-taught FAQ answer (near-exact match only, vetted by grounding policy)
+        try:
+            from app.services.taught_answers import find_match as _find_taught_answer
+            _taught = _find_taught_answer(
+                user_message, site_origin=conversation.site_origin, language=active_lang
+            )
+        except Exception:
+            _taught = None
+        if _taught:
+            reply_text = _taught["answer"]
+            append_conversation_turn(
+                db=db,
+                conversation=conversation,
+                user_message=user_message,
+                assistant_message=reply_text,
+            )
+            token_tracker.log_turn(
+                TurnTokenMetrics(
+                    request_id=f"req_{uuid.uuid4().hex[:8]}",
+                    session_id=conversation.session_id,
+                    conversation_id=str(conversation.id),
+                    intent="taught_answer",
+                    model="deterministic",
+                    latency_sec=round(time.time() - start_time, 3),
+                ),
+                db=db,
+            )
+            return {
+                "type": "text",
+                "text": reply_text,
+                "properties": [],
+                "quick_replies": self._generate_quick_replies(user_message, [], language=active_lang),
+                "lead_captured": False,
+                "preferences": conversation.preferences or {},
+                "session_id": conversation.session_id,
+                "conversation_id": str(conversation.id),
+                "language": active_lang,
+            }
+
         # 1b. Visitor asks bot to email / add calendar — honest refusal (no Gmail / no Calendar)
         if message_asks_email_or_calendar_action(user_message):
             return self._handle_cannot_email_or_calendar(

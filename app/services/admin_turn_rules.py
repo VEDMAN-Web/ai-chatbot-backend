@@ -98,6 +98,7 @@ def _which(rows: List[Any]) -> str:
 def resolve_write_target(db: Any, name: str) -> Tuple[Any, Optional[str]]:
     """Return (record, None) or (None, question). Uses the shared property resolver."""
     from app.db.models import Property
+    from app.repositories import properties_store
     from app.services.admin_property_fields import resolve_existing_property
 
     label = (name or "").strip(" ?.!")
@@ -105,7 +106,7 @@ def resolve_write_target(db: Any, name: str) -> Tuple[Any, Optional[str]]:
         return None, "Name the property you want to change. Nothing was changed."
     rows: List[Any] = []
     try:
-        queried = db.query(Property).all()
+        queried = properties_store.list_rows(db)
         if isinstance(queried, list):
             rows = queried
     except Exception:
@@ -540,7 +541,8 @@ def try_rule_based_write(
         percent = float(percent_text)
         factor = 1 + percent / 100.0 if direction.lower() in {"increase", "raise"} else 1 - percent / 100.0
         try:
-            queried = db.query(Property).all()
+            from app.repositories import properties_store
+            queried = properties_store.list_rows(db)
             rows = queried if isinstance(queried, list) else []
         except Exception:
             rows = []
@@ -618,7 +620,8 @@ def try_rule_based_write(
             return _text(conv, "I could not read that price. Nothing was changed.")
         delta = float(money["thb"])
         try:
-            queried = db.query(Property).all()
+            from app.repositories import properties_store
+            queried = properties_store.list_rows(db)
             rows = queried if isinstance(queried, list) else []
         except Exception:
             rows = []

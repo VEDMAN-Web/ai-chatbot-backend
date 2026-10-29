@@ -789,8 +789,10 @@ def get_admin_property_endpoint(
     except Exception:
         fs_prop = None
 
+    from app.repositories import properties_store
+
     prop = None
-    if not fs_prop and db is not None:
+    if not fs_prop and properties_store.sql_db(db) is not None:
         prop = db.query(Property).filter(Property.property_id == property_id).first()
 
     target_obj = fs_prop or prop
@@ -878,7 +880,9 @@ def _property_scope_target(property_id: str, db: Session):
         raw = get_raw_property_document(property_id, target="admin")
     except Exception:
         raw = None
-    prop = db.query(Property).filter(Property.property_id == property_id).first() if db is not None else None
+    from app.repositories import properties_store
+
+    prop = db.query(Property).filter(Property.property_id == property_id).first() if properties_store.sql_db(db) is not None else None
     return raw, prop
 
 
@@ -1084,6 +1088,90 @@ def delete_property_endpoint(
         confirm_property_id=confirm_property_id,
         allow_without_undo=allow_without_undo,
     )
+
+
+# ==============================================================================
+# Taught answers (Module 2): FAQ answers the public bot serves before any model call
+# ==============================================================================
+
+class TaughtAnswerCreate(BaseModel):
+    question: str
+    answer: str
+    variants: List[str] = Field(default_factory=list)
+    sites: List[str] = Field(default_factory=list, description="Empty = all websites")
+    language: str = "any"
+
+
+class TaughtAnswerUpdate(BaseModel):
+    question: Optional[str] = None
+    answer: Optional[str] = None
+    variants: Optional[List[str]] = None
+    sites: Optional[List[str]] = None
+    language: Optional[str] = None
+    status: Optional[str] = None
+
+
+def _taught_call(fn, *args, **kwargs):
+    from app.services.taught_answers import TaughtAnswerError
+
+    try:
+        return fn(*args, **kwargs)
+    except TaughtAnswerError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+    except KeyError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Taught answer not found.")
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc))
+
+
+@router.get("/taught-answers", tags=["Taught Answers"])
+def list_taught_answers_endpoint(
+    status_filter: Optional[str] = Query(None, alias="status"),
+    staff: AuthenticatedStaff = Depends(require_admin_or_super_admin_with_sites),
+):
+    from app.services import taught_answers
+
+    return {"items": _taught_call(taught_answers.list_answers, status=status_filter)}
+
+
+@router.post("/taught-answers", status_code=status.HTTP_201_CREATED, tags=["Taught Answers"])
+def create_taught_answer_endpoint(
+    body: TaughtAnswerCreate,
+    staff: AuthenticatedStaff = Depends(require_admin_or_super_admin_with_sites),
+):
+    from app.services import taught_answers
+
+    return _taught_call(
+        taught_answers.create,
+        question=body.question, answer=body.answer, variants=body.variants,
+        sites=body.sites, language=body.language, created_by=staff.email,
+    )
+
+
+@router.put("/taught-answers/{answer_id}", tags=["Taught Answers"])
+def update_taught_answer_endpoint(
+    answer_id: str,
+    body: TaughtAnswerUpdate,
+    staff: AuthenticatedStaff = Depends(require_admin_or_super_admin_with_sites),
+):
+    from app.services import taught_answers
+
+    return _taught_call(
+        taught_answers.update, answer_id,
+        question=body.question, answer=body.answer, variants=body.variants,
+        sites=body.sites, language=body.language, status=body.status, updated_by=staff.email,
+    )
+
+
+@router.delete("/taught-answers/{answer_id}", tags=["Taught Answers"])
+def archive_taught_answer_endpoint(
+    answer_id: str,
+    staff: AuthenticatedStaff = Depends(require_admin_or_super_admin_with_sites),
+):
+    """Archive (never hard delete) so the answer and its history stay recoverable."""
+    from app.services import taught_answers
+
+    return _taught_call(taught_answers.archive, answer_id, updated_by=staff.email)
 
 
 # ==============================================================================

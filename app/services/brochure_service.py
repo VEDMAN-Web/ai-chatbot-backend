@@ -111,8 +111,10 @@ def _load_property_for_brochure(db: Session, property_id: str) -> Any:
     Load property for brochure: PostgreSQL first, then Firestore (read-only).
     Raises ValueError if missing from both.
     """
+    from app.repositories import properties_store
+
     prop = None
-    if db is not None:
+    if properties_store.sql_db(db) is not None:
         try:
             prop = db.query(Property).filter(Property.property_id == property_id.upper()).first()
             if not prop:
