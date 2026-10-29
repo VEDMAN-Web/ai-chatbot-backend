@@ -1,3 +1,24 @@
+function formatApiError(data, fallback) {
+  const d = data && (data.detail !== undefined ? data.detail : data.message);
+  if (d === undefined || d === null || d === '') return fallback || 'Request failed';
+  if (typeof d === 'string') return d;
+  if (Array.isArray(d)) {
+    return d.map(x => {
+      if (typeof x === 'string') return x;
+      if (x && x.msg) return (Array.isArray(x.loc) ? x.loc.join('.') + ': ' : '') + x.msg;
+      try { return JSON.stringify(x); } catch (e) { return String(x); }
+    }).join('; ');
+  }
+  if (typeof d === 'object') {
+    if (typeof d.message === 'string') {
+      const f = d.fields ? ' (' + (typeof d.fields === 'string' ? d.fields : JSON.stringify(d.fields)) + ')' : '';
+      return d.message + f;
+    }
+    try { return JSON.stringify(d); } catch (e) { return fallback || 'Request failed'; }
+  }
+  return String(d);
+}
+
 // Tajlandia AI Frontend Application State
 let currentMode = 'public'; // 'public' | 'admin'
 let currentSessionId = '';
@@ -694,7 +715,7 @@ async function submitAdminLogin() {
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
-      const detail = data.detail || data.message || `Login failed (${res.status})`;
+      const detail = formatApiError(data, `Login failed (${res.status})`);
       throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail));
     }
     const token = data.access_token;
@@ -1057,7 +1078,7 @@ async function handleSendMessage() {
         return;
       }
       const fb = fallbackByLang[currentLanguage] || fallbackByLang.en;
-      appendMessageRow('assistant', errData.detail ? `⚠️ **Error (${res.status}):** ${errData.detail}` : fb);
+      appendMessageRow('assistant', errData.detail ? `⚠️ **Error (${res.status}):** ${formatApiError(errData)}` : fb);
       return;
     }
 
@@ -1300,7 +1321,7 @@ async function appendAssistantResponse(data, animate = false) {
       </div>
       <div class="action-card-body">
         <strong>Staged Pending Action:</strong> <code>${pendingActionId}</code><br/>
-        This write action has been safely staged in PostgreSQL and will not execute until confirmed.
+        This write action has been safely staged in Firestore and will not execute until confirmed.
       </div>
       <div class="action-card-buttons">
         <button class="btn-confirm" onclick="confirmAction('${pendingActionId}')">
@@ -1423,7 +1444,7 @@ async function confirmAction(actionId) {
       }
     } else {
       if (card) {
-        card.innerHTML = `<div style="color: var(--accent-red); font-size: 13px;">Execution failed: ${escapeHtml(data.detail || 'Error')}</div>`;
+        card.innerHTML = `<div style="color: var(--accent-red); font-size: 13px;">Execution failed: ${escapeHtml(formatApiError(data, 'Error'))}</div>`;
       }
     }
   } catch (err) {
@@ -2306,7 +2327,7 @@ async function submitBatchOperation() {
 
     const data = await res.json();
     if (!res.ok) {
-      throw new Error(data.detail || 'Batch operation failed');
+      throw new Error(formatApiError(data, 'Batch operation failed'));
     }
 
     if (resultBox) {
@@ -2315,7 +2336,7 @@ async function submitBatchOperation() {
       resultBox.innerHTML = `
         <div style="font-weight: 700; font-size: 13.5px;">✅ Operation Applied Instantly!</div>
         <div><strong>Operation ID:</strong> <code>${escapeHtml(data.operation_id)}</code></div>
-        <div><strong>Items Affected:</strong> ${data.items_affected || 0} properties modified in Firestore & PostgreSQL.</div>
+        <div><strong>Items Affected:</strong> ${data.items_affected || 0} properties modified in Firestore.</div>
         <div style="font-size: 11.5px; opacity: 0.9;">
           🛡️ <strong>6-Day Rollback Guaranteed:</strong> Pre-modification snapshot saved until <strong>${new Date(data.expires_at).toLocaleString()}</strong>.
         </div>
@@ -2458,7 +2479,7 @@ async function executeBatchUndo(operationId, count) {
 
     const data = await res.json();
     if (!res.ok) {
-      throw new Error(data.detail || 'Rollback failed');
+      throw new Error(formatApiError(data, 'Rollback failed'));
     }
 
     alert(`✅ Success: Rollback completed!\n${data.restored_count || count} properties have been restored to their pre-change snapshot.`);
@@ -2582,7 +2603,7 @@ async function uploadPropertyImages(items) {
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    const detail = data.detail || 'Image upload failed.';
+    const detail = formatApiError(data, 'Image upload failed.');
     throw new Error(typeof detail === 'string' ? detail : 'Image upload failed.');
   }
   const files = data.files || [];

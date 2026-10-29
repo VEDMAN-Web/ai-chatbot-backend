@@ -280,7 +280,7 @@ def parse_property_batch_file(file_bytes: bytes, filename: str) -> List[Dict[str
         raise BatchOperationError(f"Failed to parse file '{filename}': {str(e)}")
 
     if not records:
-        raise BatchOperationError(f"No property identifiers or records could be detected in '{filename}'. Please ensure property IDs or names are present.")
+        raise BatchOperationError(f"No property identifiers or records could be detected in '{filename}'. Bulk operations need a property list (Excel/CSV with columns like name, price, location, status, or PDF/Word listing property IDs or names). A customer offer or brochure PDF cannot be used for this.")
 
     return records
 
@@ -403,7 +403,18 @@ def execute_batch_property_operation(
         if errs:
             validation_errors.append({"property_id": supplied_id, "fields": errs})
     if validation_errors:
-        raise BatchOperationError("Validation failed: " + json.dumps(validation_errors))
+        shown = []
+        for ve in validation_errors[:5]:
+            fields = ve.get("fields")
+            if isinstance(fields, dict):
+                fields = "; ".join(f"{k}: {v}" for k, v in fields.items())
+            elif isinstance(fields, (list, tuple)):
+                fields = "; ".join(str(x) for x in fields)
+            shown.append(f"{ve.get('property_id') or 'row'} -> {fields}")
+        more = f" (+{len(validation_errors) - 5} more rows)" if len(validation_errors) > 5 else ""
+        raise BatchOperationError(
+            f"Validation failed for {len(validation_errors)} row(s): " + " | ".join(shown) + more
+        )
 
     fs_client = get_firestore_client()
     if not fs_client:
