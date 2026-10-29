@@ -799,6 +799,10 @@ def confirm_and_execute_action(
                 conversation_id=getattr(action, "conversation_id", None),
                 pending_action_id=str(action.id),
             )
+        elif action.tool_name == "bulk_create_from_document":
+            from app.services.admin_offer_import import execute_document_import
+
+            result_data = execute_document_import(db, payload, authenticated_staff)
         elif action.tool_name == "send_email":
             result_data = _execute_send_email(
                 payload,
@@ -1400,6 +1404,38 @@ def _execute_create_calendar_event(
 def name_slug(value: Optional[str]) -> str:
     """Lowercase hyphen slug of a property name (max 64)."""
     return re.sub(r"[^a-z0-9]+", "-", (value or "").lower()).strip("-")[:64]
+
+
+def generate_property_id(db: Any, name: Optional[str]) -> str:
+    """
+    Build a new property_id from the listing name. The admin never has to supply one.
+    Appends -2, -3 ... when the slug is already used by a Firestore listing.
+    """
+    from app.services.firestore_service import get_firestore_client
+
+    def _taken(pid: str) -> bool:
+        # Exact document-id check only: the name resolver is fuzzy and would
+        # treat "villa-2" as the same listing as "villa".
+        for target in ("admin", "user"):
+            try:
+                client = get_firestore_client(target=target) or (get_firestore_client() if target == "admin" else None)
+                if client and client.collection("projects").document(pid).get().exists:
+                    return True
+            except Exception:
+                continue
+        return False
+
+    base = name_slug(name)
+    if property_id_slug_error(base):
+        import hashlib
+        base = "prop-" + hashlib.sha1(str(name or "").encode("utf-8")).hexdigest()[:8]
+    candidate = base
+    for n in range(2, 100):
+        if not _taken(candidate):
+            return candidate
+        suffix = "-" + str(n)
+        candidate = base[: 64 - len(suffix)].rstrip("-") + suffix
+    return candidate
 
 
 def _read_raw_firestore(property_id: str) -> Optional[Dict[str, Any]]:

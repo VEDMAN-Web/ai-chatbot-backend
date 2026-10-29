@@ -490,7 +490,24 @@ async def execute_batch_file_endpoint(
                 detail="Uploaded file is empty."
             )
 
-        records = parse_property_batch_file(content, file.filename or "uploaded_file")
+        # Add/Create from an offer-style document: show a preview and wait for the admin's confirmation.
+        if (action or "").strip().lower() in ("create", "write"):
+            from app.services.admin_offer_import import stage_document_import
+
+            staged = stage_document_import(db, staff, content, file.filename or "uploaded_file")
+            if staged is not None:
+                return staged
+
+        try:
+            records = parse_property_batch_file(content, file.filename or "uploaded_file")
+        except BatchOperationError as parse_error:
+            if (action or "").strip().lower() in ("create", "write"):
+                raise BatchOperationError(
+                    f"{parse_error} For Add/Create, upload a CSV or Excel file with the columns name, property_type, "
+                    "province, price and status, or an offer document with one section per property "
+                    "(a title line, a 'City · Area' line and the prices in THB)."
+                )
+            raise
         result = execute_batch_property_operation(
             action_type=action,
             records=records,

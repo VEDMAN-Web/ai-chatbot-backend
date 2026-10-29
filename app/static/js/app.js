@@ -1,24 +1,3 @@
-function formatApiError(data, fallback) {
-  const d = data && (data.detail !== undefined ? data.detail : data.message);
-  if (d === undefined || d === null || d === '') return fallback || 'Request failed';
-  if (typeof d === 'string') return d;
-  if (Array.isArray(d)) {
-    return d.map(x => {
-      if (typeof x === 'string') return x;
-      if (x && x.msg) return (Array.isArray(x.loc) ? x.loc.join('.') + ': ' : '') + x.msg;
-      try { return JSON.stringify(x); } catch (e) { return String(x); }
-    }).join('; ');
-  }
-  if (typeof d === 'object') {
-    if (typeof d.message === 'string') {
-      const f = d.fields ? ' (' + (typeof d.fields === 'string' ? d.fields : JSON.stringify(d.fields)) + ')' : '';
-      return d.message + f;
-    }
-    try { return JSON.stringify(d); } catch (e) { return fallback || 'Request failed'; }
-  }
-  return String(d);
-}
-
 // Tajlandia AI Frontend Application State
 let currentMode = 'public'; // 'public' | 'admin'
 let currentSessionId = '';
@@ -346,6 +325,22 @@ function adminAuthHeaders(extra = {}) {
   const headers = { ...extra };
   if (token) headers['Authorization'] = `Bearer ${token}`;
   return headers;
+}
+
+// FastAPI sends `detail` as a string, an object or a list of validation errors. Never print it as "[object Object]".
+function formatApiError(detail, fallback) {
+  if (!detail) return fallback;
+  if (typeof detail === 'string') return detail;
+  const one = (item) => {
+    if (typeof item === 'string') return item;
+    if (item && typeof item === 'object') {
+      const where = Array.isArray(item.loc) ? item.loc.filter((p) => p !== 'body').join('.') : '';
+      const text = item.msg || item.message || '';
+      if (text) return where ? `${where}: ${text}` : text;
+    }
+    try { return JSON.stringify(item); } catch (e) { return fallback; }
+  };
+  return (Array.isArray(detail) ? detail.map(one).join('; ') : one(detail)) || fallback;
 }
 
 function isProtectedAdminDownloadUrl(url) {
@@ -715,7 +710,7 @@ async function submitAdminLogin() {
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
-      const detail = formatApiError(data, `Login failed (${res.status})`);
+      const detail = formatApiError(data.detail || data.message, `Login failed (${res.status})`);
       throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail));
     }
     const token = data.access_token;
@@ -1078,7 +1073,7 @@ async function handleSendMessage() {
         return;
       }
       const fb = fallbackByLang[currentLanguage] || fallbackByLang.en;
-      appendMessageRow('assistant', errData.detail ? `⚠️ **Error (${res.status}):** ${formatApiError(errData)}` : fb);
+      appendMessageRow('assistant', errData.detail ? `⚠️ **Error (${res.status}):** ${formatApiError(errData.detail, 'Error')}` : fb);
       return;
     }
 
@@ -1444,7 +1439,7 @@ async function confirmAction(actionId) {
       }
     } else {
       if (card) {
-        card.innerHTML = `<div style="color: var(--accent-red); font-size: 13px;">Execution failed: ${escapeHtml(formatApiError(data, 'Error'))}</div>`;
+        card.innerHTML = `<div style="color: var(--accent-red); font-size: 13px;">Execution failed: ${escapeHtml(formatApiError(data.detail, 'Error'))}</div>`;
       }
     }
   } catch (err) {
@@ -1805,8 +1800,15 @@ async function loadHistorySession(sessionId, mode) {
     : API_ROUTES.adminHistory(sessionId);
 
   try {
-    const res = await fetch(endpoint);
-    if (!res.ok) return;
+    // The admin history endpoint is staff-only, so it needs the Bearer token like every other admin call.
+    const res = await fetch(endpoint, mode === 'admin' ? { headers: adminAuthHeaders() } : undefined);
+    if (!res.ok) {
+      const reason = (res.status === 401 || res.status === 403)
+        ? 'Your session has expired. Please sign in again to see this conversation.'
+        : `Could not load this conversation (error ${res.status}).`;
+      if (messagesArea) messagesArea.innerHTML = `<div class="batch-empty-placeholder" style="padding:16px;color:#f87171;">${escapeHtml(reason)}</div>`;
+      return;
+    }
 
     const data = await res.json();
     if (mode === 'public' && data.preferences) {
@@ -2288,6 +2290,102 @@ function clearSelectedBatchFile(event) {
   if (chip) chip.style.display = 'none';
 }
 
+// --- Add/Create from an offer document: preview, then confirm -------------------------------------------
+let pendingDocumentImport = null;
+
+function renderBatchDocumentPreview(data) {
+  const resultBox = document.getElementById('batchExecutionResult');
+  if (!resultBox) return;
+  pendingDocumentImport = { id: data.pending_action_id, token: data.confirmation_token };
+  const num = (v) => (v === null || v === undefined || v === '') ? '—' : Number(v).toLocaleString('en-US');
+  const range = (a, b) => (a === null || a === undefined) ? '—' : (b !== null && b !== undefined && b !== a ? `${num(a)}–${num(b)}` : num(a));
+  const rows = (data.listings || []).map((l) => `
+    <tr>
+      <td>${escapeHtml(l.name || '')}</td>
+      <td>${escapeHtml(l.province || '—')}</td>
+      <td>${escapeHtml(l.property_type || '—')}</td>
+      <td>${escapeHtml(l.status || '—')}</td>
+      <td>${range(l.price_min, l.price_max)} THB</td>
+      <td>${range(l.bedrooms_min, l.bedrooms_max)}</td>
+      <td>${range(l.area_sqm_min, l.area_sqm_max)}</td>
+      <td style="color:${l.ready ? '#4ade80' : '#fbbf24'};">${escapeHtml(l.outcome || '')}</td>
+    </tr>`).join('');
+  resultBox.className = 'batch-result-box';
+  resultBox.style.display = 'flex';
+  resultBox.style.flexDirection = 'column';
+  resultBox.innerHTML = `
+    <div style="font-weight: 700; font-size: 13.5px;">📄 Review before creating</div>
+    <div style="font-size: 12px;">${escapeHtml(data.message || '')}</div>
+    <div style="font-size: 12px;"><strong>Target website(s):</strong> ${escapeHtml((data.websites || []).join(', ') || 'none selected')}</div>
+    <div style="overflow-x:auto;">
+      <table style="width:100%; font-size:11.5px; border-collapse:collapse;">
+        <thead><tr style="text-align:left; opacity:.8;">
+          <th>Name</th><th>Province</th><th>Type</th><th>Status</th><th>Price</th><th>Beds</th><th>m²</th><th>Result</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+    <div style="font-size: 11.5px; opacity: 0.85;">Only values written in the document are used. Nothing is saved until you confirm.</div>
+    <div style="margin-top: 6px; display: flex; gap: 8px;">
+      <button class="btn-refresh-history" id="btnConfirmDocImport" ${data.ready_count ? '' : 'disabled'}
+        onclick="confirmBatchDocumentImport()">Confirm &amp; create ${Number(data.ready_count || 0)}</button>
+      <button class="btn-refresh-history" onclick="discardBatchDocumentImport()">Discard</button>
+    </div>`;
+}
+
+async function confirmBatchDocumentImport() {
+  const resultBox = document.getElementById('batchExecutionResult');
+  if (!pendingDocumentImport || !resultBox) return;
+  const { id, token } = pendingDocumentImport;
+  const btn = document.getElementById('btnConfirmDocImport');
+  if (btn) { btn.disabled = true; btn.textContent = 'Creating…'; }
+  try {
+    const res = await fetch(`/api/v1/admin/actions/${encodeURIComponent(id)}/confirm`, {
+      method: 'POST',
+      headers: adminAuthHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ confirmation_token: token })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(formatApiError(data.detail, 'Could not create the listings'));
+    const out = data.execution_result || {};
+    const created = (out.created || []).map((c) =>
+      `<li><strong>${escapeHtml(c.name)}</strong> <code>${escapeHtml(c.property_id)}</code> — undo id <code>${escapeHtml(c.operation_id || '')}</code></li>`).join('');
+    const skipped = (out.skipped || []).map((s) =>
+      `<li>${escapeHtml(s.name)}: ${escapeHtml(s.reason)}</li>`).join('');
+    pendingDocumentImport = null;
+    resultBox.className = 'batch-result-box success';
+    resultBox.innerHTML = `
+      <div style="font-weight: 700; font-size: 13.5px;">✅ ${(out.created || []).length} listing(s) created and verified in the database</div>
+      <ul style="margin: 4px 0 0 18px; font-size: 12px;">${created}</ul>
+      ${skipped ? `<div style="font-weight:600; font-size:12px; margin-top:6px;">Not created</div><ul style="margin: 2px 0 0 18px; font-size: 12px;">${skipped}</ul>` : ''}`;
+    clearSelectedBatchFile();
+    loadBatchHistory(false);
+  } catch (err) {
+    console.error('Document import confirm error:', err);
+    resultBox.className = 'batch-result-box error';
+    resultBox.innerHTML = `
+      <div style="font-weight: 700;">❌ Nothing was created</div>
+      <div>${escapeHtml(err.message || 'Unknown error')}</div>`;
+    pendingDocumentImport = null;
+  }
+}
+
+async function discardBatchDocumentImport() {
+  const resultBox = document.getElementById('batchExecutionResult');
+  const current = pendingDocumentImport;
+  pendingDocumentImport = null;
+  if (current) {
+    try {
+      await fetch(`/api/v1/admin/actions/${encodeURIComponent(current.id)}/reject`, {
+        method: 'POST',
+        headers: adminAuthHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ reason: 'Discarded from the bulk upload preview' })
+      });
+    } catch (e) { /* the pending action expires on its own */ }
+  }
+  if (resultBox) { resultBox.style.display = 'none'; resultBox.innerHTML = ''; }
+}
+
 async function submitBatchOperation() {
   if (!selectedBatchFile) {
     alert('Please select or drop a property file (.xlsx, .xls, .csv, .pdf, .docx, .json).');
@@ -2309,7 +2407,8 @@ async function submitBatchOperation() {
 
   const formData = new FormData();
   formData.append('file', selectedBatchFile);
-  formData.append('operation_type', selectedBatchActionType);
+  // The backend form field is named `action`.
+  formData.append('action', selectedBatchActionType);
   if (notesInput && notesInput.value.trim()) {
     formData.append('notes', notesInput.value.trim());
   }
@@ -2327,7 +2426,12 @@ async function submitBatchOperation() {
 
     const data = await res.json();
     if (!res.ok) {
-      throw new Error(formatApiError(data, 'Batch operation failed'));
+      throw new Error(formatApiError(data.detail, 'Batch operation failed'));
+    }
+
+    if (data.status === 'PREVIEW') {
+      renderBatchDocumentPreview(data);
+      return;
     }
 
     if (resultBox) {
@@ -2479,7 +2583,7 @@ async function executeBatchUndo(operationId, count) {
 
     const data = await res.json();
     if (!res.ok) {
-      throw new Error(formatApiError(data, 'Rollback failed'));
+      throw new Error(formatApiError(data.detail, 'Rollback failed'));
     }
 
     alert(`✅ Success: Rollback completed!\n${data.restored_count || count} properties have been restored to their pre-change snapshot.`);
@@ -2603,7 +2707,7 @@ async function uploadPropertyImages(items) {
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    const detail = formatApiError(data, 'Image upload failed.');
+    const detail = formatApiError(data.detail, 'Image upload failed.');
     throw new Error(typeof detail === 'string' ? detail : 'Image upload failed.');
   }
   const files = data.files || [];

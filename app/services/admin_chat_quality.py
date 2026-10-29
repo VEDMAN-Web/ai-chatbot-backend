@@ -847,7 +847,8 @@ def parse_natural_edit_commands(text: str) -> list[dict]:
     if not raw or re.search(r"https?://", raw, re.I):
         return []
     raw = raw.rstrip(".").strip()
-    parts = [part.strip() for part in re.split(r"\s*(?:,|;|\n+|\band\b)\s*", raw) if part.strip()]
+    # A comma inside a number ("25,000,000") is a thousands separator, not a clause break.
+    parts = [part.strip() for part in re.split(r"\s*(?:,(?!\d{3}\b)|;|\n+|\band\b)\s*", raw) if part.strip()]
     parsed = [_edit_clause(part) for part in parts]
     if not any(parsed):
         return []

@@ -436,11 +436,7 @@ def test_chat_edits_confirm_and_guesses(world, monkeypatch):
 
     guess = _chat(world, "add https://example.com/guess")
     assert "Guess - " in guess["text"]
-    blocked = _chat(world, "confirm")
-    assert "Nothing was saved" in blocked["text"]
-    assert "status" in blocked["text"]
-    assert fsh.prop_first(world["fs"], "guess-villa") is None
-    _chat(world, "use your guesses")
+    # "confirm" after a preview that showed the guesses accepts them: no extra question.
     accepted = _chat(world, "confirm")
     assert "Saved: Guess Villa (guess-villa) - verified in database" in accepted["text"]
     stored = fsh.prop_one(world["fs"], "guess-villa")
@@ -771,12 +767,8 @@ def test_dholera_page_warns_and_waits_for_continue_anyway(world, monkeypatch):
     monkeypatch.setattr("app.services.property_extractor.extract_property_data_with_llm", lambda *a, **k: None)
     opened = _chat(world, url)
     assert "outside Thailand" in opened["text"]
-    blocked = _chat(world, "confirm")
-    assert "outside Thailand" in blocked["text"]
-    assert "nothing was saved" in blocked["text"].lower()
-    assert len(fsh.prop_rows(world["fs"])) == 0
-    continued = _chat(world, "continue anyway")
-    assert "outside Thailand" not in continued["text"]
+    # "confirm" counts as "continue anyway" (the preview already showed the warning),
+    # so the admin is only asked for what is genuinely missing: the THB price.
     still = _chat(world, "confirm")
     assert "outside Thailand" not in still["text"]
     assert "i still need" in still["text"].lower()

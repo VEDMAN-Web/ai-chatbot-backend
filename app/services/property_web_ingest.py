@@ -840,6 +840,12 @@ def _labeled_pairs(parser: _PageParser) -> Dict[str, Dict[str, Any]]:
     return out
 
 
+_NON_LISTING_LD_TYPES = (
+    "Organization", "Corporation", "LocalBusiness", "WebSite", "WebPage", "BreadcrumbList",
+    "SearchAction", "ImageObject", "Person", "ContactPoint", "SiteNavigationElement",
+)
+
+
 def _json_blocks(parser: _PageParser) -> List[Dict[str, Any]]:
     blocks = []
     for raw in parser.ldjson:
@@ -848,9 +854,22 @@ def _json_blocks(parser: _PageParser) -> List[Dict[str, Any]]:
         except Exception:
             continue
         items = parsed if isinstance(parsed, list) else [parsed]
+        flat: List[Any] = []
         for item in items:
+            if isinstance(item, dict) and isinstance(item.get("@graph"), list):
+                flat.extend(item["@graph"])
+            else:
+                flat.append(item)
+        for item in flat:
             if isinstance(item, dict):
-                kind = str(item.get("@type") or "")
+                raw_kind = item.get("@type") or ""
+                kind = " ".join(str(k) for k in raw_kind) if isinstance(raw_kind, list) else str(raw_kind)
+                # The site's own company, page or breadcrumb data is not the listing:
+                # its name and head-office address would overwrite the property's.
+                if any(token in kind for token in _NON_LISTING_LD_TYPES) and not any(
+                    token in kind for token in ("RealEstate", "Residence", "Apartment", "House", "Accommodation")
+                ):
+                    continue
                 if any(token in kind for token in ("RealEstate", "Product", "Residence", "Offer", "Apartment", "House", "Place")):
                     blocks.append(item)
                 elif "name" in item:
@@ -1297,9 +1316,18 @@ def render_preview(draft: Dict[str, Any], *, changed_only: Optional[List[str]] =
             lines.append("Found and inferred")
             lines.append(format_provenance_table(other))
     missing = missing_requirements(draft)
+    if not draft.get("websites"):
+        missing.append("website (say 'add to tajlandia.com')")
     if missing and not changed_only:
         lines.append("")
         lines.append("I still need: " + ", ".join(missing) + ".")
+    guesses = unaccepted_guesses(draft)
+    if guesses and not changed_only:
+        lines.append("")
+        lines.append(
+            "Guessed, not saved until you accept: " + ", ".join(guesses)
+            + ". Say 'use your guesses' to accept them, or give me the value."
+        )
     lines.append("")
     lines.append(CONFIRM_FOOTER)
     return "\n".join(lines)
@@ -1310,6 +1338,109 @@ def _set_provided(draft: Dict[str, Any], field: str, value: Any) -> None:
     draft.setdefault("admin_fields", [])
     if field not in draft["admin_fields"]:
         draft["admin_fields"].append(field)
+
+
+# Whole-message confirmations that is_strict_confirm_message does not cover. Only used while a URL draft is open.
+_EXTRA_CONFIRM_PHRASES = {
+    "save", "save it", "save this", "save it now", "save listing", "save the listing", "save the property",
+    "go ahead", "go ahead and save", "yes go ahead", "ok go ahead", "okay go ahead",
+    "looks good", "looks good go ahead", "looks good save it", "all good", "all good save it",
+}
+
+
+def _phrase_key(text: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[^\w\s]", " ", (text or "").lower(), flags=re.UNICODE)).strip()
+
+
+_REQUEST_OPENERS = {
+    "show", "give", "get", "list", "find", "search", "email", "send", "delete", "update", "create", "tell",
+    "explain", "what", "how", "why", "when", "where", "who", "which", "generate", "export", "undo", "remove",
+}
+_MONEY_RE = re.compile(
+    r"(?i)(?<![\w.])(\d[\d,]*(?:\.\d+)?)\s*(million|mln|m|thousand|k)?(?![A-Za-z])\s*(thb|baht|฿)?"
+)
+
+
+def _find_price_phrase(text: str) -> Optional[str]:
+    """A price only when the admin marks it: a unit (million/M/k), a currency word, or a 6+ digit number."""
+    from app.services.admin_property_fields import parse_money
+
+    for match in _MONEY_RE.finditer(text or ""):
+        digits = match.group(1)
+        unit, currency = match.group(2), match.group(3)
+        plain = digits.replace(",", "")
+        if not (unit or currency or len(plain.split(".")[0]) >= 6):
+            continue
+        phrase = match.group(0).strip()
+        if parse_money(phrase):
+            return phrase
+    return None
+
+
+def parse_missing_field_answer(message: Optional[str], missing: List[str]) -> Optional[Dict[str, Any]]:
+    """
+    Read a free-text reply like "25 million baht, under construction" into set commands.
+    Only fields the draft still needs are read, so an answer never overrides a value that is already there.
+    """
+    from app.services.action_service import ALLOWED_PROPERTY_TYPES, ALLOWED_STATUSES
+
+    raw = (message or "").strip()
+    if not raw or re.search(r"https?://", raw, re.I):
+        return None
+    low = re.sub(r"\s+", " ", raw.lower())
+    commands: List[Dict[str, Any]] = []
+    if "price" in missing:
+        phrase = _find_price_phrase(raw)
+        if phrase:
+            commands.append({"op": "set", "field": "price", "value": phrase})
+    if "status" in missing:
+        keys = sorted(set(ALLOWED_STATUSES) | {"ready", "ready to move"}, key=len, reverse=True)
+        for key in keys:
+            if re.search(rf"(?<![\w-]){re.escape(key)}(?![\w-])", low):
+                commands.append({"op": "set", "field": "status", "value": key})
+                break
+    if "property_type" in missing:
+        for key in sorted(set(ALLOWED_PROPERTY_TYPES) | {"plot", "plots"}, key=len, reverse=True):
+            if re.search(rf"(?<![\w-]){re.escape(key)}(?![\w-])", low):
+                commands.append({"op": "set", "field": "property_type", "value": key})
+                break
+    if not commands:
+        return None
+    return {"op": "multi", "commands": commands, "rejected": [], "report": False}
+
+
+_ANSWER_LIKE_RE = re.compile(
+    r"(?i)\d|\b(price|priced|cost|baht|thb|million|status|type|villa|condo|condominium|land|plot|plots|house|"
+    r"apartment|townhouse|penthouse|commercial|ready|plan|construction|sold|reserved|available|planned)\b"
+)
+
+
+def _freeform_answer(draft_action: Any, message: Optional[str]) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """
+    For a reply parse_draft_command did not understand while the draft still lacks required fields.
+    Returns (command, None) when the reply answers a missing field, (None, nudge) when it looks like an
+    answer but could not be read, and (None, None) for anything else so other handlers still see it.
+    """
+    text = (message or "").strip()
+    words = text.split()
+    if not text or "?" in text or len(words) > 20 or (words and words[0].lower().strip(",.:;") in _REQUEST_OPENERS):
+        return None, None
+    payload = draft_action.action_payload if isinstance(getattr(draft_action, "action_payload", None), dict) else {}
+    missing = missing_requirements(payload)
+    if not missing:
+        return None, None
+    command = parse_missing_field_answer(text, missing)
+    if command:
+        return command, None
+    if not _ANSWER_LIKE_RE.search(text):
+        return None, None
+    nudge = (
+        "I could not read that as a missing value. I still need: "
+        + ", ".join(_missing_phrase(payload, field) for field in missing)
+        + ". For example: 'price 25000000', 'status off plan', 'type villa'. Nothing was saved.\n\n"
+        + CONFIRM_FOOTER
+    )
+    return None, nudge
 
 
 def parse_draft_command(message: Optional[str]) -> Optional[Dict[str, Any]]:
@@ -1324,7 +1455,7 @@ def parse_draft_command(message: Optional[str]) -> Optional[Dict[str, Any]]:
         return {"op": "confirm_all"}
     if is_strict_reject_message(raw) or low in {"cancel"}:
         return {"op": "cancel"}
-    if is_strict_confirm_message(raw) or low in {"yes save it", "yes save"}:
+    if is_strict_confirm_message(raw) or low in {"yes save it", "yes save"} or _phrase_key(raw) in _EXTRA_CONFIRM_PHRASES:
         return {"op": "confirm"}
     if low.rstrip(".") == "continue anyway":
         return {"op": "continue_anyway"}
@@ -1606,6 +1737,20 @@ def _role_ok(staff: Any) -> bool:
     return (getattr(staff, "role", "") or "").lower() in {"admin", "super_admin"}
 
 
+def _commit(db: Any) -> bool:
+    """Commit and say whether it worked. A failed commit is rolled back and logged, never ignored."""
+    try:
+        db.commit()
+        return True
+    except Exception as exc:
+        logger.warning("URL draft commit failed: %s", exc)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return False
+
+
 def _chat_response(conv: Any, text: str, pending_id: Optional[str], language: str) -> Dict[str, Any]:
     return {
         "type": "text",
@@ -1680,6 +1825,17 @@ def _save_one(db: Any, staff: Any, action: Any) -> str:
     from app.services.action_service import ACTION_STATUS_EXECUTED, save_ingested_listing
 
     draft = dict(action.action_payload or {})
+    # "confirm" is the admin's answer to a preview that already showed the outside-Thailand
+    # warning and the guessed values, so it counts as "continue anyway" and "use the guesses".
+    # Price is never guessed; anything still missing is asked for once, below.
+    if draft.get("foreign_place") and not draft.get("foreign_acknowledged"):
+        draft["foreign_acknowledged"] = True
+    guessed = [
+        field for field, prov in (draft.get("provenance") or {}).items()
+        if isinstance(prov, dict) and prov.get("status") == "guess" and field not in _NEVER_GUESS
+    ]
+    if guessed:
+        draft["guesses_accepted"] = sorted(set(draft.get("guesses_accepted") or []) | set(guessed))
     if _foreign_blocks(draft):
         missing = missing_requirements(draft)
         if not draft.get("websites"):
@@ -1687,7 +1843,11 @@ def _save_one(db: Any, staff: Any, action: Any) -> str:
         text = foreign_listing_warning(str(draft.get("foreign_place") or ""), str(draft.get("reply_language") or "en"))
         if missing:
             text += "\n\nI still need: " + ", ".join(_missing_phrase(draft, field) for field in missing) + "."
-        return text + "\n\nNothing was saved.\n\n" + CONFIRM_FOOTER
+        return (
+            text
+            + "\n\nNothing was saved yet. Reply 'continue anyway' first, then 'confirm'."
+            + "\n\n" + CONFIRM_FOOTER
+        )
     missing = missing_requirements(draft)
     if not draft.get("websites"):
         missing.append("website")
@@ -1698,7 +1858,7 @@ def _save_one(db: Any, staff: Any, action: Any) -> str:
     if missing or unresolved:
         parts = [_missing_phrase(draft, field) for field in missing]
         for field in unresolved:
-            if field not in parts:
+            if field not in parts and field not in missing and not (field.startswith("price") and "price" in missing):
                 parts.append(field)
         optional = [field for field in ("bedrooms", "bathrooms", "parking") if field not in missing]
         skip_hint = ""
@@ -1779,15 +1939,22 @@ def try_handle_property_url_turn(
     drafts = [item for item in (open_pending or []) if getattr(item, "tool_name", None) == INGEST_TOOL and getattr(item, "status", None) == "PENDING"]
     urls = extract_urls(message)
     command = parse_draft_command(message) if drafts and not urls else None
+    nudge = None
+    if drafts and not urls and not command:
+        command, nudge = _freeform_answer(drafts[0], message)
     from app.services.admin_chat_quality import classify_draft_question
 
     asking = bool(drafts and not urls and not command and classify_draft_question(message))
-    if not urls and not command and not asking:
+    if not urls and not command and not asking and not nudge:
         return None
     if not _role_ok(staff):
         text = "Only an admin or super admin can import a property from a URL."
         append_conversation_turn(db, conv, message or "", text)
         return _chat_response(conv, text, None, language)
+
+    if nudge:
+        append_conversation_turn(db, conv, message or "", nudge)
+        return _chat_response(conv, nudge, str(drafts[0].id), language)
 
     if urls:
         from app.repositories import pending_actions_repo

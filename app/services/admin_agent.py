@@ -536,12 +536,12 @@ CLAUDE_ADMIN_TOOLS = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "property_id": {"type": "string", "description": "Property identifier"},
+                "property_id": {"type": "string", "description": "Existing property identifier. Leave empty when creating a new listing: the system generates the id from the property name."},
                 "fields_to_update": {"type": "object", "description": "Dictionary of fields to update"},
                 "images": {"type": "array", "items": {"type": "string"}, "description": "List of property image URLs"},
                 "cover_image": {"type": "string", "description": "Cover image URL"}
             },
-            "required": ["property_id", "fields_to_update"]
+            "required": ["fields_to_update"]
         }
     },
     {
@@ -5542,6 +5542,17 @@ def _execute_admin_tool_uncached(
         if not explicit_websites:
             raw_fields.pop("websites", None)
             raw_fields.pop("selected_websites", None)
+
+        # A new listing needs no id from the admin: build it from the name.
+        if not str(target_pid or "").strip() and not resolve_source:
+            new_name = raw_fields.get("property_name") or raw_fields.get("title") or raw_fields.get("name")
+            if isinstance(new_name, str) and new_name.strip():
+                from app.services.action_service import generate_property_id
+
+                target_pid = generate_property_id(db, new_name)
+                tool_args["property_id"] = target_pid
+                tool_args["mode"] = "create"
+                tool_args["id_generated"] = True
 
         # Exists in Firestore → always update (never create-required fields)
         if resolve_source:
