@@ -1174,7 +1174,9 @@ def preview_rows(draft: Dict[str, Any], *, only_fields: Optional[List[str]] = No
             continue
         prov = provenance.get(field)
         row = _row(field, prov)
-        needs = (
+        # A medium-confidence guess is used when the admin confirms, so it is not a blocker.
+        usable_guess = bool(prov) and prov.get("status") == "guess" and prov.get("confidence") != "low" and not prov.get("needs_decision")
+        needs = not usable_guess and (
             prov is None
             or prov.get("status") in {"missing", "guess"}
             or prov.get("needs_decision")
@@ -1326,18 +1328,17 @@ def render_preview(draft: Dict[str, Any], *, changed_only: Optional[List[str]] =
     else:
         name = ((draft.get("provenance") or {}).get("property_name") or {}).get("value")
         lines.append(f"**Property found: {name}**" if name else "**Property found**")
-        lines.append("")
-        lines.append(f"- Source: {draft.get('source_url')} ({draft.get('source_site')})")
-        lines.append(f"- Target websites: {', '.join(draft.get('websites') or []) or '—'}")
-        lines.append(f"- Images: {len(draft.get('images') or [])}")
+        lines.append(f"Source: {draft.get('source_url')} ({draft.get('source_site')})")
+        lines.append(f"Target websites: {', '.join(draft.get('websites') or []) or '—'}")
+        lines.append(f"Images: {len(draft.get('images') or [])}")
         duplicate = draft.get("duplicate")
         if duplicate:
             lines.append(
-                f"- Duplicate: this matches existing '{duplicate.get('name')}' ({duplicate.get('property_id')}) in {duplicate.get('store')}. "
+                f"Duplicate: this matches existing '{duplicate.get('name')}' ({duplicate.get('property_id')}) in {duplicate.get('store')}. "
                 "Confirm will update that listing. Say 'create new' if you wanted a separate property; the same name cannot be created twice."
             )
         else:
-            lines.append("- Duplicate: none")
+            lines.append("Duplicate: none")
         lines.append("")
         if other:
             lines.append("**Extracted from the page**")
@@ -1364,7 +1365,7 @@ def render_preview(draft: Dict[str, Any], *, changed_only: Optional[List[str]] =
         )
     if _foreign_blocks(draft):
         lines.append("")
-        lines.append("> " + foreign_listing_warning(str(draft.get("foreign_place") or ""), str(draft.get("reply_language") or "en")))
+        lines.append("Note: " + foreign_listing_warning(str(draft.get("foreign_place") or ""), str(draft.get("reply_language") or "en")))
     lines.append("")
     lines.append(CONFIRM_FOOTER)
     return "\n".join(lines)
@@ -1897,16 +1898,13 @@ def _save_one(db: Any, staff: Any, action: Any) -> str:
         for field in unresolved:
             if field not in parts and field not in missing and not (field.startswith("price") and "price" in missing):
                 parts.append(field)
-        optional = [field for field in ("bedrooms", "bathrooms", "parking") if field not in missing]
-        skip_hint = ""
-        if optional:
-            skip_hint = f" You can say 'skip {optional[0]}' for an optional field."
+        example = _missing_example(missing)
         return (
             "I still need: "
             + "; ".join(parts)
-            + ". Tell me the missing value."
-            + skip_hint
-            + " Nothing was saved.\n\n"
+            + ". Tell me the missing value"
+            + (f", for example: `{example}`" if example else "")
+            + ". Nothing was saved.\n\n"
             + CONFIRM_FOOTER
         )
     pending_guesses = unaccepted_guesses(draft)
