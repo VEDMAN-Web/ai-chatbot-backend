@@ -6,15 +6,14 @@ from fastapi import FastAPI, Depends, Query, HTTPException, status, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-from sqlalchemy.orm import Session
 from typing import List, Optional, Any
 from app.core.config import settings
-from app.db.session import get_db, get_admin_db, get_user_db
+from app.core.deps import get_db, get_admin_db, get_user_db
 from app.services.property_search import PropertyFilterParams, search_properties_safe, get_property_by_id, property_belongs_to_websites
 from app.core.tenant import normalize_website_list
-from app.db.models import Property
 from app.api.v1.chat import router as chat_router
 from app.api.v1.admin import router as admin_router
+from app.api.v1.admin_logs import router as admin_logs_router
 from app.api.v1.auth import router as auth_router
 from app.api.v1.superadmin_instructions import router as superadmin_instructions_router
 
@@ -53,15 +52,6 @@ if os.path.exists(static_dir):
 def _prewarm_caches_background() -> None:
     """Load property index + name index without blocking startup; never raise."""
     try:
-        from app.core.config import settings as _settings
-        logger.info(
-            "STORE_PROPERTIES_READ_USER=%s STORE_LEADS_USER=%s",
-            getattr(_settings, "STORE_PROPERTIES_READ_USER", "firestore"),
-            getattr(_settings, "STORE_LEADS_USER", "firestore"),
-        )
-    except Exception:
-        pass
-    try:
         from app.services.property_index import get_property_index
         get_property_index().ensure_fresh(force=True)
     except Exception as e:
@@ -80,28 +70,16 @@ def _prewarm_caches_background() -> None:
 
 @app.on_event("startup")
 def startup_db_init():
-    """Ensure all PostgreSQL tables and extensions exist on boot for both admin and user databases."""
-    # Fail fast if DATABASE_URL is missing outside tests; then emit config flag warnings (no secrets)
+    """Startup config checks and cache pre-warm (Firestore is the only datastore)."""
     try:
-        from app.core.config import assert_database_configured_or_exit, log_config_warnings
-        assert_database_configured_or_exit()
+        from app.core.config import log_config_warnings
         log_config_warnings()
+        from app.services.report_service import log_storage_backend_on_startup
+        log_storage_backend_on_startup()
     except RuntimeError:
         raise
     except Exception as e:
         logger.warning("Startup config checks failed (non-fatal if already asserted): %s", e)
-
-    try:
-        from app.db.schema_sync import ensure_postgres_schema
-        from app.db.session import admin_engine, user_engine
-
-        try:
-            ensure_postgres_schema((admin_engine, user_engine))
-            print("FastAPI Startup: Verified all admin and user database tables and columns.")
-        except Exception as eng_e:
-            print(f"FastAPI Startup: Database schema was not fully applied: {eng_e}")
-    except Exception as e:
-        print(f"FastAPI Startup DB Notice: {e}")
 
     # Non-blocking cache pre-warm (Firestore may be unavailable in some envs)
     try:
@@ -234,6 +212,7 @@ app.add_middleware(
 # Register Public Chatbot & Admin Agent Routers
 app.include_router(chat_router, prefix="/api/v1")
 app.include_router(admin_router, prefix="/api/v1")
+app.include_router(admin_logs_router, prefix="/api/v1")
 app.include_router(superadmin_instructions_router, prefix="/api/v1")
 app.include_router(auth_router, prefix="/api/v1")
 
@@ -284,39 +263,29 @@ app.post("/api/v1/admin/users/{user_id}/block", response_model=AdminUserDirector
 app.post("/api/v1/users/{user_id}/block", response_model=AdminUserDirectoryItem, tags=["Admin Directory"], include_in_schema=False)(block_admin_user)
 
 @app.get("/health", tags=["System"])
-def health_check(
-    admin_db: Session = Depends(get_admin_db),
-    user_db: Session = Depends(get_user_db)
-):
-    """System health check, PostgreSQL (admin and user instances), and Firestore connection test."""
+def health_check():
+    """System health check against Firestore (the only datastore)."""
     try:
-        admin_count = admin_db.query(Property).count()
-        user_count = user_db.query(Property).count()
-        fs_health = {"connected": False}
-        if (
-            getattr(settings, "ENABLE_FIRESTORE_SYNC", False)
-            or settings.get_admin_enable_firestore_sync()
-            or settings.get_user_enable_firestore_sync()
-        ):
-            try:
-                from app.services.firestore_service import check_firestore_health
-                fs_health = check_firestore_health()
-            except Exception as fe:
-                fs_health = {"connected": False, "error": str(fe)}
-
+        from app.services.firestore_service import check_firestore_health, get_firestore_properties_count
+        fs_health = check_firestore_health()
+        count = 0
+        try:
+            count = get_firestore_properties_count("user")
+        except Exception as ce:
+            fs_health = {**(fs_health or {}), "count_error": str(ce)}
+        if not (fs_health or {}).get("connected"):
+            raise RuntimeError((fs_health or {}).get("error") or "Firestore not connected")
         return {
             "status": "healthy",
             "environment": settings.ENVIRONMENT,
-            "database": "connected",
-            "admin_database": {"connected": True, "properties_count": admin_count},
-            "user_database": {"connected": True, "properties_count": user_count},
-            "total_properties": user_count or admin_count,
-            "firestore": fs_health
+            "database": "firestore",
+            "total_properties": count,
+            "firestore": fs_health,
         }
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"Database connection failed: {e}"
+            detail=f"Firestore connection failed: {e}"
         )
 
 @app.get("/api/v1/branding", tags=["System"])
@@ -354,9 +323,9 @@ def list_properties(
     site_origin: Optional[str] = Query(None, description="Tenant site origin domain"),
     limit: Optional[int] = Query(50, ge=1, le=500, description="Max properties to return"),
     offset: Optional[int] = Query(0, ge=0, description="Pagination offset"),
-    db: Session = Depends(get_user_db)
+    db: Any = Depends(get_user_db)
 ):
-    """Direct property filtering endpoint using safe SQLAlchemy query builder with website scoping."""
+    """Direct property filtering endpoint filtered in Python over Firestore listings, scoped to the requested websites."""
     raw_sites = (
         websites
         or request.query_params.get("selected_websites")
@@ -410,7 +379,7 @@ def get_property(
     request: Request,
     websites: Optional[str] = Query(None, description="Optional website filter"),
     site_origin: Optional[str] = Query(None, description="Tenant site origin domain"),
-    db: Session = Depends(get_user_db)
+    db: Any = Depends(get_user_db)
 ):
     """Lookup property by exact Property ID with optional website scope check."""
     raw_sites = (

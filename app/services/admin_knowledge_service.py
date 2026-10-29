@@ -2,22 +2,19 @@ import json
 import os
 import logging
 from typing import Dict, Any, Optional
-from sqlalchemy.orm import Session
-from app.db.models import Property, PropertySpec
 from app.services.admin_property_fields import (
     format_price_for_display,
     localize_name,
     parse_bedrooms,
     parse_price_amount,
     read_firestore_canonical,
-    read_pg_canonical,
 )
 
 logger = logging.getLogger(__name__)
 
 
 def get_property_knowledge(
-    db: Session,
+    db: Any,
     property_id: str,
     *,
     include_internal_notes: bool = False,
@@ -54,20 +51,7 @@ def get_property_knowledge(
         logger.warning(f"Firestore get_property_by_id_from_firestore error: {e}")
         fs_prop = None
 
-    # 1.5 Query Property and PropertySpec from DB
-    prop = None
-    spec = None
-    from app.repositories import properties_store
-
-    if properties_store.sql_db(db) is not None:
-        try:
-            prop = db.query(Property).filter(Property.property_id.in_(list(id_aliases))).first()
-            if prop:
-                spec = db.query(PropertySpec).filter(PropertySpec.property_id == prop.property_id).first()
-        except Exception as e:
-            logger.debug(f"DB lookup fallback: {e}")
-
-    if not fs_prop and not prop and not spec:
+    if not fs_prop:
         return None
 
     price_keys = [
@@ -77,8 +61,6 @@ def get_property_knowledge(
         "area_display", "property_type", "has_pool",
     ]
     merged: Dict[str, Any] = {}
-    if prop:
-        merged.update(read_pg_canonical(prop, price_keys))
     if fs_prop:
         raw = fs_prop.get("raw_firestore_data") if isinstance(fs_prop.get("raw_firestore_data"), dict) else {}
         # Prefer flat card + raw
@@ -99,7 +81,6 @@ def get_property_knowledge(
     dev_name = (
         (fs_prop.get("developer_name") if fs_prop else None)
         or fs_raw.get("developerId")
-        or (prop.developer_name if prop else None)
     )
 
     inv_highlights = fs_raw.get("investmentHighlights")
@@ -112,31 +93,22 @@ def get_property_knowledge(
     else:
         notes_val = ""
 
-    roof_material = (spec.roof_material if spec and spec.roof_material else None) or "Not documented in verified database"
-    roof_colour = (spec.roof_colour if spec and spec.roof_colour else None) or "Not documented in verified database"
-    flooring = (spec.flooring if spec and spec.flooring else None) or "Not documented in verified database"
-    walls = (spec.walls if spec and spec.walls else None) or "Not documented in verified database"
-    doors_windows = (spec.doors_windows if spec and spec.doors_windows else None) or "Not documented in verified database"
-    exterior_mat = (spec.exterior_materials if spec and spec.exterior_materials else None) or "Not documented in verified database"
-    interior_mat = (spec.interior_materials if spec and spec.interior_materials else None) or "Not documented in verified database"
-    arch_style = (spec.architectural_style if spec and spec.architectural_style else None) or (
-        merged.get("property_type") or "Not documented in verified database"
-    )
-    foundation_val = (
-        spec.construction_details.get("foundation")
-        if spec and isinstance(spec.construction_details, dict) and spec.construction_details.get("foundation")
-        else None
-    ) or "Not documented in verified database"
+    roof_material = "Not documented in verified database"
+    roof_colour = "Not documented in verified database"
+    flooring = "Not documented in verified database"
+    walls = "Not documented in verified database"
+    doors_windows = "Not documented in verified database"
+    exterior_mat = "Not documented in verified database"
+    interior_mat = "Not documented in verified database"
+    arch_style = merged.get("property_type") or "Not documented in verified database"
+    foundation_val = "Not documented in verified database"
+    internal_notes = notes_val if notes_val else "No confidential notes recorded for this development."
 
-    internal_notes = (spec.internal_notes if spec and spec.internal_notes else None) or (
-        notes_val if notes_val else "No confidential notes recorded for this development."
-    )
-
-    prop_id_val = (fs_prop.get("property_id") if fs_prop else None) or (prop.property_id if prop else clean_id)
+    prop_id_val = (fs_prop.get("property_id") if fs_prop else None) or clean_id
     prop_name_val = localize_name(merged.get("property_name")) or (
         localize_name(fs_prop.get("name")) if fs_prop else None
-    ) or (prop.property_name if prop else clean_id)
-    prop_status = completion_status or (prop.status if prop else "Available")
+    ) or clean_id
+    prop_status = completion_status or "Available"
     prop_loc = merged.get("location") or (
         f"{merged.get('district') or ''}, {merged.get('province') or ''}".strip(", ")
     ) or "Thailand"

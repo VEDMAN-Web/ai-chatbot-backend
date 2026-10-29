@@ -1,11 +1,11 @@
+from typing import Any
 from datetime import datetime
 from typing import List, Optional, Dict
 from fastapi import Depends, HTTPException, Security, status, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials, APIKeyHeader
 from pydantic import BaseModel, Field
-from sqlalchemy.orm import Session
 
-from app.db.session import get_db
+from app.core.deps import get_db
 from app.repositories import users_repo
 from app.core.config import settings
 from app.core.tenant import (
@@ -154,7 +154,7 @@ def _load_user_by_id(db, user_id):
 
 
 def get_current_user_from_db(
-    db: Session = Depends(get_db),
+    db: Any = Depends(get_db),
     bearer_creds: Optional[HTTPAuthorizationCredentials] = Security(security_bearer),
     staff_email_hdr: Optional[str] = Security(header_staff_email),
     staff_token_hdr: Optional[str] = Security(header_staff_token)
@@ -185,13 +185,13 @@ def get_current_user_from_db(
             if existing_session.revoked_at is not None:
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Session has been revoked or logged out.",
+                    detail="Any has been revoked or logged out.",
                     headers={"WWW-Authenticate": "Bearer"}
                 )
             if existing_session.expires_at <= datetime.utcnow():
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Session has expired. Please log in again.",
+                    detail="Any has expired. Please log in again.",
                     headers={"WWW-Authenticate": "Bearer"}
                 )
             resolved_role = user.role or "worker"

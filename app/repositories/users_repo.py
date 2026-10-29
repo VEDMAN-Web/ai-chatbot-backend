@@ -1,5 +1,5 @@
 """
-Staff users + login sessions repository (Stage F3) — Postgres / Firestore / both.
+Staff users + login sessions repository (Stage F3) — Firestore.
 
 Callers must use this module; never query User / UserSession or the Firestore client directly.
 
@@ -7,7 +7,7 @@ Firestore layout
   admin_authentication/{email}   one document per staff user (document id = lower-case email)
   admin_sessions/{sha256(token)} one document per login session (the raw token is never stored)
 
-Records returned by this module expose the same attribute names as the SQLAlchemy rows
+Records returned by this module expose the same attribute names as the former SQLAlchemy rows
 (id, email, name, role, domain, allowed_websites, password_hash, is_active, status,
 google_email, google_refresh_token, preferences, created_at) so existing code keeps working.
 Change attributes, then call save_user(db, user).
@@ -23,24 +23,13 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from app.repositories import _fs_utils as fs
-from app.repositories.store_mode import (
-    reads_firestore_first,
-    reads_postgres,
-    require_firestore_client,
-    store_mode,
-    writes_firestore,
-    writes_postgres,
-)
+from app.repositories.store_mode import require_firestore_client
 
 logger = logging.getLogger(__name__)
 
 USERS_COLLECTION = "admin_authentication"
 SESSIONS_COLLECTION = "admin_sessions"
 _ID_NAMESPACE = uuid.UUID("6f1c2f0e-7b0a-4d7e-9a53-0d0b7c1f6a11")
-
-
-def _mode() -> str:
-    return store_mode("STORE_USERS", default="firestore")
 
 
 def _client():
@@ -63,7 +52,7 @@ def _iso(value: Any) -> Optional[str]:
 
 
 def _as_uuid(value: Any) -> Any:
-    """SQL rows use UUID columns; ids travel as strings elsewhere. Convert when it is a UUID."""
+    """Ids travel as strings; convert to UUID when the value is one."""
     if isinstance(value, uuid.UUID):
         return value
     try:
@@ -86,7 +75,7 @@ def hash_token(token: str) -> str:
 # ---------------------------------------------------------------------------
 
 class UserRecord:
-    """Duck-typed stand-in for the SQLAlchemy User row."""
+    """Duck-typed user record."""
 
     def __init__(self, data: Dict[str, Any]):
         d = dict(data or {})
@@ -143,7 +132,7 @@ class UserRecord:
 
 
 class SessionRecord:
-    """Duck-typed stand-in for the SQLAlchemy UserSession row."""
+    """Duck-typed session record."""
 
     def __init__(self, data: Dict[str, Any]):
         d = dict(data or {})
@@ -166,62 +155,6 @@ class SessionRecord:
 
 
 # ---------------------------------------------------------------------------
-# SQL helpers
-# ---------------------------------------------------------------------------
-
-def _sql_models():
-    from app.db.models import User, UserSession
-
-    return User, UserSession
-
-
-def _pg_get_by_email(db: Any, email: str):
-    from sqlalchemy import func
-
-    User, _ = _sql_models()
-    return db.query(User).filter(func.lower(User.email) == email).first()
-
-
-def _pg_get_by_id(db: Any, user_id: str):
-    User, _ = _sql_models()
-    try:
-        return db.query(User).filter(User.id == _as_uuid(user_id)).first()
-    except Exception:
-        try:
-            db.rollback()
-        except Exception:
-            pass
-        return None
-
-
-def _pg_mirror_user(db: Any, rec: UserRecord) -> None:
-    """Best-effort upsert of a Firestore user into SQL (only used when STORE_USERS=both)."""
-    try:
-        User, _ = _sql_models()
-        row = _pg_get_by_email(db, rec.email)
-        if row is None:
-            row = User(email=rec.email)
-            db.add(row)
-        row.name = rec.name
-        row.role = rec.role
-        row.domain = rec.domain
-        row.allowed_websites = list(rec.allowed_websites or [])
-        row.password_hash = rec.password_hash
-        row.is_active = rec.is_active
-        row.status = rec.status
-        row.google_email = rec.google_email
-        row.google_refresh_token = rec.google_refresh_token
-        row.preferences = copy.deepcopy(rec.preferences or {})
-        db.commit()
-    except Exception as e:
-        logger.warning("users_repo: SQL mirror failed for %s: %s", rec.email, e)
-        try:
-            db.rollback()
-        except Exception:
-            pass
-
-
-# ---------------------------------------------------------------------------
 # Firestore helpers
 # ---------------------------------------------------------------------------
 
@@ -230,7 +163,7 @@ def _fs_client_required():
 
 
 def _fs_get_by_email(email: str) -> Optional[UserRecord]:
-    client = _client() if _mode() == "both" else _fs_client_required()
+    client = _fs_client_required()
     if client is None:
         return None
     data = fs.get_document(client, USERS_COLLECTION, email)
@@ -264,7 +197,7 @@ def _fs_doc_id(rec: UserRecord) -> str:
 
 
 def _fs_all_users() -> List[UserRecord]:
-    client = _client() if _mode() == "both" else _fs_client_required()
+    client = _fs_client_required()
     out: List[UserRecord] = []
     for snap in fs.stream_collection(client, USERS_COLLECTION):
         data = fs.doc_to_dict(snap)
@@ -285,13 +218,9 @@ def get_by_email(db: Any, email: str):
     email = (email or "").strip().lower()
     if not email:
         return None
-    mode = _mode()
-    if reads_firestore_first(mode):
-        rec = _fs_get_by_email(email)
-        if rec is not None:
-            return rec
-    if reads_postgres(mode) and db is not None:
-        return _pg_get_by_email(db, email)
+    rec = _fs_get_by_email(email)
+    if rec is not None:
+        return rec
     return None
 
 
@@ -299,17 +228,13 @@ def get_by_id(db: Any, user_id: Any):
     uid = str(user_id or "").strip()
     if not uid:
         return None
-    mode = _mode()
-    if reads_firestore_first(mode):
-        if "@" in uid:
-            rec = _fs_get_by_email(uid.lower())
-            if rec is not None:
-                return rec
-        for rec in _fs_all_users():
-            if str(rec.id) == uid:
-                return rec
-    if reads_postgres(mode) and db is not None:
-        return _pg_get_by_id(db, uid)
+    if "@" in uid:
+        rec = _fs_get_by_email(uid.lower())
+        if rec is not None:
+            return rec
+    for rec in _fs_all_users():
+        if str(rec.id) == uid:
+            return rec
     return None
 
 
@@ -322,13 +247,8 @@ def list_users(
     status: Optional[str] = None,
 ) -> List[Any]:
     """All matching users, oldest first."""
-    mode = _mode()
     users: List[Any] = []
-    if reads_firestore_first(mode):
-        users = _fs_all_users()
-    if not users and reads_postgres(mode) and db is not None:
-        User, _ = _sql_models()
-        users = db.query(User).order_by(User.created_at.asc()).all()
+    users = _fs_all_users()
 
     wanted_roles = {r.strip().lower() for r in roles} if roles else None
     term = (search or "").strip().lower()
@@ -368,7 +288,6 @@ def create_user(db: Any, **fields: Any):
         raise ValueError("email is required")
     if get_by_email(db, email) is not None:
         raise ValueError(f"User with email '{email}' already exists.")
-    mode = _mode()
     rec = UserRecord({
         "email": email,
         "name": fields.get("name"),
@@ -384,57 +303,21 @@ def create_user(db: Any, **fields: Any):
         "userId": str(uuid.uuid4()),
         "createdAt": datetime.utcnow(),
     })
-    if writes_firestore(mode):
-        client = _fs_client_required() if mode == "firestore" else _client()
-        if client is not None:
-            fs.set_document(client, USERS_COLLECTION, email, rec.to_firestore_dict(), merge=False)
-            rec._doc_id = email
-    if writes_postgres(mode) and db is not None:
-        if mode == "postgres":
-            User, _ = _sql_models()
-            row = User(
-                email=email,
-                name=rec.name,
-                role=rec.role,
-                domain=rec.domain,
-                allowed_websites=list(rec.allowed_websites or []),
-                password_hash=rec.password_hash,
-                is_active=rec.is_active,
-                status=rec.status,
-                google_email=rec.google_email,
-                google_refresh_token=rec.google_refresh_token,
-                preferences=copy.deepcopy(rec.preferences or {}),
-            )
-            db.add(row)
-            db.commit()
-            db.refresh(row)
-            return row
-        _pg_mirror_user(db, rec)
+    client = _fs_client_required()
+    if client is not None:
+        fs.set_document(client, USERS_COLLECTION, email, rec.to_firestore_dict(), merge=False)
+        rec._doc_id = email
     return rec
 
 
 def save_user(db: Any, user: Any) -> Any:
     """Persist attribute changes made on a record returned by this module."""
     if isinstance(user, UserRecord):
-        mode = _mode()
-        if writes_firestore(mode):
-            client = _fs_client_required() if mode == "firestore" else _client()
-            if client is not None:
-                payload = user.to_firestore_dict()
-                fs.set_document(client, USERS_COLLECTION, _fs_doc_id(user), payload, merge=True)
-        if writes_postgres(mode) and mode == "both" and db is not None:
-            _pg_mirror_user(db, user)
+        client = _fs_client_required()
+        if client is not None:
+            payload = user.to_firestore_dict()
+            fs.set_document(client, USERS_COLLECTION, _fs_doc_id(user), payload, merge=True)
         return user
-    # SQLAlchemy row (STORE_USERS=postgres)
-    try:
-        db.commit()
-        db.refresh(user)
-    except Exception:
-        try:
-            db.rollback()
-        except Exception:
-            pass
-        raise
     return user
 
 
@@ -472,26 +355,12 @@ def upgrade_legacy_password(db: Any, user: Any, plain_password: str) -> bool:
 
 def delete_user(db: Any, user: Any) -> None:
     """Delete the user and all of their sessions."""
-    mode = _mode()
     uid = str(user.id)
     email = (user.email or "").strip().lower()
     delete_user_sessions(db, uid)
-    if writes_firestore(mode):
-        client = _client()
-        if client is not None:
-            fs.delete_document(client, USERS_COLLECTION, _fs_doc_id(user) if isinstance(user, UserRecord) else email)
-    if writes_postgres(mode) and db is not None:
-        try:
-            row = user if not isinstance(user, UserRecord) else _pg_get_by_email(db, email)
-            if row is not None:
-                db.delete(row)
-                db.commit()
-        except Exception as e:
-            logger.warning("users_repo: SQL delete failed for %s: %s", email, e)
-            try:
-                db.rollback()
-            except Exception:
-                pass
+    client = _client()
+    if client is not None:
+        fs.delete_document(client, USERS_COLLECTION, _fs_doc_id(user) if isinstance(user, UserRecord) else email)
 
 
 # ---------------------------------------------------------------------------
@@ -499,7 +368,6 @@ def delete_user(db: Any, user: Any) -> None:
 # ---------------------------------------------------------------------------
 
 def create_session(db: Any, user_id: Any, token: str, expires_at: datetime):
-    mode = _mode()
     now = datetime.utcnow()
     rec = SessionRecord({
         "id": hash_token(token),
@@ -509,17 +377,9 @@ def create_session(db: Any, user_id: Any, token: str, expires_at: datetime):
         "createdAt": now,
     })
     rec.token = token
-    if writes_firestore(mode):
-        client = _fs_client_required() if mode == "firestore" else _client()
-        if client is not None:
-            fs.set_document(client, SESSIONS_COLLECTION, rec.id, rec.to_firestore_dict(), merge=False)
-    if writes_postgres(mode) and db is not None and mode == "postgres":
-        _, UserSession = _sql_models()
-        row = UserSession(user_id=_as_uuid(user_id), token=token, expires_at=expires_at, created_at=now)
-        db.add(row)
-        db.commit()
-        db.refresh(row)
-        return row
+    client = _fs_client_required()
+    if client is not None:
+        fs.set_document(client, SESSIONS_COLLECTION, rec.id, rec.to_firestore_dict(), merge=False)
     return rec
 
 
@@ -527,17 +387,12 @@ def get_session_by_token(db: Any, token: str):
     token = (token or "").strip()
     if not token:
         return None
-    mode = _mode()
-    if reads_firestore_first(mode):
-        client = _client() if mode == "both" else _fs_client_required()
-        data = fs.get_document(client, SESSIONS_COLLECTION, hash_token(token)) if client is not None else None
-        if data is not None:
-            rec = SessionRecord(data)
-            rec.token = token
-            return rec
-    if reads_postgres(mode) and db is not None:
-        _, UserSession = _sql_models()
-        return db.query(UserSession).filter(UserSession.token == token).first()
+    client = _fs_client_required()
+    data = fs.get_document(client, SESSIONS_COLLECTION, hash_token(token)) if client is not None else None
+    if data is not None:
+        rec = SessionRecord(data)
+        rec.token = token
+        return rec
     return None
 
 
@@ -545,16 +400,13 @@ def revoke_session(db: Any, session: Any) -> None:
     if session is None or session.revoked_at is not None:
         return
     session.revoked_at = datetime.utcnow()
-    if isinstance(session, SessionRecord):
-        client = _client()
-        if client is not None:
-            fs.set_document(client, SESSIONS_COLLECTION, session.id, {"revokedAt": _iso(session.revoked_at)}, merge=True)
-    else:
-        db.commit()
+    client = _client()
+    if client is not None:
+        fs.set_document(client, SESSIONS_COLLECTION, session.id, {"revokedAt": _iso(session.revoked_at)}, merge=True)
 
 
 def _fs_sessions_for_user(user_id: str) -> List[SessionRecord]:
-    client = _client() if _mode() == "both" else _fs_client_required()
+    client = _fs_client_required()
     if client is None:
         return []
     out: List[SessionRecord] = []
@@ -570,73 +422,33 @@ def _fs_sessions_for_user(user_id: str) -> List[SessionRecord]:
 
 def revoke_user_sessions(db: Any, user_id: Any) -> int:
     """Revoke every active session of a user. Returns how many were revoked."""
-    mode = _mode()
     uid = str(user_id)
     count = 0
     now = datetime.utcnow()
-    if writes_firestore(mode) or reads_firestore_first(mode):
-        client = _client()
-        if client is not None:
-            for sess in _fs_sessions_for_user(uid):
-                if sess.revoked_at is None:
-                    fs.set_document(client, SESSIONS_COLLECTION, sess.id, {"revokedAt": _iso(now)}, merge=True)
-                    count += 1
-    if reads_postgres(mode) and db is not None:
-        try:
-            _, UserSession = _sql_models()
-            count += db.query(UserSession).filter(
-                UserSession.user_id == _as_uuid(user_id),
-                UserSession.revoked_at.is_(None),
-            ).update({"revoked_at": now}, synchronize_session=False)
-            db.commit()
-        except Exception as e:
-            logger.warning("users_repo: SQL revoke failed: %s", e)
-            try:
-                db.rollback()
-            except Exception:
-                pass
+    client = _client()
+    if client is not None:
+        for sess in _fs_sessions_for_user(uid):
+            if sess.revoked_at is None:
+                fs.set_document(client, SESSIONS_COLLECTION, sess.id, {"revokedAt": _iso(now)}, merge=True)
+                count += 1
     return int(count)
 
 
 def count_active_sessions(db: Any, user_id: Any) -> int:
-    mode = _mode()
     uid = str(user_id)
     now = datetime.utcnow()
-    if reads_firestore_first(mode):
-        client = _client()
-        if mode == "firestore":
-            _fs_client_required()
-        if client is not None:
-            return sum(
-                1 for s in _fs_sessions_for_user(uid)
-                if s.revoked_at is None and s.expires_at > now
-            )
-    if reads_postgres(mode) and db is not None:
-        _, UserSession = _sql_models()
-        return db.query(UserSession).filter(
-            UserSession.user_id == _as_uuid(user_id),
-            UserSession.revoked_at.is_(None),
-            UserSession.expires_at > now,
-        ).count()
+    client = _fs_client_required()
+    if client is not None:
+        return sum(
+            1 for s in _fs_sessions_for_user(uid)
+            if s.revoked_at is None and s.expires_at > now
+        )
     return 0
 
 
 def delete_user_sessions(db: Any, user_id: Any) -> None:
-    mode = _mode()
     uid = str(user_id)
-    if writes_firestore(mode):
-        client = _client()
-        if client is not None:
-            for sess in _fs_sessions_for_user(uid):
-                fs.delete_document(client, SESSIONS_COLLECTION, sess.id)
-    if writes_postgres(mode) and db is not None:
-        try:
-            _, UserSession = _sql_models()
-            db.query(UserSession).filter(UserSession.user_id == _as_uuid(user_id)).delete()
-            db.commit()
-        except Exception as e:
-            logger.warning("users_repo: SQL session delete failed: %s", e)
-            try:
-                db.rollback()
-            except Exception:
-                pass
+    client = _client()
+    if client is not None:
+        for sess in _fs_sessions_for_user(uid):
+            fs.delete_document(client, SESSIONS_COLLECTION, sess.id)

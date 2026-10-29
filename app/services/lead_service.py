@@ -13,10 +13,8 @@ from decimal import Decimal
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
-from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.db.models import Lead, Conversation
 
 logger = logging.getLogger(__name__)
 
@@ -139,7 +137,7 @@ def _interest_rank(level: Optional[str]) -> int:
 
 
 class SessionLead:
-    """Lightweight lead object used for in-session upsert (and when SQL is off)."""
+    """Lightweight lead object used for in-session upsert ()."""
 
     def __init__(self, data: Dict[str, Any]):
         self.id = data.get("id") or str(uuid4())
@@ -194,8 +192,8 @@ def calculate_lead_score(
 
 
 def record_or_update_lead(
-    db: Optional[Session] = None,
-    conversation: Optional[Conversation] = None,
+    db: Optional[Any] = None,
+    conversation: Optional[Any] = None,
     contact_name: Optional[str] = None,
     contact_email: Optional[str] = None,
     contact_phone: Optional[str] = None,
@@ -286,9 +284,8 @@ def record_or_update_lead(
         _IN_SESSION_LEADS[key] = existing
         session_lead = SessionLead(deepcopy(existing))
 
-    # Durable write according to STORE_LEADS_USER (never blocks on failure)
-    mode = leads_store_mode()
-    if mode in ("firestore", "both") and getattr(settings, "ENABLE_LEAD_SAVING", True):
+    # Durable Firestore write (never blocks on failure)
+    if getattr(settings, "ENABLE_LEAD_SAVING", True):
         try:
             persist_lead_to_firestore(session_lead, conversation, notes=notes)
         except Exception as fe:
@@ -302,13 +299,6 @@ def get_session_lead(conversation: Any) -> Optional[SessionLead]:
     with _SESSION_LOCK:
         data = _IN_SESSION_LEADS.get(key)
         return SessionLead(deepcopy(data)) if data else None
-
-
-def leads_store_mode() -> str:
-    mode = str(getattr(settings, "STORE_LEADS_USER", "firestore") or "firestore").strip().lower()
-    if mode not in {"firestore", "postgres", "both"}:
-        return "firestore"
-    return mode
 
 
 def make_lead_dedupe_key(
@@ -477,57 +467,9 @@ def persist_lead_to_firestore(
         return None
 
 
-def _persist_sql_lead(db: Session, conversation: Any, session_lead: SessionLead) -> None:
-    conv_id = getattr(conversation, "id", None)
-    lead = None
-    if conv_id and not isinstance(conv_id, str):
-        try:
-            lead = db.query(Lead).filter(Lead.conversation_id == conv_id).first()
-        except Exception as qe:
-            logger.warning("Lead lookup in SQL failed: %s", qe)
-            return
-
-    if not lead and hasattr(conversation, "__table__") and conv_id and not isinstance(conv_id, str):
-        try:
-            lead = Lead(
-                conversation_id=conversation.id,
-                status="new",
-                buying_signals=[],
-            )
-            db.add(lead)
-        except Exception as e:
-            logger.warning("Lead create skipped: %s", e)
-            return
-
-    if not lead:
-        return
-
-    if session_lead.contact_name:
-        lead.contact_name = session_lead.contact_name
-    if session_lead.contact_email:
-        lead.contact_email = session_lead.contact_email
-    if session_lead.contact_phone:
-        lead.contact_phone = session_lead.contact_phone
-    if session_lead.preferred_location:
-        lead.preferred_location = session_lead.preferred_location
-    if session_lead.preferred_type:
-        lead.preferred_type = session_lead.preferred_type
-    if session_lead.budget_min is not None:
-        lead.budget_min = session_lead.budget_min
-    if session_lead.budget_max is not None:
-        lead.budget_max = session_lead.budget_max
-    lead.buying_signals = list(session_lead.buying_signals or [])
-    lead.lead_score = float(session_lead.lead_score or 0.0)
-    db.commit()
-    try:
-        db.refresh(lead)
-    except Exception:
-        pass
-
-
 def enqueue_lead_save(
-    db: Optional[Session] = None,
-    conversation: Optional[Conversation] = None,
+    db: Optional[Any] = None,
+    conversation: Optional[Any] = None,
     **fields: Any,
 ) -> None:
     """
@@ -537,7 +479,7 @@ def enqueue_lead_save(
     if conversation is None:
         return
 
-    # Snapshot identity + history length for scoring (avoid sharing live ORM across threads)
+    # Snapshot identity + history length for scoring (avoid sharing live objects across threads)
     snap = type(
         "LeadConvSnap",
         (),
@@ -549,38 +491,17 @@ def enqueue_lead_save(
             "preferences": dict(getattr(conversation, "preferences", None) or {}),
             "site_origin": getattr(conversation, "site_origin", None),
             "lead_score": getattr(conversation, "lead_score", 0.0),
-            "__table__": getattr(conversation, "__table__", None),
         },
     )()
 
     payload = dict(fields)
 
     def _run() -> None:
-        local_db = None
         try:
-            lead = record_or_update_lead(db=None, conversation=snap, **payload)
-            if getattr(settings, "ENABLE_LEAD_SAVING", False) and lead is not None:
-                mode = leads_store_mode()
-                if mode in ("postgres", "both"):
-                    try:
-                        from app.db.session import UserSessionLocal
-                        local_db = UserSessionLocal()
-                    except Exception:
-                        local_db = None
-                    if local_db is not None:
-                        try:
-                            _persist_sql_lead(local_db, snap, lead)
-                        except Exception as pe:
-                            logger.warning("Lead SQL persist failed (session lead kept): %s", pe)
-                # Firestore write already attempted inside record_or_update_lead for firestore/both
+            # The Firestore write happens inside record_or_update_lead.
+            record_or_update_lead(db=None, conversation=snap, **payload)
         except Exception as e:
             logger.warning("Background lead save failed (chat reply unaffected): %s", e)
-        finally:
-            if local_db is not None:
-                try:
-                    local_db.close()
-                except Exception:
-                    pass
 
     try:
         threading.Thread(target=_run, daemon=True, name="lead-save").start()

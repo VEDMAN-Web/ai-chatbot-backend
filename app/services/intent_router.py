@@ -1331,7 +1331,7 @@ def detect_deterministic_intent(
                                 or (last_result_ids[0] if len(last_result_ids) == 1 else None)
                             )
                         else:
-                            prop_id = prop_name  # resolve via Firestore/SQL by name
+                            prop_id = prop_name  # resolve via Firestore by name
                     elif pctx.get("active_property_id"):
                         prop_id = pctx.get("active_property_id")
                     elif len(last_result_ids) == 1:

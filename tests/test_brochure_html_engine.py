@@ -338,7 +338,6 @@ def test_firestore_only_and_missing_raises(monkeypatch):
     fs.set("meta", "properties_version", {"version": 1, "updated_at": "2026-01-01T00:00:00Z"})
     monkeypatch.setattr("app.services.firestore_service.get_firestore_client", lambda target="user": fs)
     monkeypatch.setattr("app.services.firestore_service.get_user_firestore_client", lambda: fs)
-    monkeypatch.setattr(settings, "STORE_PROPERTIES_READ_USER", "firestore")
     idx = get_property_index()
     idx.set_client_override(fs)
     idx.ensure_fresh(force=True)

@@ -13,34 +13,18 @@ import pytest
 from app.core import config as config_mod
 from app.core.config import (
     Settings,
-    assert_database_configured_or_exit,
     get_admin_config_status,
     log_config_warnings,
 )
 from app.services.admin_agent import redact_admin_sensitive_output
 
 
-def test_config_default_has_no_real_password():
+def test_config_has_no_sql_database_settings():
     src = inspect.getsource(Settings)
-    # Hardcoded production-style password must be gone
     assert "xyz123" not in src
-    assert "xyz123%4024" not in src
-    # Field default is empty (env/conftest supply test URLs)
-    field_default = Settings.model_fields["DATABASE_URL"].default
-    assert field_default == ""
-
-
-def test_fail_fast_when_database_url_empty_outside_test(monkeypatch):
-    monkeypatch.setattr(config_mod, "is_test_environment", lambda: False)
-    with patch.object(config_mod.settings, "DATABASE_URL", ""):
-        with pytest.raises(RuntimeError, match="DATABASE_URL"):
-            assert_database_configured_or_exit()
-
-
-def test_no_fail_fast_in_test_env(monkeypatch):
-    monkeypatch.setattr(config_mod, "is_test_environment", lambda: True)
-    with patch.object(config_mod.settings, "DATABASE_URL", ""):
-        assert_database_configured_or_exit()  # must not raise
+    for name in ("DATABASE_URL", "ADMIN_DATABASE_URL", "USER_DATABASE_URL"):
+        assert name not in Settings.model_fields
+    assert not hasattr(config_mod, "assert_database_configured_or_exit")
 
 
 def test_log_config_warnings_each_case(caplog, monkeypatch):
@@ -78,13 +62,11 @@ def test_config_status_no_secrets_and_shape():
         "lead_saving",
         "firestore_project_shared",
         "google_redirect_host",
-        "database_configured",
         "report_storage",
     }
     assert isinstance(status["audit_logging"], bool)
     assert isinstance(status["lead_saving"], bool)
     assert isinstance(status["firestore_project_shared"], bool)
-    assert isinstance(status["database_configured"], bool)
     assert isinstance(status["google_redirect_host"], str)
     assert status["report_storage"] in ("ephemeral", "s3", "persistent")
     blob = str(status).lower()

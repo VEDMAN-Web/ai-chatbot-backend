@@ -671,7 +671,7 @@ def _first_nonempty_scalars(item: Dict[str, Any], limit: int = 3) -> List[str]:
             continue
         if v is None or (isinstance(v, str) and not str(v).strip()):
             continue
-        parts.append(f"{k}: {v}")
+        parts.append(f"{str(k).replace('_', ' ').capitalize()}: {v}")
         if len(parts) >= limit:
             break
     return parts
@@ -825,6 +825,10 @@ def build_deterministic_reply_from_tools(
     for p in payloads:
         if not isinstance(p, dict):
             continue
+        if "authoritative_total_properties" in p or p.get("firestore_count_unavailable"):
+            from app.services.admin_chat_quality import format_inventory_reply
+            lines.append(format_inventory_reply(p, language))
+            continue
         er = p.get("execution_result") if isinstance(p.get("execution_result"), dict) else p
         if not isinstance(er, dict):
             continue
@@ -967,9 +971,7 @@ def build_deterministic_reply_from_tools(
             if isinstance(p, dict):
                 scalars = _first_nonempty_scalars(p, 5)
                 if scalars:
-                    lines.append(
-                        "Dane narzędzia:" if pl else "Tool data:"
-                    )
+                    lines.append("Here is what I found:" if not pl else "Oto co znalazłem:")
                     for s in scalars:
                         lines.append(f"- {s}")
                 else:
@@ -997,16 +999,11 @@ def build_deterministic_reply_from_tools(
             else "Tool returned data but no readable fields were available to display."
         ]
 
-    header = (
-        "Oto zweryfikowane dane wyłącznie z wyników narzędzi tej tury:"
-        if pl
-        else "Here are verified figures taken only from this turn's tool results:"
-    )
     body = "\n".join(cleaned)
     # Safety: never emit internal redacted keys even if model left them in strings
     for banned in ("internal_notes", "developer_contact", "raw_firestore_data"):
         body = re.sub(rf"{banned}\s*[:=]\s*.*", f"{banned}: [redacted]", body, flags=re.I)
-    return header + "\n\n" + body
+    return body
 
 
 def _log_verifier_intervention(

@@ -21,9 +21,7 @@ from typing import Optional, List, Dict, Any, Union
 from reportlab.pdfgen import canvas
 from reportlab.lib import colors
 from reportlab.lib.utils import ImageReader
-from sqlalchemy.orm import Session
 
-from app.db.models import Property, PropertyImage
 from app.core.tenant import resolve_tenant
 from app.services.report_service import default_storage_provider
 from app.services.offer_dossier_service import (
@@ -112,44 +110,30 @@ def _firestore_card_to_brochure_prop(card: Dict[str, Any]) -> SimpleNamespace:
     )
 
 
-def _load_property_for_brochure(db: Session, property_id: str) -> Any:
+def _load_property_for_brochure(db: Any, property_id: str) -> Any:
     """
-    Load property for brochure via Firestore (index / projects). SQL only for sql|both.
+    Load property for brochure via Firestore (property index, then projects docs).
     Raises ValueError if missing.
     """
-    from app.services.property_index import IndexUnavailable, get_property_index, public_store_mode
-    mode = public_store_mode()
+    from app.services.property_index import IndexUnavailable, get_property_index
+
     pid = str(property_id or "").strip()
-
-    if mode in ("firestore", "both"):
-        fs_card = None
+    fs_card = None
+    try:
+        fs_card = get_property_index().get_by_id(pid, include_raw=True)
+    except IndexUnavailable as e:
+        logger.error("Property index unavailable for brochure '%s': %s", property_id, e)
+    except Exception as e:
+        logger.warning("Index brochure lookup failed for '%s': %s", property_id, e)
+    if not fs_card:
         try:
-            fs_card = get_property_index().get_by_id(pid, include_raw=True)
-        except IndexUnavailable as e:
-            logger.error("Property index unavailable for brochure '%s': %s", property_id, e)
+            from app.services.firestore_service import get_property_by_id_from_firestore
+            fs_card = get_property_by_id_from_firestore(pid)
         except Exception as e:
-            logger.warning("Index brochure lookup failed for '%s': %s", property_id, e)
-        if not fs_card:
-            try:
-                from app.services.firestore_service import get_property_by_id_from_firestore
-                fs_card = get_property_by_id_from_firestore(pid)
-            except Exception as e:
-                logger.warning("Firestore brochure lookup failed for '%s': %s", property_id, e)
-                fs_card = None
-        if fs_card and isinstance(fs_card, dict):
-            return _firestore_card_to_brochure_prop(fs_card)
-        if mode == "firestore":
-            raise ValueError(f"Property with ID '{property_id}' not found.")
-
-    if mode in ("sql", "both") and db is not None:
-        try:
-            prop = db.query(Property).filter(Property.property_id == property_id.upper()).first()
-            if not prop:
-                prop = db.query(Property).filter(Property.property_id.ilike(property_id.strip())).first()
-            if prop:
-                return prop
-        except Exception as e:
-            logger.warning(f"PostgreSQL brochure lookup failed for '{property_id}': {e}")
+            logger.warning("Firestore brochure lookup failed for '%s': %s", property_id, e)
+            fs_card = None
+    if fs_card and isinstance(fs_card, dict):
+        return _firestore_card_to_brochure_prop(fs_card)
 
     raise ValueError(f"Property with ID '{property_id}' not found.")
 
@@ -191,7 +175,7 @@ def _write_brochure_copy_timed(data: Any, language: str) -> tuple:
 
 
 def _generate_html_brochure_pdf(
-    db: Session,
+    db: Any,
     property_id: str,
     site_origin: Optional[str] = None,
     language: str = "en",
@@ -294,7 +278,7 @@ def _generate_html_brochure_pdf(
 
 
 def generate_single_property_brochure_pdf(
-    db: Session,
+    db: Any,
     property_id: str,
     site_origin: Optional[str] = None,
     language: str = "en",
@@ -345,7 +329,7 @@ def generate_single_property_brochure_pdf(
 
 
 def _generate_reportlab_brochure_pdf(
-    db: Session,
+    db: Any,
     property_id: str,
     site_origin: Optional[str] = None,
     language: str = "en",
@@ -359,7 +343,7 @@ def _generate_reportlab_brochure_pdf(
     brand = tenant.brand_name
     lang = language if language in ["en", "pl", "th"] else "en"
 
-    # 1. Fetch Property (PostgreSQL, then Firestore)
+    # 1. Fetch Property (Firestore)
     prop = _load_property_for_brochure(db, property_id)
 
     # 2. Select Theme (default to Variant 2 - Modern Slate / Tajlandia AI / Varsovia)
@@ -1010,7 +994,7 @@ def _generate_reportlab_brochure_pdf(
 
 
 def generate_property_brochure(
-    db: Session,
+    db: Any,
     property_id: str,
     site_origin: Optional[str] = None,
     language: str = "en",
@@ -1030,7 +1014,7 @@ def generate_property_brochure(
 
 
 def generate_and_upload_brochure(
-    db: Session,
+    db: Any,
     property_id: str,
     site_origin: Optional[str] = None,
     language: str = "en",

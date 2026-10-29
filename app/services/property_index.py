@@ -36,20 +36,6 @@ def _norm_text(text: Any) -> str:
     return _strip_accents(str(text or "").lower()).strip()
 
 
-def public_store_mode() -> str:
-    """
-    Normalised public property store mode.
-    Allowed: firestore | sql | both. Legacy alias: postgres → sql.
-    """
-    from app.core.config import settings
-    mode = str(getattr(settings, "STORE_PROPERTIES_READ_USER", "firestore") or "firestore").strip().lower()
-    if mode == "postgres":
-        mode = "sql"
-    if mode not in {"firestore", "sql", "both"}:
-        return "firestore"
-    return mode
-
-
 def sanitize_public_card(card: Dict[str, Any]) -> Dict[str, Any]:
     """Drop internal / admin-only fields before replies or cards."""
     out = dict(card or {})

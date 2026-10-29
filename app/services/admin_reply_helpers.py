@@ -66,10 +66,17 @@ def is_capabilities_question(message: Optional[str]) -> bool:
 
 
 def is_undo_request(message: Optional[str]) -> bool:
+    """True for undo / undo the last change / undo that / rollback / revert."""
     raw = (message or "").strip().lower()
-    return bool(
-        re.search(r"\b(undo|rollback|revert|cofnij|cofnąć|cofniecie)\b", raw)
-    )
+    if not raw:
+        return False
+    if re.search(
+        r"\b(undo|rollback|revert|cofnij|cofnąć|cofniecie)\b"
+        r"(?:\s+(?:the\s+)?(?:last\s+)?(?:change|update|edit|that|it))?\b",
+        raw,
+    ):
+        return True
+    return bool(re.match(r"^(undo|rollback|revert)(\s+.+)?$", raw))
 
 
 def build_admin_structured_state(
@@ -136,34 +143,22 @@ def load_admin_action_state_from_db(
 ) -> Dict[str, Any]:
     """Load open PENDING + last 3 finished actions for SESSION STATE."""
     out: Dict[str, Any] = {"open_pending": [], "recent_finished": []}
-    if db is None or not conversation_id:
+    if not conversation_id:
         return out
     try:
-        from app.db.models import PendingAction
+        from app.repositories import pending_actions_repo
         from app.services.action_service import ACTION_STATUS_PENDING
 
-        open_q = (
-            db.query(PendingAction)
-            .filter(
-                PendingAction.conversation_id == str(conversation_id),
-                PendingAction.status == ACTION_STATUS_PENDING,
-            )
-            .order_by(PendingAction.created_at.desc())
-            .limit(5)
-            .all()
+        out["open_pending"] = pending_actions_repo.list_open_pending(
+            db, str(conversation_id), limit=5
         )
-        out["open_pending"] = list(open_q or [])
-        finished = (
-            db.query(PendingAction)
-            .filter(
-                PendingAction.conversation_id == str(conversation_id),
-                PendingAction.status != ACTION_STATUS_PENDING,
-            )
-            .order_by(PendingAction.created_at.desc())
-            .limit(8)
-            .all()
+        finished = pending_actions_repo.list_by_conversation(
+            db, str(conversation_id), status=None, limit=12
         )
-        # Prefer most recently executed/rejected
+        finished = [
+            a for a in finished
+            if getattr(a, "status", None) != ACTION_STATUS_PENDING
+        ]
         finished_sorted = sorted(
             finished or [],
             key=lambda a: getattr(a, "executed_at", None) or getattr(a, "created_at", None) or 0,
@@ -220,7 +215,7 @@ def contextual_followup_suggestions(
     tool_results: Optional[Sequence[Any]] = None,
     *,
     language: str = "en",
-    limit: int = 3,
+    limit: int = 2,
 ) -> List[str]:
     """
     Up to 3 contextual suggestions from the type of tool result.
@@ -347,13 +342,13 @@ def append_followup_suggestions(text: str, suggestions: Sequence[str], language:
     if not suggestions:
         return text or ""
     pl = (language or "en").lower().startswith("pl")
-    header = "**Sugestie (nie uruchamiają akcji):**" if pl else "**Suggestions (do not run an action by themselves):**"
+    header = "**Sugestie:**" if pl else "**Suggestions:**"
     body = (text or "").rstrip()
     # Merge duplicated Suggestions blocks into one per reply
-    if "Suggestions (do not run" in body or "Sugestie (nie uruchamiają" in body:
+    if "Suggestions" in body or "Sugestie" in body:
         # Strip previous suggestion sections
         body = re.sub(
-            r"\n\n\*\*(?:Suggestions \(do not run an action by themselves\)|Sugestie \(nie uruchamiają akcji\)):\*\*(?:\n\d+\).*)+",
+            r"\n\n\*\*(?:Suggestions(?: \(do not run an action by themselves\))?|Sugestie(?: \(nie uruchamiają akcji\))?):\*\*(?:\n\d+\).*)+",
             "",
             body,
             flags=re.I,

@@ -1,33 +1,21 @@
-"""51-question public chat replay. Firestore is off. Listings live in SQLite."""
+"""51-question public chat replay against an in-memory Firestore."""
 import re
 
 import pytest
-from sqlalchemy.dialects.sqlite.base import SQLiteTypeCompiler
-
-def _visit_jsonb(self, type_, **kw):
-    return self.visit_JSON(type_, **kw)
-
-def _visit_uuid(self, type_, **kw):
-    return "CHAR(32)"
-
-SQLiteTypeCompiler.visit_JSONB = _visit_jsonb
-SQLiteTypeCompiler.visit_UUID = _visit_uuid
-
 from fastapi.testclient import TestClient
 
-from app.db.models import Conversation, Property, PropertyImage
-from app.db.session import UserSessionLocal, user_engine
 from app.main import app
-from app.services.firestore_service import get_firestore_client
+from app.services.property_index import get_property_index, reset_property_index_for_tests
 from app.services.property_name_index import ensure_name_index_from_firestore, get_property_name_index
 from app.services.public_agent import public_agent
+from tests.test_property_index_f1 import FakeFirestore, _project
+
+
+_CITY = {"Phuket": "phuket", "Koh Samui": "koh-samui", "Bangkok": "bangkok", "Pattaya": "pattaya"}
 
 
 def _seed():
-    Property.__table__.create(user_engine, checkfirst=True)
-    PropertyImage.__table__.create(user_engine, checkfirst=True)
-    Conversation.__table__.create(user_engine, checkfirst=True)
-    db = UserSessionLocal()
+    fs = FakeFirestore()
     specs = [
         ("replay-pk-1", "Layan Palm Villa", "Villa", "Phuket", 12_000_000, 3, True, True, "Ready"),
         ("replay-pk-2", "Kamala Pool Villa", "Villa", "Phuket", 18_000_000, 3, True, False, "Ready"),
@@ -51,21 +39,15 @@ def _seed():
         ("replay-bk-5", "Thonglor Condo", "Condominium", "Bangkok", 22_000_000, 2, False, False, "Ready"),
     ]
     for row in specs:
-        db.merge(Property(
-            property_id=row[0], property_name=row[1], property_type=row[2], area=row[3],
-            province=row[3], price_numeric_min=row[4], price_display=f"from {row[4] / 1_000_000:.2f} million THB",
-            bedrooms_min=row[5], bedrooms_max=row[5], bedrooms_display=str(row[5]),
-            has_pool=row[6], beach_access=row[7], status=row[8], is_public=True, currency="THB",
-        ))
-    db.commit()
-    db.close()
-
-
-def _cleanup():
-    db = UserSessionLocal()
-    db.query(Property).filter(Property.property_id.like("replay-%")).delete(synchronize_session=False)
-    db.commit()
-    db.close()
+        doc_id, data = _project(
+            row[0], name=row[1], city=_CITY[row[3]], price=row[4], beds=row[5],
+            ptype=row[2], status=row[8], has_pool=row[6],
+            amenities=(["Pool"] if row[6] else []) + (["Beach access"] if row[7] else []),
+        )
+        data["priceDisplay"] = f"from {row[4] / 1_000_000:.2f} million THB"
+        fs.set("projects", doc_id, data)
+    fs.set("meta", "properties_version", {"version": 1, "updated_at": "2026-01-01T00:00:00Z"})
+    return fs
 
 
 def _quality(text, replies):
@@ -93,12 +75,14 @@ def _post(client, session_id, message):
 
 @pytest.fixture
 def replay_client(monkeypatch):
-    _seed()
-    # Explicit SQL store: this replay suite seeds SQLite listings (not Firestore).
-    monkeypatch.setattr("app.core.config.settings.STORE_PROPERTIES_READ_USER", "sql")
-    monkeypatch.setattr("app.services.firestore_service.get_firestore_client", lambda *a, **k: None)
-    monkeypatch.setattr("app.services.public_agent.get_firestore_client", lambda *a, **k: None, raising=False)
+    reset_property_index_for_tests()
+    fs = _seed()
+    monkeypatch.setattr("app.services.firestore_service.get_firestore_client", lambda target="user": fs)
+    monkeypatch.setattr("app.services.firestore_service.get_user_firestore_client", lambda: fs)
     monkeypatch.setattr(public_agent, "client", None)
+    idx = get_property_index()
+    idx.set_client_override(fs)
+    idx.ensure_fresh(force=True)
     index = get_property_name_index()
     index._loader = None
     ensure_name_index_from_firestore(force=True)
@@ -106,7 +90,7 @@ def replay_client(monkeypatch):
     try:
         yield client
     finally:
-        _cleanup()
+        reset_property_index_for_tests()
 
 
 def test_session_a_filters_reset_and_recall(replay_client):

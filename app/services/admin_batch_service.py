@@ -33,16 +33,6 @@ def get_snapshot_client():
     return get_firestore_client(target="admin") or get_firestore_client()
 
 
-def _is_real_db_session(db: Any) -> bool:
-    from app.repositories import properties_store
-
-    if not properties_store.sql_enabled():
-        return False
-    if db is None:
-        return False
-    return not type(db).__module__.startswith("unittest.mock")
-
-
 def _json_safe(value: Any) -> Any:
     """Deep copy into JSON-safe values. Decimals become ints when integral, else floats."""
     if value is None or isinstance(value, (str, int, float, bool)):
@@ -77,80 +67,6 @@ def _capture_raw_firestore(client: Any, property_id: str) -> Tuple[Optional[Dict
     return _json_safe(data), True
 
 
-def _sql_row_dict(prop: Any) -> Dict[str, Any]:
-    from app.db.models import Property
-    out: Dict[str, Any] = {}
-    for col in Property.__table__.columns:
-        out[col.name] = _json_safe(getattr(prop, col.name, None))
-    return out
-
-
-def _capture_raw_sql(db: Any, property_id: str) -> Tuple[Optional[Dict[str, Any]], bool]:
-    if not _is_real_db_session(db):
-        return None, False
-    from app.db.models import Property
-    prop = db.query(Property).filter(Property.property_id == property_id).first()
-    if prop is None:
-        return None, False
-    return _sql_row_dict(prop), True
-
-
-def _coerce_sql_value(col: Any, value: Any) -> Any:
-    if value is None:
-        return None
-    type_name = type(col.type).__name__
-    if type_name in {"DateTime", "Date"}:
-        if isinstance(value, datetime):
-            return value.replace(tzinfo=None) if value.tzinfo else value
-        if isinstance(value, str):
-            try:
-                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-                return parsed.replace(tzinfo=None)
-            except Exception:
-                return None
-    if type_name in {"Numeric", "Float", "DECIMAL", "Double"}:
-        try:
-            return Decimal(str(value))
-        except Exception:
-            return value
-    if type_name in {"Integer", "BigInteger", "SmallInteger"}:
-        try:
-            return int(value)
-        except Exception:
-            return value
-    if type_name == "Boolean":
-        return bool(value)
-    return value
-
-
-def _restore_sql_row(db: Any, property_id: str, raw: Optional[Dict[str, Any]]) -> None:
-    if not _is_real_db_session(db) or not isinstance(raw, dict):
-        return
-    from app.db.models import Property
-    prop = db.query(Property).filter(Property.property_id == property_id).first()
-    if prop is None:
-        prop = Property(
-            property_id=property_id,
-            property_name=raw.get("property_name") or property_id,
-        )
-        db.add(prop)
-    for col in Property.__table__.columns:
-        if col.name == "property_id" or col.name not in raw:
-            continue
-        setattr(prop, col.name, _coerce_sql_value(col, raw[col.name]))
-    db.commit()
-
-
-def _delete_sql_row(db: Any, property_id: str) -> None:
-    if not _is_real_db_session(db):
-        return
-    from app.db.models import Property
-    # Core DELETE avoids cascading into image/spec tables that may not exist in tests.
-    db.query(Property).filter(Property.property_id == property_id).delete(synchronize_session="fetch")
-    db.commit()
-    db.expire_all()
-
-
 def _read_back_firestore(projects_col: Any, property_id: str) -> Any:
     try:
         snap = projects_col.document(str(property_id)).get()
@@ -165,16 +81,6 @@ def _read_back_firestore(projects_col: Any, property_id: str) -> Any:
     if exists is False:
         return None
     return "UNREADABLE"
-
-
-def _read_back_sql(db: Any, property_id: str) -> Any:
-    if not _is_real_db_session(db):
-        return "NO_SESSION"
-    from app.db.models import Property
-    prop = db.query(Property).filter(Property.property_id == property_id).first()
-    if prop is None:
-        return None
-    return _sql_row_dict(prop)
 
 
 def _dict_field_diffs(expected: Dict[str, Any], actual: Dict[str, Any], prefix: str) -> List[str]:
@@ -218,18 +124,14 @@ def _batch_fields_for_validation(rec: Dict[str, Any]) -> Dict[str, Any]:
     return mapped
 
 
-def _store_summary(raw_fs: Optional[Dict[str, Any]], raw_sql: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+def _store_summary(raw_fs: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """Before/after audit summary. Omits address and other free-text PII."""
-    src = raw_fs or raw_sql or {}
+    src = raw_fs or {}
     name = src.get("name") or src.get("title") or src.get("property_name")
     if isinstance(name, dict):
         name = name.get("en") or next((v for v in name.values() if v), None)
-    if raw_fs is not None:
-        price = raw_fs.get("priceFrom")
-        active = raw_fs.get("isActive")
-    else:
-        price = src.get("price_numeric_min")
-        active = src.get("is_public")
+    price = src.get("priceFrom")
+    active = src.get("isActive")
     return {
         "name": name,
         "price": price,
@@ -471,7 +373,7 @@ def execute_batch_property_operation(
 ) -> Dict[str, Any]:
     """
     Executes bulk property mutations (delete, update, or create) in Firestore
-    (and PostgreSQL if synced), while saving a complete pre-modification snapshot
+    while saving a complete pre-modification snapshot
     retained for exactly 6 days to support undo.
 
     confirmed_by_staff must be True only when invoked after an explicit pending-action
@@ -562,7 +464,7 @@ def execute_batch_property_operation(
             if doc_id and current_doc:
                 if selected_sites:
                     doc_sites = current_doc.get("websites") or current_doc.get("allowed_websites")
-                    if doc_sites and not any(s in selected_websites for s in doc_sites):
+                    if doc_sites and not any(s in selected_sites for s in doc_sites):
                         logger.warning(f"Batch update skipping {doc_id} as it is outside selected websites: {selected_sites}")
                         continue
 
@@ -643,12 +545,10 @@ def execute_batch_property_operation(
         "details": executed_details,
         "snapshot_format": "raw_v1",
         "raw_firestore": {k: _json_safe(v) for k, v in previous_snapshot.items()},
-        "raw_sql": {},
         "existed_in_firestore": (
             {k: False for k in created_ids} if action_clean == "create"
             else {k: True for k in previous_snapshot}
         ),
-        "existed_in_sql": {k: False for k in (created_ids or affected_ids)},
     }
 
     try:
@@ -703,11 +603,13 @@ def record_crud_operation_snapshot(
     db_session: Optional[Any] = None,
     confirmed_by_staff: bool = False,
     skip_audit: bool = False,
+    conversation_id: Optional[str] = None,
+    pending_action_id: Optional[str] = None,
 ) -> Optional[str]:
     """
     Saves a 6-day pre-modification snapshot for individual admin CRUD operations.
 
-    Restore source is the raw Firestore document and the raw SQL column dict.
+    Restore source is the raw Firestore document.
     `previous_snapshot` is kept only as a display card and is never written back.
     confirmed_by_staff=True only after explicit pending-action confirmation.
     """
@@ -727,14 +629,13 @@ def record_crud_operation_snapshot(
     expire_at_iso = expire_at.isoformat()
 
     raw_fs, existed_fs = _capture_raw_firestore(fs_client, property_id)
-    raw_sql, existed_sql = _capture_raw_sql(db_session, property_id)
 
     # Display card only. Callers may pass a normalised view; it is not the restore source.
     previous_snapshot: Dict[str, Any] = {}
     if isinstance(previous_state, dict) and previous_state:
         previous_snapshot[property_id] = _json_safe(previous_state)
-    elif raw_fs or raw_sql:
-        card_src = raw_fs or raw_sql or {}
+    elif raw_fs:
+        card_src = raw_fs
         previous_snapshot[property_id] = {
             "property_id": property_id,
             "name": card_src.get("name") or card_src.get("property_name"),
@@ -756,14 +657,14 @@ def record_crud_operation_snapshot(
         "affected_ids": affected_ids,
         "previous_snapshot": previous_snapshot,
         "raw_firestore": {property_id: raw_fs} if existed_fs and raw_fs is not None else {},
-        "raw_sql": {property_id: raw_sql} if existed_sql and raw_sql is not None else {},
         "existed_in_firestore": {property_id: bool(existed_fs)},
-        "existed_in_sql": {property_id: bool(existed_sql)},
         "snapshot_format": "raw_v1",
         "created_ids": created_ids,
         "created_at": now.isoformat(),
         "expire_at": expire_at_iso,
         "expires_at": expire_at_iso,
+        "conversation_id": conversation_id,
+        "pending_action_id": pending_action_id,
         "details": [{
             "property_id": property_id,
             "action": action_clean
@@ -859,7 +760,7 @@ def _snapshot_has_raw_source(data: Dict[str, Any]) -> bool:
         return True
     return any(
         key in data
-        for key in ("raw_firestore", "raw_sql", "existed_in_firestore", "existed_in_sql")
+        for key in ("raw_firestore", "existed_in_firestore")
     )
 
 
@@ -869,9 +770,7 @@ def _ordered_ids(data: Dict[str, Any]) -> List[str]:
         data.get("affected_ids") or [],
         data.get("created_ids") or [],
         list((data.get("raw_firestore") or {}).keys()),
-        list((data.get("raw_sql") or {}).keys()),
         list((data.get("existed_in_firestore") or {}).keys()),
-        list((data.get("existed_in_sql") or {}).keys()),
     ]
     for pool in pools:
         for item in pool:
@@ -886,11 +785,9 @@ def _verify_exact_restore(
     db_session: Optional[Any],
     property_ids: List[str],
 ) -> List[str]:
-    """Re-read both stores and list fields that do not match the raw snapshot."""
+    """Re-read Firestore and list fields that do not match the raw snapshot."""
     raw_fs_map = data.get("raw_firestore") or {}
-    raw_sql_map = data.get("raw_sql") or {}
     existed_fs = data.get("existed_in_firestore") or {}
-    existed_sql = data.get("existed_in_sql") or {}
     action_type = data.get("action_type")
     created = set(data.get("created_ids") or [])
     diffs: List[str] = []
@@ -911,22 +808,6 @@ def _verify_exact_restore(
             diffs.append(f"{pid}.firestore: missing document")
         else:
             diffs.extend(_dict_field_diffs(expect_fs, actual_fs, f"{pid}.firestore"))
-
-        expect_sql = None
-        if action_type == "create" or pid in created or not existed_sql.get(pid):
-            expect_sql = None
-        else:
-            expect_sql = raw_sql_map.get(pid) or {}
-        actual_sql = _read_back_sql(db_session, pid)
-        if expect_sql is None:
-            if actual_sql not in (None, "NO_SESSION"):
-                diffs.append(f"{pid}.sql: row still present")
-        elif actual_sql == "NO_SESSION":
-            diffs.append(f"{pid}.sql: database session unavailable")
-        elif actual_sql is None:
-            diffs.append(f"{pid}.sql: missing row")
-        else:
-            diffs.extend(_dict_field_diffs(expect_sql, actual_sql, f"{pid}.sql"))
     return diffs
 
 
@@ -938,7 +819,7 @@ def undo_batch_property_operation(
     """
     Roll back an operation inside the retention window from the raw snapshot.
 
-    Firestore is replaced with doc.set(raw) (no merge). SQL columns are restored
+    Firestore is replaced with doc.set(raw) (no merge).
     one by one. A create, or a store the record did not previously occupy, is deleted.
     Success is reported only after a re-read matches the snapshot.
     """
@@ -971,9 +852,7 @@ def undo_batch_property_operation(
     action_type = data.get("action_type")
     created_ids: List[str] = [str(x) for x in (data.get("created_ids") or [])]
     raw_fs_map: Dict[str, Any] = data.get("raw_firestore") or {}
-    raw_sql_map: Dict[str, Any] = data.get("raw_sql") or {}
     existed_fs: Dict[str, Any] = data.get("existed_in_firestore") or {}
-    existed_sql: Dict[str, Any] = data.get("existed_in_sql") or {}
     projects_col = fs_client.collection("projects")
     property_ids = _ordered_ids(data)
     restored_count = 0
@@ -986,10 +865,6 @@ def undo_batch_property_operation(
                     projects_col.document(doc_id).delete()
                 except Exception as exc:
                     logger.error(f"Error deleting created Firestore document {doc_id}: {exc}")
-                try:
-                    _delete_sql_row(db_session, doc_id)
-                except Exception as exc:
-                    logger.error(f"Error deleting created SQL row {doc_id}: {exc}")
                 restored_count += 1
         else:
             for doc_id in property_ids:
@@ -1000,18 +875,16 @@ def undo_batch_property_operation(
                         projects_col.document(doc_id).delete()
                 except Exception as exc:
                     logger.error(f"Error restoring Firestore document {doc_id}: {exc}")
-                try:
-                    if existed_sql.get(doc_id) and isinstance(raw_sql_map.get(doc_id), dict):
-                        _restore_sql_row(db_session, doc_id, raw_sql_map[doc_id])
-                    else:
-                        _delete_sql_row(db_session, doc_id)
-                except Exception as exc:
-                    logger.error(f"Error restoring SQL row {doc_id}: {exc}")
                 restored_count += 1
     finally:
         try:
             from app.services.cache_service import search_cache
             search_cache.invalidate()
+        except Exception:
+            pass
+        try:
+            from app.services.firestore_service import bump_properties_version
+            bump_properties_version(target="user")
         except Exception:
             pass
 
@@ -1037,7 +910,7 @@ def undo_batch_property_operation(
     for pid in property_ids:
         before_bits.append({
             "property_id": pid,
-            "before": _store_summary(raw_fs_map.get(pid), raw_sql_map.get(pid)),
+            "before": _store_summary(raw_fs_map.get(pid)),
         })
 
     audit_label = "disabled"
@@ -1054,7 +927,6 @@ def undo_batch_property_operation(
                     "property_ids": property_ids,
                     "stores": {
                         "firestore": {pid: bool(existed_fs.get(pid)) for pid in property_ids},
-                        "sql": {pid: bool(existed_sql.get(pid)) for pid in property_ids},
                     },
                 },
                 proposed_payload={
@@ -1073,6 +945,8 @@ def undo_batch_property_operation(
                     f"UNDO of operation {operation_id} by {actor}. "
                     f"restored_ok={restored_ok}."
                 ),
+                conversation_id=data.get("conversation_id") or data.get("conversationId"),
+                pending_action_id=data.get("pending_action_id") or data.get("pendingActionId"),
             )
             if (
                 getattr(settings, "ENABLE_AUDIT_LOGGING", False)

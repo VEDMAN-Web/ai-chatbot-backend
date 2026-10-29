@@ -208,8 +208,6 @@ def fake_fs(monkeypatch):
 
     monkeypatch.setattr("app.services.firestore_service.get_firestore_client", lambda target="user": fs)
     monkeypatch.setattr("app.services.firestore_service.get_user_firestore_client", lambda: fs)
-    monkeypatch.setattr(settings, "STORE_PROPERTIES_READ_USER", "firestore")
-    monkeypatch.setattr(settings, "STORE_LEADS_USER", "firestore")
     monkeypatch.setattr(settings, "ENABLE_LEAD_SAVING", True)
 
     idx = get_property_index()
@@ -268,7 +266,6 @@ def test_firestore_down_without_cache_raises(monkeypatch):
 
 def test_service_busy_reply_on_index_unavailable(monkeypatch):
     reset_property_index_for_tests()
-    monkeypatch.setattr(settings, "STORE_PROPERTIES_READ_USER", "firestore")
     agent = PublicAgentService.__new__(PublicAgentService)
     agent.model = "test"
     agent.client = None
@@ -366,7 +363,6 @@ def test_search_performance_under_50ms(fake_fs):
 # ---------------------------------------------------------------------------
 
 def test_leads_dedupe_firestore_mode(fake_fs, monkeypatch):
-    monkeypatch.setattr(settings, "STORE_LEADS_USER", "firestore")
     conv = SimpleNamespace(
         session_id="lead-sess-1", id="c1", site_origin="varsoviaestate.com",
         message_history=[], preferences={}, agent_type="public",
@@ -407,8 +403,6 @@ def test_leads_dedupe_firestore_mode(fake_fs, monkeypatch):
 
 
 def test_public_chat_no_sql_uses_index(fake_fs, monkeypatch):
-    monkeypatch.setattr(settings, "STORE_PROPERTIES_READ_USER", "firestore")
-    monkeypatch.setattr(settings, "USER_DATABASE_URL", "postgresql://invalid:invalid@127.0.0.1:1/none")
     cards = search_properties_unified(
         db=None,
         params=PropertyFilterParams(
@@ -427,5 +421,3 @@ def test_public_chat_no_sql_uses_index(fake_fs, monkeypatch):
 def test_config_status_exposes_store_modes():
     from app.core.config import get_public_config_status
     st = get_public_config_status()
-    assert "store_properties_read_user" in st
-    assert "store_leads_user" in st

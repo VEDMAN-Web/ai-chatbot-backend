@@ -937,7 +937,7 @@ def default_firestore_name_loader(target: str = "user") -> List[Dict[str, Any]]:
     t0 = time.monotonic()
     client = get_firestore_client(target=target)
     if not client:
-        return sql_name_rows()
+        return []
     col = client.collection("projects")
     rows: List[Dict[str, Any]] = []
     # Select only needed fields when possible
@@ -959,33 +959,7 @@ def default_firestore_name_loader(target: str = "user") -> List[Dict[str, Any]]:
         len(rows),
         target,
     )
-    return rows or sql_name_rows()
-
-
-def sql_name_rows() -> List[Dict[str, Any]]:
-    """Name index fallback when Firestore is down. Reads the SQL properties table only."""
-    try:
-        from app.db.models import Property
-        from app.db.session import UserSessionLocal
-        db = UserSessionLocal()
-    except Exception:
-        return []
-    try:
-        rows = []
-        for prop in db.query(Property).limit(500).all():
-            rows.append({
-                "doc_id": prop.property_id,
-                "id": prop.property_id,
-                "name": prop.property_name,
-                "title": prop.project_name or prop.property_name,
-                "slug": prop.property_id,
-                "cityId": prop.area or prop.province or "",
-            })
-        return rows
-    except Exception:
-        return []
-    finally:
-        db.close()
+    return rows
 
 
 def ensure_name_index_from_firestore(target: str = "user", force: bool = False) -> None:

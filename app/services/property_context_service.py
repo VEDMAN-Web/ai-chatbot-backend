@@ -2,7 +2,7 @@
 Persistent property-aware conversation context for the public chatbot.
 
 Memory decides WHICH property the user means.
-Live Firestore/SQL retrieval decides WHAT is currently true.
+Live Firestore retrieval decides WHAT is currently true.
 """
 
 from __future__ import annotations
@@ -680,40 +680,16 @@ def fetch_authorized_property(db: Any, property_id: str) -> Tuple[Optional[Any],
     Returns (orm_or_adapter, card_dict, source_label).
     Never invents data.
     """
-    from app.services.property_search import get_property_by_id, get_property_by_name
-    from app.services.property_index import get_property_index, public_store_mode, sanitize_public_card
+    from app.services.property_index import get_property_index, sanitize_public_card
 
     pid = _normalize_id(property_id)
     if not pid:
         return None, None, "none"
 
-    mode = public_store_mode()
-    if mode in ("firestore", "both"):
-        try:
-            card = get_property_index().get_by_id(pid)
-            if card:
-                return card, sanitize_public_card(card), "firestore"
-        except Exception as e:
-            logger.error("Property index fetch failed for %s (STORE=%s): %s", pid, mode, e)
-            if mode == "firestore":
-                return None, None, "missing"
-
-    if mode in ("sql", "both"):
-        prop = get_property_by_id(db, pid) if db else None
-        if not prop:
-            prop = get_property_by_name(db, pid) if db else None
-        if prop:
-            if isinstance(prop, dict):
-                card = sanitize_public_card(prop)
-                return prop, card, "firestore"
-            try:
-                from app.services.public_agent import format_property_card
-                card = format_property_card(prop)
-            except Exception:
-                card = {
-                    "property_id": getattr(prop, "property_id", pid),
-                    "name": getattr(prop, "property_name", None),
-                    "price": getattr(prop, "price_display", None),
-                }
-            return prop, card, "sql"
+    try:
+        card = get_property_index().get_by_id(pid)
+        if card:
+            return card, sanitize_public_card(card), "firestore"
+    except Exception as e:
+        logger.error("Property index fetch failed for %s: %s", pid, e)
     return None, None, "missing"

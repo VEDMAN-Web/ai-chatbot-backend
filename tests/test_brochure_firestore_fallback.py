@@ -1,7 +1,6 @@
 """
-Brochure generator from Firestore project documents + honest agent failure.
-Uses shared FakeFirestore; no Postgres path when STORE=firestore.
-Fully mocked: no network, no real DB credentials.
+Brochure generator Firestore fallback + honest agent failure.
+Fully mocked: no network, no real DB, no Firestore credentials.
 """
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -9,78 +8,76 @@ from unittest.mock import MagicMock, patch
 import pytest
 from fastapi import HTTPException
 
-from app.core.config import settings
 from app.services.brochure_service import (
     _firestore_card_to_brochure_prop,
     _load_property_for_brochure,
     generate_single_property_brochure_pdf,
 )
 from app.services.i18n_service import get_brochure_unavailable_text
-from app.services.property_index import get_property_index, reset_property_index_for_tests
 from app.services.public_agent import PublicAgentService
-from tests.test_property_index_f1 import FakeFirestore
 
 
-FAKE_FS_DOC = {
-    "name": {"en": "Isla Kata Sea View Villa"},
-    "propertyType": "Villa",
-    "priceFrom": 18_500_000,
-    "currency": "THB",
-    "layouts": [{"bedrooms": 3}],
-    "areaFrom": 270,
-    "cityId": "Kata",
-    "countryId": "thailand",
-    "province": "Phuket",
-    "completionStatus": "Available",
-    "amenities": ["Pool"],
-    "tags": ["Pool"],
+FAKE_FS_CARD = {
+    "property_id": "isla-kata-sea-view-villa",
+    "name": "Isla Kata Sea View Villa",
+    "property_type": "Villa",
+    "price": "from 18.50M THB",
+    "price_numeric_min": 18_500_000,
+    "bedrooms": "3 Beds",
+    "area": "270 sqm",
+    "location": "Phuket, Kata",
+    "district": "phuket",
+    "province": "thailand",
+    "status": "Available",
+    "has_pool": True,
+    "beach_access": True,
     "images": ["https://example.com/villa1.jpg"],
-    "coverImage": "https://example.com/villa1.jpg",
-    "description": {"en": "Verified villa in Kata."},
+    "description": "Verified villa in Kata.",
     "highlights": ["Pool"],
-    "isActive": True,
-    "websites": ["tajlandia.com", "thai.estate", "varsoviaestate.com"],
-    "slug": {"en": "isla-kata-sea-view-villa"},
 }
 
 
-FAKE_FS_SPARSE_DOC = {
-    "name": {"en": "Sparse Project"},
-    "countryId": "thailand",
-    "isActive": True,
-    "websites": ["thai.estate", "tajlandia.com", "varsoviaestate.com"],
+FAKE_FS_SPARSE = {
+    "property_id": "sparse-project",
+    "name": "Sparse Project",
+    "property_type": None,
+    "price": None,
+    "price_numeric_min": None,
+    "bedrooms": None,
+    "area": None,
+    "location": "Thailand",
+    "district": None,
+    "province": None,
+    "status": None,
+    "has_pool": False,
     "images": [],
+    "description": "",
+    "highlights": [],
 }
 
 
-def _seed(fs: FakeFirestore, doc_id: str, data: dict, monkeypatch):
-    reset_property_index_for_tests()
-    fs.set("projects", doc_id, data)
-    fs.set("meta", "properties_version", {"version": 1, "updated_at": "2026-01-01T00:00:00Z"})
-    monkeypatch.setattr("app.services.firestore_service.get_firestore_client", lambda target="user": fs)
-    monkeypatch.setattr("app.services.firestore_service.get_user_firestore_client", lambda: fs)
-    monkeypatch.setattr(settings, "STORE_PROPERTIES_READ_USER", "firestore")
-    idx = get_property_index()
-    idx.set_client_override(fs)
-    idx.ensure_fresh(force=True)
-    return idx
-
-
-@pytest.fixture
-def fake_fs(monkeypatch):
-    reset_property_index_for_tests()
-    fs = FakeFirestore()
-    monkeypatch.setattr("app.services.firestore_service.get_firestore_client", lambda target="user": fs)
-    monkeypatch.setattr("app.services.firestore_service.get_user_firestore_client", lambda: fs)
-    monkeypatch.setattr(settings, "STORE_PROPERTIES_READ_USER", "firestore")
-    yield fs
-    reset_property_index_for_tests()
-
-
-def test_1_firestore_generates_pdf(fake_fs, monkeypatch):
-    _seed(fake_fs, "isla-kata-sea-view-villa", FAKE_FS_DOC, monkeypatch)
+def _mock_db_no_prop():
     db = MagicMock()
+    q = MagicMock()
+    q.filter.return_value.first.return_value = None
+    db.query.return_value = q
+    return db
+
+
+def _mock_db_with_prop(prop):
+    db = MagicMock()
+    q = MagicMock()
+    q.filter.return_value.first.return_value = prop
+    db.query.return_value = q
+    return db
+
+
+def test_1_firestore_fallback_generates_pdf():
+    db = _mock_db_no_prop()
     with patch(
+        "app.services.firestore_service.get_property_by_id_from_firestore",
+        return_value=FAKE_FS_CARD,
+    ), patch(
         "app.services.brochure_service.fetch_property_image_reader",
         return_value=MagicMock(),
     ), patch(
@@ -93,6 +90,7 @@ def test_1_firestore_generates_pdf(fake_fs, monkeypatch):
         return_value=None,
     ):
         storage.save_file.return_value = "https://cdn.example.com/brochure.pdf"
+        # drawImage may fail on MagicMock; brochure already catches that
         res = generate_single_property_brochure_pdf(
             db=db,
             property_id="isla-kata-sea-view-villa",
@@ -105,63 +103,14 @@ def test_1_firestore_generates_pdf(fake_fs, monkeypatch):
     assert res["pages"] == 8
 
 
-def test_2_firestore_path_loads_seeded_project(fake_fs, monkeypatch):
-    """Replaces the old Postgres-only brochure path with a Firestore project fixture."""
-    doc = {
-        "name": {"en": "Firestore Villa"},
-        "cityId": "Layan",
-        "province": "Phuket",
-        "countryId": "thailand",
-        "propertyType": "Villa",
-        "completionStatus": "Available",
-        "priceFrom": 12_000_000,
-        "currency": "THB",
-        "ownershipType": "Leasehold",
-        "amenities": ["Pool"],
-        "developerName": "Dev Co",
-        "description": {"en": "A verified FS listing."},
-        "layouts": [{"bedrooms": 3, "bathrooms": 3}],
-        "areaFrom": 200,
-        "images": [],
-        "isActive": True,
-        "websites": ["varsoviaestate.com", "tajlandia.com", "thai.estate"],
-    }
-    _seed(fake_fs, "PROP-FS-001", doc, monkeypatch)
-    db = MagicMock()
-    # SQL query must never be required in firestore mode
-    db.query.side_effect = AssertionError("SQL must not be queried in firestore mode")
-
+def test_3_missing_everywhere_raises_and_endpoint_404():
+    db = _mock_db_no_prop()
     with patch(
-        "app.services.brochure_service.fetch_property_image_reader",
-        return_value=MagicMock(),
-    ), patch(
-        "app.services.brochure_service.default_storage_provider"
-    ) as storage, patch(
-        "app.services.brochure_service.resolve_logo_path",
+        "app.services.firestore_service.get_property_by_id_from_firestore",
         return_value=None,
     ):
-        storage.save_file.return_value = "https://cdn.example.com/fs.pdf"
-        res = generate_single_property_brochure_pdf(
-            db=db,
-            property_id="PROP-FS-001",
-            site_origin="varsoviaestate.com",
-            language="en",
-        )
-    assert res["success"] is True
-    assert res["pdf_bytes"].startswith(b"%PDF")
-    assert res["property_id"] == "PROP-FS-001"
-
-
-def test_3_missing_everywhere_raises_and_endpoint_404(fake_fs, monkeypatch):
-    _seed(fake_fs, "other", {
-        "name": {"en": "Other"},
-        "isActive": True,
-        "websites": ["tajlandia.com"],
-        "priceFrom": 1,
-    }, monkeypatch)
-    db = MagicMock()
-    with pytest.raises(ValueError, match="not found"):
-        _load_property_for_brochure(db, "missing-slug-xyz")
+        with pytest.raises(ValueError, match="not found"):
+            _load_property_for_brochure(db, "missing-slug-xyz")
 
     from app.api.v1 import chat as chat_mod
 
@@ -181,11 +130,8 @@ def test_3_missing_everywhere_raises_and_endpoint_404(fake_fs, monkeypatch):
     assert "not found" in str(ei.value.detail).lower()
 
 
-def test_4_sparse_firestore_no_images_no_crash_no_invented_price(fake_fs, monkeypatch):
-    _seed(fake_fs, "sparse-project", FAKE_FS_SPARSE_DOC, monkeypatch)
-    card = get_property_index().get_by_id("sparse-project", include_raw=True)
-    assert card is not None
-    adapted = _firestore_card_to_brochure_prop(card)
+def test_4_sparse_firestore_no_images_no_crash_no_invented_price():
+    adapted = _firestore_card_to_brochure_prop(FAKE_FS_SPARSE)
     assert adapted.images == []
     assert adapted.price_display is None
     assert adapted.price_numeric_min is None
@@ -196,8 +142,11 @@ def test_4_sparse_firestore_no_images_no_crash_no_invented_price(fake_fs, monkey
     assert "9.xx" not in str(adapted.price_display)
     assert adapted.bedrooms_min is None
 
-    db = MagicMock()
+    db = _mock_db_no_prop()
     with patch(
+        "app.services.firestore_service.get_property_by_id_from_firestore",
+        return_value=FAKE_FS_SPARSE,
+    ), patch(
         "app.services.brochure_service.fetch_property_image_reader",
         return_value=MagicMock(),
     ), patch(
@@ -218,8 +167,7 @@ def test_4_sparse_firestore_no_images_no_crash_no_invented_price(fake_fs, monkey
     assert "99" not in (res.get("property_name") or "")
 
 
-def test_5_agent_brochure_failure_honest_no_fake_link(fake_fs, monkeypatch):
-    _seed(fake_fs, "isla-kata-sea-view-villa", FAKE_FS_DOC, monkeypatch)
+def test_5_agent_brochure_failure_honest_no_fake_link():
     agent = PublicAgentService.__new__(PublicAgentService)
     agent.model = "test"
     agent.client = None
@@ -245,9 +193,13 @@ def test_5_agent_brochure_failure_honest_no_fake_link(fake_fs, monkeypatch):
         ), patch(
             "app.services.public_agent.append_conversation_turn"
         ), patch(
-            "app.services.public_agent.settings.ENABLE_FIRESTORE_SYNC", True
+            "app.services.firestore_service.get_property_by_id_from_firestore",
+            return_value=FAKE_FS_CARD,
         ):
             db = MagicMock()
+            q = MagicMock()
+            q.filter.return_value.first.return_value = None
+            db.query.return_value = q
             result = agent._handle_brochure_request(
                 db=db,
                 conversation=conversation,

@@ -12,15 +12,10 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import create_engine
-from sqlalchemy.dialects.postgresql import JSONB, UUID
-from sqlalchemy.ext.compiler import compiles
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
-
 from app.core.auth import AuthenticatedStaff
 from app.core.config import settings
-from app.db.models import AuditLog, PendingAction, Property
+from app.core.deps import FirestoreSession
+from tests import fs_helpers as fsh
 from app.services import property_web_ingest as ingest
 from app.services.action_service import save_ingested_listing
 from app.services.admin_agent import is_strict_confirm_message, process_admin_chat
@@ -38,16 +33,6 @@ from app.services.property_web_ingest import (
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "layan_palm_villa.html"
 PUBLIC_IP = "93.184.216.34"
-
-
-@compiles(JSONB, "sqlite")
-def _compile_jsonb_sqlite(type_, compiler, **kw):
-    return "JSON"
-
-
-@compiles(UUID, "sqlite")
-def _compile_uuid_sqlite(type_, compiler, **kw):
-    return "CHAR(36)"
 
 
 class _Snap:
@@ -79,18 +64,50 @@ class _Doc:
         self.store.delete(self.collection_name, self.id)
 
 
+def _where_filters(args, kwargs):
+    filters = []
+    if len(args) >= 3:
+        filters.append((args[0], args[2]))
+    filt = kwargs.get("filter")
+    if filt is not None:
+        field = getattr(filt, "field_path", None) or getattr(filt, "field", None)
+        value = getattr(filt, "value", None)
+        if field is not None:
+            filters.append((str(field), value))
+    return filters
+
+
 class _Query:
-    def __init__(self, collection):
+    def __init__(self, collection, filters=None, limit_n=None):
         self.collection = collection
+        self.filters = list(filters or [])
+        self.limit_n = limit_n
 
-    def limit(self, _n):
-        return self
-
-    def stream(self):
-        return self.collection.stream()
+    def limit(self, count):
+        return _Query(self.collection, self.filters, count)
 
     def where(self, *args, **kwargs):
-        return self
+        filters = list(self.filters)
+        filters.extend(_where_filters(args, kwargs))
+        return _Query(self.collection, filters, self.limit_n)
+
+    def stream(self):
+        found = []
+        for snap in self.collection.stream():
+            data = snap.to_dict() or {}
+            matched = True
+            for field, expected in self.filters:
+                current = data
+                for part in str(field).split("."):
+                    current = current.get(part) if isinstance(current, dict) else None
+                if current != expected:
+                    matched = False
+                    break
+            if matched:
+                found.append(snap)
+            if self.limit_n is not None and len(found) >= self.limit_n:
+                break
+        return found
 
 
 class _Collection:
@@ -107,11 +124,11 @@ class _Collection:
         for doc_id, data in self.store.items(self.name):
             yield _Snap(doc_id, data)
 
-    def limit(self, _n):
-        return _Query(self)
+    def limit(self, count):
+        return _Query(self, limit_n=count)
 
     def where(self, *args, **kwargs):
-        return _Query(self)
+        return _Query(self, _where_filters(args, kwargs))
 
 
 class FakeFirestore:
@@ -151,13 +168,7 @@ class FakeFirestore:
 
 
 def _session():
-    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
-    for table in (Property.__table__, AuditLog.__table__, PendingAction.__table__):
-        for idx in list(table.indexes):
-            if getattr(idx, "dialect_kwargs", {}).get("postgresql_using") == "gin":
-                table.indexes.discard(idx)
-        table.create(bind=engine, checkfirst=True)
-    return sessionmaker(bind=engine, autocommit=False, autoflush=False)()
+    return FirestoreSession()
 
 
 def _staff(role="super_admin"):
@@ -177,6 +188,10 @@ def world(monkeypatch):
     admin_fs = FakeFirestore()
     monkeypatch.setattr("app.services.firestore_service.get_admin_firestore_client", lambda: admin_fs)
     monkeypatch.setattr("app.services.firestore_service.get_user_firestore_client", lambda: admin_fs)
+    monkeypatch.setattr(
+        "app.services.firestore_service.get_firestore_client",
+        lambda target="user", *a, **k: admin_fs,
+    )
     monkeypatch.setattr(settings, "ENABLE_FIRESTORE_SYNC", True)
     monkeypatch.setattr(settings, "ADMIN_ENABLE_FIRESTORE_SYNC", True)
     monkeypatch.setattr(settings, "ENABLE_AUDIT_LOGGING", True)
@@ -231,10 +246,6 @@ def _page(url, body, content_type="text/html"):
 
 
 def _chat(world, message, staff=None):
-    # SQLite drops timezones, and expiry is compared with local now.
-    for row in world["db"].query(PendingAction).filter(PendingAction.status == "PENDING"):
-        row.expires_at = datetime.now() + timedelta(hours=2)
-    world["db"].commit()
     return process_admin_chat(
         db=world["db"],
         session_id="s-ingest",
@@ -398,7 +409,7 @@ def test_chat_edits_confirm_and_guesses(world, monkeypatch):
     assert "Confirm & Execute" not in preview["text"]
 
     edited = _chat(world, "set price 12M")
-    assert "price_numeric_min" in edited["text"]
+    assert "Price" in edited["text"]
     assert "provided by admin" in edited["text"]
     assert "property_name" not in edited["text"].split("Updated", 1)[-1]
 
@@ -413,13 +424,13 @@ def test_chat_edits_confirm_and_guesses(world, monkeypatch):
     monkeypatch.setattr("app.services.admin_agent._call_anthropic_claude", no_model)
     leads = _chat(world, "yes show me the leads")
     assert "Saved:" not in leads["text"]
-    pending = world["db"].query(PendingAction).filter(PendingAction.status == "PENDING").all()
+    pending = fsh.pending_rows(world["fs"], "PENDING")
     assert pending and pending[0].tool_name == "ingest_property_from_url"
 
     saved = _chat(world, "confirm")
     assert "Saved: Layan Palm Villa (layan-palm-villa) - verified in database" in saved["text"]
     assert "provided by admin: " in saved["text"]
-    row = world["db"].query(Property).filter(Property.property_id == "layan-palm-villa").one()
+    row = fsh.prop_one(world["fs"], "layan-palm-villa")
     assert row.price_numeric_min == 12000000
     assert world["fs"].get("projects", "layan-palm-villa")["name"] == "Layan Palm Villa"
 
@@ -428,11 +439,11 @@ def test_chat_edits_confirm_and_guesses(world, monkeypatch):
     blocked = _chat(world, "confirm")
     assert "Nothing was saved" in blocked["text"]
     assert "status" in blocked["text"]
-    assert world["db"].query(Property).filter(Property.property_id == "guess-villa").first() is None
+    assert fsh.prop_first(world["fs"], "guess-villa") is None
     _chat(world, "use your guesses")
     accepted = _chat(world, "confirm")
     assert "Saved: Guess Villa (guess-villa) - verified in database" in accepted["text"]
-    stored = world["db"].query(Property).filter(Property.property_id == "guess-villa").one()
+    stored = fsh.prop_one(world["fs"], "guess-villa")
     assert stored.raw_metadata["ingest"]["source_url"] == "https://example.com/guess"
     assert "status" in stored.raw_metadata["ingest"]["guessed_fields"]
     assert "html" not in json.dumps(stored.raw_metadata).lower() or "completion" in json.dumps(stored.raw_metadata)
@@ -460,14 +471,14 @@ def test_save_undo_duplicate_worker_and_injection(world, monkeypatch):
     saved = _chat(world, "confirm")
     assert "verified in database" in saved["text"]
     assert "Undo operation id:" in saved["text"]
-    assert world["db"].query(Property).count() == 1
+    assert len(fsh.prop_rows(world["fs"])) == 1
     assert world["fs"].get("projects", "layan-palm-villa") is not None
-    audits = world["db"].query(AuditLog).filter(AuditLog.tool_name == "ingest_property_from_url").all()
+    audits = fsh.audit_rows(world["fs"], "ingest_property_from_url")
     assert audits
     assert audits[-1].tool_arguments["source_url"] == "https://example.com/layan-palm-villa"
     op_id = saved["text"].split("Undo operation id: ", 1)[1].split(".", 1)[0].strip()
     undo_batch_property_operation(op_id, world["staff"], db_session=world["db"])
-    assert world["db"].query(Property).count() == 0
+    assert len(fsh.prop_rows(world["fs"])) == 0
     assert world["fs"].get("projects", "layan-palm-villa") is None
 
     _chat(world, "https://example.com/layan-palm-villa")
@@ -479,9 +490,9 @@ def test_save_undo_duplicate_worker_and_injection(world, monkeypatch):
     trapped = _chat(world, "import https://evil.example/trap")
     assert "The page contained text that looked like instructions; I ignored it" in trapped["text"]
     _chat(world, "confirm")
-    tools = [row.tool_name for row in world["db"].query(PendingAction).all()]
+    tools = [row.tool_name for row in fsh.pending_rows(world["fs"])]
     assert "send_email" not in tools
-    assert world["db"].query(Property).filter(Property.property_id == "trap-villa").first() is not None
+    assert fsh.prop_first(world["fs"], "trap-villa") is not None
 
     refused = _chat(world, "https://example.com/layan-palm-villa", staff=_staff("worker"))
     assert "admin" in refused["text"].lower()
@@ -489,18 +500,16 @@ def test_save_undo_duplicate_worker_and_injection(world, monkeypatch):
 
 
 def test_three_urls_confirm_all_skips_incomplete_and_duplicates(world, monkeypatch):
-    world["db"].add(Property(
-        property_id="already-villa",
-        property_name="Already Villa",
-        property_type="Villa",
-        province="Phuket",
-        price_numeric_min=10000000,
-        status="Available",
-        websites=["tajlandia.com"],
-        is_public=True,
-        raw_metadata={"ingest": {"source_url": "https://example.com/already"}},
-    ))
-    world["db"].commit()
+    world["fs"].set("projects", "already-villa", {
+        "name": "Already Villa",
+        "propertyType": "Villa",
+        "province": "Phuket",
+        "priceFrom": 10000000,
+        "status": "Available",
+        "websites": ["tajlandia.com"],
+        "isActive": True,
+        "raw_metadata": {"ingest": {"source_url": "https://example.com/already"}},
+    })
     world["routes"]({
         "https://example.com/already": _page(
             "https://example.com/already",
@@ -525,14 +534,14 @@ def test_three_urls_confirm_all_skips_incomplete_and_duplicates(world, monkeypat
         world,
         "Add https://example.com/already and https://example.com/incomplete and https://example.com/ready",
     )
-    drafts = world["db"].query(PendingAction).filter(PendingAction.tool_name == "ingest_property_from_url", PendingAction.status == "PENDING").all()
+    drafts = fsh.pending_rows(world["fs"], "PENDING", "ingest_property_from_url")
     assert len(drafts) == 3
     assert opened["confirm_via_chat_only"] is True
     result = _chat(world, "confirm all")
     assert "Skipped" in result["text"]
-    assert world["db"].query(Property).filter(Property.property_id == "ready-villa").one()
-    assert world["db"].query(Property).filter(Property.property_id == "incomplete-villa").first() is None
-    assert world["db"].query(Property).count() == 2
+    assert fsh.prop_one(world["fs"], "ready-villa")
+    assert fsh.prop_first(world["fs"], "incomplete-villa") is None
+    assert len(fsh.prop_rows(world["fs"])) == 2
 
 
 def test_new_url_supersedes_the_open_draft(world, monkeypatch):
@@ -554,8 +563,8 @@ def test_new_url_supersedes_the_open_draft(world, monkeypatch):
     _chat(world, "https://example.com/first")
     second = _chat(world, "https://example.com/second")
     assert "discarded" in second["text"].lower()
-    pending = world["db"].query(PendingAction).filter(PendingAction.status == "PENDING").all()
-    superseded = world["db"].query(PendingAction).filter(PendingAction.status == "SUPERSEDED").all()
+    pending = fsh.pending_rows(world["fs"], "PENDING")
+    superseded = fsh.pending_rows(world["fs"], "SUPERSEDED")
     assert len(pending) == 1
     assert pending[0].action_payload["source_url"] == "https://example.com/second"
     assert superseded and superseded[0].action_payload["source_url"] == "https://example.com/first"
@@ -572,9 +581,337 @@ def test_incomplete_confirm_lists_required_fields(world, monkeypatch):
     _chat(world, "https://example.com/bare")
     refused = _chat(world, "confirm")
     assert "Nothing was saved" in refused["text"] or "cannot save" in refused["text"].lower()
-    for field in ("property_type", "location", "price", "status"):
+    for field in ("Type", "location", "price", "status"):
         assert field in refused["text"]
+    assert "property_type" not in refused["text"]
     assert save_ingested_listing  # the save path stays unused until the draft is complete
+
+
+def test_natural_edit_updates_open_draft_without_search(world, monkeypatch):
+    world["routes"]({
+        "https://example.com/probe": _page(
+            "https://example.com/probe",
+            "<table><tr><th>Name</th><td>Probe Villa</td></tr><tr><th>Type</th><td>Villa</td></tr>"
+            "<tr><th>Status</th><td>Available</td></tr><tr><th>Province</th><td>Phuket</td></tr></table>",
+        )
+    })
+    monkeypatch.setattr("app.services.property_extractor.extract_property_data_with_llm", lambda *a, **k: None)
+    searched = []
+    real_exec = __import__("app.services.admin_agent", fromlist=["_execute_admin_tool"])._execute_admin_tool
+
+    def _spy(db, tool_name, tool_args, staff_user, conversation_id):
+        searched.append(tool_name)
+        return real_exec(db, tool_name, tool_args, staff_user, conversation_id)
+
+    monkeypatch.setattr("app.services.admin_agent._execute_admin_tool", _spy)
+    _chat(world, "https://example.com/probe")
+    edited = _chat(world, "use price 25000000 and bedrooms 4")
+    assert "search_properties_full" not in searched
+    assert "25,000,000" in edited["text"]
+    assert "4" in edited["text"]
+    pending = fsh.pending_one(world["fs"], "PENDING")
+    fields = pending.action_payload["provenance"]
+    assert fields["price_numeric_min"]["value"] == 25000000
+    assert fields["bedrooms_min"]["value"] == 4
+    assert "found" in edited["text"].lower() or "provided" in edited["text"].lower()
+
+
+def test_unrelated_question_keeps_the_draft_open(world, monkeypatch):
+    world["routes"]({
+        "https://example.com/open": _page(
+            "https://example.com/open",
+            "<table><tr><th>Name</th><td>Open Villa</td></tr><tr><th>Price</th><td>5,000,000 THB</td></tr>"
+            "<tr><th>Type</th><td>Villa</td></tr><tr><th>Status</th><td>Available</td></tr>"
+            "<tr><th>Province</th><td>Phuket</td></tr></table>",
+        )
+    })
+    monkeypatch.setattr("app.services.property_extractor.extract_property_data_with_llm", lambda *a, **k: None)
+    _chat(world, "https://example.com/open")
+    reply = _chat(world, "what is the weather in Bangkok")
+    assert "still open" in reply["text"].lower()
+    assert "Open Villa" in reply["text"]
+    assert len(fsh.pending_rows(world["fs"], "PENDING")) == 1
+
+
+def test_several_fields_and_cancel(world, monkeypatch):
+    world["routes"]({
+        "https://example.com/multi": _page(
+            "https://example.com/multi",
+            "<table><tr><th>Name</th><td>Multi Villa</td></tr><tr><th>Price</th><td>5,000,000 THB</td></tr>"
+            "<tr><th>Type</th><td>Villa</td></tr><tr><th>Status</th><td>Available</td></tr>"
+            "<tr><th>Province</th><td>Phuket</td></tr></table>",
+        )
+    })
+    monkeypatch.setattr("app.services.property_extractor.extract_property_data_with_llm", lambda *a, **k: None)
+    _chat(world, "https://example.com/multi")
+    edited = _chat(world, "price 25M, set bedrooms to 4, change the status to Off-plan, add Phuket as province, name it Layan Palm Villa 2")
+    pending = fsh.pending_one(world["fs"], "PENDING")
+    prov = pending.action_payload["provenance"]
+    assert prov["price_numeric_min"]["value"] == 25000000
+    assert prov["bedrooms_min"]["value"] == 4
+    assert prov["status"]["value"] == "Off-plan"
+    assert "Layan Palm Villa 2" in edited["text"]
+    cancelled = _chat(world, "cancel")
+    assert "discarded" in cancelled["text"].lower() or "nothing was saved" in cancelled["text"].lower()
+    assert len(fsh.pending_rows(world["fs"], "PENDING")) == 0
+
+
+def test_confirm_missing_price_skip_required_and_preview_match(world, monkeypatch):
+    world["routes"]({
+        "https://example.com/noprice": _page(
+            "https://example.com/noprice",
+            "<table><tr><th>Name</th><td>No Price Villa</td></tr><tr><th>Type</th><td>Villa</td></tr>"
+            "<tr><th>Status</th><td>Available</td></tr><tr><th>Province</th><td>Phuket</td></tr></table>",
+        )
+    })
+    monkeypatch.setattr("app.services.property_extractor.extract_property_data_with_llm", lambda *a, **k: None)
+    _chat(world, "https://example.com/noprice")
+    refused = _chat(world, "confirm")
+    assert "i still need" in refused["text"].lower()
+    assert "price" in refused["text"].lower()
+    assert "nothing was saved" in refused["text"].lower()
+    skipped = _chat(world, "skip price")
+    assert "cannot skip price" in skipped["text"].lower()
+    supplied = _chat(world, "use price 18500000")
+    assert "18,500,000" in supplied["text"]
+    saved = _chat(world, "confirm")
+    assert "nothing was saved" not in saved["text"].lower()
+    row = fsh.prop_one(world["fs"], name="No Price Villa")
+    assert int(row.price_numeric_min) == 18500000
+
+
+DHOLERA_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Residential Plot for Sale in Dholera (REI1500895) | RealEstateIndia</title>
+</head>
+<body>
+  <nav class="menu"><img src="https://cdn.example.com/menu-sprite.png" alt="menu"></nav>
+  <img src="https://cdn.example.com/avatar.jpg" class="avatar" alt="avatar">
+  <img src="https://cdn.example.com/tracking-pixel.gif" alt="tracking" width="1" height="1">
+  <h1>Residential Plot for Sale in Dholera (REI1500895)</h1>
+  <div class="property-information">
+    <p>Price: ₹ 45 Lac</p>
+    <p>Property Type: Residential Plot(s)</p>
+    <p>Area: 1000 Sq. Yards</p>
+    <p>Location: Dholera, Gujarat</p>
+    <p>Status: Available</p>
+    <p>Developer: Dholera SIR</p>
+  </div>
+  <img src="https://cdn.example.com/dholera-plot.jpg" alt="plot photo" width="800" height="600">
+  <footer>Also see Phuket villas and Kata beach homes. Agent Surinder. Office in Kolkata and Kathua.</footer>
+</body>
+</html>
+"""
+
+
+def _draft_from_html(url, html, monkeypatch):
+    monkeypatch.setattr("app.services.property_extractor.extract_property_data_with_llm", lambda *a, **k: None)
+    return extract_draft(FetchedPage(url, url, "text/html", html, html.encode("utf-8")))
+
+
+def test_clean_listing_name_strips_ids_and_site_suffix():
+    from app.services.property_web_ingest import _clean_listing_name
+
+    assert _clean_listing_name("Residential Plot for Sale in Dholera (REI1500895)") == "Residential Plot for Sale in Dholera"
+    assert _clean_listing_name("Palm Listing ID : 123 | RealEstateIndia") == "Palm"
+
+
+def test_location_matches_whole_words_and_ignores_footer(monkeypatch):
+    thai = _draft_from_html(
+        "https://example.com/surin-house",
+        "<title>Beach House</title><body><p>Address: Surin Beach Road, Phuket</p>"
+        "<footer>Offices in Kolkata and Kathua. Agent Surinder Shah. Visit Kata.</footer></body>",
+        monkeypatch,
+    )
+    assert thai["provenance"]["province"]["value"] == "Phuket"
+    assert thai["provenance"]["province"]["status"] == "inferred"
+    assert thai["provenance"]["district"]["value"] == "Surin"
+    assert thai["foreign_place"] is None
+
+    surinder = _draft_from_html(
+        "https://example.com/surinder",
+        "<title>Surinder</title><body><p>Owner: Surinder</p>"
+        "<footer>Phuket Kata Kolkata Kathua</footer></body>",
+        monkeypatch,
+    )
+    assert "province" not in surinder["provenance"]
+    assert "district" not in surinder["provenance"]
+
+    for place, html in (
+        ("Kolkata", "<title>Flat in Kolkata</title><body><p>Location: Kolkata</p></body>"),
+        ("Kathua", "<title>House in Kathua</title><body><p>Location: Kathua</p></body>"),
+    ):
+        draft = _draft_from_html(f"https://example.com/{place.lower()}", html, monkeypatch)
+        assert "province" not in draft["provenance"]
+        assert draft.get("foreign_place") == place
+
+
+def test_dholera_page_warns_and_waits_for_continue_anyway(world, monkeypatch):
+    url = "https://www.realestateindia.com/residential-plot-dholera-45-lac"
+    draft = _draft_from_html(url, DHOLERA_HTML, monkeypatch)
+    assert draft["provenance"]["property_name"]["value"] == "Residential Plot for Sale in Dholera"
+    assert "REI1500895" not in draft["provenance"]["property_name"]["value"]
+    assert draft["provenance"]["property_name"]["evidence"] == "h1"
+    assert draft["provenance"]["property_type"]["value"] == "Land"
+    assert draft["provenance"]["price_display"]["needs_decision"] is True
+    assert "45 Lac" in draft["provenance"]["price_display"]["value"]
+    assert "price_numeric_min" not in draft["provenance"]
+    assert "province" not in draft["provenance"]
+    assert draft["foreign_place"] in {"Dholera", "Gujarat", "India"}
+    assert draft["images"] == ["https://cdn.example.com/dholera-plot.jpg"]
+    preview = render_preview(draft)
+    assert preview.lower().count("| price |") == 1
+    assert "page shows ₹ 45 Lac, not THB" in preview
+    assert "outside Thailand" in preview
+    assert "continue anyway" in preview
+
+    world["routes"]({url: _page(url, DHOLERA_HTML)})
+    monkeypatch.setattr("app.services.property_extractor.extract_property_data_with_llm", lambda *a, **k: None)
+    opened = _chat(world, url)
+    assert "outside Thailand" in opened["text"]
+    blocked = _chat(world, "confirm")
+    assert "outside Thailand" in blocked["text"]
+    assert "nothing was saved" in blocked["text"].lower()
+    assert len(fsh.prop_rows(world["fs"])) == 0
+    continued = _chat(world, "continue anyway")
+    assert "outside Thailand" not in continued["text"]
+    still = _chat(world, "confirm")
+    assert "outside Thailand" not in still["text"]
+    assert "i still need" in still["text"].lower()
+    assert "price" in still["text"].lower()
+    assert "nothing was saved" in still["text"].lower()
+    assert "property_type" not in still["text"]
+    _chat(world, "price 5 million thb")
+    saved = _chat(world, "confirm")
+    assert "nothing was saved" not in saved["text"].lower()
+    row = fsh.prop_one(world["fs"], name="Residential Plot for Sale in Dholera")
+    assert int(row.price_numeric_min) == 5_000_000
+
+    polish = render_preview({**draft, "reply_language": "pl"})
+    assert "spoza Tajlandii" in polish
+    hindi = render_preview({**draft, "reply_language": "hi"})
+    assert "bahar" in hindi
+    gujarati = render_preview({**draft, "reply_language": "gu"})
+    assert "bahaar" in gujarati
+
+
+def test_thai_location_allows_confirm_without_continue_anyway(world, monkeypatch):
+    url = "https://www.realestateindia.com/dholera-plot-45-lac"
+    world["routes"]({url: _page(url, DHOLERA_HTML)})
+    monkeypatch.setattr("app.services.property_extractor.extract_property_data_with_llm", lambda *a, **k: None)
+    _chat(world, url)
+    _chat(world, "location Phuket")
+    _chat(world, "price 6 million thb")
+    saved = _chat(world, "confirm")
+    assert "outside Thailand" not in saved["text"]
+    assert "nothing was saved" not in saved["text"].lower()
+    assert len(fsh.prop_rows(world["fs"])) == 1
+
+
+@pytest.mark.parametrize(
+    ("message", "name", "kind", "status_value", "price"),
+    [
+        (
+            "Name : itisha_test, Type : villa, price :50million thb, status= ready to move.",
+            "itisha_test",
+            "Villa",
+            "Ready to move in",
+            50_000_000,
+        ),
+        (
+            "name itisha_test, type villa, price 50 million, status ready to move",
+            "itisha_test",
+            "Villa",
+            "Ready to move in",
+            50_000_000,
+        ),
+        (
+            "Name = Sea Villa; Type = Condo; Status = Ready to move in",
+            "Sea Villa",
+            "Condominium",
+            "Ready to move in",
+            12_000_000,
+        ),
+        (
+            "naam itisha_test, kimat 50 million, type villa, status ready",
+            "itisha_test",
+            "Villa",
+            "Ready to move in",
+            50_000_000,
+        ),
+    ],
+)
+def test_multi_field_edit_then_confirm(world, monkeypatch, message, name, kind, status_value, price):
+    world["routes"]({
+        "https://example.com/edit-me": _page(
+            "https://example.com/edit-me",
+            "<table><tr><th>Name</th><td>Old Villa</td></tr><tr><th>Price</th><td>12,000,000 THB</td></tr>"
+            "<tr><th>Type</th><td>Villa</td></tr><tr><th>Status</th><td>Available</td></tr>"
+            "<tr><th>Province</th><td>Phuket</td></tr></table>",
+        )
+    })
+    monkeypatch.setattr("app.services.property_extractor.extract_property_data_with_llm", lambda *a, **k: None)
+    _chat(world, "https://example.com/edit-me")
+    edited = _chat(world, message)
+    assert "Applied" in edited["text"]
+    # Empty "Not understood" table is omitted when every edit was applied
+    assert "Not understood" not in edited["text"]
+    assert name in edited["text"]
+    pending = fsh.pending_one(world["fs"], "PENDING")
+    prov = pending.action_payload["provenance"]
+    assert prov["property_name"]["value"] == name
+    assert prov["property_type"]["value"] == kind
+    assert prov["status"]["value"] == status_value
+    assert prov["price_numeric_min"]["value"] == price
+    saved = _chat(world, "confirm")
+    assert "nothing was saved" not in saved["text"].lower()
+    row = fsh.prop_one(world["fs"], name=name)
+    assert row.property_type == kind
+    assert row.status == status_value
+    assert int(row.price_numeric_min) == price
+
+
+def test_invalid_edit_lists_allowed_values_and_confirm_lists_only_what_is_missing(world, monkeypatch):
+    from app.services.admin_chat_quality import parse_natural_edit_commands
+
+    assert parse_natural_edit_commands("type plot")[0]["value"] == "Land"
+    assert parse_natural_edit_commands("status sold out")[0]["value"] == "Sold Out"
+    assert parse_natural_edit_commands("status under construction")[0]["value"] == "Under construction"
+    assert parse_natural_edit_commands("status off plan")[0]["value"] == "Off-plan"
+    assert parse_natural_edit_commands("status ready")[0]["value"] == "Ready to move in"
+
+    world["routes"]({
+        "https://example.com/partial": _page(
+            "https://example.com/partial",
+            "<table><tr><th>Name</th><td>Old Villa</td></tr><tr><th>Province</th><td>Phuket</td></tr></table>",
+        )
+    })
+    monkeypatch.setattr("app.services.property_extractor.extract_property_data_with_llm", lambda *a, **k: None)
+    _chat(world, "https://example.com/partial")
+    edited = _chat(world, "Name: Kept_Name_1, type: castle, status: banana")
+    assert "Not understood" in edited["text"]
+    assert "Villa" in edited["text"]
+    assert "Sold Out" in edited["text"]
+    pending = fsh.pending_one(world["fs"], "PENDING")
+    prov = pending.action_payload["provenance"]
+    assert prov["property_name"]["value"] == "Kept_Name_1"
+    assert "property_type" not in prov or prov.get("property_type", {}).get("value") != "castle"
+    assert prov.get("status", {}).get("value") != "banana"
+    missing = _chat(world, "confirm")
+    lowered = missing["text"].lower()
+    assert "nothing was saved" in lowered
+    assert "price" in lowered
+    assert "status" in lowered
+    assert "type" in lowered
+    assert "location" not in lowered
+    assert "kept_name_1" not in lowered
+    _chat(world, "type villa, price 20 million thb, status available")
+    saved = _chat(world, "confirm")
+    assert "nothing was saved" not in saved["text"].lower()
+    row = fsh.prop_one(world["fs"], name="Kept_Name_1")
+    assert int(row.price_numeric_min) == 20_000_000
 
 
 def test_config_status_lists_ingest_limits():

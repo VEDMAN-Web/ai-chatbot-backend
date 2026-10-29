@@ -1,15 +1,15 @@
 import os
+import uuid
 import logging
 import time
 from decimal import Decimal
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse, FileResponse
-from sqlalchemy.orm import Session
 from pydantic import BaseModel, Field, EmailStr, field_validator
 import io
 from typing import Optional, List, Dict, Any
 from app.core.config import settings
-from app.db.session import get_user_db as get_db
+from app.core.deps import get_user_db as get_db
 from app.services.conversation_service import (
     get_or_create_conversation,
     append_conversation_turn,
@@ -19,7 +19,6 @@ from app.services.conversation_service import (
 )
 from app.services.public_agent import public_agent, format_property_card
 from app.services.lead_service import record_or_update_lead
-from app.db.models import Property
 
 logger = logging.getLogger(__name__)
 
@@ -145,7 +144,7 @@ class ChatHistoryResponse(BaseModel):
     messages: List[Dict[str, Any]]
 
 class LeadSubmitRequest(BaseModel):
-    session_id: str = Field(..., description="Session identifier")
+    session_id: str = Field(..., description="Any identifier")
     contact_name: Optional[str] = Field(None, max_length=100)
     contact_email: Optional[str] = Field(None, max_length=100)
     contact_phone: Optional[str] = Field(None, max_length=50)
@@ -170,7 +169,7 @@ class LeadSubmitResponse(BaseModel):
 )
 def handle_public_chat(
     req: PublicChatRequest,
-    db: Session = Depends(get_db)
+    db: Any = Depends(get_db)
 ):
     req_t0 = time.monotonic()
     has_contact = bool(
@@ -237,7 +236,7 @@ def handle_public_chat(
                     recorded_lead_id = None
 
                 # Firestore lead upsert is handled inside record_or_update_lead
-                # when STORE_LEADS_USER is firestore|both (dedupe_key transaction).
+                # (dedupe_key transaction).
             else:
                 import uuid
                 recorded_lead_id = f"lead_session_{uuid.uuid4().hex[:8]}"
@@ -454,7 +453,7 @@ def public_chat_config_status():
 )
 def get_chat_history(
     session_id: str,
-    db: Session = Depends(get_db)
+    db: Any = Depends(get_db)
 ):
     conversation = get_or_create_conversation(
         db=db,
@@ -509,7 +508,7 @@ def get_chat_history(
 )
 def submit_direct_lead(
     req: LeadSubmitRequest,
-    db: Session = Depends(get_db)
+    db: Any = Depends(get_db)
 ):
     conversation = get_or_create_conversation(
         db=db,
@@ -545,7 +544,7 @@ def submit_direct_lead(
             )
         except Exception as lead_err:
             logger.warning("Direct lead save failed (response unaffected): %s", lead_err)
-        # Firestore upsert (dedupe_key) runs inside record_or_update_lead when STORE_LEADS_USER allows it.
+        # Firestore upsert (dedupe_key) runs inside record_or_update_lead.
 
     return {
         "status": "success",
@@ -587,7 +586,7 @@ def download_property_brochure(
         description="Optional brochure visual theme 1–7 (default: random)",
     ),
     lang: Optional[str] = Query(None, description="Brochure language: en, pl, or th"),
-    db: Session = Depends(get_db)
+    db: Any = Depends(get_db)
 ):
     """
     Public endpoint — generates a branded single-property brochure PDF on-demand.
@@ -615,8 +614,12 @@ def download_property_brochure(
             try:
                 from app.services.lead_service import enqueue_lead_save
                 conv = get_or_create_conversation(db=db, session_id=session_id, site_origin=tenant.site_origin)
-                from app.services.property_search import get_property_by_id
-                prop = get_property_by_id(db, property_id)
+                prop = None
+                try:
+                    from app.services.property_search import get_property_by_id
+                    prop = get_property_by_id(db, property_id)
+                except Exception:
+                    prop = None
                 district = getattr(prop, "district", None) if prop else None
                 province = getattr(prop, "province", None) if prop else None
                 pname = (

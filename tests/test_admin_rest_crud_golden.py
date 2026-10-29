@@ -1,7 +1,7 @@
 """
 Admin REST CRUD golden tests.
 
-Fake in-memory Firestore plus in-memory SQLite. No live Postgres or Firestore.
+Fake in-memory Firestore only. No live Firestore.
 """
 
 from __future__ import annotations
@@ -13,17 +13,11 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
-from sqlalchemy.dialects.postgresql import JSONB, UUID
-from sqlalchemy.ext.compiler import compiles
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
 
 from app.api.v1.admin import router as admin_router
 from app.core.auth import AuthenticatedStaff, get_current_user_from_db
 from app.core.config import settings
-from app.db.models import AuditLog, Property
-from app.db.session import get_db
+from app.core.deps import FirestoreSession, get_db
 from app.services.action_service import validate_listing_values, validate_property_data
 from app.services.admin_batch_service import (
     OLD_SNAPSHOT_MESSAGE,
@@ -32,16 +26,6 @@ from app.services.admin_batch_service import (
 )
 from app.services.cache_service import search_cache
 from app.services.firestore_service import get_firestore_client
-
-
-@compiles(JSONB, "sqlite")
-def _compile_jsonb_sqlite(type_, compiler, **kw):
-    return "JSON"
-
-
-@compiles(UUID, "sqlite")
-def _compile_uuid_sqlite(type_, compiler, **kw):
-    return "CHAR(36)"
 
 
 class _Snap:
@@ -151,22 +135,6 @@ class FakeFirestore:
         self.docs.pop((collection, doc_id), None)
 
 
-def _sqlite_session():
-    engine = create_engine(
-        "sqlite://",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    for table in (Property.__table__, AuditLog.__table__):
-        for idx in list(table.indexes):
-            using = getattr(idx, "dialect_kwargs", {}).get("postgresql_using")
-            if using == "gin":
-                table.indexes.discard(idx)
-        table.create(bind=engine, checkfirst=True)
-    Session = sessionmaker(bind=engine, autocommit=False, autoflush=False)
-    return Session()
-
-
 def _staff(role="super_admin", allowed=None):
     sites = allowed or ["tajlandia.com", "varsoviaestate.com", "thai.estate"]
     return AuthenticatedStaff(
@@ -180,7 +148,7 @@ def _staff(role="super_admin", allowed=None):
 
 @pytest.fixture
 def world(monkeypatch):
-    session = _sqlite_session()
+    session = FirestoreSession()
     admin_fs = FakeFirestore()
     user_fs = FakeFirestore()
     monkeypatch.setattr(
@@ -190,6 +158,10 @@ def world(monkeypatch):
     monkeypatch.setattr(
         "app.services.firestore_service.get_user_firestore_client",
         lambda: user_fs,
+    )
+    monkeypatch.setattr(
+        "app.services.firestore_service.get_firestore_client",
+        lambda target="user", *a, **k: admin_fs if target == "admin" else user_fs,
     )
     monkeypatch.setattr(settings, "ENABLE_FIRESTORE_SYNC", True)
     monkeypatch.setattr(settings, "ADMIN_ENABLE_FIRESTORE_SYNC", True)
@@ -217,7 +189,6 @@ def world(monkeypatch):
         "holder": holder,
     }
     app.dependency_overrides.clear()
-    session.close()
 
 
 def _minimal_body(**extra):
@@ -236,26 +207,23 @@ def _fs_doc(admin_fs, property_id):
     return admin_fs.get("projects", property_id)
 
 
-def _sql_row(db, property_id):
-    return db.query(Property).filter(Property.property_id == property_id).first()
+def _audit_rows(admin_fs):
+    return [data for _, data in admin_fs.items("audit_logs")]
 
 
-def test_minimal_and_full_create_land_in_both_stores(world):
+def test_minimal_and_full_create_land_in_firestore(world):
     created = world["client"].post("/api/v1/admin/properties", json=_minimal_body())
     assert created.status_code == 201, created.text
     payload = created.json()
     pid = payload["property_id"]
-    assert payload["sql"] is True
+    assert "sql" not in payload
     assert payload["firestore"] is True
-    assert payload["stores"] == {"sql": True, "firestore": True}
-    assert "Postgres" in payload["message"] and "Firestore" in payload["message"]
+    assert payload["stores"] == {"firestore": True}
+    assert "Postgres" not in payload["message"] and "Firestore" in payload["message"]
     assert payload["operation_id"]
     assert payload["audit"] != "disabled"
 
-    row = _sql_row(world["db"], pid)
     doc = _fs_doc(world["admin_fs"], pid)
-    assert row is not None and row.property_name == "Minimal Villa"
-    assert float(row.price_numeric_min) == 2500000
     assert doc["name"] == "Minimal Villa"
     assert doc["priceFrom"] == 2500000
     assert doc["isActive"] is True
@@ -280,19 +248,12 @@ def test_minimal_and_full_create_land_in_both_stores(world):
         ),
     )
     assert full.status_code == 201, full.text
-    full_row = _sql_row(world["db"], full_id)
     full_doc = _fs_doc(world["admin_fs"], full_id)
-    assert full_row.project_name == "Laguna"
-    assert full_row.district == "Thalang"
-    assert full_row.bedrooms_min == 3
-    assert float(full_row.price_numeric_max) == 6000000
-    assert full_row.description == "Pool villa"
     assert full_doc["name"] == "Laguna Full Villa"
     assert full_doc["priceTo"] == 6000000
 
 
 def test_failed_validation_writes_nothing(world):
-    before_sql = world["db"].query(Property).count()
     before_fs = len(world["admin_fs"].items("projects"))
     res = world["client"].post(
         "/api/v1/admin/properties",
@@ -300,7 +261,6 @@ def test_failed_validation_writes_nothing(world):
     )
     assert res.status_code == 422
     assert "price" in res.json()["detail"]["fields"]
-    assert world["db"].query(Property).count() == before_sql
     assert len(world["admin_fs"].items("projects")) == before_fs
     assert world["admin_fs"].items("admin_batch_operations") == []
 
@@ -317,14 +277,12 @@ def test_duplicate_create_is_409_and_leaves_original(world):
     )
     assert again.status_code == 409
     assert "already exists" in again.json()["detail"].lower()
-    row = _sql_row(world["db"], "dup-villa")
     doc = _fs_doc(world["admin_fs"], "dup-villa")
-    assert float(row.price_numeric_min) == 1110000
     assert doc["priceFrom"] == 1110000
     assert doc["name"] == "Minimal Villa"
 
 
-def test_firestore_failure_rolls_back_sql(world, monkeypatch):
+def test_firestore_failure_returns_502_and_writes_nothing(world, monkeypatch):
     def _boom(**kwargs):
         raise RuntimeError("firestore down")
 
@@ -338,10 +296,9 @@ def test_firestore_failure_rolls_back_sql(world, monkeypatch):
     )
     assert res.status_code == 502
     body = res.json()["detail"]
-    assert body["sql"] is False
+    assert "sql" not in body
     assert body["firestore"] is False
     assert body["failed"] == "firestore"
-    assert _sql_row(world["db"], "rollback-villa") is None
     assert _fs_doc(world["admin_fs"], "rollback-villa") is None
 
 
@@ -360,25 +317,12 @@ def test_update_then_undo_restores_firestore_bytes(world):
         "customNote": "keep-me",
     }
     world["admin_fs"].set("projects", "byte-villa", original)
-    world["db"].add(Property(
-        property_id="byte-villa",
-        property_name="Byte Villa",
-        property_type="Villa",
-        province="Phuket",
-        price_numeric_min=39000000,
-        price_numeric_max=42000000,
-        status="Available",
-        websites=["tajlandia.com"],
-        is_public=True,
-    ))
-    world["db"].commit()
 
     updated = world["client"].put(
         "/api/v1/admin/properties/byte-villa",
         json={"price_numeric_min": 1000000},
     )
     assert updated.status_code == 200, updated.text
-    assert updated.json()["sql"] is True
     assert updated.json()["firestore"] is True
     assert _fs_doc(world["admin_fs"], "byte-villa")["priceFrom"] == 1000000
     assert _fs_doc(world["admin_fs"], "byte-villa")["createdAt"] == "2024-01-02T03:04:05"
@@ -390,7 +334,6 @@ def test_update_then_undo_restores_firestore_bytes(world):
     assert undone.json()["restored_ok"] is True
     assert undone.json()["differing_fields"] == []
     assert _fs_doc(world["admin_fs"], "byte-villa") == original
-    assert float(_sql_row(world["db"], "byte-villa").price_numeric_min) == 39000000
 
 
 def test_soft_delete_undo_restores_price_and_active(world):
@@ -407,22 +350,10 @@ def test_soft_delete_undo_restores_price_and_active(world):
         "websites": ["tajlandia.com"],
     }
     world["admin_fs"].set("projects", "soft-villa", original)
-    world["db"].add(Property(
-        property_id="soft-villa",
-        property_name="Soft Villa",
-        property_type="Villa",
-        province="Phuket",
-        price_numeric_min=8800000,
-        status="Available",
-        websites=["tajlandia.com"],
-        is_public=True,
-    ))
-    world["db"].commit()
     deleted = world["client"].delete("/api/v1/admin/properties/soft-villa")
     assert deleted.status_code == 200, deleted.text
     assert deleted.json()["status"] == "ARCHIVED"
     assert deleted.json()["firestore"] is True
-    assert deleted.json()["sql"] is True
     assert _fs_doc(world["admin_fs"], "soft-villa")["isActive"] is False
     assert _fs_doc(world["admin_fs"], "soft-villa")["priceFrom"] == 8800000
 
@@ -434,13 +365,9 @@ def test_soft_delete_undo_restores_price_and_active(world):
     assert restored == original
     assert restored["priceFrom"] == 8800000
     assert restored["isActive"] is True
-    row = _sql_row(world["db"], "soft-villa")
-    assert row.is_public is True
-    assert float(row.price_numeric_min) == 8800000
-    assert row.status == "Available"
 
 
-def test_create_undo_removes_both_stores_and_second_undo_is_refused(world):
+def test_create_undo_removes_document_and_second_undo_is_refused(world):
     created = world["client"].post(
         "/api/v1/admin/properties",
         json=_minimal_body(property_id="undo-create"),
@@ -450,7 +377,6 @@ def test_create_undo_removes_both_stores_and_second_undo_is_refused(world):
     undone = world["client"].post(f"/api/v1/admin/operations/{op}/undo")
     assert undone.status_code == 200, undone.text
     assert undone.json()["restored_ok"] is True
-    assert _sql_row(world["db"], "undo-create") is None
     assert _fs_doc(world["admin_fs"], "undo-create") is None
 
     again = world["client"].post(f"/api/v1/admin/operations/{op}/undo")
@@ -525,10 +451,10 @@ def test_expired_undo_is_refused(world):
     res = world["client"].post(f"/api/v1/admin/operations/{op}/undo")
     assert res.status_code == 400
     assert "expired" in res.json()["detail"].lower()
-    assert _sql_row(world["db"], "expired-villa") is not None
+    assert _fs_doc(world["admin_fs"], "expired-villa") is not None
 
 
-def test_firestore_only_update_does_not_invent_sql(world):
+def test_update_existing_listing_changes_only_given_fields(world):
     world["admin_fs"].set(
         "projects",
         "fs-only",
@@ -549,65 +475,18 @@ def test_firestore_only_update_does_not_invent_sql(world):
     )
     assert res.status_code == 200, res.text
     body = res.json()
-    assert body["sql"] is False
     assert body["firestore"] is True
-    assert _sql_row(world["db"], "fs-only") is None
     assert _fs_doc(world["admin_fs"], "fs-only")["name"] == "Firestore Only"
     assert _fs_doc(world["admin_fs"], "fs-only")["priceFrom"] == 6400000
 
 
-def test_sql_only_update_writes_complete_firestore_doc(world):
-    world["db"].add(Property(
-        property_id="sql-only",
-        property_name="SQL Only Villa",
-        property_type="Villa",
-        province="Phuket",
-        price_numeric_min=3000000,
-        status="Available",
-        websites=["tajlandia.com"],
-        is_public=True,
-    ))
-    world["db"].commit()
+def test_update_missing_property_is_404(world):
     res = world["client"].put(
-        "/api/v1/admin/properties/sql-only",
+        "/api/v1/admin/properties/does-not-exist",
         json={"price_numeric_min": 3100000},
     )
-    assert res.status_code == 200, res.text
-    assert res.json()["sql"] is True
-    assert res.json()["firestore"] is True
-    doc = _fs_doc(world["admin_fs"], "sql-only")
-    assert doc["name"] == "SQL Only Villa"
-    assert doc["title"] == "SQL Only Villa"
-    assert doc["propertyType"] == "Villa"
-    assert doc["province"] == "Phuket"
-    assert doc["priceFrom"] == 3100000
-    assert doc["isActive"] is True
-    assert doc["websites"] == ["tajlandia.com"]
-
-
-def test_sql_only_update_skips_firestore_when_sync_disabled(world, monkeypatch):
-    monkeypatch.setattr(settings, "ENABLE_FIRESTORE_SYNC", False)
-    monkeypatch.setattr(settings, "ADMIN_ENABLE_FIRESTORE_SYNC", False)
-    world["db"].add(Property(
-        property_id="sql-nosync",
-        property_name="No Sync Villa",
-        property_type="Villa",
-        province="Phuket",
-        price_numeric_min=2000000,
-        status="Available",
-        websites=["tajlandia.com"],
-        is_public=True,
-    ))
-    world["db"].commit()
-    res = world["client"].put(
-        "/api/v1/admin/properties/sql-nosync",
-        json={"status": "Reserved"},
-    )
-    assert res.status_code == 200, res.text
-    assert res.json()["sql"] is True
-    assert res.json()["firestore"] is False
-    assert _fs_doc(world["admin_fs"], "sql-nosync") is None
-    assert _sql_row(world["db"], "sql-nosync").status == "Reserved"
+    assert res.status_code == 404, res.text
+    assert _fs_doc(world["admin_fs"], "does-not-exist") is None
 
 
 def test_hard_delete_requires_typed_confirmation(world, monkeypatch):
@@ -616,7 +495,6 @@ def test_hard_delete_requires_typed_confirmation(world, monkeypatch):
     missing = world["client"].delete("/api/v1/admin/properties/hard-villa?hard_delete=true")
     assert missing.status_code == 400
     assert "confirm_property_id" in missing.json()["detail"]
-    assert _sql_row(world["db"], "hard-villa") is not None
     assert _fs_doc(world["admin_fs"], "hard-villa") is not None
 
     wrong = world["client"].delete(
@@ -627,9 +505,7 @@ def test_hard_delete_requires_typed_confirmation(world, monkeypatch):
         "/api/v1/admin/properties/hard-villa?hard_delete=true&confirm_property_id=hard-villa"
     )
     assert gone.status_code == 200, gone.text
-    assert gone.json()["sql"] is True
     assert gone.json()["firestore"] is True
-    assert _sql_row(world["db"], "hard-villa") is None
     assert _fs_doc(world["admin_fs"], "hard-villa") is None
 
 
@@ -640,7 +516,6 @@ def test_hard_delete_blocked_by_default_even_for_super_admin(world):
     )
     assert res.status_code == 403, res.text
     assert "ALLOW_HARD_DELETE" in res.json()["detail"]
-    assert _sql_row(world["db"], "keep-villa") is not None
     assert _fs_doc(world["admin_fs"], "keep-villa") is not None
 
 
@@ -698,7 +573,6 @@ def test_validation_rejects_bad_numbers_and_ids(world):
         res = world["client"].post("/api/v1/admin/properties", json=body)
         assert res.status_code == 422, res.text
         assert field in res.json()["detail"]["fields"]
-    assert world["db"].query(Property).count() == 0
 
     ok, missing, msg = validate_property_data(
         {
@@ -707,7 +581,7 @@ def test_validation_rejects_bad_numbers_and_ids(world):
             "is_update_only": True,
             "fields_to_update": {"price_numeric_min": -1, "bathrooms": 80},
         },
-        existing_property=Property(property_id="p1", property_name="X"),
+        existing_property={"property_id": "p1", "property_name": "X"},
     )
     assert ok is False
     assert "price_numeric_min" in missing
@@ -753,15 +627,15 @@ def test_audit_entries_and_disabled_flag(world, monkeypatch):
         json=_minimal_body(property_id="audit-villa"),
     )
     assert created.status_code == 201, created.text
-    logs = world["db"].query(AuditLog).all()
+    logs = _audit_rows(world["admin_fs"])
     assert len(logs) == 1
     log = logs[0]
-    assert log.tool_name == "admin_rest_create"
-    args = log.tool_arguments or {}
+    assert log["tool_name"] == "admin_rest_create"
+    args = log.get("tool_arguments") or {}
     assert args.get("actor") == "admin@tajlandia.com"
     assert args.get("property_id") == "audit-villa"
     assert args.get("operation_id") == created.json()["operation_id"]
-    blob = str(log.proposed_payload)
+    blob = str(log.get("proposed_payload"))
     assert "address" not in blob
     assert "description" not in blob
 
@@ -772,7 +646,7 @@ def test_audit_entries_and_disabled_flag(world, monkeypatch):
     )
     assert muted.status_code == 200, muted.text
     assert muted.json()["audit"] == "disabled"
-    assert world["db"].query(AuditLog).count() == 1
+    assert len(_audit_rows(world["admin_fs"])) == 1
 
 
 def test_search_cache_invalidated_on_create_and_undo(world):
@@ -793,47 +667,6 @@ def test_search_cache_invalidated_on_create_and_undo(world):
     assert search_cache._cache == {}
 
 
-def test_pirak_villa_consistency_lists_differences(world):
-    world["admin_fs"].set(
-        "projects",
-        "pirak-villa",
-        {
-            "name": "Pirak Villa",
-            "title": "Pirak Villa",
-            "propertyType": "Villa",
-            "province": "Phuket",
-            "priceFrom": 39990000,
-            "isActive": True,
-            "status": "Available",
-            "websites": ["tajlandia.com"],
-        },
-    )
-    world["db"].add(Property(
-        property_id="pirak-villa",
-        property_name="Pirak Villa",
-        property_type="Villa",
-        province="Phuket",
-        price_numeric_min=35000000,
-        status="Under construction",
-        websites=["tajlandia.com"],
-        is_public=False,
-    ))
-    world["db"].commit()
-    res = world["client"].get("/api/v1/admin/properties/pirak-villa/consistency")
-    assert res.status_code == 200, res.text
-    body = res.json()
-    assert body["consistent"] is False
-    fields = {item["field"]: item for item in body["differences"]}
-    assert fields["price"]["firestore"] == 39990000
-    assert fields["price"]["sql"] == 35000000
-    assert fields["status"]["firestore"] == "Available"
-    assert fields["status"]["sql"] == "Under construction"
-    assert fields["isActive"]["firestore"] is True
-    assert fields["isActive"]["sql"] is False
-    assert "name" not in fields
-    assert "websites" not in fields
-
-
 def test_overwrite_flag_is_rejected(world):
     res = world["client"].post(
         "/api/v1/admin/properties?overwrite=true",
@@ -841,4 +674,4 @@ def test_overwrite_flag_is_rejected(world):
     )
     assert res.status_code == 400
     assert "overwrite" in res.json()["detail"]
-    assert _sql_row(world["db"], "no-overwrite") is None
+    assert _fs_doc(world["admin_fs"], "no-overwrite") is None

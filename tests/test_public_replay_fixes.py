@@ -393,26 +393,14 @@ def test_pdf_of_it_uses_the_property_in_focus(monkeypatch):
     monkeypatch.setattr(public_agent_mod, "append_conversation_turn", lambda **_k: None)
     monkeypatch.setattr(public_agent_mod.token_tracker, "log_turn", lambda *a, **k: None)
 
-    class Prop:
-        property_id = "replay-bk-2"
-        property_name = "15 Suite Sukhumvit 15"
-        district = "Sukhumvit"
-        province = "Bangkok"
-        property_type = "Condominium"
+    from app.core.deps import FirestoreSession
+    from app.services.firestore_service import get_firestore_client
 
-    class Query:
-        def filter(self, *_a, **_k):
-            return self
-
-        def all(self):
-            return []
-
-        def first(self):
-            return Prop()
-
-    class DB:
-        def query(self, _model):
-            return Query()
+    get_firestore_client("user").collection("projects").document("replay-bk-2").set({
+        "name": {"en": "15 Suite Sukhumvit 15"}, "cityId": "bangkok", "countryId": "thailand",
+        "propertyType": "Condominium", "priceFrom": 20_000_000, "isActive": True,
+        "websites": ["varsoviaestate.com"], "slug": {"en": "replay-bk-2"},
+    })
 
     monkeypatch.setattr(
         "app.services.brochure_service.generate_and_upload_brochure",
@@ -423,9 +411,9 @@ def test_pdf_of_it_uses_the_property_in_focus(monkeypatch):
         "property_context": {"active_property_id": "replay-bk-2", "recently_discussed_ids": ["replay-bk-2"]},
         "selected_property_ids": ["replay-bk-2"],
     }
-    missing = agent.run_conversation(db=DB(), conversation=_conv(), user_message="give me pdf of it", requested_language="en")
+    missing = agent.run_conversation(db=FirestoreSession(), conversation=_conv(), user_message="give me pdf of it", requested_language="en")
     assert "which property" in missing["text"].lower()
-    result = agent.run_conversation(db=DB(), conversation=conv, user_message="give me pdf of it", requested_language="en")
+    result = agent.run_conversation(db=FirestoreSession(), conversation=conv, user_message="give me pdf of it", requested_language="en")
     assert "which property" not in result["text"].lower()
     assert result.get("brochure_property_id") == "replay-bk-2" or "15 Suite Sukhumvit 15" in result["text"]
 

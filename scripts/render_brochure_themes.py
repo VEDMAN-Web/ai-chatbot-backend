@@ -73,7 +73,6 @@ def main() -> int:
     parser.add_argument("--no-png", action="store_true")
     args = parser.parse_args()
 
-    from app.db.session import SessionLocal
     from app.services.brochure_data import load_brochure_data
     from app.services.brochure_renderer import build_brochure_html, render_brochure_pdf
     from app.services.brochure_themes import THEMES
@@ -85,16 +84,12 @@ def main() -> int:
     thumbs = out_dir / "thumbs"
     thumbs.mkdir(parents=True, exist_ok=True)
 
-    db = SessionLocal()
-    try:
-        data = load_brochure_data(
-            db=db,
-            property_id=args.property_id,
-            site_origin=args.site_origin,
-            language=args.lang,
-        )
-    finally:
-        db.close()
+    data = load_brochure_data(
+        db=None,
+        property_id=args.property_id,
+        site_origin=args.site_origin,
+        language=args.lang,
+    )
 
     logger.info(
         "Loaded property=%s name=%s lang=%s",

@@ -11,7 +11,7 @@ import app.services.public_agent as public_agent_mod
 from app.api.v1.admin import router as admin_router
 from app.core.auth import AuthenticatedStaff, require_admin_or_super_admin_with_sites
 from app.core.config import settings
-from app.db.session import get_db
+from app.core.deps import get_db
 from app.services import grounding_policy, taught_answers
 from app.services.public_agent import PublicAgentService
 from tests.fake_firestore import FakeFirestore, patch_firestore

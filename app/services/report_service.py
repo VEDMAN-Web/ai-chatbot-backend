@@ -11,9 +11,6 @@ import time
 from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Any, Optional, Tuple
 from abc import ABC, abstractmethod
-from sqlalchemy import or_
-from sqlalchemy.orm import Session
-from app.db.models import Property, PropertySpec, Lead
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -168,6 +165,47 @@ class LocalStorageProvider(StorageProvider):
 
 class S3StorageProvider(StorageProvider):
     mode = "s3"
+    _boto3_probed = False
+    _boto3_error: Optional[str] = None
+    _missing_boto3_logged = False
+
+    @classmethod
+    def reset_boto3_probe(cls) -> None:
+        """Clear the cached import result (tests)."""
+        cls._boto3_probed = False
+        cls._boto3_error = None
+        cls._missing_boto3_logged = False
+
+    @classmethod
+    def boto3_import_error(cls) -> Optional[str]:
+        """Import boto3 lazily. Returns an error string when the package is missing."""
+        if cls._boto3_probed:
+            return cls._boto3_error
+        cls._boto3_probed = True
+        try:
+            import boto3  # noqa: F401
+            cls._boto3_error = None
+        except ImportError as exc:
+            cls._boto3_error = str(exc) or "boto3 is not installed"
+        return cls._boto3_error
+
+    @classmethod
+    def log_missing_boto3_once(cls) -> None:
+        """One ERROR plus one WARNING. Safe to call from startup and from provider selection."""
+        if cls._missing_boto3_logged:
+            return
+        err = cls.boto3_import_error()
+        if err is None:
+            return
+        cls._missing_boto3_logged = True
+        logger.error(
+            "S3 storage is configured but boto3 cannot be imported (%s). "
+            "Reports and brochures will not use S3.",
+            err,
+        )
+        logger.warning(
+            "Falling back to LocalStorageProvider. Files are not persistent and will disappear on redeploy."
+        )
 
     def __init__(
         self,
@@ -177,7 +215,7 @@ class S3StorageProvider(StorageProvider):
         profile_name: Optional[str] = None,
         folder: str = "brochures"
     ):
-        self.endpoint_url = endpoint_url or os.getenv("HF_S3_ENDPOINT_URL") or os.getenv("S3_ENDPOINT_URL") or "https://s3.hf.co/itisha249"
+        self.endpoint_url = endpoint_url or os.getenv("HF_S3_ENDPOINT_URL") or os.getenv("S3_ENDPOINT_URL") or "https://s3.example.com"
         self.bucket_name = bucket_name or os.getenv("HF_S3_BUCKET") or os.getenv("AWS_S3_BUCKET") or "tajlandia"
         self.region_name = region_name or os.getenv("AWS_DEFAULT_REGION") or "us-east-1"
         self.profile_name = profile_name or os.getenv("AWS_PROFILE") or "hf"
@@ -342,15 +380,68 @@ def get_report_storage_mode() -> str:
     return "ephemeral"
 
 
+TEMPORARY_STORAGE_NOTE = (
+    "The file was saved on temporary storage and may disappear after a restart."
+)
+
+
+def local_fallback_allowed() -> bool:
+    return os.getenv("REPORT_REQUIRE_S3", "").strip() != "1"
+
+
+def save_bytes_with_fallback(
+    storage: StorageProvider,
+    filename: str,
+    content: bytes,
+    content_type: str = "application/pdf",
+) -> tuple:
+    """Save bytes. Missing boto3 or a failed S3 upload can land on local disk."""
+    temporary = bool(is_s3_configured() and S3StorageProvider.boto3_import_error())
+    active = storage
+    if temporary and not isinstance(active, LocalStorageProvider):
+        S3StorageProvider.log_missing_boto3_once()
+        active = LocalStorageProvider()
+    try:
+        return active.save_file(filename, content, content_type=content_type), temporary
+    except StorageError:
+        if isinstance(active, S3StorageProvider) and local_fallback_allowed():
+            logger.warning(
+                "S3 upload failed for %s. Falling back to LocalStorageProvider.",
+                filename,
+            )
+            local = LocalStorageProvider()
+            return local.save_file(filename, content, content_type=content_type), True
+        raise
+
+
 def get_storage_provider() -> StorageProvider:
-    """S3 is primary when configured; otherwise local disk (may be ephemeral)."""
+    """S3 is primary when configured and boto3 imports; otherwise local disk (may be ephemeral)."""
     if is_s3_configured():
+        if S3StorageProvider.boto3_import_error() is not None:
+            S3StorageProvider.log_missing_boto3_once()
+            return LocalStorageProvider()
         return S3StorageProvider()
     return LocalStorageProvider()
 
 
-# Default storage provider instance (resolved lazily via get_storage_provider in generate_report)
-default_storage_provider = get_storage_provider()
+def log_storage_backend_on_startup() -> None:
+    """Log the missing-boto3 ERROR once at process start. Never raises."""
+    try:
+        if is_s3_configured() and S3StorageProvider.boto3_import_error() is not None:
+            S3StorageProvider.log_missing_boto3_once()
+    except Exception as exc:
+        logger.warning("Storage backend startup check failed: %s", exc)
+
+
+class _LazyDefaultStorage:
+    """Brochure and dossier code keep this name; the real provider is chosen per call."""
+
+    def __getattr__(self, name: str):
+        return getattr(get_storage_provider(), name)
+
+
+# Resolved on each use so a missing boto3 falls back instead of failing every PDF.
+default_storage_provider = _LazyDefaultStorage()
 
 
 def validate_report_filename(filename: str) -> str:
@@ -484,6 +575,9 @@ def _delete_report_metadata(filename: str) -> None:
 
 def _provider_for_storage_mode(mode: Optional[str]) -> StorageProvider:
     if mode == "s3":
+        if S3StorageProvider.boto3_import_error() is not None:
+            S3StorageProvider.log_missing_boto3_once()
+            return LocalStorageProvider()
         return S3StorageProvider()
     if mode == "memory":
         return InMemoryStorageProvider()
@@ -1104,8 +1198,11 @@ def _finalize_report_save(
             "memory" if isinstance(storage, InMemoryStorageProvider) else "local"
         )
 
+    temporary_storage = False
     try:
-        file_url = storage.save_file(filename, content_bytes, content_type=content_type)
+        file_url, temporary_storage = save_bytes_with_fallback(
+            storage, filename, content_bytes, content_type=content_type
+        )
     except StorageError as e:
         return {
             "filename": filename,
@@ -1135,20 +1232,25 @@ def _finalize_report_save(
     if file_url and file_url.startswith("/api/v1/chat/"):
         admin_url = file_url
 
+    message = format_report_ready_message(
+        filename=filename, format_type=os.path.splitext(filename)[1].lstrip(".") or "pdf"
+    )
+    if temporary_storage or (is_s3_configured() and isinstance(storage, LocalStorageProvider)):
+        message = f"{message} {TEMPORARY_STORAGE_NOTE}"
+        meta_storage = "local"
     return {
         "filename": filename,
         "file_url": admin_url,
         "storage_ok": True,
         "storage": meta_storage,
-        "message": format_report_ready_message(
-            filename=filename, format_type=os.path.splitext(filename)[1].lstrip(".") or "pdf"
-        ),
+        "temporary_storage": bool(temporary_storage or (is_s3_configured() and isinstance(storage, LocalStorageProvider))),
+        "message": message,
     }
 
 
 # 3. Main Generation Entrypoint
 def generate_report(
-    db: Session,
+    db: Any,
     format_type: str,
     property_ids: Optional[List[str]] = None,
     lead_ids: Optional[List[str]] = None,
@@ -1194,28 +1296,26 @@ def generate_report(
             else f"last {period_days} days through {now.strftime('%Y-%m-%d')}"
         )
 
-        query = db.query(Lead)
+        from app.repositories import leads_read_repo
+
         leads: List[Any] = []
         capped = False
         if lead_ids:
             clean_lids = [str(lid).strip() for lid in lead_ids if lid]
-            leads = query.filter(
-                (Lead.contact_name.in_(clean_lids))
-                | (Lead.id.in_(clean_lids))
-            ).order_by(Lead.created_at.desc()).all()
+            leads = leads_read_repo.query_leads(
+                db, ids=clean_lids, limit=LEADS_REPORT_CAP, order="newest"
+            )
             period_subtitle = f"selected leads ({len(leads)})"
         else:
+            window_start = None
             if not all_time and period_days:
                 window_start = now - timedelta(days=period_days)
-                try:
-                    query = query.filter(Lead.created_at >= window_start.replace(tzinfo=None))
-                except Exception:
-                    query = query.filter(Lead.created_at >= window_start)
-            total_matching = query.count()
-            leads = (
-                query.order_by(Lead.created_at.desc(), Lead.lead_score.desc())
-                .limit(LEADS_REPORT_CAP)
-                .all()
+            total_matching = leads_read_repo.count_leads(db, window_start=window_start)
+            leads = leads_read_repo.query_leads(
+                db,
+                window_start=window_start,
+                limit=LEADS_REPORT_CAP,
+                order="newest",
             )
             capped = total_matching > LEADS_REPORT_CAP
             if capped:
@@ -1225,14 +1325,8 @@ def generate_report(
             if not leads and not all_time and period_days:
                 wider = 30 if period_days < 30 else (90 if period_days < 90 else 180)
                 w_start = now - timedelta(days=wider)
-                try:
-                    wider_q = db.query(Lead).filter(
-                        Lead.created_at >= w_start.replace(tzinfo=None)
-                    )
-                except Exception:
-                    wider_q = db.query(Lead).filter(Lead.created_at >= w_start)
-                wider_count = wider_q.count()
-                most_recent = db.query(Lead).order_by(Lead.created_at.desc()).first()
+                wider_count = leads_read_repo.count_leads(db, window_start=w_start)
+                most_recent = leads_read_repo.most_recent_lead(db)
                 recent_d = None
                 if most_recent and getattr(most_recent, "created_at", None):
                     try:
@@ -1314,6 +1408,8 @@ def generate_report(
                 f"✅ Generated {fmt.upper()} leads report ({len(leads_data)} leads — {period_subtitle})"
                 f"{note}. Use the download card below."
             )
+        if saved.get("temporary_storage"):
+            ready_msg = f"{ready_msg} {TEMPORARY_STORAGE_NOTE}"
         return {
             "format": fmt,
             "filename": filename,
@@ -1332,22 +1428,15 @@ def generate_report(
     report_title = title or "Tajlandia AI Property Intelligence Inventory Report"
     if _style_notes:
         report_title = f"{report_title}\n{_style_notes[:400]}"
-    from app.services.property_search import build_property_query, PropertyFilterParams
+    from app.services.property_search import filter_properties, PropertyFilterParams
 
-    # build_property_query expects a Session (not an existing Query)
-    params = PropertyFilterParams(websites=websites or None)
-    query = build_property_query(db, params)
+    params = PropertyFilterParams(websites=websites or None, is_public=None)
+    properties = filter_properties(params, target="admin")
     if property_ids:
-        clean_ids = [str(pid).strip() for pid in property_ids if pid]
-        # Match both exact IDs and case variants used in Firestore/SQL
-        upper_ids = [c.upper() for c in clean_ids]
-        query = query.filter(
-            or_(
-                Property.property_id.in_(clean_ids),
-                Property.property_id.in_(upper_ids),
-            )
-        )
-    properties = query.all()
+        # Match both exact IDs and case variants used in Firestore
+        wanted = {str(pid).strip() for pid in property_ids if pid}
+        wanted |= {w.upper() for w in wanted}
+        properties = [p for p in properties if p.property_id in wanted]
 
     properties_data = []
     for prop in properties:

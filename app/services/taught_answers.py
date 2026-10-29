@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 
 COLLECTION = "taught_answers"
 STATUSES = ("active", "archived")
+AUDIENCES = ("public", "admin", "both")
 QUESTION_MAX = 300
 ANSWER_MAX = 1200
 VARIANT_MAX = 10
@@ -90,6 +91,13 @@ def _validate(question: str, answer: str, variants: List[str]) -> None:
         raise TaughtAnswerError("answer rejected: " + "; ".join(problems))
 
 
+def _audience(value: Optional[str]) -> str:
+    v = (value or "public").strip().lower()
+    if v not in AUDIENCES:
+        raise TaughtAnswerError("audience must be public, admin or both")
+    return v
+
+
 def _clean_list(values: Optional[List[str]]) -> List[str]:
     out: List[str] = []
     for v in values or []:
@@ -100,7 +108,8 @@ def _clean_list(values: Optional[List[str]]) -> List[str]:
 
 
 def create(*, question: str, answer: str, variants: Optional[List[str]] = None,
-           sites: Optional[List[str]] = None, language: str = "any", created_by: str = "") -> Dict[str, Any]:
+           sites: Optional[List[str]] = None, language: str = "any", audience: str = "public",
+           created_by: str = "") -> Dict[str, Any]:
     variants = _clean_list(variants)
     question, answer = (question or "").strip(), (answer or "").strip()
     _validate(question, answer, variants)
@@ -113,6 +122,7 @@ def create(*, question: str, answer: str, variants: Optional[List[str]] = None,
         "answer": answer,
         "sites": sorted({_site(s) for s in (sites or []) if _site(s)}),
         "language": (language or "any").lower()[:2] if (language or "any").lower() != "any" else "any",
+        "audience": _audience(audience),
         "status": "active",
         "version": 1,
         "hits": 0,
@@ -132,7 +142,8 @@ def get(doc_id: str) -> Optional[Dict[str, Any]]:
 
 def update(doc_id: str, *, question: Optional[str] = None, answer: Optional[str] = None,
            variants: Optional[List[str]] = None, sites: Optional[List[str]] = None,
-           language: Optional[str] = None, status: Optional[str] = None, updated_by: str = "") -> Dict[str, Any]:
+           language: Optional[str] = None, status: Optional[str] = None, audience: Optional[str] = None,
+           updated_by: str = "") -> Dict[str, Any]:
     current = get(doc_id)
     if current is None:
         raise KeyError(doc_id)
@@ -152,6 +163,8 @@ def update(doc_id: str, *, question: Optional[str] = None, answer: Optional[str]
         patch["sites"] = sorted({_site(s) for s in sites if _site(s)})
     if language is not None:
         patch["language"] = language.lower()[:2] if language.lower() != "any" else "any"
+    if audience is not None:
+        patch["audience"] = _audience(audience)
     if status is not None:
         patch["status"] = status
     fs.set_document(_require_client(), COLLECTION, doc_id, patch, merge=True)
@@ -200,8 +213,9 @@ def _score(message: str, row: Dict[str, Any]) -> float:
     return best
 
 
-def find_match(message: str, *, site_origin: Optional[str] = None, language: str = "en") -> Optional[Dict[str, Any]]:
-    """Best active taught answer for this message, or None. Never raises."""
+def find_match(message: str, *, site_origin: Optional[str] = None, language: str = "en",
+               audience: str = "public") -> Optional[Dict[str, Any]]:
+    """Best active taught answer for this message and audience (public bot or admin bot), or None. Never raises."""
     try:
         if not normalize(message) or len(message) > QUESTION_MAX * 2:
             return None
@@ -209,6 +223,8 @@ def find_match(message: str, *, site_origin: Optional[str] = None, language: str
         lang = (language or "en").lower()[:2]
         best, best_score = None, 0.0
         for row in _active_rows():
+            if (row.get("audience") or "public") not in (audience, "both"):
+                continue
             if row.get("sites") and site not in row["sites"]:
                 continue
             if row.get("language") not in (None, "", "any", lang):

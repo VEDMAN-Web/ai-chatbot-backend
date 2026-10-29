@@ -6,10 +6,8 @@ import logging
 from datetime import datetime
 from decimal import Decimal
 from typing import Dict, Any, List, Optional, Tuple
-from sqlalchemy.orm import Session
 from openai import OpenAI
 from app.core.config import settings
-from app.db.models import Property, Conversation
 from app.services.property_search import (
     PropertyFilterParams, search_properties_safe, get_property_by_id, get_property_by_name,
     to_compact_projection, get_properties_by_ids
@@ -349,8 +347,8 @@ def _card_detail_url(property_id: str, site_origin: Optional[str] = None, countr
     return existing_url or built or ""
 
 
-def format_property_card(p: Property, site_origin: Optional[str] = None) -> Dict[str, Any]:
-    """Formats a Property ORM object into the frontend-expected card structure with Maps and Calendar integration."""
+def format_property_card(p: Any, site_origin: Optional[str] = None) -> Dict[str, Any]:
+    """Formats a property record into the frontend-expected card structure with Maps and Calendar integration."""
     img_urls = [
         _absolute_media_url(img.image_url, site_origin=site_origin)
         for img in (p.images or [])
@@ -1006,29 +1004,9 @@ def extract_explicit_property_token(
     return None
 
 
-def _sql_card_fallback(row: Property) -> Dict[str, Any]:
-    """Card fields the public response requires when image rows cannot be loaded."""
-    return {
-        "property_id": row.property_id,
-        "name": row.property_name,
-        "property_type": row.property_type or "Residential",
-        "price": row.price_display or "Price on request",
-        "bedrooms": row.bedrooms_display or "N/A",
-        "area": getattr(row, "area_display", None) or "N/A",
-        "location": row.area or row.province or "Thailand",
-        "status": row.status or "Available",
-        "images": [],
-        "highlights": [],
-        "detail_page_url": row.detail_page_url or settings.get_property_detail_url(
-            row.property_id, country=row.province, city=row.district
-        ),
-    }
-
-
 def lookup_property_by_slug_or_name(token: str) -> Optional[Dict[str, Any]]:
     """
     Resolve slug / exact name via the in-memory property index (Firestore).
-    SQL only when STORE_PROPERTIES_READ_USER is sql|both — never silent firestore→SQL.
     Never invents a hit. Returns a normalized property card dict or None.
     """
     raw = (token or "").strip()
@@ -1037,91 +1015,64 @@ def lookup_property_by_slug_or_name(token: str) -> Optional[Dict[str, Any]]:
     from app.services.property_index import (
         IndexUnavailable,
         get_property_index,
-        public_store_mode,
         sanitize_public_card,
     )
-    mode = public_store_mode()
 
-    if mode in ("firestore", "both"):
+    idx = None
+    try:
+        idx = get_property_index()
+        card = idx.get_by_id(raw)
+        if card:
+            return sanitize_public_card(card)
+        for q in (raw, raw.replace("-", " "), raw.replace("_", " ")):
+            hits = idx.find_name_candidates(q, limit=1)
+            if hits:
+                for rec in idx.all_records():
+                    if str(rec.get("name") or "").strip().lower() == hits[0].lower():
+                        return sanitize_public_card(rec)
+    except IndexUnavailable as e:
+        logger.error("Property index unavailable for slug lookup '%s': %s", raw, e)
+        # Still try a direct Firestore document read (not SQL). Return None if missing.
         idx = None
-        try:
-            idx = get_property_index()
-            card = idx.get_by_id(raw)
-            if card:
-                return sanitize_public_card(card)
-            for q in (raw, raw.replace("-", " "), raw.replace("_", " ")):
-                hits = idx.find_name_candidates(q, limit=1)
-                if hits:
-                    for rec in idx.all_records():
-                        if str(rec.get("name") or "").strip().lower() == hits[0].lower():
-                            return sanitize_public_card(rec)
-        except IndexUnavailable as e:
-            logger.error("Property index unavailable for slug lookup '%s': %s", raw, e)
-            # Still try a direct Firestore document read (not SQL). Return None if missing.
-            idx = None
-        except Exception as e:
-            logger.warning("Property index slug lookup failed for '%s': %s", raw, e)
+    except Exception as e:
+        logger.warning("Property index slug lookup failed for '%s': %s", raw, e)
 
-        try:
-            from app.services.firestore_service import get_property_by_id_from_firestore
-            fs = get_property_by_id_from_firestore(raw)
-            if fs:
-                return sanitize_public_card(fs)
-        except Exception as e:
-            logger.warning("Firestore slug/name lookup failed for '%s': %s", raw, e)
+    try:
+        from app.services.firestore_service import get_property_by_id_from_firestore
+        fs = get_property_by_id_from_firestore(raw)
+        if fs:
+            return sanitize_public_card(fs)
+    except Exception as e:
+        logger.warning("Firestore slug/name lookup failed for '%s': %s", raw, e)
 
-        try:
-            from app.services.property_name_index import (
-                ensure_name_index_from_firestore,
-                match_property_name,
-            )
-            ensure_name_index_from_firestore()
-            for q in (raw, raw.replace("-", " "), raw.replace("_", " ")):
-                mr = match_property_name(q)
-                if mr.confident and mr.confident.doc_id:
-                    if idx is not None:
-                        try:
-                            card = idx.get_by_id(mr.confident.doc_id)
-                            if card:
-                                return sanitize_public_card(card)
-                        except IndexUnavailable:
-                            pass
-                    from app.services.firestore_service import get_property_by_id_from_firestore
-                    fs = get_property_by_id_from_firestore(mr.confident.doc_id)
-                    if fs:
-                        return sanitize_public_card(fs)
-        except Exception as e:
-            logger.warning("Name-index slug lookup failed for '%s': %s", raw, e)
-
-    if mode in ("sql", "both"):
-        try:
-            from app.db.session import UserSessionLocal
-            from app.db.models import Property
-            from sqlalchemy import or_
-            _db = UserSessionLocal()
-            try:
-                row = (
-                    _db.query(Property)
-                    .filter(or_(
-                        Property.property_id == raw,
-                        Property.property_name.ilike(f"%{raw}%"),
-                    ))
-                    .first()
-                )
-                if row is not None:
+    try:
+        from app.services.property_name_index import (
+            ensure_name_index_from_firestore,
+            match_property_name,
+        )
+        ensure_name_index_from_firestore()
+        for q in (raw, raw.replace("-", " "), raw.replace("_", " ")):
+            mr = match_property_name(q)
+            if mr.confident and mr.confident.doc_id:
+                if idx is not None:
                     try:
-                        return format_property_card(row)
-                    except Exception:
-                        return _sql_card_fallback(row)
-            finally:
-                _db.close()
-        except Exception:
-            pass
+                        card = idx.get_by_id(mr.confident.doc_id)
+                        if card:
+                            return sanitize_public_card(card)
+                    except IndexUnavailable:
+                        pass
+                from app.services.firestore_service import get_property_by_id_from_firestore
+                fs = get_property_by_id_from_firestore(mr.confident.doc_id)
+                if fs:
+                    return sanitize_public_card(fs)
+    except Exception as e:
+        logger.warning("Name-index slug lookup failed for '%s': %s", raw, e)
+
     return None
 
 
 def resolve_empty_search_after_seen_exclusion(
-    db: Session,
+    db: Any,
     params: PropertyFilterParams,
     seen_ids: List[str],
     *,
@@ -1169,26 +1120,23 @@ def resolve_empty_search_after_seen_exclusion(
 
 
 def search_properties_unified(
-    db: Session,
+    db: Any,
     params: PropertyFilterParams,
     limit: Optional[int] = None,
     exclude_property_ids: Optional[List[str]] = None
 ) -> List[Dict[str, Any]]:
     """
-    Unified public property search via the in-memory Firestore property index
-    (STORE_PROPERTIES_READ_USER). Optional SQL fallback when mode is postgres/both.
+    Unified public property search via the in-memory Firestore property index.
     Excludes property IDs already recommended in this chat session.
     """
     from app.services.property_index import (
         IndexUnavailable,
         get_property_index,
-        public_store_mode,
         sanitize_public_card,
     )
 
     lim = limit or params.limit or 6
     cards: List[Dict[str, Any]] = []
-    mode = public_store_mode()
 
     # If this is a specific direct search by name/query, do NOT exclude it
     if getattr(params, "query", None):
@@ -1202,40 +1150,23 @@ def search_properties_unified(
     if "beach_access" in req_am:
         params.beach_access = True
 
-    if mode in ("firestore", "both"):
-        try:
-            idx_cards = get_property_index().search(
-                params,
-                exclude_property_ids=list(exclude_set) if exclude_set else None,
-                limit=lim + len(exclude_set),
-            )
-            for c in idx_cards:
-                cid = str(c.get("property_id") or c.get("id") or "").strip().lower()
-                cname = str(c.get("name") or "").strip().lower()
-                if cid not in exclude_set and cname not in exclude_set:
-                    cards.append(sanitize_public_card(c))
-        except IndexUnavailable as e:
-            logger.error("Property index unavailable (STORE=%s): %s", mode, e)
-            if mode == "firestore":
-                raise
-        except Exception as e:
-            logger.error("Error querying property index in search_properties_unified: %s", e)
-            if mode == "firestore":
-                raise
-
-    # SQL only when STORE_PROPERTIES_READ_USER is sql or both — never silent firestore→SQL fallback
-    if not cards and db is not None and mode in ("sql", "both"):
-        try:
-            from app.services.property_search import build_property_query
-            query = build_property_query(db, params)
-            db_props = query.offset(params.offset or 0).limit(lim + len(exclude_set)).all()
-            for p in db_props or []:
-                pid = str(getattr(p, "property_id", "") or "").strip().lower()
-                pname = str(getattr(p, "property_name", "") or getattr(p, "name", "") or "").strip().lower()
-                if pid not in exclude_set and pname not in exclude_set:
-                    cards.append(format_property_card(p))
-        except Exception as e:
-            logger.warning("Error querying local database properties in search_properties_unified: %s", e)
+    try:
+        idx_cards = get_property_index().search(
+            params,
+            exclude_property_ids=list(exclude_set) if exclude_set else None,
+            limit=lim + len(exclude_set),
+        )
+        for c in idx_cards:
+            cid = str(c.get("property_id") or c.get("id") or "").strip().lower()
+            cname = str(c.get("name") or "").strip().lower()
+            if cid not in exclude_set and cname not in exclude_set:
+                cards.append(sanitize_public_card(c))
+    except IndexUnavailable as e:
+        logger.error("Property index unavailable: %s", e)
+        raise
+    except Exception as e:
+        logger.error("Error querying property index in search_properties_unified: %s", e)
+        raise
 
     return cards[:lim]
 
@@ -2517,8 +2448,8 @@ class PublicAgentService:
 
     def execute_tool(
         self,
-        db: Session,
-        conversation: Conversation,
+        db: Any,
+        conversation: Any,
         tool_name: str,
         args: Dict[str, Any]
     ) -> (Dict[str, Any], List[Dict[str, Any]], bool):
@@ -2735,7 +2666,7 @@ class PublicAgentService:
                         "detail_page_url": fs_prop.get("detail_page_url")
                     }, matched_cards, False
 
-            # 2. Fallback: Local SQL Database
+            # 2. Fallback
             prop = get_property_by_id(db, pid) if (db and pid) else None
             if not prop and args.get("property_name") and db:
                 prop = get_property_by_name(db, args["property_name"])
@@ -3066,8 +2997,8 @@ class PublicAgentService:
 
     def run_conversation(
         self,
-        db: Session,
-        conversation: Conversation,
+        db: Any,
+        conversation: Any,
         user_message: str,
         requested_language: Optional[str] = None
     ) -> Dict[str, Any]:
@@ -3118,8 +3049,8 @@ class PublicAgentService:
 
     def _run_conversation_internal(
         self,
-        db: Session,
-        conversation: Conversation,
+        db: Any,
+        conversation: Any,
         user_message: str,
         requested_language: Optional[str] = None
     ) -> Dict[str, Any]:
@@ -3835,7 +3766,7 @@ class PublicAgentService:
 
     def _sync_pending_name_candidates_from_last_search(
         self,
-        conversation: Conversation,
+        conversation: Any,
         asked_name: Optional[str] = None,
         candidates: Optional[List[Dict[str, Any]]] = None,
         tool_results: Optional[List[Any]] = None,
@@ -3864,14 +3795,14 @@ class PublicAgentService:
             candidates=cands,
         )
 
-    def _clear_pending_name_candidates(self, conversation: Conversation) -> None:
+    def _clear_pending_name_candidates(self, conversation: Any) -> None:
         from app.services.name_confirmation import clear_pending_name_candidates
         conversation.preferences = clear_pending_name_candidates(conversation.preferences)
 
     def _maybe_resolve_pending_name_candidates(
         self,
-        db: Session,
-        conversation: Conversation,
+        db: Any,
+        conversation: Any,
         user_message: str,
         start_time: float,
         language: str = "en",
@@ -3947,8 +3878,8 @@ class PublicAgentService:
 
     def _handle_lead_capture(
         self,
-        db: Session,
-        conversation: Conversation,
+        db: Any,
+        conversation: Any,
         args: Dict[str, Any],
         user_message: str,
         start_time: float,
@@ -4082,7 +4013,7 @@ class PublicAgentService:
             f"summary={chat_summary}"
         )
 
-        # Fast in-session upsert for lead_id in the reply; durable SQL is backgrounded.
+        # Fast in-session upsert for lead_id in the reply; durable Firestore write is backgrounded.
         # Same phone/email in this session updates the existing lead (no duplicate).
         try:
             lead = record_or_update_lead(
@@ -4391,8 +4322,8 @@ class PublicAgentService:
 
     def _handle_show_more(
         self,
-        db: Session,
-        conversation: Conversation,
+        db: Any,
+        conversation: Any,
         args: Dict[str, Any],
         user_message: str,
         start_time: float,
@@ -4726,8 +4657,8 @@ class PublicAgentService:
 
     def _handle_property_details(
         self,
-        db: Session,
-        conversation: Conversation,
+        db: Any,
+        conversation: Any,
         args: Dict[str, Any],
         user_message: str,
         start_time: float,
@@ -5093,23 +5024,6 @@ class PublicAgentService:
             p_beds = _clean_field(p_beds)
             p_area = _clean_field(p_area)
             _ba = " | ".join(x for x in (p_beds, p_area) if x)  # "Bedrooms / Area" value, only what exists
-            # SQL enrichment only when STORE allows SQL — never silent firestore→SQL
-            if isinstance(card, dict) and db is not None and (p_id or pid):
-                try:
-                    from app.services.property_index import public_store_mode
-                    if public_store_mode() in ("sql", "both"):
-                        sql_row = get_property_by_id(db, str(p_id or pid))
-                        if sql_row is not None and not isinstance(sql_row, dict):
-                            if getattr(sql_row, "has_pool", None):
-                                card["has_pool"] = True
-                            if getattr(sql_row, "beach_access", None):
-                                card["beach_access"] = True
-                            for field in ("amenities", "features", "pool_type"):
-                                value = getattr(sql_row, field, None)
-                                if value and not card.get(field):
-                                    card[field] = value
-                except Exception:
-                    pass
             amenity_facts = collect_property_amenities(card if isinstance(card, dict) else {})
             has_pool = bool(amenity_facts.get("pool") and amenity_facts["pool"].present) or bool(
                 amenity_facts.get("pool_private") and amenity_facts["pool_private"].present
@@ -5498,8 +5412,8 @@ class PublicAgentService:
 
     def _handle_property_comparison(
         self,
-        db: Session,
-        conversation: Conversation,
+        db: Any,
+        conversation: Any,
         args: Dict[str, Any],
         user_message: str,
         start_time: float,
@@ -5724,8 +5638,8 @@ class PublicAgentService:
 
     def _handle_brochure_request(
         self,
-        db: Session,
-        conversation: Conversation,
+        db: Any,
+        conversation: Any,
         args: Dict[str, Any],
         user_message: str,
         start_time: float,
@@ -5758,7 +5672,12 @@ class PublicAgentService:
 
         # 1. Always prioritize any property explicitly named or referenced in the user's current message
         u_clean = user_message.lower()
-        all_props = db.query(Property).all() if db is not None else []
+        try:
+            from app.repositories import properties_store
+
+            all_props = properties_store.public_rows(db)
+        except Exception:
+            all_props = []
         explicit_prop_id = None
         common_words = {'residence', 'residences', 'villa', 'villas', 'condo', 'condominium', 'waterfront', 'lake', 'phase', 'park', 'hill', 'hills', 'view', 'beach', 'project'}
 
@@ -5879,25 +5798,16 @@ class PublicAgentService:
                 "brochure_property_id": None
             }
 
-        # Property found — resolve display name (PG or Firestore), then generate brochure
+        # Property found — resolve display name (Firestore), then generate brochure
         from app.core.tenant import resolve_tenant
         tenant = resolve_tenant(conversation.site_origin)
 
         prop = None
-        try:
-            if db is not None and prop_id:
-                prop = db.query(Property).filter(Property.property_id == str(prop_id)).first()
-                if prop is None:
-                    prop = db.query(Property).filter(Property.property_id.ilike(str(prop_id))).first()
-                if prop is not None:
-                    prop_id = prop.property_id
-        except Exception:
-            prop = None
-        p_name = prop.property_name if prop else prop_id
-        pref_loc = f"{prop.district}, {prop.province}" if prop and prop.district else (prop.province if prop else None)
-        pref_type = prop.property_type if prop else None
+        p_name = prop_id
+        pref_loc = None
+        pref_type = None
         fs_found = False
-        if not prop and getattr(settings, "ENABLE_FIRESTORE_SYNC", True):
+        if getattr(settings, "ENABLE_FIRESTORE_SYNC", True):
             try:
                 from app.services.firestore_service import get_property_by_id_from_firestore
                 fs_card = get_property_by_id_from_firestore(str(prop_id).strip())
@@ -6040,8 +5950,8 @@ class PublicAgentService:
 
     def _handle_refine_filter(
         self,
-        db: Session,
-        conversation: Conversation,
+        db: Any,
+        conversation: Any,
         refinements: Dict[str, Any],
         user_message: str,
         start_time: float,
@@ -6284,8 +6194,8 @@ class PublicAgentService:
 
     def _handle_property_search(
         self,
-        db: Session,
-        conversation: Conversation,
+        db: Any,
+        conversation: Any,
         user_message: str,
         start_time: float,
         language: str = "en"
@@ -7126,8 +7036,8 @@ class PublicAgentService:
 
     def _handle_general_question(
         self,
-        db: Session,
-        conversation: Conversation,
+        db: Any,
+        conversation: Any,
         user_message: str,
         start_time: float,
         language: str = "en"
@@ -7308,8 +7218,8 @@ class PublicAgentService:
 
     def _handle_cannot_email_or_calendar(
         self,
-        db: Session,
-        conversation: Conversation,
+        db: Any,
+        conversation: Any,
         user_message: str,
         start_time: float,
         language: str = "en",
@@ -7380,8 +7290,8 @@ class PublicAgentService:
 
     def _handle_greeting(
         self,
-        db: Session,
-        conversation: Conversation,
+        db: Any,
+        conversation: Any,
         user_message: str,
         language: str = "en"
     ) -> Dict[str, Any]:
@@ -7404,16 +7314,6 @@ class PublicAgentService:
         if clean_msg in ["hi", "hello", "hey", "cześć", "czesc", "dzień dobry", "dzien dobry", "witaj", "witam"]:
             safe_prefs = {}
             conversation.preferences = {}
-            if hasattr(conversation, "__table__"):
-                try:
-                    from sqlalchemy.orm.attributes import flag_modified
-                    flag_modified(conversation, "preferences")
-                    db.commit()
-                except Exception:
-                    try:
-                        db.rollback()
-                    except Exception:
-                        pass
 
         return {
             "type": "text",
@@ -7429,8 +7329,8 @@ class PublicAgentService:
 
     def _call_openai(
         self,
-        db: Session,
-        conversation: Conversation,
+        db: Any,
+        conversation: Any,
         user_message: str,
         raw_user_message: Optional[str] = None,
         start_time: Optional[float] = None,
@@ -7782,8 +7682,8 @@ class PublicAgentService:
 
     def _run_deterministic_retrieval(
         self,
-        db: Session,
-        conversation: Conversation,
+        db: Any,
+        conversation: Any,
         user_message: str,
         raw_user_message: Optional[str] = None,
         start_time: Optional[float] = None,

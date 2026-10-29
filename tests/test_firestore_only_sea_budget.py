@@ -48,7 +48,6 @@ def fake_fs(monkeypatch):
 
     monkeypatch.setattr("app.services.firestore_service.get_firestore_client", lambda target="user": fs)
     monkeypatch.setattr("app.services.firestore_service.get_user_firestore_client", lambda: fs)
-    monkeypatch.setattr(settings, "STORE_PROPERTIES_READ_USER", "firestore")
 
     idx = get_property_index()
     idx.set_client_override(fs)
