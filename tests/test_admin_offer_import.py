@@ -181,7 +181,7 @@ def test_unreadable_document_gets_a_helpful_error(api):
     res = _upload(client, "Hello, this is just a letter.")
     assert res.status_code == 400
     detail = res.json()["detail"]
-    assert "No property identifiers" in detail and "CSV or Excel" in detail
+    assert "CSV or Excel" in detail
 
 
 def test_update_and_delete_uploads_never_use_the_offer_preview(api):
@@ -196,3 +196,78 @@ def test_modal_shows_the_preview_and_confirms_through_the_action_endpoint():
     assert "data.status === 'PREVIEW'" in js
     assert "/api/v1/admin/actions/${encodeURIComponent(id)}/confirm" in js
     assert "confirmation_token: token" in js
+
+
+PORTFOLIO = """01 / PHUKET / LAYAN BEACH
+Sample Grand Villa
+Sample Phuket Estates
+32 500 000 THB
+WITHIN BUDGET • RESERVATION GUARANTEED
+AREA STAGE OWNERSHIP AMENITIES
+420 m² Gotowe do odbioru Freehold / Leasehold Prywatny Basen
+Spektakularna willa na wzgórzu z basenem.
+INCOME GENERATION MODEL:
+Program najmu.
+"""
+PORTFOLIO_SUMMARY = """01 / PHUKET
+Sample Grand Villa
+od 32 500 000 THB
+"""
+PORTFOLIO_OPTION = """OPCJA 01 • PHUKET
+Sample Grand Villa
+od 32 500 000 THB • 3-4 Sypialnie • Gotowe do odbioru
+"""
+
+
+def test_client_offer_portfolio_layout_is_read():
+    drafts = extract_offer_listings(_offer(PORTFOLIO_SUMMARY, PORTFOLIO, PORTFOLIO_OPTION))
+    assert [d["label"] for d in drafts] == ["Sample Grand Villa"]
+    f = drafts[0]["fields"]
+    assert f["province"] == "Phuket" and f["district"] == "Layan Beach"
+    assert f["price_numeric_min"] == 32500000 and f["area_sqm_min"] == 420
+    assert f["status"] == "Ready to move in" and f["property_type"] == "Villa"
+    assert f["bedrooms_min"] == 3 and f["bedrooms_max"] == 4
+    assert drafts[0]["missing"] == []
+
+
+def test_document_without_property_sections_is_not_parsed_line_by_line(api):
+    client, _world = api
+    res = _upload(client, "Dear client,\nThe villa is lovely.\nA nice condo too.\n")
+    assert res.status_code == 400
+    assert "could not find any property sections" in res.json()["detail"]
+
+
+def test_llm_reads_the_document_but_unsupported_values_are_dropped(monkeypatch):
+    import json
+    import types
+
+    from app.core.config import settings
+    from app.services import admin_offer_import as imp
+
+    answer = [
+        {"property_name": "Sample Grand Villa", "property_type": "Villa", "status": "Ready to move in",
+         "province": "Phuket", "price_numeric_min": 32500000, "bedrooms_min": 3, "bedrooms_max": 4},
+        {"property_name": "Invented Tower", "property_type": "Villa", "status": "Ready to move in",
+         "province": "Phuket", "price_numeric_min": 1000000},
+        {"property_name": "Sample Grand Villa", "price_numeric_min": 1},
+    ]
+
+    class _Client:
+        def __init__(self, **kw):
+            self.messages = types.SimpleNamespace(create=lambda **k: types.SimpleNamespace(
+                content=[types.SimpleNamespace(type="text", text=json.dumps(answer))]))
+
+    monkeypatch.setattr(settings, "ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setattr("anthropic.Anthropic", _Client)
+    drafts = imp.extract_listings_with_llm(_offer(PORTFOLIO_SUMMARY, PORTFOLIO))
+    assert [d["label"] for d in drafts] == ["Sample Grand Villa"]  # invented name and the repeat are dropped
+    assert drafts[0]["fields"]["price_numeric_min"] == 32500000
+    assert drafts[0]["missing"] == []
+
+
+def test_llm_unavailable_falls_back_to_rules(monkeypatch):
+    from app.core.config import settings
+    from app.services import admin_offer_import as imp
+
+    monkeypatch.setattr(settings, "ANTHROPIC_API_KEY", "")
+    assert imp.extract_listings_with_llm(_offer(PORTFOLIO)) == []

@@ -497,6 +497,16 @@ async def execute_batch_file_endpoint(
             staged = stage_document_import(db, staff, content, file.filename or "uploaded_file")
             if staged is not None:
                 return staged
+            from app.services.admin_offer_import import OFFER_EXTENSIONS
+
+            if (file.filename or "").lower().rsplit(".", 1)[-1] in OFFER_EXTENSIONS:
+                # A PDF/Word/text file that is not a property list: say so instead of treating
+                # every line as a property row.
+                raise BatchOperationError(
+                    "I could not find any property sections in this document, so nothing was created. "
+                    "For Add/Create upload a CSV or Excel file with the columns name, property_type, province, "
+                    "price and status, or an offer with one section per property (title, location, price in THB, status)."
+                )
 
         try:
             records = parse_property_batch_file(content, file.filename or "uploaded_file")
