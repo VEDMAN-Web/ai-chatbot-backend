@@ -683,7 +683,7 @@ def foreign_listing_warning(place: str, language: str = "en") -> str:
     return (
         f"This looks like a listing outside Thailand ({shown}). "
         "Tajlandia sites list Thailand properties. "
-        "Reply 'continue anyway' to keep it, or 'cancel'."
+        "Reply 'continue anyway' (or just 'confirm') to keep it, or 'cancel'."
     )
 
 
@@ -760,6 +760,25 @@ def _apply_guesses(fields: Dict[str, Dict[str, Any]], page_text: str) -> None:
             reason=f"the page says '{year.group(0)}'" if year else "the page mentions a future completion",
             confidence="medium",
         )
+    if "status" not in fields:
+        for pattern, value in (
+            (r"ready[\s-]*to[\s-]*move(?:[\s-]*in)?", "Ready to move in"),
+            (r"under[\s-]*construction", "Under construction"),
+            (r"possession\s*(?:status)?\s*[:\-]?\s*immediate", "Ready to move in"),
+            (r"\b(?:new|pre)[\s-]*launch\b|\bpre[\s-]*sale\b", "Pre-sale"),
+            (r"\boff[\s-]*plan\b", "Off-plan"),
+        ):
+            hit = re.search(pattern, low)
+            if hit:
+                fields["status"] = _prov(
+                    value,
+                    "guess",
+                    "page",
+                    evidence=hit.group(0),
+                    reason=f"the page says '{hit.group(0).strip()}'",
+                    confidence="medium",
+                )
+                break
     # Price, size, beds, baths, ownership, ROI and coordinates are never guessed.
 
 
@@ -1277,16 +1296,24 @@ def _record_previewed(draft: Dict[str, Any], rows: List[Dict[str, str]]) -> None
     draft["previewed_values"] = shown
 
 
+def _missing_example(missing: List[str]) -> str:
+    parts = []
+    if "price" in missing:
+        parts.append("price 5 million thb")
+    if "status" in missing:
+        parts.append("ready to move")
+    if "property_type" in missing:
+        parts.append("type villa")
+    return ", ".join(parts)
+
+
 def render_preview(draft: Dict[str, Any], *, changed_only: Optional[List[str]] = None, superseded: Optional[str] = None) -> str:
     from app.services.admin_change_diff import format_provenance_table
 
     full_decision, full_other = preview_rows(draft)
     _record_previewed(draft, full_decision + full_other)
     decision, other = preview_rows(draft, only_fields=changed_only)
-    lines = []
-    if _foreign_blocks(draft):
-        lines.append(foreign_listing_warning(str(draft.get("foreign_place") or ""), str(draft.get("reply_language") or "en")))
-        lines.append("")
+    lines: List[str] = []
     if superseded:
         lines.append(f"The previous draft for {superseded} was discarded.")
         lines.append("")
@@ -1294,40 +1321,50 @@ def render_preview(draft: Dict[str, Any], *, changed_only: Optional[List[str]] =
         lines.append("The page contained text that looked like instructions; I ignored it.")
         lines.append("")
     if changed_only:
-        lines.append("Updated")
+        lines.append("**Updated**")
         lines.append(format_provenance_table(decision + other))
     else:
-        lines.append(f"Source: {draft.get('source_url')} ({draft.get('source_site')})")
-        lines.append(f"Target websites: {', '.join(draft.get('websites') or []) or '—'}")
-        lines.append(f"Images: {len(draft.get('images') or [])}")
+        name = ((draft.get("provenance") or {}).get("property_name") or {}).get("value")
+        lines.append(f"**Property found: {name}**" if name else "**Property found**")
+        lines.append("")
+        lines.append(f"- Source: {draft.get('source_url')} ({draft.get('source_site')})")
+        lines.append(f"- Target websites: {', '.join(draft.get('websites') or []) or '—'}")
+        lines.append(f"- Images: {len(draft.get('images') or [])}")
         duplicate = draft.get("duplicate")
         if duplicate:
             lines.append(
-                f"Duplicate: this matches existing '{duplicate.get('name')}' ({duplicate.get('property_id')}) in {duplicate.get('store')}. "
+                f"- Duplicate: this matches existing '{duplicate.get('name')}' ({duplicate.get('property_id')}) in {duplicate.get('store')}. "
                 "Confirm will update that listing. Say 'create new' if you wanted a separate property; the same name cannot be created twice."
             )
         else:
-            lines.append("Duplicate: none")
+            lines.append("- Duplicate: none")
         lines.append("")
-        lines.append("Needs your decision")
-        lines.append(format_provenance_table(decision or [{"field": "—", "value": "—", "source": "nothing else"}]))
         if other:
-            lines.append("")
-            lines.append("Found and inferred")
+            lines.append("**Extracted from the page**")
             lines.append(format_provenance_table(other))
+            lines.append("")
+        lines.append("**Still needed from you**" if decision else "**Nothing missing**")
+        lines.append(format_provenance_table(decision or [{"field": "—", "value": "—", "source": "all required values found"}]))
     missing = missing_requirements(draft)
     if not draft.get("websites"):
         missing.append("website (say 'add to tajlandia.com')")
     if missing and not changed_only:
         lines.append("")
-        lines.append("I still need: " + ", ".join(missing) + ".")
+        example = _missing_example(missing)
+        lines.append(
+            "I still need: " + ", ".join(missing) + "."
+            + (f" You can send it in one message, for example: `{example}`." if example else "")
+        )
     guesses = unaccepted_guesses(draft)
     if guesses and not changed_only:
         lines.append("")
         lines.append(
-            "Guessed, not saved until you accept: " + ", ".join(guesses)
-            + ". Say 'use your guesses' to accept them, or give me the value."
+            "Guessed from the page: " + ", ".join(guesses)
+            + ". They are used when you confirm. Send a value to change them."
         )
+    if _foreign_blocks(draft):
+        lines.append("")
+        lines.append("> " + foreign_listing_warning(str(draft.get("foreign_place") or ""), str(draft.get("reply_language") or "en")))
     lines.append("")
     lines.append(CONFIRM_FOOTER)
     return "\n".join(lines)
