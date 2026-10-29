@@ -57,7 +57,9 @@ def get_property_knowledge(
     # 1.5 Query Property and PropertySpec from DB
     prop = None
     spec = None
-    if db is not None:
+    from app.repositories import properties_store
+
+    if properties_store.sql_db(db) is not None:
         try:
             prop = db.query(Property).filter(Property.property_id.in_(list(id_aliases))).first()
             if prop:

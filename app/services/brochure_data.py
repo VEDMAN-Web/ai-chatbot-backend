@@ -957,7 +957,9 @@ def _from_firestore_card(card: Dict[str, Any], language: str, site_origin: Optio
 # ---------------------------------------------------------------------------
 
 def _load_postgres_property(db: Session, property_id: str) -> Any:
-    if db is None:
+    from app.repositories import properties_store
+
+    if properties_store.sql_db(db) is None:
         return None
     try:
         from app.db.models import Property

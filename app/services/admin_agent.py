@@ -54,6 +54,12 @@ _NEGATION_MARKERS = (
 )
 
 
+def _sql_db(db):
+    from app.repositories import properties_store
+
+    return properties_store.sql_db(db)
+
+
 def is_strict_confirm_message(message: Optional[str]) -> bool:
     """True only for short, unambiguous confirmation phrases (≤~4 words, no other request)."""
     if not message or not str(message).strip():
@@ -322,7 +328,7 @@ def _resolve_batch_targets(
                         }
             except Exception as e:
                 logger.debug(f"Batch target resolve (firestore) skipped for '{q}': {e}")
-        if not resolved_id and db is not None:
+        if not resolved_id and _sql_db(db) is not None:
             try:
                 from app.db.models import Property
                 prop = (
@@ -356,7 +362,7 @@ def _resolve_batch_targets(
             continue
 
         # Enrich current from store when name-index resolved without snapshot
-        if not current and db is not None:
+        if not current and _sql_db(db) is not None:
             try:
                 from app.db.models import Property
                 prop = db.query(Property).filter(Property.property_id == resolved_id).first()
@@ -4562,7 +4568,7 @@ def _execute_admin_tool_uncached(
         pg_count = 0
         try:
             from app.db.models import Property
-            pg_count = db.query(Property).count()
+            pg_count = _sql_db(db).query(Property).count() if _sql_db(db) is not None else 0
         except Exception:
             pass
 
