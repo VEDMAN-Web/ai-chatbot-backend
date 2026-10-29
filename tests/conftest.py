@@ -1,10 +1,9 @@
 """
-Pytest bootstrap — set test DATABASE_URL before app settings are imported.
-Must not contain production credentials.
+Pytest bootstrap. Firestore is the only datastore.
 
-Live Google Firestore is blocked by default (clients return None) so the suite
-cannot hang on network RPCs. Tests that need Firestore must patch clients
-themselves (FakeFirestore) or set ALLOW_LIVE_FIRESTORE=1 with credentials.
+Live Google Firestore is blocked by default so the suite cannot hang on network RPCs.
+Every test gets an in-memory FakeFirestore (tests.fake_firestore) patched in as the Firestore client.
+Set ALLOW_LIVE_FIRESTORE=1 with credentials to run against a real project.
 """
 from __future__ import annotations
 
@@ -12,10 +11,6 @@ import os
 
 import pytest
 
-os.environ.setdefault(
-    "DATABASE_URL",
-    "postgresql://test_user:test_pass@127.0.0.1:5432/tajlandia_test",
-)
 os.environ.setdefault("ENVIRONMENT", "test")
 os.environ.setdefault("ENV", "test")
 
@@ -34,48 +29,30 @@ def firestore_credentials_present() -> bool:
 
 
 @pytest.fixture(autouse=True)
-def _block_live_google_firestore(monkeypatch):
-    """Return None from Firestore getters unless ALLOW_LIVE_FIRESTORE is set."""
+def _default_fake_firestore(monkeypatch):
+    """Patch every Firestore client getter to one shared in-memory fake (unless live Firestore is allowed)."""
     if _live_firestore_allowed():
-        yield
+        yield None
         return
+    from tests.fake_firestore import patch_firestore
 
-    def _none(*a, **k):
-        return None
+    fake = patch_firestore(monkeypatch)
+    monkeypatch.setattr("app.core.config.settings.ENABLE_AUDIT_LOGGING", True, raising=False)
+    try:
+        from app.services.firestore_service import clear_property_catalog_cache
 
-    monkeypatch.setattr(
-        "app.services.firestore_service.get_firestore_client",
-        _none,
-    )
-    monkeypatch.setattr(
-        "app.services.firestore_service.get_admin_firestore_client",
-        _none,
-        raising=False,
-    )
-    monkeypatch.setattr(
-        "app.services.firestore_service.get_user_firestore_client",
-        _none,
-        raising=False,
-    )
-    yield
+        clear_property_catalog_cache()
+    except Exception:
+        pass
+    yield fake
 
 
-@pytest.fixture(autouse=True)
-def _default_stores_postgres_when_no_fs(monkeypatch):
-    """
-    Product default is firestore-only, but with live FS blocked most unit tests
-    have no client. Use postgres store modes unless a test overrides them or
-    provides FakeFirestore via set_store_modes / patch_firestore.
-    """
-    if _live_firestore_allowed():
-        yield
-        return
-    # Soft default for isolated unit tests (explicit firestore tests override)
-    monkeypatch.setattr("app.core.config.settings.STORE_PENDING_ACTIONS", "postgres")
-    monkeypatch.setattr("app.core.config.settings.STORE_AUDIT", "postgres")
-    monkeypatch.setattr("app.core.config.settings.STORE_LEADS_READ", "postgres")
-    monkeypatch.setattr("app.core.config.settings.STORE_USERS", "postgres")
-    yield
+@pytest.fixture
+def db():
+    """Placeholder for the removed SQL session (truthy, no-op commit/rollback)."""
+    from app.core.deps import FirestoreSession
+
+    return FirestoreSession()
 
 
 def pytest_configure(config):

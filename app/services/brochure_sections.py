@@ -9,6 +9,7 @@ boxes, no "N/A". Long lists/paragraphs are clamped or paginated.
 from __future__ import annotations
 
 import re
+from typing import Optional
 from dataclasses import dataclass
 from typing import Any, Dict, List, Sequence
 

@@ -4,8 +4,7 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.core.config import settings
-from app.db.session import SessionLocal
-from app.db.models import User, Property, UserSession
+from app.repositories import users_repo
 from app.core.security import hash_password, generate_session_token
 from app.core.tenant import ALL_CANONICAL_WEBSITES
 
@@ -13,37 +12,15 @@ client = TestClient(app)
 
 
 @pytest.fixture(autouse=True)
-def mock_firestore_for_tests(monkeypatch):
-    """Setup test users and test properties without network ADC delays."""
+def seed_super_admin(monkeypatch):
     monkeypatch.setattr(settings, "ENABLE_FIRESTORE_SYNC", False)
-    monkeypatch.setattr("app.services.firestore_auth_service.get_firestore_client", lambda *a, **kw: None)
-    monkeypatch.setattr("app.services.firestore_service.get_firestore_client", lambda *a, **kw: None)
-    monkeypatch.setattr("app.services.admin_batch_service.get_firestore_client", lambda *a, **kw: None)
-    db = SessionLocal()
-    try:
-        from sqlalchemy import text
-        try:
-            db.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT 'active';"))
-            db.commit()
-        except Exception:
-            db.rollback()
-
-        # Create a test super admin
-        super_admin_email = "test_super_admin@tajlandia.com"
-        existing_sa = db.query(User).filter(User.email == super_admin_email).first()
-        if not existing_sa:
-            sa = User(
-                email=super_admin_email,
-                name="Test Super Admin",
-                role="super_admin",
-                password_hash=hash_password("SuperAdmin123!"),
-                is_active=True,
-                allowed_websites=list(ALL_CANONICAL_WEBSITES)
-            )
-            db.add(sa)
-            db.commit()
-    finally:
-        db.close()
+    email = "test_super_admin@tajlandia.com"
+    if users_repo.get_by_email(None, email) is None:
+        users_repo.create_user(
+            None, email=email, name="Test Super Admin", role="super_admin", domain="tajlandia.com",
+            password_hash=hash_password("SuperAdmin123!"), is_active=True, status="active",
+            allowed_websites=list(ALL_CANONICAL_WEBSITES), preferences={},
+        )
     yield
 
 
@@ -196,7 +173,7 @@ def test_active_checkbox_selection_and_isolation():
     assert "Access denied" in resp_unauth.json()["detail"]
 
     # 2. Select authorized checkbox (tajlandia.com)
-    prop_id = f"PROP-TAJ-{uuid.uuid4().hex[:6].upper()}"
+    prop_id = f"prop-taj-{uuid.uuid4().hex[:6]}"
     create_resp = client.post(
         "/api/v1/admin/properties",
         headers={
@@ -284,7 +261,7 @@ def test_cross_website_crud_with_all_access():
     """
     sa_token = _login_and_get_token("test_super_admin@tajlandia.com", "SuperAdmin123!")
 
-    thai_prop_id = f"PROP-THAI-{uuid.uuid4().hex[:6].upper()}"
+    thai_prop_id = f"prop-thai-{uuid.uuid4().hex[:6]}"
     create_resp = client.post(
         "/api/v1/admin/properties",
         headers={
@@ -535,7 +512,7 @@ def test_worker_cannot_perform_property_crud_but_can_chat():
         "/api/v1/admin/properties",
         headers=worker_headers,
         json={
-            "property_id": f"PROP-W-{uuid.uuid4().hex[:4]}",
+            "property_id": f"prop-w-{uuid.uuid4().hex[:4]}",
             "property_name": "Worker Villa",
             "websites": ["tajlandia.com"]
         }

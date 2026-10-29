@@ -13,14 +13,23 @@ Rules:
     If a Firestore doc already has a different userId, it is kept and the session is remapped.
   * Sessions: only unexpired, unrevoked ones. Stored as sha256(token), never the raw token.
   * Run the dry run first and check "conflicts" before --apply.
-Then set STORE_USERS=firestore.
+ONE-OFF TOOL. Postgres is no longer part of the app. This script reads the old `users` and `user_sessions`
+tables with plain SQL and needs two packages that are NOT in requirements.txt:
+
+    pip install sqlalchemy psycopg2-binary
+    DATABASE_URL=postgresql://... python -m scripts.migrate_sql_to_firestore
+
+Run it (dry run first, then --apply) BEFORE deploying a build without Postgres, or nobody can log in.
+The database URL comes from the DATABASE_URL environment variable only. It is never stored in code.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from datetime import datetime
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
 from app.repositories import _fs_utils as fs
@@ -74,14 +83,12 @@ def _sql_user_record(row: Any) -> UserRecord:
     return rec
 
 
-def migrate_users(db: Any, client: Any, *, apply: bool = False) -> Dict[str, Any]:
-    from app.db.models import User
-
+def migrate_users(users: List[Any], client: Any, *, apply: bool = False) -> Dict[str, Any]:
     report: Dict[str, Any] = {
         "sql_users": 0, "created": [], "filled": [], "unchanged": [],
         "conflicts": [], "skipped": [], "id_map": {},
     }
-    for row in db.query(User).order_by(User.email).all():
+    for row in sorted(users, key=lambda r: (r.email or "")):
         report["sql_users"] += 1
         email = (row.email or "").strip().lower()
         if not email:
@@ -124,12 +131,10 @@ def migrate_users(db: Any, client: Any, *, apply: bool = False) -> Dict[str, Any
     return report
 
 
-def migrate_sessions(db: Any, client: Any, id_map: Dict[str, str], *, apply: bool = False) -> Dict[str, Any]:
-    from app.db.models import UserSession
-
+def migrate_sessions(sessions: List[Any], client: Any, id_map: Dict[str, str], *, apply: bool = False) -> Dict[str, Any]:
     now = datetime.utcnow()
     report: Dict[str, Any] = {"sql_sessions": 0, "copied": 0, "already_present": 0, "dropped_expired_or_revoked": 0, "orphaned": 0}
-    for row in db.query(UserSession).all():
+    for row in sessions:
         report["sql_sessions"] += 1
         if row.revoked_at is not None or row.expires_at is None or row.expires_at <= now:
             report["dropped_expired_or_revoked"] += 1
@@ -152,13 +157,11 @@ def migrate_sessions(db: Any, client: Any, id_map: Dict[str, str], *, apply: boo
     return report
 
 
-def parity(db: Any, client: Any) -> Dict[str, Any]:
+def parity(users: List[Any], client: Any) -> Dict[str, Any]:
     """Compare SQL and Firestore after a run. ok=True means every SQL user exists in Firestore with a userId."""
-    from app.db.models import User
-
     missing: List[str] = []
     no_hash: List[str] = []
-    for row in db.query(User).all():
+    for row in users:
         email = (row.email or "").strip().lower()
         existing = _find_existing(client, email)
         if existing is None:
@@ -172,13 +175,36 @@ def parity(db: Any, client: Any) -> Dict[str, Any]:
     return {"ok": not missing, "missing_in_firestore": missing, "users_without_password_hash": no_hash}
 
 
-def run(db: Any, client: Any, *, apply: bool = False, users_only: bool = False) -> Dict[str, Any]:
-    users = migrate_users(db, client, apply=apply)
-    out: Dict[str, Any] = {"mode": "APPLY" if apply else "DRY-RUN", "users": {k: v for k, v in users.items() if k != "id_map"}}
+def load_from_postgres(url: str) -> Dict[str, List[Any]]:
+    """Read users and sessions with plain SQL (needs sqlalchemy + psycopg2, installed only for this one-off)."""
+    from sqlalchemy import create_engine, text
+
+    if url.startswith("postgres://"):
+        url = url.replace("postgres://", "postgresql+psycopg2://", 1)
+    elif url.startswith("postgresql://"):
+        url = url.replace("postgresql://", "postgresql+psycopg2://", 1)
+    engine = create_engine(url)
+    try:
+        with engine.connect() as conn:
+            users = [SimpleNamespace(**dict(r._mapping)) for r in conn.execute(text(
+                "SELECT id, email, name, role, domain, allowed_websites, password_hash, is_active, status, "
+                "google_email, google_refresh_token, preferences, created_at FROM users"
+            ))]
+            sessions = [SimpleNamespace(**dict(r._mapping)) for r in conn.execute(text(
+                "SELECT id, user_id, token, expires_at, revoked_at, created_at FROM user_sessions"
+            ))]
+    finally:
+        engine.dispose()
+    return {"users": users, "sessions": sessions}
+
+
+def run(users: List[Any], sessions: List[Any], client: Any, *, apply: bool = False, users_only: bool = False) -> Dict[str, Any]:
+    migrated = migrate_users(users, client, apply=apply)
+    out: Dict[str, Any] = {"mode": "APPLY" if apply else "DRY-RUN", "users": {k: v for k, v in migrated.items() if k != "id_map"}}
     if not users_only:
-        out["sessions"] = migrate_sessions(db, client, users["id_map"], apply=apply)
+        out["sessions"] = migrate_sessions(sessions, client, migrated["id_map"], apply=apply)
     if apply:
-        out["parity"] = parity(db, client)
+        out["parity"] = parity(users, client)
     return out
 
 
@@ -188,17 +214,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--users-only", action="store_true", help="Skip sessions.")
     args = parser.parse_args(argv)
 
-    from app.db.session import SessionLocal
-
+    url = os.environ.get("DATABASE_URL", "").strip()
+    if not url:
+        print("Set the DATABASE_URL environment variable to the old Postgres URL.", file=sys.stderr)
+        return 2
     client = fs.admin_fs_client()
     if client is None:
         print("Firestore client unavailable. Check ADMIN_FIRESTORE_* / credentials.", file=sys.stderr)
         return 2
-    db = SessionLocal()
-    try:
-        report = run(db, client, apply=args.apply, users_only=args.users_only)
-    finally:
-        db.close()
+    loaded = load_from_postgres(url)
+    report = run(loaded["users"], loaded["sessions"], client, apply=args.apply, users_only=args.users_only)
     print(json.dumps(report, indent=2, default=str))
     if report["users"]["conflicts"]:
         print("\nWARNING: userId conflicts found. Review before relying on old links.", file=sys.stderr)

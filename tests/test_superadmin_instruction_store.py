@@ -12,15 +12,9 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from fastapi import HTTPException
-from sqlalchemy import create_engine
-from sqlalchemy.dialects.postgresql import JSONB, UUID
-from sqlalchemy.ext.compiler import compiles
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
 
 from app.core.auth import AuthenticatedStaff
 from app.core.config import get_admin_config_status
-from app.db.models import Conversation
 from app.api.v1.superadmin_instructions import InstructionBody, create_instruction
 from app.services.instruction_store import (
     InstructionStoreError,
@@ -28,16 +22,6 @@ from app.services.instruction_store import (
     get_active_instruction_block,
     reset_instruction_store_for_tests,
 )
-
-
-@compiles(JSONB, "sqlite")
-def _compile_jsonb_sqlite(type_, compiler, **kw):
-    return "JSON"
-
-
-@compiles(UUID, "sqlite")
-def _compile_uuid_sqlite(type_, compiler, **kw):
-    return "CHAR(36)"
 
 
 class _Snap:

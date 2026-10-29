@@ -192,16 +192,8 @@ def patch_firestore(monkeypatch, fake: Optional[FakeFirestore] = None) -> FakeFi
     return fs
 
 
-def set_store_modes(
-    monkeypatch,
-    *,
-    pending: str = "firestore",
-    audit: str = "firestore",
-    leads: str = "firestore",
-) -> None:
-    monkeypatch.setattr("app.core.config.settings.STORE_PENDING_ACTIONS", pending)
-    monkeypatch.setattr("app.core.config.settings.STORE_AUDIT", audit)
-    monkeypatch.setattr("app.core.config.settings.STORE_LEADS_READ", leads)
+def set_store_modes(monkeypatch, **_ignored: str) -> None:
+    """Kept for old tests: STORE_* flags are gone (Firestore only). Only turns audit logging on."""
     monkeypatch.setattr("app.core.config.settings.ENABLE_AUDIT_LOGGING", True)
 
 

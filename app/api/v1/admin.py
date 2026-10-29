@@ -6,12 +6,10 @@ from typing import Dict, Any, Optional, List, Generator
 from fastapi import APIRouter, Depends, HTTPException, Query, status, UploadFile, File, Form, Request
 from fastapi.responses import FileResponse, StreamingResponse, RedirectResponse, Response
 from pydantic import BaseModel, Field
-from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
 
-from app.db.session import get_db
-from app.db.models import Conversation, Property
+from app.core.deps import get_db
 from app.core.config import settings
 from app.core.auth import (
     AuthenticatedStaff,
@@ -90,7 +88,7 @@ def admin_chat_endpoint(
     request: Request,
     stream: bool = Query(False, description="If true, return Server-Sent Events (status then final verified text)"),
     staff: AuthenticatedStaff = Depends(require_admin_or_employee_with_sites),
-    db: Session = Depends(get_db)
+    db: Any = Depends(get_db)
 ):
     """
     Authenticated Admin / Internal Team AI Agent unified endpoint.
@@ -193,7 +191,7 @@ def admin_chat_endpoint(
 def get_admin_history_endpoint(
     session_id: str,
     staff: AuthenticatedStaff = Depends(require_admin_or_employee),
-    db: Session = Depends(get_db)
+    db: Any = Depends(get_db)
 ):
     """
     Retrieves full admin multi-turn conversation history from Firestore.
@@ -225,7 +223,7 @@ def get_admin_history_endpoint(
 def inspect_pending_action_endpoint(
     pending_action_id: str,
     staff: AuthenticatedStaff = Depends(require_admin_or_employee),
-    db: Session = Depends(get_db)
+    db: Any = Depends(get_db)
 ):
     """Retrieves current status and payload details of a staged pending action."""
     action = get_pending_action(db, pending_action_id)
@@ -296,7 +294,7 @@ def confirm_pending_action_endpoint(
     request: Request,
     body: Optional[ActionConfirmRequest] = None,
     staff: AuthenticatedStaff = Depends(require_admin_or_employee),
-    db: Session = Depends(get_db),
+    db: Any = Depends(get_db),
 ):
     """
     Explicit Two-Step Confirmation endpoint for write actions.
@@ -318,7 +316,7 @@ def reject_pending_action_endpoint(
     pending_action_id: str,
     body: Optional[ActionRejectRequest] = None,
     staff: AuthenticatedStaff = Depends(require_admin_or_employee),
-    db: Session = Depends(get_db)
+    db: Any = Depends(get_db)
 ):
     """Rejects a staged pending action and logs the rejection in audit logs."""
     reason = body.reason if body else None
@@ -471,7 +469,7 @@ async def execute_batch_file_endpoint(
     file: UploadFile = File(..., description="Uploaded Excel (.xlsx/.xls), CSV, PDF, or Word (.docx) file containing property list"),
     action: str = Form(..., description="Action to perform on target properties: 'delete', 'update', or 'create'"),
     staff: AuthenticatedStaff = Depends(require_admin_or_super_admin),
-    db: Session = Depends(get_db)
+    db: Any = Depends(get_db)
 ):
     """
     Instantly applies bulk property mutations (delete, update, or create) from an uploaded file.
@@ -519,7 +517,7 @@ def undo_batch_operation_endpoint(
     operation_id: str,
     request: Request,
     staff: AuthenticatedStaff = Depends(require_admin_or_super_admin),
-    db: Session = Depends(get_db),
+    db: Any = Depends(get_db),
 ):
     """
     Instantly rolls back a previous batch operation within its 6-day retention window.
@@ -683,7 +681,7 @@ def list_admin_properties_endpoint(
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     staff: AuthenticatedStaff = Depends(require_admin_or_employee_with_sites),
-    db: Session = Depends(get_db)
+    db: Any = Depends(get_db)
 ):
     """
     Fetches property listings strictly scoped to the staff member's currently selected websites.
@@ -730,44 +728,10 @@ def list_admin_properties_endpoint(
             "selected_websites": staff.selected_websites,
             "properties": fs_output
         }
-
-    # Fallback to local SQL database if Firestore returned nothing (e.g. offline unit testing)
-    params = PropertyFilterParams(
-        location=location,
-        property_type=property_type,
-        min_price=min_price,
-        max_price=max_price,
-        bedrooms=bedrooms,
-        has_pool=has_pool,
-        status=status,
-        websites=staff.selected_websites,
-        limit=limit,
-        offset=offset,
-        is_public=None
-    )
-    results = search_properties_safe(db, params)
-    output = []
-    for p in results:
-        output.append({
-            "property_id": p.property_id,
-            "property_name": p.property_name,
-            "project_name": p.project_name,
-            "property_type": p.property_type,
-            "status": p.status,
-            "province": p.province,
-            "district": p.district,
-            "area": p.area,
-            "price_display": p.price_display,
-            "bedrooms": p.bedrooms_display,
-            "has_pool": p.has_pool,
-            "websites": p.websites or [],
-            "images": [img.image_url for img in p.images] if p.images else [],
-            "is_public": p.is_public
-        })
     return {
-        "count": len(output),
+        "count": 0,
         "selected_websites": staff.selected_websites,
-        "properties": output
+        "properties": []
     }
 
 
@@ -775,10 +739,10 @@ def list_admin_properties_endpoint(
 def get_admin_property_endpoint(
     property_id: str,
     staff: AuthenticatedStaff = Depends(require_admin_or_employee_with_sites),
-    db: Session = Depends(get_db)
+    db: Any = Depends(get_db)
 ):
     """
-    Retrieves a single property listing from Cloud Firestore (primary) or local DB.
+    Retrieves a single property listing from Cloud Firestore.
     Strictly verifies that the property belongs to the staff member's currently selected websites.
     """
     # 1. Check Cloud Firestore (Primary)
@@ -789,13 +753,7 @@ def get_admin_property_endpoint(
     except Exception:
         fs_prop = None
 
-    from app.repositories import properties_store
-
-    prop = None
-    if not fs_prop and properties_store.sql_db(db) is not None:
-        prop = db.query(Property).filter(Property.property_id == property_id).first()
-
-    target_obj = fs_prop or prop
+    target_obj = fs_prop
     if not target_obj:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -841,49 +799,14 @@ def get_admin_property_endpoint(
             "is_public": fs_prop.get("is_public", True)
         }
 
-    return {
-        "found": True,
-        "property_id": prop.property_id,
-        "property_name": prop.property_name,
-        "project_name": prop.project_name,
-        "property_type": prop.property_type,
-        "status": prop.status,
-        "location": {
-            "country": prop.country,
-            "province": prop.province,
-            "district": prop.district,
-            "area": prop.area,
-            "address": prop.address
-        },
-        "pricing": {
-            "display": prop.price_display,
-            "numeric_min": float(prop.price_numeric_min) if prop.price_numeric_min else None,
-            "currency": prop.currency
-        },
-        "details": {
-            "bedrooms": prop.bedrooms_display,
-            "bathrooms": prop.bathrooms,
-            "area": prop.area_display
-        },
-        "amenities": prop.amenities,
-        "websites": prop.websites or [],
-        "images": [img.image_url for img in prop.images] if prop.images else [],
-        "is_public": prop.is_public
-    }
 
-
-def _property_scope_target(property_id: str, db: Session):
-    """Raw Firestore document or SQL row used for existence and website checks."""
+def _property_scope_target(property_id: str, db: Any):
+    """Raw Firestore document used for existence and website checks (None when missing)."""
     from app.services.firestore_service import get_raw_property_document
-    raw = None
     try:
-        raw = get_raw_property_document(property_id, target="admin")
+        return get_raw_property_document(property_id, target="admin")
     except Exception:
-        raw = None
-    from app.repositories import properties_store
-
-    prop = db.query(Property).filter(Property.property_id == property_id).first() if properties_store.sql_db(db) is not None else None
-    return raw, prop
+        return None
 
 
 @router.post("/properties", status_code=status.HTTP_201_CREATED)
@@ -893,10 +816,10 @@ def create_property_endpoint(
     overwrite: Optional[bool] = Query(None, description="Not supported. Use PUT to update an existing property."),
     allow_without_undo: bool = Query(False, description="Admin only: write even if the undo snapshot cannot be saved."),
     staff: AuthenticatedStaff = Depends(require_admin_or_super_admin_with_sites),
-    db: Session = Depends(get_db),
+    db: Any = Depends(get_db),
 ):
     """
-    Create a property in Postgres and Firestore after validation.
+    Create a property in Firestore after validation.
     Workers are read-only. A duplicate id or name returns 409.
     """
     _limit_admin_write(request, staff)
@@ -943,33 +866,6 @@ def create_property_endpoint(
     )
 
 
-@router.get("/properties/{property_id}/consistency")
-def property_consistency_endpoint(
-    property_id: str,
-    staff: AuthenticatedStaff = Depends(require_admin_or_super_admin_with_sites),
-    db: Session = Depends(get_db),
-):
-    """Admin-only comparison of the Firestore document and the Postgres row."""
-    from app.services.action_service import rest_property_consistency
-
-    raw, prop = _property_scope_target(property_id, db)
-    target_obj = raw or prop
-    if not target_obj:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Property with ID '{property_id}' not found.",
-        )
-    if not property_belongs_to_websites(target_obj, staff.selected_websites):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=(
-                f"Access denied: Property '{property_id}' does not belong to your currently selected website(s) "
-                f"{staff.selected_websites}."
-            ),
-        )
-    return rest_property_consistency(db, property_id)
-
-
 @router.put("/properties/{property_id}")
 def update_property_endpoint(
     property_id: str,
@@ -977,17 +873,15 @@ def update_property_endpoint(
     request: Request,
     allow_without_undo: bool = Query(False),
     staff: AuthenticatedStaff = Depends(require_admin_or_super_admin_with_sites),
-    db: Session = Depends(get_db),
+    db: Any = Depends(get_db),
 ):
     """
-    Update a property that already exists in Firestore, Postgres, or both.
-    A Postgres-only row is not given a nameless Firestore stub.
+    Update a property that already exists in Firestore.
     """
     _limit_admin_write(request, staff)
     from app.services.action_service import rest_update_property
 
-    raw, prop = _property_scope_target(property_id, db)
-    target_obj = raw or prop
+    target_obj = _property_scope_target(property_id, db)
     if not target_obj:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -1044,7 +938,7 @@ def delete_property_endpoint(
     ),
     allow_without_undo: bool = Query(False),
     staff: AuthenticatedStaff = Depends(require_admin_or_super_admin_with_sites),
-    db: Session = Depends(get_db),
+    db: Any = Depends(get_db),
 ):
     """
     Soft-delete (archive) a property, or permanently delete it when hard_delete=true
@@ -1064,8 +958,7 @@ def delete_property_endpoint(
                 detail="Permanent delete is disabled on this environment (ALLOW_HARD_DELETE is off).",
             )
 
-    raw, prop = _property_scope_target(property_id, db)
-    target_obj = raw or prop
+    target_obj = _property_scope_target(property_id, db)
     if not target_obj:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -1100,6 +993,7 @@ class TaughtAnswerCreate(BaseModel):
     variants: List[str] = Field(default_factory=list)
     sites: List[str] = Field(default_factory=list, description="Empty = all websites")
     language: str = "any"
+    audience: str = Field("public", description="public | admin | both")
 
 
 class TaughtAnswerUpdate(BaseModel):
@@ -1108,6 +1002,7 @@ class TaughtAnswerUpdate(BaseModel):
     variants: Optional[List[str]] = None
     sites: Optional[List[str]] = None
     language: Optional[str] = None
+    audience: Optional[str] = None
     status: Optional[str] = None
 
 
@@ -1144,7 +1039,7 @@ def create_taught_answer_endpoint(
     return _taught_call(
         taught_answers.create,
         question=body.question, answer=body.answer, variants=body.variants,
-        sites=body.sites, language=body.language, created_by=staff.email,
+        sites=body.sites, language=body.language, audience=body.audience, created_by=staff.email,
     )
 
 
@@ -1159,7 +1054,8 @@ def update_taught_answer_endpoint(
     return _taught_call(
         taught_answers.update, answer_id,
         question=body.question, answer=body.answer, variants=body.variants,
-        sites=body.sites, language=body.language, status=body.status, updated_by=staff.email,
+        sites=body.sites, language=body.language, audience=body.audience, status=body.status,
+        updated_by=staff.email,
     )
 
 
@@ -1187,14 +1083,14 @@ def get_admin_activity_logs_endpoint(
     end_date: Optional[datetime] = Query(None, description="Filter logs up to date (ISO format)"),
     limit: int = Query(50, ge=1, le=500, description="Page limit"),
     offset: int = Query(0, ge=0, description="Offset for pagination"),
-    source: str = Query("all", description="'postgres', 'firestore', or 'all'"),
+    source: str = Query("all", description="'firestore' or 'all'"),
     staff: AuthenticatedStaff = Depends(require_admin_or_employee),
-    db: Session = Depends(get_db)
+    db: Any = Depends(get_db)
 ):
     """
     Returns full administrative activity logs.
     Includes tool executions, staff chat sessions, database mutations, and auth actions.
-    Aggregates from PostgreSQL and Cloud Firestore.
+    Reads from Cloud Firestore.
     """
     from app.services.audit_service import query_admin_activity_logs
 
@@ -1219,7 +1115,7 @@ def get_data_change_history_endpoint(
     limit: int = Query(50, ge=1, le=500, description="Page limit"),
     offset: int = Query(0, ge=0, description="Offset for pagination"),
     staff: AuthenticatedStaff = Depends(require_admin_or_employee),
-    db: Session = Depends(get_db)
+    db: Any = Depends(get_db)
 ):
     """
     Returns chronological history of who updated which data across the platform.

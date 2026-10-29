@@ -10,11 +10,6 @@ from typing import Any, Dict, List, Optional
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
-from sqlalchemy.dialects.postgresql import JSONB, UUID
-from sqlalchemy.ext.compiler import compiles
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
 
 from app.api.v1.admin_logs import router as logs_router
 from app.core.auth import (
@@ -23,8 +18,8 @@ from app.core.auth import (
     require_super_admin,
 )
 from app.core.config import get_admin_config_status, settings
-from app.db.models import AuditLog, PendingAction, Property, User, UserSession
-from app.db.session import get_db
+from app.core.deps import FirestoreSession, get_db
+from tests import fs_helpers as fsh
 from app.services import admin_logs_service as logs_svc
 from app.services.admin_logs_service import (
     ADMIN_COLLECTION,
@@ -35,16 +30,6 @@ from app.services.admin_logs_service import (
     reset_stats_cache,
 )
 from app.services.audit_service import record_audit_log
-
-
-@compiles(JSONB, "sqlite")
-def _compile_jsonb_sqlite(type_, compiler, **kw):
-    return "JSON"
-
-
-@compiles(UUID, "sqlite")
-def _compile_uuid_sqlite(type_, compiler, **kw):
-    return "CHAR(36)"
 
 
 class _Snap:
@@ -131,16 +116,6 @@ class FakeFirestore:
         return len(self.items(collection))
 
 
-def _session():
-    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
-    for table in (AuditLog.__table__, PendingAction.__table__, Property.__table__, User.__table__, UserSession.__table__):
-        for idx in list(table.indexes):
-            if getattr(idx, "dialect_kwargs", {}).get("postgresql_using") == "gin":
-                table.indexes.discard(idx)
-        table.create(bind=engine, checkfirst=True)
-    return sessionmaker(bind=engine, autocommit=False, autoflush=False)()
-
-
 def _staff(role="admin", sites=None):
     return AuthenticatedStaff(
         user_id=f"{role}@tajlandia.com",
@@ -167,7 +142,7 @@ def world(monkeypatch):
 
     monkeypatch.setattr("app.services.firestore_service.get_firestore_client", client)
     monkeypatch.setattr(logs_svc, "_firestore_client", client)
-    db = _session()
+    db = FirestoreSession()
     yield {"db": db, "fs_user": fs_user, "fs_admin": fs_admin}
     reset_stats_cache()
 
@@ -448,7 +423,7 @@ def test_audit_rows_for_log_read_and_failed_login(world):
     super_staff = _staff("super_admin")
     client = _client(world, super_staff, as_super=True)
     client.get("/api/v1/admin/query-logs")
-    audits = world["db"].query(AuditLog).filter(AuditLog.tool_name == "admin:read_logs").all()
+    audits = fsh.audit_rows(world["fs_admin"], "admin:read_logs")
     assert audits
 
     record_audit_log(
@@ -479,7 +454,7 @@ def test_audit_rows_for_log_read_and_failed_login(world):
         staff_user_id="admin@tajlandia.com",
         status="SUCCESS",
     )
-    names = {row.tool_name for row in world["db"].query(AuditLog).all()}
+    names = {row.tool_name for row in fsh.audit_rows(world["fs_admin"])}
     assert "auth:login_failed" in names
     assert "instruction:activate" in names
     assert "manage_property_images" in names

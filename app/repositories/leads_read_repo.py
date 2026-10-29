@@ -1,5 +1,5 @@
 """
-Leads read repository (admin) — Firestore first with optional SQL fallback.
+Leads read repository (admin) — Firestore.
 
 Public bot writes leads; admin only reads and updates status.
 Tolerant of missing fields and old document shapes.
@@ -12,14 +12,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from app.repositories import _fs_utils as fs
-from app.repositories.store_mode import (
-    reads_firestore_first,
-    reads_postgres,
-    require_firestore_client,
-    store_mode,
-    writes_firestore,
-    writes_postgres,
-)
+from app.repositories.store_mode import require_firestore_client
 
 logger = logging.getLogger(__name__)
 
@@ -60,16 +53,10 @@ class LeadRecord:
         self.conversation_id = d.get("conversation_id")
 
 
-def _mode() -> str:
-    return store_mode("STORE_LEADS_READ")
-
-
 def _leads_client():
     # Leads live on the user/public project (shared contract with public bot)
     client = fs.user_fs_client() or fs.admin_fs_client()
-    if _mode() == "firestore":
-        return require_firestore_client(client, store_name="leads")
-    return client
+    return require_firestore_client(client, store_name="leads")
 
 
 def query_leads(
@@ -86,35 +73,19 @@ def query_leads(
     order: str = "newest",
 ) -> List[LeadRecord]:
     """
-    Read leads. Default STORE_LEADS_READ=both: Firestore first, SQL if empty.
+    Read leads from Firestore.
     """
-    mode = _mode()
-    rows: List[LeadRecord] = []
-
-    if reads_firestore_first(mode):
-        rows = _fs_query(
-            days=days,
-            window_start=window_start,
-            status=status,
-            min_score=min_score,
-            name_or_contact=name_or_contact,
-            ids=ids,
-            site=site,
-            limit=limit,
-            order=order,
-        )
-    if (not rows) and reads_postgres(mode) and db is not None:
-        rows = _pg_query(
-            db,
-            days=days,
-            window_start=window_start,
-            status=status,
-            min_score=min_score,
-            name_or_contact=name_or_contact,
-            ids=ids,
-            limit=limit,
-            order=order,
-        )
+    rows = _fs_query(
+        days=days,
+        window_start=window_start,
+        status=status,
+        min_score=min_score,
+        name_or_contact=name_or_contact,
+        ids=ids,
+        site=site,
+        limit=limit,
+        order=order,
+    )
     return rows
 
 
@@ -143,60 +114,19 @@ def most_recent_lead(db: Any = None) -> Optional[LeadRecord]:
 
 
 def update_status(db: Any, lead_id: str, status: str) -> Optional[LeadRecord]:
-    """Admin status update only. Writes follow STORE_LEADS_READ mode."""
-    mode = _mode()
+    """Admin status update only."""
     now_iso = datetime.now(timezone.utc).isoformat()
     updated: Optional[LeadRecord] = None
 
-    if writes_firestore(mode):
-        client = _leads_client()
-        if client is not None:
-            data = fs.get_document(client, COLLECTION, lead_id)
-            if data is not None:
-                data["status"] = status
-                data["updated_at"] = now_iso
-                data["updatedAt"] = now_iso
-                fs.set_document(client, COLLECTION, lead_id, data, merge=True)
-                updated = LeadRecord(data, lead_id)
-
-    if writes_postgres(mode) and db is not None:
-        try:
-            from app.db.models import Lead
-            import uuid as _uuid
-            row = None
-            try:
-                row = db.query(Lead).filter(Lead.id == _uuid.UUID(str(lead_id))).first()
-            except Exception:
-                row = None
-            if row is None:
-                # Match by stringified id scan (sqlite tests)
-                for candidate in db.query(Lead).all():
-                    if str(candidate.id) == str(lead_id):
-                        row = candidate
-                        break
-            if row is not None:
-                row.status = status
-                db.commit()
-                updated = LeadRecord({
-                    "id": str(row.id),
-                    "contact_name": row.contact_name,
-                    "contact_email": row.contact_email,
-                    "contact_phone": row.contact_phone,
-                    "preferred_location": row.preferred_location,
-                    "preferred_type": row.preferred_type,
-                    "budget_min": row.budget_min,
-                    "budget_max": row.budget_max,
-                    "lead_score": row.lead_score,
-                    "buying_signals": row.buying_signals,
-                    "status": row.status,
-                    "created_at": row.created_at,
-                }, str(row.id))
-        except Exception as e:
-            logger.warning("Lead status SQL update failed: %s", e)
-            try:
-                db.rollback()
-            except Exception:
-                pass
+    client = _leads_client()
+    if client is not None:
+        data = fs.get_document(client, COLLECTION, lead_id)
+        if data is not None:
+            data["status"] = status
+            data["updated_at"] = now_iso
+            data["updatedAt"] = now_iso
+            fs.set_document(client, COLLECTION, lead_id, data, merge=True)
+            updated = LeadRecord(data, lead_id)
 
     return updated
 
@@ -260,70 +190,3 @@ def _fs_query(
         out.sort(key=lambda r: r.created_at or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
     return out[:limit]
 
-
-def _pg_query(
-    db: Any,
-    *,
-    days: Optional[int] = None,
-    window_start: Optional[datetime] = None,
-    status: Optional[str] = None,
-    min_score: float = 0.0,
-    name_or_contact: Optional[str] = None,
-    ids: Optional[List[str]] = None,
-    limit: int = 50,
-    order: str = "newest",
-) -> List[LeadRecord]:
-    from app.db.models import Lead
-
-    try:
-        query = db.query(Lead)
-        if min_score:
-            query = query.filter(Lead.lead_score >= min_score)
-        if status:
-            query = query.filter(Lead.status == status)
-        start = window_start
-        if start is None and days and int(days) > 0:
-            from datetime import timedelta
-            start = datetime.now(timezone.utc) - timedelta(days=int(days))
-        if start is not None:
-            try:
-                query = query.filter(Lead.created_at >= start.replace(tzinfo=None))
-            except Exception:
-                query = query.filter(Lead.created_at >= start)
-        if ids:
-            clean = [str(i).strip() for i in ids if i]
-            query = query.filter((Lead.contact_name.in_(clean)) | (Lead.id.in_(clean)))
-        if name_or_contact:
-            like = f"%{name_or_contact.strip()}%"
-            query = query.filter(
-                (Lead.contact_name.ilike(like))
-                | (Lead.contact_email.ilike(like))
-                | (Lead.contact_phone.ilike(like))
-            )
-        if order == "score":
-            rows = query.order_by(Lead.lead_score.desc(), Lead.created_at.desc()).limit(limit).all()
-        else:
-            rows = query.order_by(Lead.created_at.desc(), Lead.lead_score.desc()).limit(limit).all()
-        out: List[LeadRecord] = []
-        for r in rows or []:
-            out.append(
-                LeadRecord({
-                    "id": str(getattr(r, "id", "") or ""),
-                    "contact_name": getattr(r, "contact_name", None),
-                    "contact_email": getattr(r, "contact_email", None),
-                    "contact_phone": getattr(r, "contact_phone", None),
-                    "preferred_location": getattr(r, "preferred_location", None),
-                    "preferred_type": getattr(r, "preferred_type", None),
-                    "budget_min": getattr(r, "budget_min", None),
-                    "budget_max": getattr(r, "budget_max", None),
-                    "lead_score": getattr(r, "lead_score", 0),
-                    "buying_signals": getattr(r, "buying_signals", None),
-                    "status": getattr(r, "status", None),
-                    "created_at": getattr(r, "created_at", None),
-                    "site": getattr(r, "site", None),
-                }, str(getattr(r, "id", "") or ""))
-            )
-        return out
-    except Exception as e:
-        logger.warning("Lead postgres query failed: %s", e)
-        return []

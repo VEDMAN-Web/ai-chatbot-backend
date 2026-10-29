@@ -1,5 +1,5 @@
 """
-Audit log repository — Postgres / Firestore / both.
+Audit log repository — Firestore.
 
 One document per action in collection `audit_logs`.
 On read, also merges legacy `admin_audit_log` documents so history is not lost.
@@ -14,14 +14,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from app.repositories import _fs_utils as fs
-from app.repositories.store_mode import (
-    reads_firestore_first,
-    reads_postgres,
-    require_firestore_client,
-    store_mode,
-    writes_firestore,
-    writes_postgres,
-)
+from app.repositories.store_mode import require_firestore_client
 
 logger = logging.getLogger(__name__)
 
@@ -66,10 +59,6 @@ class AuditLogRecord:
         }
 
 
-def _mode() -> str:
-    return store_mode("STORE_AUDIT")
-
-
 def create(
     db: Any,
     *,
@@ -103,78 +92,16 @@ def create(
         "created_at": datetime.now(timezone.utc),
     })
 
-    mode = _mode()
-    wrote = False
-    pg_ok = False
-    errors: List[str] = []
-    pg_required = writes_postgres(mode) and db is not None
-
-    if pg_required:
-        try:
-            _pg_insert(db, record)
-            wrote = True
-            pg_ok = True
-        except Exception as e:
-            try:
-                db.rollback()
-            except Exception:
-                pass
-            errors.append(f"postgres:{e}")
-            logger.error("Audit postgres write failed: %s", e)
-
-    if writes_firestore(mode):
-        client = fs.admin_fs_client()
-        if mode == "firestore":
-            client = require_firestore_client(client, store_name="audit_logs")
-        if client is not None:
-            try:
-                fs.set_document(client, COLLECTION, record.id, record.to_firestore_dict())
-                wrote = True
-            except Exception as e:
-                errors.append(f"firestore:{e}")
-                logger.error("Audit firestore write failed: %s", e)
-
-    # Dual-store: Postgres failure is hard-fail even if Firestore succeeded
-    # (unit tests mock only SQL; production both-mode must not silently drop SQL).
-    if pg_required and not pg_ok:
-        raise RuntimeError("; ".join(errors) or "audit postgres write failed")
-    if not wrote:
-        raise RuntimeError("; ".join(errors) or "audit write failed")
+    client = require_firestore_client(fs.admin_fs_client(), store_name="audit_logs")
+    try:
+        fs.set_document(client, COLLECTION, record.id, record.to_firestore_dict())
+    except Exception as e:
+        logger.error("Audit firestore write failed: %s", e)
+        raise RuntimeError(f"firestore:{e}") from e
     return record
 
 
-def _pg_insert(db: Any, record: AuditLogRecord) -> None:
-    from app.db.models import AuditLog
-
-    row = AuditLog(
-        id=uuid.UUID(record.id),
-        staff_user_id=record.staff_user_id,
-        tool_name=record.tool_name,
-        tool_arguments=record.tool_arguments,
-        proposed_payload=record.proposed_payload,
-        confirmed_by_staff=record.confirmed_by_staff,
-        execution_result=record.execution_result,
-        status=record.status,
-        error_message=record.error_message,
-        conversation_id=record.conversation_id,
-        pending_action_id=record.pending_action_id,
-        request_id=record.request_id,
-        created_at=record.created_at.replace(tzinfo=None) if record.created_at.tzinfo else record.created_at,
-    )
-    db.add(row)
-    db.commit()
-    try:
-        db.refresh(row)
-        record.id = str(row.id)
-        record.created_at = row.created_at if getattr(row.created_at, "tzinfo", None) else (
-            row.created_at.replace(tzinfo=timezone.utc) if row.created_at else record.created_at
-        )
-    except Exception:
-        pass
-
-
 def update_fields(db: Any, audit_id: str, **fields: Any) -> Optional[AuditLogRecord]:
-    mode = _mode()
     record = get_by_id(db, audit_id)
     if record is None:
         return None
@@ -184,63 +111,22 @@ def update_fields(db: Any, audit_id: str, **fields: Any) -> Optional[AuditLogRec
     ):
         if key in fields:
             setattr(record, key, fields[key])
-    if writes_firestore(mode):
-        client = fs.admin_fs_client()
-        if client is not None:
-            fs.set_document(client, COLLECTION, record.id, record.to_firestore_dict(), merge=True)
-    if writes_postgres(mode) and db is not None:
-        try:
-            from app.db.models import AuditLog
-            row = db.query(AuditLog).filter(AuditLog.id == uuid.UUID(str(audit_id))).first()
-            if row:
-                for key in ("status", "execution_result", "error_message", "proposed_payload", "tool_arguments", "confirmed_by_staff"):
-                    if key in fields:
-                        setattr(row, key, fields[key])
-                db.commit()
-        except Exception as e:
-            logger.warning("Audit postgres update failed: %s", e)
+    client = fs.admin_fs_client()
+    if client is not None:
+        fs.set_document(client, COLLECTION, record.id, record.to_firestore_dict(), merge=True)
     return record
 
 
 def get_by_id(db: Any, audit_id: str) -> Optional[AuditLogRecord]:
-    mode = _mode()
-    if reads_firestore_first(mode):
-        client = fs.admin_fs_client()
-        data = fs.get_document(client, COLLECTION, audit_id) if client else None
-        if data:
-            return AuditLogRecord(data)
-    if reads_postgres(mode) and db is not None:
-        try:
-            from app.db.models import AuditLog
-            row = db.query(AuditLog).filter(AuditLog.id == uuid.UUID(str(audit_id))).first()
-            if row:
-                return AuditLogRecord({
-                    "id": str(row.id),
-                    "staff_user_id": row.staff_user_id,
-                    "tool_name": row.tool_name,
-                    "tool_arguments": row.tool_arguments,
-                    "proposed_payload": row.proposed_payload,
-                    "confirmed_by_staff": row.confirmed_by_staff,
-                    "execution_result": row.execution_result,
-                    "status": row.status,
-                    "error_message": row.error_message,
-                    "conversation_id": row.conversation_id,
-                    "pending_action_id": row.pending_action_id,
-                    "request_id": row.request_id,
-                    "created_at": row.created_at,
-                })
-        except Exception:
-            pass
+    client = fs.admin_fs_client()
+    data = fs.get_document(client, COLLECTION, audit_id) if client else None
+    if data:
+        return AuditLogRecord(data)
     return None
 
 
 def list_by_conversation(db: Any, conversation_id: str, limit: int = 100) -> List[AuditLogRecord]:
-    mode = _mode()
-    rows: List[AuditLogRecord] = []
-    if reads_firestore_first(mode):
-        rows = _fs_query(conversation_id=conversation_id, limit=limit)
-    if (not rows) and reads_postgres(mode) and db is not None:
-        rows = _pg_query(db, conversation_id=conversation_id, limit=limit)
+    rows = _fs_query(conversation_id=conversation_id, limit=limit)
     # Merge legacy admin_audit_log
     legacy = _legacy_by_conversation(conversation_id, limit=limit)
     return _dedupe_merge(rows, legacy)[:limit]
@@ -258,41 +144,22 @@ def query(
     limit: int = 50,
     offset: int = 0,
 ) -> Dict[str, Any]:
-    mode = _mode()
-    records: List[AuditLogRecord] = []
-
-    if reads_firestore_first(mode):
-        records = _fs_query(
-            staff_email=staff_email,
-            tool_name=tool_name,
-            status=status,
-            start_date=start_date,
-            end_date=end_date,
-            conversation_id=conversation_id,
-            limit=limit + offset + 200,
-        )
-    pg_records: List[AuditLogRecord] = []
-    if reads_postgres(mode) and db is not None:
-        pg_records = _pg_query(
-            db,
-            staff_email=staff_email,
-            tool_name=tool_name,
-            status=status,
-            start_date=start_date,
-            end_date=end_date,
-            conversation_id=conversation_id,
-            limit=limit + offset + 200,
-        )
+    records = _fs_query(
+        staff_email=staff_email,
+        tool_name=tool_name,
+        status=status,
+        start_date=start_date,
+        end_date=end_date,
+        conversation_id=conversation_id,
+        limit=limit + offset + 200,
+    )
     legacy = _legacy_query(
         staff_email=staff_email,
         tool_name=tool_name,
         limit=limit + offset + 100,
     )
 
-    if reads_firestore_first(mode):
-        merged = _dedupe_merge(records, pg_records, legacy)
-    else:
-        merged = _dedupe_merge(pg_records, records, legacy)
+    merged = _dedupe_merge(records, legacy)
 
     merged.sort(key=lambda r: r.created_at or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
     total = len(merged)
@@ -349,57 +216,6 @@ def _fs_query(
         out.append(rec)
     out.sort(key=lambda r: r.created_at or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
     return out[:limit]
-
-
-def _pg_query(
-    db: Any,
-    *,
-    staff_email: Optional[str] = None,
-    tool_name: Optional[str] = None,
-    status: Optional[str] = None,
-    start_date: Optional[datetime] = None,
-    end_date: Optional[datetime] = None,
-    conversation_id: Optional[str] = None,
-    limit: int = 100,
-) -> List[AuditLogRecord]:
-    from app.db.models import AuditLog
-
-    try:
-        query = db.query(AuditLog)
-        if staff_email:
-            query = query.filter(AuditLog.staff_user_id.ilike(f"%{staff_email.strip()}%"))
-        if tool_name:
-            query = query.filter(AuditLog.tool_name.ilike(f"%{tool_name.strip()}%"))
-        if status:
-            query = query.filter(AuditLog.status.ilike(status.strip()))
-        if conversation_id:
-            query = query.filter(AuditLog.conversation_id == str(conversation_id))
-        if start_date:
-            query = query.filter(AuditLog.created_at >= start_date)
-        if end_date:
-            query = query.filter(AuditLog.created_at <= end_date)
-        rows = query.order_by(AuditLog.created_at.desc()).limit(limit).all()
-        return [
-            AuditLogRecord({
-                "id": str(r.id),
-                "staff_user_id": r.staff_user_id,
-                "tool_name": r.tool_name,
-                "tool_arguments": r.tool_arguments,
-                "proposed_payload": r.proposed_payload,
-                "confirmed_by_staff": r.confirmed_by_staff,
-                "execution_result": r.execution_result,
-                "status": r.status,
-                "error_message": r.error_message,
-                "conversation_id": r.conversation_id,
-                "pending_action_id": r.pending_action_id,
-                "request_id": r.request_id,
-                "created_at": r.created_at,
-            })
-            for r in rows or []
-        ]
-    except Exception as e:
-        logger.warning("Audit postgres query failed: %s", e)
-        return []
 
 
 def _legacy_query(

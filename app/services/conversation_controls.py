@@ -71,13 +71,13 @@ def _numeric_bedrooms(value: Any) -> Any:
 
 
 def overlay_missing_bedrooms(db: Any, cards: Any) -> Any:
-    """Copy SQL bedroom counts onto search cards that do not have them."""
+    """Copy Firestore bedroom counts onto search cards that do not have them."""
     if db is None or not isinstance(cards, list):
         return cards
     try:
-        from app.db.models import Property
+        from app.repositories import properties_store
 
-        rows = db.query(Property).all()
+        rows = properties_store.list_rows(db)
     except Exception:
         return cards
     if not isinstance(rows, list):

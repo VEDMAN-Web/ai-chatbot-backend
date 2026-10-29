@@ -12,15 +12,10 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import create_engine
-from sqlalchemy.dialects.postgresql import JSONB, UUID
-from sqlalchemy.ext.compiler import compiles
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
-
 from app.core.auth import AuthenticatedStaff
 from app.core.config import settings
-from app.db.models import AuditLog, PendingAction, Property
+from app.core.deps import FirestoreSession
+from tests import fs_helpers as fsh
 from app.services import property_web_ingest as ingest
 from app.services.action_service import save_ingested_listing
 from app.services.admin_agent import is_strict_confirm_message, process_admin_chat
@@ -38,16 +33,6 @@ from app.services.property_web_ingest import (
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "layan_palm_villa.html"
 PUBLIC_IP = "93.184.216.34"
-
-
-@compiles(JSONB, "sqlite")
-def _compile_jsonb_sqlite(type_, compiler, **kw):
-    return "JSON"
-
-
-@compiles(UUID, "sqlite")
-def _compile_uuid_sqlite(type_, compiler, **kw):
-    return "CHAR(36)"
 
 
 class _Snap:
@@ -183,13 +168,7 @@ class FakeFirestore:
 
 
 def _session():
-    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
-    for table in (Property.__table__, AuditLog.__table__, PendingAction.__table__):
-        for idx in list(table.indexes):
-            if getattr(idx, "dialect_kwargs", {}).get("postgresql_using") == "gin":
-                table.indexes.discard(idx)
-        table.create(bind=engine, checkfirst=True)
-    return sessionmaker(bind=engine, autocommit=False, autoflush=False)()
+    return FirestoreSession()
 
 
 def _staff(role="super_admin"):
@@ -213,10 +192,6 @@ def world(monkeypatch):
         "app.services.firestore_service.get_firestore_client",
         lambda target="user", *a, **k: admin_fs,
     )
-    # Dual-write so legacy SQL assertions on PendingAction/AuditLog still see rows
-    monkeypatch.setattr(settings, "STORE_PENDING_ACTIONS", "both")
-    monkeypatch.setattr(settings, "STORE_AUDIT", "both")
-    monkeypatch.setattr(settings, "STORE_LEADS_READ", "both")
     monkeypatch.setattr(settings, "ENABLE_FIRESTORE_SYNC", True)
     monkeypatch.setattr(settings, "ADMIN_ENABLE_FIRESTORE_SYNC", True)
     monkeypatch.setattr(settings, "ENABLE_AUDIT_LOGGING", True)
@@ -271,10 +246,6 @@ def _page(url, body, content_type="text/html"):
 
 
 def _chat(world, message, staff=None):
-    # SQLite drops timezones, and expiry is compared with local now.
-    for row in world["db"].query(PendingAction).filter(PendingAction.status == "PENDING"):
-        row.expires_at = datetime.now() + timedelta(hours=2)
-    world["db"].commit()
     return process_admin_chat(
         db=world["db"],
         session_id="s-ingest",
@@ -453,13 +424,13 @@ def test_chat_edits_confirm_and_guesses(world, monkeypatch):
     monkeypatch.setattr("app.services.admin_agent._call_anthropic_claude", no_model)
     leads = _chat(world, "yes show me the leads")
     assert "Saved:" not in leads["text"]
-    pending = world["db"].query(PendingAction).filter(PendingAction.status == "PENDING").all()
+    pending = fsh.pending_rows(world["fs"], "PENDING")
     assert pending and pending[0].tool_name == "ingest_property_from_url"
 
     saved = _chat(world, "confirm")
     assert "Saved: Layan Palm Villa (layan-palm-villa) - verified in database" in saved["text"]
     assert "provided by admin: " in saved["text"]
-    row = world["db"].query(Property).filter(Property.property_id == "layan-palm-villa").one()
+    row = fsh.prop_one(world["fs"], "layan-palm-villa")
     assert row.price_numeric_min == 12000000
     assert world["fs"].get("projects", "layan-palm-villa")["name"] == "Layan Palm Villa"
 
@@ -468,11 +439,11 @@ def test_chat_edits_confirm_and_guesses(world, monkeypatch):
     blocked = _chat(world, "confirm")
     assert "Nothing was saved" in blocked["text"]
     assert "status" in blocked["text"]
-    assert world["db"].query(Property).filter(Property.property_id == "guess-villa").first() is None
+    assert fsh.prop_first(world["fs"], "guess-villa") is None
     _chat(world, "use your guesses")
     accepted = _chat(world, "confirm")
     assert "Saved: Guess Villa (guess-villa) - verified in database" in accepted["text"]
-    stored = world["db"].query(Property).filter(Property.property_id == "guess-villa").one()
+    stored = fsh.prop_one(world["fs"], "guess-villa")
     assert stored.raw_metadata["ingest"]["source_url"] == "https://example.com/guess"
     assert "status" in stored.raw_metadata["ingest"]["guessed_fields"]
     assert "html" not in json.dumps(stored.raw_metadata).lower() or "completion" in json.dumps(stored.raw_metadata)
@@ -500,14 +471,14 @@ def test_save_undo_duplicate_worker_and_injection(world, monkeypatch):
     saved = _chat(world, "confirm")
     assert "verified in database" in saved["text"]
     assert "Undo operation id:" in saved["text"]
-    assert world["db"].query(Property).count() == 1
+    assert len(fsh.prop_rows(world["fs"])) == 1
     assert world["fs"].get("projects", "layan-palm-villa") is not None
-    audits = world["db"].query(AuditLog).filter(AuditLog.tool_name == "ingest_property_from_url").all()
+    audits = fsh.audit_rows(world["fs"], "ingest_property_from_url")
     assert audits
     assert audits[-1].tool_arguments["source_url"] == "https://example.com/layan-palm-villa"
     op_id = saved["text"].split("Undo operation id: ", 1)[1].split(".", 1)[0].strip()
     undo_batch_property_operation(op_id, world["staff"], db_session=world["db"])
-    assert world["db"].query(Property).count() == 0
+    assert len(fsh.prop_rows(world["fs"])) == 0
     assert world["fs"].get("projects", "layan-palm-villa") is None
 
     _chat(world, "https://example.com/layan-palm-villa")
@@ -519,9 +490,9 @@ def test_save_undo_duplicate_worker_and_injection(world, monkeypatch):
     trapped = _chat(world, "import https://evil.example/trap")
     assert "The page contained text that looked like instructions; I ignored it" in trapped["text"]
     _chat(world, "confirm")
-    tools = [row.tool_name for row in world["db"].query(PendingAction).all()]
+    tools = [row.tool_name for row in fsh.pending_rows(world["fs"])]
     assert "send_email" not in tools
-    assert world["db"].query(Property).filter(Property.property_id == "trap-villa").first() is not None
+    assert fsh.prop_first(world["fs"], "trap-villa") is not None
 
     refused = _chat(world, "https://example.com/layan-palm-villa", staff=_staff("worker"))
     assert "admin" in refused["text"].lower()
@@ -529,18 +500,16 @@ def test_save_undo_duplicate_worker_and_injection(world, monkeypatch):
 
 
 def test_three_urls_confirm_all_skips_incomplete_and_duplicates(world, monkeypatch):
-    world["db"].add(Property(
-        property_id="already-villa",
-        property_name="Already Villa",
-        property_type="Villa",
-        province="Phuket",
-        price_numeric_min=10000000,
-        status="Available",
-        websites=["tajlandia.com"],
-        is_public=True,
-        raw_metadata={"ingest": {"source_url": "https://example.com/already"}},
-    ))
-    world["db"].commit()
+    world["fs"].set("projects", "already-villa", {
+        "name": "Already Villa",
+        "propertyType": "Villa",
+        "province": "Phuket",
+        "priceFrom": 10000000,
+        "status": "Available",
+        "websites": ["tajlandia.com"],
+        "isActive": True,
+        "raw_metadata": {"ingest": {"source_url": "https://example.com/already"}},
+    })
     world["routes"]({
         "https://example.com/already": _page(
             "https://example.com/already",
@@ -565,14 +534,14 @@ def test_three_urls_confirm_all_skips_incomplete_and_duplicates(world, monkeypat
         world,
         "Add https://example.com/already and https://example.com/incomplete and https://example.com/ready",
     )
-    drafts = world["db"].query(PendingAction).filter(PendingAction.tool_name == "ingest_property_from_url", PendingAction.status == "PENDING").all()
+    drafts = fsh.pending_rows(world["fs"], "PENDING", "ingest_property_from_url")
     assert len(drafts) == 3
     assert opened["confirm_via_chat_only"] is True
     result = _chat(world, "confirm all")
     assert "Skipped" in result["text"]
-    assert world["db"].query(Property).filter(Property.property_id == "ready-villa").one()
-    assert world["db"].query(Property).filter(Property.property_id == "incomplete-villa").first() is None
-    assert world["db"].query(Property).count() == 2
+    assert fsh.prop_one(world["fs"], "ready-villa")
+    assert fsh.prop_first(world["fs"], "incomplete-villa") is None
+    assert len(fsh.prop_rows(world["fs"])) == 2
 
 
 def test_new_url_supersedes_the_open_draft(world, monkeypatch):
@@ -594,8 +563,8 @@ def test_new_url_supersedes_the_open_draft(world, monkeypatch):
     _chat(world, "https://example.com/first")
     second = _chat(world, "https://example.com/second")
     assert "discarded" in second["text"].lower()
-    pending = world["db"].query(PendingAction).filter(PendingAction.status == "PENDING").all()
-    superseded = world["db"].query(PendingAction).filter(PendingAction.status == "SUPERSEDED").all()
+    pending = fsh.pending_rows(world["fs"], "PENDING")
+    superseded = fsh.pending_rows(world["fs"], "SUPERSEDED")
     assert len(pending) == 1
     assert pending[0].action_payload["source_url"] == "https://example.com/second"
     assert superseded and superseded[0].action_payload["source_url"] == "https://example.com/first"
@@ -640,7 +609,7 @@ def test_natural_edit_updates_open_draft_without_search(world, monkeypatch):
     assert "search_properties_full" not in searched
     assert "25,000,000" in edited["text"]
     assert "4" in edited["text"]
-    pending = world["db"].query(PendingAction).filter(PendingAction.status == "PENDING").one()
+    pending = fsh.pending_one(world["fs"], "PENDING")
     fields = pending.action_payload["provenance"]
     assert fields["price_numeric_min"]["value"] == 25000000
     assert fields["bedrooms_min"]["value"] == 4
@@ -661,7 +630,7 @@ def test_unrelated_question_keeps_the_draft_open(world, monkeypatch):
     reply = _chat(world, "what is the weather in Bangkok")
     assert "still open" in reply["text"].lower()
     assert "Open Villa" in reply["text"]
-    assert world["db"].query(PendingAction).filter(PendingAction.status == "PENDING").count() == 1
+    assert len(fsh.pending_rows(world["fs"], "PENDING")) == 1
 
 
 def test_several_fields_and_cancel(world, monkeypatch):
@@ -676,7 +645,7 @@ def test_several_fields_and_cancel(world, monkeypatch):
     monkeypatch.setattr("app.services.property_extractor.extract_property_data_with_llm", lambda *a, **k: None)
     _chat(world, "https://example.com/multi")
     edited = _chat(world, "price 25M, set bedrooms to 4, change the status to Off-plan, add Phuket as province, name it Layan Palm Villa 2")
-    pending = world["db"].query(PendingAction).filter(PendingAction.status == "PENDING").one()
+    pending = fsh.pending_one(world["fs"], "PENDING")
     prov = pending.action_payload["provenance"]
     assert prov["price_numeric_min"]["value"] == 25000000
     assert prov["bedrooms_min"]["value"] == 4
@@ -684,7 +653,7 @@ def test_several_fields_and_cancel(world, monkeypatch):
     assert "Layan Palm Villa 2" in edited["text"]
     cancelled = _chat(world, "cancel")
     assert "discarded" in cancelled["text"].lower() or "nothing was saved" in cancelled["text"].lower()
-    assert world["db"].query(PendingAction).filter(PendingAction.status == "PENDING").count() == 0
+    assert len(fsh.pending_rows(world["fs"], "PENDING")) == 0
 
 
 def test_confirm_missing_price_skip_required_and_preview_match(world, monkeypatch):
@@ -707,7 +676,7 @@ def test_confirm_missing_price_skip_required_and_preview_match(world, monkeypatc
     assert "18,500,000" in supplied["text"]
     saved = _chat(world, "confirm")
     assert "nothing was saved" not in saved["text"].lower()
-    row = world["db"].query(Property).filter(Property.property_name == "No Price Villa").one()
+    row = fsh.prop_one(world["fs"], name="No Price Villa")
     assert int(row.price_numeric_min) == 18500000
 
 
@@ -805,7 +774,7 @@ def test_dholera_page_warns_and_waits_for_continue_anyway(world, monkeypatch):
     blocked = _chat(world, "confirm")
     assert "outside Thailand" in blocked["text"]
     assert "nothing was saved" in blocked["text"].lower()
-    assert world["db"].query(Property).count() == 0
+    assert len(fsh.prop_rows(world["fs"])) == 0
     continued = _chat(world, "continue anyway")
     assert "outside Thailand" not in continued["text"]
     still = _chat(world, "confirm")
@@ -817,7 +786,7 @@ def test_dholera_page_warns_and_waits_for_continue_anyway(world, monkeypatch):
     _chat(world, "price 5 million thb")
     saved = _chat(world, "confirm")
     assert "nothing was saved" not in saved["text"].lower()
-    row = world["db"].query(Property).filter(Property.property_name == "Residential Plot for Sale in Dholera").one()
+    row = fsh.prop_one(world["fs"], name="Residential Plot for Sale in Dholera")
     assert int(row.price_numeric_min) == 5_000_000
 
     polish = render_preview({**draft, "reply_language": "pl"})
@@ -838,7 +807,7 @@ def test_thai_location_allows_confirm_without_continue_anyway(world, monkeypatch
     saved = _chat(world, "confirm")
     assert "outside Thailand" not in saved["text"]
     assert "nothing was saved" not in saved["text"].lower()
-    assert world["db"].query(Property).count() == 1
+    assert len(fsh.prop_rows(world["fs"])) == 1
 
 
 @pytest.mark.parametrize(
@@ -890,7 +859,7 @@ def test_multi_field_edit_then_confirm(world, monkeypatch, message, name, kind, 
     # Empty "Not understood" table is omitted when every edit was applied
     assert "Not understood" not in edited["text"]
     assert name in edited["text"]
-    pending = world["db"].query(PendingAction).filter(PendingAction.status == "PENDING").one()
+    pending = fsh.pending_one(world["fs"], "PENDING")
     prov = pending.action_payload["provenance"]
     assert prov["property_name"]["value"] == name
     assert prov["property_type"]["value"] == kind
@@ -898,7 +867,7 @@ def test_multi_field_edit_then_confirm(world, monkeypatch, message, name, kind, 
     assert prov["price_numeric_min"]["value"] == price
     saved = _chat(world, "confirm")
     assert "nothing was saved" not in saved["text"].lower()
-    row = world["db"].query(Property).filter(Property.property_name == name).one()
+    row = fsh.prop_one(world["fs"], name=name)
     assert row.property_type == kind
     assert row.status == status_value
     assert int(row.price_numeric_min) == price
@@ -925,7 +894,7 @@ def test_invalid_edit_lists_allowed_values_and_confirm_lists_only_what_is_missin
     assert "Not understood" in edited["text"]
     assert "Villa" in edited["text"]
     assert "Sold Out" in edited["text"]
-    pending = world["db"].query(PendingAction).filter(PendingAction.status == "PENDING").one()
+    pending = fsh.pending_one(world["fs"], "PENDING")
     prov = pending.action_payload["provenance"]
     assert prov["property_name"]["value"] == "Kept_Name_1"
     assert "property_type" not in prov or prov.get("property_type", {}).get("value") != "castle"
@@ -941,7 +910,7 @@ def test_invalid_edit_lists_allowed_values_and_confirm_lists_only_what_is_missin
     _chat(world, "type villa, price 20 million thb, status available")
     saved = _chat(world, "confirm")
     assert "nothing was saved" not in saved["text"].lower()
-    row = world["db"].query(Property).filter(Property.property_name == "Kept_Name_1").one()
+    row = fsh.prop_one(world["fs"], name="Kept_Name_1")
     assert int(row.price_numeric_min) == 20_000_000
 
 

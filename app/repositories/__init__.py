@@ -1,1 +1,1 @@
-"""Admin data repositories (Firestore / Postgres dual-store)."""
+"""Admin data repositories (Firestore)."""

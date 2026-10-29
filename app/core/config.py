@@ -8,9 +8,6 @@ from pydantic import field_validator
 
 logger = logging.getLogger(__name__)
 
-# Clearly fake — no real credentials. Production/dev must set DATABASE_URL via env/.env.
-_DATABASE_URL_PLACEHOLDER = "postgresql://USER:PASSWORD@127.0.0.1:5432/tajlandia_db"
-
 _WEAK_SECRETS = {
     "",
     "secret",
@@ -86,11 +83,6 @@ class Settings(BaseSettings):
 
         return f"{base}/oferty/{clean_slug}"
     
-    # Database Configuration (Multi-Database Support for Admin vs User Side)
-    # Must be set via environment / .env in non-test runs — default has no real credentials.
-    DATABASE_URL: str = ""
-    ADMIN_DATABASE_URL: Optional[str] = None
-    USER_DATABASE_URL: Optional[str] = None
     # Optional app signing secret (also check INTERNAL_API_SECRET for weakness)
     SECRET_KEY: str = ""
     
@@ -142,7 +134,7 @@ class Settings(BaseSettings):
     # Persistent property context (reference memory separate from live facts)
     PROPERTY_CONTEXT_RECENT_MESSAGES: int = 20
     PROPERTY_CONTEXT_SUMMARY_CHARS: int = 4000
-    # Chat history + property_context always go to Firestore (not Postgres)
+    # Chat history + property_context always go to Firestore
     ENABLE_PROPERTY_CONTEXT_PERSISTENCE: bool = True
 
     # Lead/audit permanent writes (separate from chat memory which is always Firestore when sync is on)
@@ -153,16 +145,6 @@ class Settings(BaseSettings):
     CHAT_LOG_RETENTION_DAYS: int = 180
     CHAT_LOG_MASK_PII: bool = True
 
-    # Stage F1 dual-store modes: "postgres" | "firestore" | "both"
-    # both = write both stores; read Firestore first (leads: fall back to SQL if empty)
-    # Stage F1: Firestore is the default store. Use "postgres" or "both" only as temporary overrides.
-    STORE_PENDING_ACTIONS: str = "firestore"
-    STORE_AUDIT: str = "firestore"
-    STORE_LEADS_READ: str = "firestore"
-    # Stage F3: staff users + login sessions (admin_authentication / admin_sessions).
-    STORE_USERS: str = "firestore"
-    # Stage F2: both | postgres | firestore. Firestore = properties never touch SQL.
-    STORE_PROPERTIES_WRITE: str = "both"
     # Local development only: accept "dev-token-<email>" and the bare X-Staff-Email header. Never in production.
     ALLOW_INSECURE_DEV_AUTH: bool = False
     ALLOW_HARD_DELETE: bool = False
@@ -255,12 +237,6 @@ class Settings(BaseSettings):
     USER_FIREBASE_CREDENTIALS_PATH: Optional[str] = None
     USER_ENABLE_FIRESTORE_SYNC: Optional[bool] = None
 
-    def get_admin_db_url(self) -> str:
-        return self.ADMIN_DATABASE_URL or self.DATABASE_URL
-
-    def get_user_db_url(self) -> str:
-        return self.USER_DATABASE_URL or self.DATABASE_URL
-
     def get_admin_firestore_project_id(self) -> str:
         return self.ADMIN_FIRESTORE_PROJECT_ID or self.FIRESTORE_PROJECT_ID or "varsovia-8c135"
 
@@ -313,17 +289,6 @@ class Settings(BaseSettings):
     ]
 
 
-
-    @field_validator("DATABASE_URL", "ADMIN_DATABASE_URL", "USER_DATABASE_URL", mode="before")
-    def assemble_db_url(cls, v: Optional[str]) -> Optional[str]:
-        if isinstance(v, str):
-            if v.startswith("postgres://"):
-                return v.replace("postgres://", "postgresql+psycopg2://", 1)
-            elif v.startswith("postgresql://") and not v.startswith("postgresql+"):
-                return v.replace("postgresql://", "postgresql+psycopg2://", 1)
-            elif v.startswith("postgresql+psycopg://"):
-                return v.replace("postgresql+psycopg://", "postgresql+psycopg2://", 1)
-        return v
 
     @field_validator("ALLOWED_ORIGINS", mode="before")
     def assemble_cors_origins(cls, v: Union[str, List[str]]) -> List[str]:
@@ -398,35 +363,6 @@ def is_test_environment() -> bool:
     return False
 
 
-def _database_url_is_configured(url: Optional[str]) -> bool:
-    u = (url or "").strip()
-    if not u:
-        return False
-    # Reject empty-ish / placeholder-only values
-    if u in (_DATABASE_URL_PLACEHOLDER, "postgresql://USER:PASSWORD@127.0.0.1:5432/tajlandia_db"):
-        return False
-    if "USER:PASSWORD@" in u or "user:password@" in u.lower():
-        return False
-    if u.rstrip("/").endswith("://") or u in ("postgresql://", "postgresql+psycopg2://"):
-        return False
-    return True
-
-
-def assert_database_configured_or_exit() -> None:
-    """
-    Fail fast at startup when DATABASE_URL is missing in a non-test environment.
-    Tests must supply DATABASE_URL via conftest / env — never from a real password default.
-    """
-    if is_test_environment():
-        return
-    if _database_url_is_configured(settings.DATABASE_URL):
-        return
-    raise RuntimeError(
-        "DATABASE_URL is not configured. Set DATABASE_URL in the environment or .env file "
-        "(do not embed real passwords in code). Refusing to start."
-    )
-
-
 def log_config_warnings() -> None:
     """
     Emit WARNING logs once at startup for risky/off flags. Never logs secret values.
@@ -439,12 +375,6 @@ def log_config_warnings() -> None:
             )
     if not getattr(settings, "ENABLE_LEAD_SAVING", False):
         logger.warning("Lead saving is OFF")
-
-    try:
-        from app.repositories.store_mode import log_store_modes_at_startup
-        log_store_modes_at_startup()
-    except Exception as e:
-        logger.debug("Could not log STORE_* modes at startup: %s", e)
 
     redirect = (getattr(settings, "GOOGLE_REDIRECT_URI", None) or "").strip()
     if redirect and "railway.app" in redirect.lower():
@@ -535,10 +465,6 @@ def get_admin_config_status() -> Dict[str, Any]:
     admin_chat_on = bool(getattr(settings, "ADMIN_CHAT_LOGGING", True))
     retention = int(getattr(settings, "CHAT_LOG_RETENTION_DAYS", 180) or 180)
     mask_pii = bool(getattr(settings, "CHAT_LOG_MASK_PII", True))
-    from app.repositories.store_mode import normalize_store_mode
-    store_pending = normalize_store_mode(getattr(settings, "STORE_PENDING_ACTIONS", None))
-    store_audit = normalize_store_mode(getattr(settings, "STORE_AUDIT", None))
-    store_leads = normalize_store_mode(getattr(settings, "STORE_LEADS_READ", None))
     return {
         "audit_logging": audit_on,
         "lead_saving": lead_on,
@@ -546,9 +472,6 @@ def get_admin_config_status() -> Dict[str, Any]:
         "admin_chat_logging": admin_chat_on,
         "chat_log_retention_days": retention,
         "chat_log_mask_pii": mask_pii,
-        "store_pending_actions": store_pending,
-        "store_audit": store_audit,
-        "store_leads_read": store_leads,
         "flags": {
             "ENABLE_AUDIT_LOGGING": {
                 "value": audit_on,
@@ -574,22 +497,9 @@ def get_admin_config_status() -> Dict[str, Any]:
                 "value": mask_pii,
                 "what_it_does": "Masks emails and phone numbers in admin chat log text.",
             },
-            "STORE_PENDING_ACTIONS": {
-                "value": store_pending,
-                "what_it_does": "Where pending_actions are stored (default firestore; postgres/both are temporary overrides).",
-            },
-            "STORE_AUDIT": {
-                "value": store_audit,
-                "what_it_does": "Where audit_logs are stored (default firestore; postgres/both are temporary overrides).",
-            },
-            "STORE_LEADS_READ": {
-                "value": store_leads,
-                "what_it_does": "Where admin lead reads come from (default firestore; postgres/both are temporary overrides).",
-            },
         },
         "firestore_project_shared": not bool(admin_fs),
         "google_redirect_host": redirect_host,
-        "database_configured": _database_url_is_configured(settings.DATABASE_URL),
         "report_storage": report_storage_label,
         "ingest_allowed_domains": _csv_setting("INGEST_ALLOWED_DOMAINS"),
         "ingest_blocked_domains": _csv_setting("INGEST_BLOCKED_DOMAINS"),

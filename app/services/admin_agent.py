@@ -4,7 +4,6 @@ import json
 import logging
 from typing import Dict, Any, List, Optional
 from datetime import datetime, timezone
-from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.auth import AuthenticatedStaff
@@ -52,12 +51,6 @@ _CONFIRM_FORBIDDEN_EXTRA = {
 _NEGATION_MARKERS = (
     "don't", "dont", "do not", "never", "nie ", "nie,", "ไม่",
 )
-
-
-def _sql_db(db):
-    from app.repositories import properties_store
-
-    return properties_store.sql_db(db)
 
 
 def _token_from_tool_results(tool_results: Any) -> Optional[str]:
@@ -383,7 +376,7 @@ def is_strict_reject_message(message: Optional[str]) -> bool:
 
 
 def _resolve_batch_targets(
-    db: Session,
+    db: Any,
     property_ids: Optional[List[str]],
     update_fields: Optional[Dict[str, Any]] = None,
     operation_type: str = "delete",
@@ -425,7 +418,7 @@ def _resolve_batch_targets(
             unresolved.append(q)
             continue
 
-        # Direct id / Firestore / SQL fallback when index missed an explicit doc id
+        # Direct id / Firestore fallback when index missed an explicit doc id
         if not resolved_id:
             try:
                 from app.services.firestore_service import get_firestore_client
@@ -450,30 +443,6 @@ def _resolve_batch_targets(
                         }
             except Exception as e:
                 logger.debug(f"Batch target resolve (firestore) skipped for '{q}': {e}")
-        if not resolved_id and _sql_db(db) is not None:
-            try:
-                from app.db.models import Property
-                prop = (
-                    db.query(Property)
-                    .filter(Property.property_id == q)
-                    .first()
-                )
-                if prop:
-                    resolved_id = prop.property_id
-                    name = (
-                        getattr(prop, "property_name", None)
-                        or getattr(prop, "title", None)
-                        or resolved_id
-                    )
-                    current = {
-                        "status": getattr(prop, "status", None),
-                        "price": getattr(prop, "price_display", None)
-                        or getattr(prop, "price_numeric_min", None),
-                        "location": getattr(prop, "location", None),
-                    }
-            except Exception as e:
-                logger.debug(f"Batch target resolve (sql) skipped for '{q}': {e}")
-
         if not resolved_id:
             unresolved.append(q)
             if not clarification:
@@ -482,22 +451,6 @@ def _resolve_batch_targets(
                     f"I will not invent an id or propose a change."
                 )
             continue
-
-        # Enrich current from store when name-index resolved without snapshot
-        if not current and _sql_db(db) is not None:
-            try:
-                from app.db.models import Property
-                prop = db.query(Property).filter(Property.property_id == resolved_id).first()
-                if prop:
-                    name = name or getattr(prop, "property_name", None) or resolved_id
-                    current = {
-                        "status": getattr(prop, "status", None),
-                        "price": getattr(prop, "price_display", None)
-                        or getattr(prop, "price_numeric_min", None),
-                        "location": getattr(prop, "location", None),
-                    }
-            except Exception:
-                pass
 
         change: Dict[str, Any] = {"operation": operation_type}
         if operation_type == "update" and up:
@@ -579,7 +532,7 @@ CLAUDE_ADMIN_TOOLS = [
     },
     {
         "name": "create_or_update_listing",
-        "description": "Proposes creating or updating property data in PostgreSQL and Cloud Firestore. DOES NOT execute immediately; stages a pending action requiring employee confirmation. Supports setting property info (title, price, location, bedrooms, pool) and adding property image URLs.",
+        "description": "Proposes creating or updating property data in Cloud Firestore. DOES NOT execute immediately; stages a pending action requiring employee confirmation. Supports setting property info (title, price, location, bedrooms, pool) and adding property image URLs.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -720,7 +673,7 @@ CLAUDE_ADMIN_TOOLS = [
         "name": "execute_batch_property_action",
         "description": (
             "PROPOSE ONLY a bulk property operation (delete, update, or create). "
-            "Never mutates Firestore/SQL directly. Builds an itemised preview and stages a PendingAction; "
+            "Never mutates Firestore directly. Builds an itemised preview and stages a PendingAction; "
             "staff must confirm item-by-item / via confirm_and_execute_action before any write."
         ),
         "input_schema": {
@@ -754,7 +707,7 @@ CLAUDE_ADMIN_TOOLS = [
     },
     {
         "name": "get_database_inventory_stats",
-        "description": "Retrieves the authoritative total property count and complete breakdown of all properties across the entire database (Cloud Firestore live projects catalog and PostgreSQL). Use this tool whenever asked how many total properties are in the database, overall inventory size, or catalog overview.",
+        "description": "Retrieves the authoritative total property count and complete breakdown of all properties across the entire database (Cloud Firestore live projects catalog). Use this tool whenever asked how many total properties are in the database, overall inventory size, or catalog overview.",
         "input_schema": {
             "type": "object",
             "properties": {}
@@ -821,7 +774,7 @@ When authorized staff asks you to create, prepare, or generate a portfolio PDF, 
 PROPERTY DELETIONS & BATCH ACTIONS PROTOCOL (PROPOSE → CONFIRM ONLY — NEVER INSTANT MUTATE):
 When an authorized admin asks to delete, remove, create, or modify a property (e.g., "9D Cozy Villas okay delete this", "remove 9D Cozy Villas", "delete property X", "update price on …"):
 1. DO NOT ask for a Property ID if they already gave a clear name. Accept the name/id and resolve it against the catalog.
-2. Invoke `execute_batch_property_action` to PROPOSE the change only. That tool stages a PendingAction and returns `requires_confirmation=True`. It MUST NEVER mutate Firestore/SQL itself.
+2. Invoke `execute_batch_property_action` to PROPOSE the change only. That tool stages a PendingAction and returns `requires_confirmation=True`. It MUST NEVER mutate Firestore itself.
 3. Always propose first. Never claim you executed a delete/update/create. Never promise instant removal from the live database. Staff must confirm via the confirm button / explicit short confirmation before any write applies through `confirm_and_execute_action`.
 4. If TWO OR MORE properties match an ambiguous name, list them (id + name + key current values) and ask which one(s) — do not guess.
 5. After a successful staff confirmation (not before), you may report that the listed items were applied, share the Operation ID, and note the 6-day undo snapshot window.
@@ -1192,7 +1145,7 @@ def _attach_timing_debug(res: Dict[str, Any], timer: Any) -> Dict[str, Any]:
 
 
 def try_admin_fast_path(
-    db: Session,
+    db: Any,
     conv: Any,
     message: str,
     staff_user: AuthenticatedStaff,
@@ -1211,26 +1164,6 @@ def try_admin_fast_path(
     obvious = classify_obvious_intent(message) or {}
     fast = obvious.get("fast_path")
     msg_l = (message or "").strip().lower()
-
-    if re.search(r"\bshow differences\b", msg_l):
-        from app.services.admin_chat_quality import format_store_differences
-        from app.services.firestore_service import get_store_differences
-
-        text = format_store_differences(get_store_differences(db))
-        append_conversation_turn(db, conv, message, text)
-        return {
-            "type": "text",
-            "text": text,
-            "session_id": conv.session_id,
-            "conversation_id": str(conv.id),
-            "requires_confirmation": False,
-            "pending_action_id": None,
-            "action_status": None,
-            "tools_used": [{"name": "get_database_inventory_stats"}],
-            "download_link": None,
-            "suggestions": [],
-            "language": language,
-        }
 
     if not fast:
         if is_capabilities_question(message) or is_greeting_or_chit_chat(message):
@@ -1365,7 +1298,7 @@ def try_admin_fast_path(
     return None
 
 
-def _handle_admin_greeting(db: Session, conv: Any, message: str, language: str = "en") -> Dict[str, Any]:
+def _handle_admin_greeting(db: Any, conv: Any, message: str, language: str = "en") -> Dict[str, Any]:
     """Warmly greets authorized staff or answers capabilities — no LLM call."""
     from app.services.admin_reply_helpers import is_capabilities_question
 
@@ -1442,7 +1375,7 @@ def _handle_admin_greeting(db: Session, conv: Any, message: str, language: str =
 
 
 def process_admin_chat(
-    db: Session,
+    db: Any,
     session_id: str,
     message: Optional[str] = None,
     staff_user: Optional[AuthenticatedStaff] = None,
@@ -1937,21 +1870,14 @@ def process_admin_chat(
                     fields = payload.get("fields") or payload.get("fields_to_update") or {}
                     if isinstance(fields, dict):
                         new_value = fields.get("price_display") or fields.get("price_numeric_min")
-                pg_state = "saved"
                 fs_state = "unavailable"
-                try:
-                    from app.db.models import Property as _Property
-                    found_pg = db.query(_Property).filter(_Property.property_id == str(pid)).first()
-                    pg_state = "saved" if found_pg is not None else "missing"
-                except Exception:
-                    pg_state = "could not be checked"
                 try:
                     from app.services.firestore_service import get_property_by_id_from_firestore
                     found_fs = get_property_by_id_from_firestore(str(pid), target="admin")
                     fs_state = "saved" if found_fs else "missing"
                 except Exception:
                     fs_state = "unavailable"
-                store_line = describe_store_check(pg_state, fs_state)
+                store_line = describe_store_check(fs_state)
                 note = audit_note_for_reply(
                     role=getattr(staff_user, "role", None),
                     message=clean_message,
@@ -1977,13 +1903,13 @@ def process_admin_chat(
                 count = int(raw_res.get("image_count") or 0)
                 count_text = "1 image" if count == 1 else f"{count} images"
                 if active_lang == "pl":
-                    reply_text = f"Gotowe. {title} ma teraz {count_text}. Sprawdziłem obie bazy i zmiana jest zapisana."
+                    reply_text = f"Gotowe. {title} ma teraz {count_text}. Sprawdziłem bazę i zmiana jest zapisana."
                     if op_id:
                         reply_text += " Możesz cofnąć przez 6 dni, mówiąc 'cofnij'."
                 else:
                     reply_text = (
                         f"Done. {title} now has {count_text}. "
-                        "I checked both databases and the change is saved."
+                        "I checked the database and the change is saved."
                     )
                     if op_id:
                         reply_text += " You can undo this for 6 days by saying 'undo'."
@@ -2216,6 +2142,18 @@ def process_admin_chat(
             append_conversation_turn(db, conv, clean_message, ruled.get("text") or "")
             return _attach_timing_debug(ruled, timer)
 
+    # 3b. Admin-taught answer for admin-bot FAQs (near-exact match only; rules above always win)
+    if staff_user is not None and action not in ("confirm", "reject") and clean_message and not attached_images:
+        try:
+            from app.services.taught_answers import find_match as _find_taught_answer
+            _taught = _find_taught_answer(clean_message, language=active_lang, audience="admin")
+        except Exception:
+            _taught = None
+        if _taught:
+            from app.services.admin_turn_rules import _text as _taught_text
+            append_conversation_turn(db, conv, clean_message, _taught["answer"])
+            return _attach_timing_debug(_taught_text(conv, _taught["answer"]), timer)
+
     # 4. AI Model Intent Classification & Safety Evaluation
     client = None
     if settings.ANTHROPIC_API_KEY:
@@ -2365,7 +2303,7 @@ def _sanitize_tool_result_for_llm(obj: Any) -> Any:
 
 
 def _call_anthropic_claude(
-    db: Session,
+    db: Any,
     conv: Any,
     message: str,
     staff_user: AuthenticatedStaff,
@@ -3015,7 +2953,7 @@ def _call_anthropic_claude(
 
 
 def _run_deterministic_admin(
-    db: Session,
+    db: Any,
     conv: Any,
     message: str,
     staff_user: AuthenticatedStaff,
@@ -3928,8 +3866,8 @@ def _run_deterministic_admin(
             subject_name = subject_match.group(1).strip(" .") if subject_match else ""
             property_names = set()
             try:
-                from app.db.models import Property as _Property
-                property_rows = db.query(_Property).all()
+                from app.repositories import properties_store as _ps
+                property_rows = _ps.list_rows(db)
                 if isinstance(property_rows, list):
                     property_names = {
                         str(getattr(row, "property_name", "") or "").strip().lower()
@@ -4922,7 +4860,7 @@ def _prop_to_dict(p: Any) -> Dict[str, Any]:
 
 
 def _execute_admin_tool(
-    db: Session,
+    db: Any,
     tool_name: str,
     tool_args: Dict[str, Any],
     staff_user: AuthenticatedStaff,
@@ -4963,7 +4901,7 @@ def _execute_admin_tool(
 
 
 def _execute_admin_tool_uncached(
-    db: Session,
+    db: Any,
     tool_name: str,
     tool_args: Dict[str, Any],
     staff_user: AuthenticatedStaff,
@@ -4996,22 +4934,6 @@ def _execute_admin_tool_uncached(
         except Exception as e:
             logger.warning(f"Error querying Firestore in search_properties_full: {e}")
 
-        # Fallback only if Firestore returned no properties (e.g. offline unit testing without GCP credentials)
-        if not res and db is not None:
-            params = PropertyFilterParams(
-                location=tool_args.get("location"),
-                property_type=tool_args.get("property_type"),
-                min_price=tool_args.get("min_price"),
-                max_price=tool_args.get("max_price"),
-                bedrooms=tool_args.get("bedrooms"),
-                has_pool=tool_args.get("has_pool"),
-                status=tool_args.get("status"),
-                limit=tool_args.get("limit", 10),
-                websites=selected_websites
-            )
-            props = search_properties_safe(db, params)
-            res = [_prop_to_dict(p) for p in props]
-
         record_audit_log(
             db=db,
             staff_user_id=staff_email,
@@ -5032,13 +4954,6 @@ def _execute_admin_tool_uncached(
         except Exception as e:
             fs_unavailable = True
             logger.warning(f"Firestore property count is unavailable: {e}")
-
-        pg_count = 0
-        try:
-            from app.db.models import Property
-            pg_count = _sql_db(db).query(Property).count() if _sql_db(db) is not None else 0
-        except Exception:
-            pass
 
         props_sample = []
         try:
@@ -5081,17 +4996,14 @@ def _execute_admin_tool_uncached(
             if p.get("price_numeric_min"):
                 prices.append(p["price_numeric_min"])
 
-        if fs_unavailable:
-            total_count = pg_count or len(props_sample)
-        elif fs_count is not None and pg_count and int(fs_count) != int(pg_count):
-            total_count = int(pg_count)
+        if fs_unavailable or fs_count is None:
+            total_count = len(props_sample)
         else:
-            total_count = fs_count if fs_count is not None else (pg_count or len(props_sample))
+            total_count = fs_count
 
         res = {
             "authoritative_total_properties": total_count,
             "firestore_live_projects_count": 0 if fs_count is None else fs_count,
-            "postgresql_listings_count": pg_count,
             "firestore_count_unavailable": fs_unavailable,
             "is_complete_database_count": not fs_unavailable,
             "notes": "This is the authoritative total property count of the entire database. It is NOT capped or truncated by search limits.",
@@ -5618,19 +5530,12 @@ def _execute_admin_tool_uncached(
         target_pid = tool_args.get("property_id")
         selected_websites = getattr(staff_user, "selected_websites", None)
         resolve_source, resolved = resolve_existing_property(db, str(target_pid or ""))
-        prop = resolved if resolve_source == "postgres" else None
-        if prop and selected_websites and not property_belongs_to_websites(prop, selected_websites):
-            return {
-                "status": "FORBIDDEN",
-                "message": f"Access denied: Property '{target_pid}' does not belong to your currently selected website(s): {selected_websites}."
-            }, False, None
+        prop = None
 
         # Canonical id from resolver (Firestore doc id)
         if resolve_source == "firestore" and isinstance(resolved, dict):
             target_pid = resolved.get("property_id") or resolved.get("_firestore_doc_id") or target_pid
             tool_args["property_id"] = target_pid
-        elif prop is not None:
-            target_pid = getattr(prop, "property_id", target_pid)
 
         raw_fields = dict(tool_args.get("fields_to_update") or tool_args.get("fields") or {})
         explicit_websites = "websites" in raw_fields or "selected_websites" in raw_fields
@@ -5638,7 +5543,7 @@ def _execute_admin_tool_uncached(
             raw_fields.pop("websites", None)
             raw_fields.pop("selected_websites", None)
 
-        # Exists in PG or Firestore → always update (never create-required fields)
+        # Exists in Firestore → always update (never create-required fields)
         if resolve_source:
             mode = "update"
             tool_args["mode"] = "update"

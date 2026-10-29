@@ -407,6 +407,11 @@ def normalize_firestore_project(doc_id: str, data: Dict[str, Any]) -> Dict[str, 
         "amenities": amenities,
         "tags": tags,
         "expected_roi": data.get("expectedROI") or data.get("rentalYield"),
+        "developer_name": next(
+            (str(v).strip() for v in (data.get("developer_name"), data.get("developerName"), data.get("developer"))
+             if isinstance(v, str) and v.strip()),
+            None,
+        ),
         "description": desc_str,
         "websites": websites_list,
         "is_public": data.get("isActive", True),
@@ -762,56 +767,6 @@ def _norm_store_value(value: Any) -> str:
         except ValueError:
             pass
     return re.sub(r"\s+", " ", text)
-
-
-def get_store_differences(db: Any) -> Dict[str, Any]:
-    """List ids that exist in only one store, or whose name, price, or status differ."""
-    from app.db.models import Property
-
-    postgres: Dict[str, Dict[str, Any]] = {}
-    try:
-        for row in db.query(Property).all():
-            postgres[str(row.property_id)] = {
-                "name": row.property_name,
-                "price": row.price_numeric_min if row.price_numeric_min is not None else row.price_display,
-                "status": row.status,
-            }
-    except Exception as exc:
-        return {"error": f"Postgres could not be read ({exc}).", "items": []}
-
-    firestore: Dict[str, Dict[str, Any]] = {}
-    try:
-        client = get_firestore_client(target="admin")
-        if not client:
-            raise RuntimeError("Firestore count is unavailable")
-        for doc in client.collection("projects").stream():
-            data = doc.to_dict() or {}
-            name = data.get("name") or data.get("title") or doc.id
-            if isinstance(name, dict):
-                name = name.get("en") or next(iter(name.values()), doc.id)
-            firestore[str(doc.id)] = {
-                "name": name,
-                "price": data.get("priceFrom") if data.get("priceFrom") is not None else data.get("price"),
-                "status": data.get("completionStatus") or data.get("status"),
-            }
-    except Exception:
-        return {"error": "The Firestore count is unavailable.", "items": []}
-
-    items = []
-    for property_id in sorted(set(postgres) | set(firestore)):
-        if property_id not in firestore:
-            items.append({"property_id": property_id, "issue": "only in Postgres"})
-            continue
-        if property_id not in postgres:
-            items.append({"property_id": property_id, "issue": "only in Firestore"})
-            continue
-        differed = []
-        for field in ("name", "price", "status"):
-            if _norm_store_value(postgres[property_id].get(field)) != _norm_store_value(firestore[property_id].get(field)):
-                differed.append(field)
-        if differed:
-            items.append({"property_id": property_id, "issue": "differs in " + ", ".join(differed)})
-    return {"error": None, "items": items}
 
 
 def get_property_by_id_from_firestore(property_id: str, target: str = "user") -> Optional[Dict[str, Any]]:
@@ -1310,6 +1265,10 @@ def save_or_update_property_firestore(
         if fields.get("description"):
             update_payload["description"] = fields.get("description")
 
+        # Import provenance (source URL, guessed fields) — Firestore is the only store now
+        if isinstance(fields.get("raw_metadata"), dict) and fields["raw_metadata"]:
+            update_payload["raw_metadata"] = fields["raw_metadata"]
+
         # Pool & Amenities
         if fields.get("has_pool") is not None:
             amenities = list(existing_data.get("amenities") or [])
@@ -1650,7 +1609,7 @@ def get_audit_logs_from_firestore(
 # ==============================================================================
 
 class FirestoreConversation:
-    """Wrapper that mimics SQLAlchemy Conversation object so existing code works seamlessly."""
+    """Wrapper that mimics the old Conversation object so existing code works seamlessly."""
     def __init__(self, doc_id: str, data: Dict[str, Any]):
         self.id = doc_id
         self.session_id = data.get("sessionId") or doc_id
@@ -1713,7 +1672,7 @@ def get_or_create_conversation_firestore(
 ) -> FirestoreConversation:
     """
     Retrieves or creates a conversation in Firestore `conversations`.
-    Stores full messageHistory + preferences (property_context). No PostgreSQL.
+    Stores full messageHistory + preferences (property_context).
 
     Existing docs are rebound to the request site_origin so multi-site session
     reuse cannot keep a stale brand / advisor email.
@@ -1879,7 +1838,7 @@ def append_conversation_turn_firestore(
 
     conversation.updated_at = timestamp
 
-    # Write FULL history + preferences to Firestore (no Postgres)
+    # Write FULL history + preferences to Firestore
     sid = getattr(conversation, "session_id", None)
     agent_type = getattr(conversation, "agent_type", "public")
     client = get_firestore_client(target="admin" if agent_type == "admin" else "user")

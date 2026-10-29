@@ -97,7 +97,6 @@ def _which(rows: List[Any]) -> str:
 
 def resolve_write_target(db: Any, name: str) -> Tuple[Any, Optional[str]]:
     """Return (record, None) or (None, question). Uses the shared property resolver."""
-    from app.db.models import Property
     from app.repositories import properties_store
     from app.services.admin_property_fields import resolve_existing_property
 
@@ -533,7 +532,6 @@ def try_rule_based_write(
         re.I,
     )
     if bulk:
-        from app.db.models import Property
         from app.services.action_service import create_pending_action
         from app.services.admin_change_diff import build_batch_change_diff
 
@@ -610,7 +608,6 @@ def try_rule_based_write(
         re.I,
     )
     if bulk_amount and "%" not in bulk_amount.group(0):
-        from app.db.models import Property
         from app.services.action_service import create_pending_action
         from app.services.admin_change_diff import build_batch_change_diff
 

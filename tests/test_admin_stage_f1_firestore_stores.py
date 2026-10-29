@@ -14,15 +14,9 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
-from sqlalchemy import create_engine
-from sqlalchemy.dialects.postgresql import JSONB, UUID
-from sqlalchemy.ext.compiler import compiles
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
-
 from app.core.auth import AuthenticatedStaff
 from app.core.config import get_admin_config_status
-from app.db.models import AuditLog, Base, PendingAction, Property
+from app.core.deps import FirestoreSession
 from app.repositories import audit_repo, leads_read_repo, pending_actions_repo
 from app.services.audit_service import (
     AUDIT_WRITE_FAILED_MSG,
@@ -39,16 +33,6 @@ from app.services.action_service import (
     reject_pending_action,
 )
 from tests.fake_firestore import FakeFirestore, patch_firestore, set_store_modes
-
-
-@compiles(JSONB, "sqlite")
-def _compile_jsonb_sqlite(type_, compiler, **kw):
-    return "JSON"
-
-
-@compiles(UUID, "sqlite")
-def _compile_uuid_sqlite(type_, compiler, **kw):
-    return "CHAR(36)"
 
 
 class _Snap:
@@ -193,20 +177,7 @@ class FakeFirestore:
 
 @pytest.fixture
 def db():
-    engine = create_engine(
-        "sqlite://",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    Base.metadata.create_all(bind=engine, tables=[
-        Property.__table__,
-        PendingAction.__table__,
-        AuditLog.__table__,
-    ])
-    Session = sessionmaker(bind=engine)
-    session = Session()
-    yield session
-    session.close()
+    return FirestoreSession()
 
 
 @pytest.fixture
@@ -408,17 +379,6 @@ def test_leads_report_from_firestore_all_formats(db, fake_fs, monkeypatch):
         assert res.get("error") is None or "No leads" not in str(res.get("message") or "")
 
 
-def test_leads_both_falls_back_to_sql_when_fs_empty(db, monkeypatch):
-    _modes(monkeypatch, leads="both")
-    monkeypatch.setattr(
-        "app.services.firestore_service.get_firestore_client",
-        lambda *a, **k: None,
-    )
-    # Empty FS → SQL path; with empty SQL returns []
-    rows = leads_read_repo.query_leads(db, limit=5)
-    assert rows == []
-
-
 # ----- conversation review -----
 
 
@@ -458,49 +418,11 @@ def test_conversation_review_from_firestore(db, fake_fs, monkeypatch):
 # ----- STORE modes + config-status -----
 
 
-def test_config_status_exposes_store_modes(monkeypatch):
-    _modes(monkeypatch, pending="postgres", audit="firestore", leads="both")
+def test_config_status_has_no_store_mode_flags():
     status = get_admin_config_status()
-    assert status["store_pending_actions"] == "postgres"
-    assert status["store_audit"] == "firestore"
-    assert status["store_leads_read"] == "both"
-    assert status["flags"]["STORE_PENDING_ACTIONS"]["value"] == "postgres"
-
-
-def test_pending_postgres_only_mode(db, fake_fs, staff, monkeypatch):
-    _modes(monkeypatch, pending="postgres", audit="postgres")
-    action = create_pending_action(
-        db,
-        staff_user_id=staff.email,
-        tool_name="send_email",
-        action_payload={"to": "a@b.com", "subject": "Hi", "body": "x"},
-        conversation_id="conv-pg",
-    )
-    # Postgres row exists; firestore pending collection may be empty
-    row = db.query(PendingAction).filter(PendingAction.id == uuid.UUID(str(action.id))).first()
-    assert row is not None
-    assert not any(
-        p[0] == "pending_actions" and p[1] == str(action.id) for p in fake_fs.docs
-    )
-
-
-# ----- production startup without postgres -----
-
-
-def test_production_startup_errors_without_postgres(monkeypatch):
-    monkeypatch.setenv("ENVIRONMENT", "production")
-    monkeypatch.setenv("ENV", "production")
-    # Force re-evaluate allow flag
-    from app.db import session as session_mod
-
-    monkeypatch.setattr(session_mod, "runtime_env", lambda: "production")
-    monkeypatch.setattr(session_mod, "is_test_environment", lambda: False)
-
-    with pytest.raises(RuntimeError, match="PostgreSQL is required"):
-        session_mod._create_db_engine(
-            "postgresql://bad:bad@127.0.0.1:1/none",
-            "admin",
-        )
+    assert not [k for k in status if k.startswith("store_")]
+    assert not [k for k in status["flags"] if k.startswith("STORE_")]
+    assert "database_configured" not in status
 
 
 # ----- bump_properties_version -----
@@ -532,8 +454,8 @@ def test_invalidate_search_cache_bumps_version(fake_fs, monkeypatch):
     assert fake_fs.docs[("meta", "properties_version")]["version"] >= 1
 
 
-def test_firestore_mode_missing_client_raises_no_sql_fallback(db, monkeypatch):
-    """STORE=firestore with no client must raise — never fall back to SQL silently."""
+def test_missing_firestore_client_raises(db, monkeypatch):
+    """With no Firestore client, writes must raise (there is no other store to fall back to)."""
     _modes(monkeypatch, pending="firestore", audit="firestore")
     monkeypatch.setattr(
         "app.services.firestore_service.get_firestore_client",

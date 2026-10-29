@@ -1553,17 +1553,9 @@ def apply_command(draft: Dict[str, Any], command: Dict[str, Any]) -> List[str]:
 
 
 def find_duplicate(db: Any, url: str, name: str) -> Optional[Dict[str, str]]:
-    from app.services.action_service import _is_real_db_session, name_slug
-    from app.db.models import Property
+    from app.services.action_service import name_slug
 
     slug = name_slug(name)
-    if _is_real_db_session(db):
-        for row in db.query(Property).all():
-            meta = getattr(row, "raw_metadata", None) or {}
-            ingest = meta.get("ingest") if isinstance(meta, dict) else None
-            same_url = isinstance(ingest, dict) and ingest.get("source_url") == url
-            if same_url or (slug and name_slug(row.property_name or "") == slug):
-                return {"property_id": row.property_id, "name": row.property_name or row.property_id, "store": "Postgres"}
     try:
         from app.services.firestore_service import get_firestore_client
         client = get_firestore_client(target="admin")

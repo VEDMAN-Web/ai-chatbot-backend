@@ -9,7 +9,6 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # WeasyPrint needs: pango, cairo, gdk-pixbuf, fonts-config (+ build tools for wheels)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
-    libpq-dev \
     curl \
     libpango-1.0-0 \
     libpangocairo-1.0-0 \

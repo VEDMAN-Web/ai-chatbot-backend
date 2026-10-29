@@ -9,8 +9,6 @@ import json
 import logging
 from enum import Enum
 from typing import Dict, Any, List, Optional, Tuple
-from sqlalchemy.orm import Session
-from app.db.models import Property
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -71,7 +69,7 @@ class ToolRoutingGuardrail:
         cls,
         user_message: str,
         session_state: Optional[Dict[str, Any]],
-        db: Session
+        db: Any
     ) -> Tuple[Optional[str], Optional[str], bool]:
         """
         Disambiguation Guardrail for PDF / Brochure generation.

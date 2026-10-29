@@ -10,14 +10,13 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
-from sqlalchemy.orm import Session
 
 from app.core.auth import (
     AuthenticatedStaff,
     require_admin_or_super_admin,
     require_super_admin,
 )
-from app.db.session import get_db
+from app.core.deps import get_db
 from app.services.admin_logs_service import (
     ADMIN_COLLECTION,
     VISITOR_COLLECTION,
@@ -49,7 +48,7 @@ def _allowed_sites(staff: AuthenticatedStaff) -> List[str]:
 
 
 def _audit_read(
-    db: Session,
+    db: Any,
     staff: AuthenticatedStaff,
     endpoint: str,
     filters: Dict[str, Any],
@@ -158,7 +157,7 @@ def list_query_logs(
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     staff: AuthenticatedStaff = Depends(require_admin_or_super_admin),
-    db: Session = Depends(get_db),
+    db: Any = Depends(get_db),
 ):
     params = _common_query(
         site=site, language=language, date_from=date_from, date_to=date_to,
@@ -193,7 +192,7 @@ def list_query_sessions(
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     staff: AuthenticatedStaff = Depends(require_admin_or_super_admin),
-    db: Session = Depends(get_db),
+    db: Any = Depends(get_db),
 ):
     params = _common_query(
         site=site, language=language, date_from=date_from, date_to=date_to,
@@ -216,7 +215,7 @@ def list_query_sessions(
 def get_query_session(
     session_id: str,
     staff: AuthenticatedStaff = Depends(require_admin_or_super_admin),
-    db: Session = Depends(get_db),
+    db: Any = Depends(get_db),
 ):
     _audit_read(db, staff, "GET /admin/query-logs/sessions/{session_id}", {"session_id": session_id})
     return query_session_turns(
@@ -230,7 +229,7 @@ def get_query_session(
 @router.get("/query-logs/stats")
 def query_log_stats(
     staff: AuthenticatedStaff = Depends(require_admin_or_super_admin),
-    db: Session = Depends(get_db),
+    db: Any = Depends(get_db),
 ):
     _audit_read(db, staff, "GET /admin/query-logs/stats", {})
     return query_stats(
@@ -259,7 +258,7 @@ def list_chat_logs(
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     staff: AuthenticatedStaff = Depends(require_super_admin),
-    db: Session = Depends(get_db),
+    db: Any = Depends(get_db),
 ):
     params = _common_query(
         site=site, language=language, date_from=date_from, date_to=date_to,
@@ -294,7 +293,7 @@ def list_chat_sessions(
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     staff: AuthenticatedStaff = Depends(require_super_admin),
-    db: Session = Depends(get_db),
+    db: Any = Depends(get_db),
 ):
     params = _common_query(
         site=site, language=language, date_from=date_from, date_to=date_to,
@@ -317,7 +316,7 @@ def list_chat_sessions(
 def get_chat_session(
     session_id: str,
     staff: AuthenticatedStaff = Depends(require_super_admin),
-    db: Session = Depends(get_db),
+    db: Any = Depends(get_db),
 ):
     _audit_read(db, staff, "GET /admin/chat-logs/sessions/{session_id}", {"session_id": session_id})
     return query_session_turns(
@@ -331,7 +330,7 @@ def get_chat_session(
 @router.get("/chat-logs/stats")
 def chat_log_stats(
     staff: AuthenticatedStaff = Depends(require_super_admin),
-    db: Session = Depends(get_db),
+    db: Any = Depends(get_db),
 ):
     _audit_read(db, staff, "GET /admin/chat-logs/stats", {})
     return query_stats(
@@ -345,7 +344,7 @@ def chat_log_stats(
 def purge_chat_logs_endpoint(
     body: Optional[PurgeBody] = None,
     staff: AuthenticatedStaff = Depends(require_super_admin),
-    db: Session = Depends(get_db),
+    db: Any = Depends(get_db),
 ):
     dry_run = True if body is None else bool(body.dry_run)
     result = purge_chat_logs(dry_run=dry_run)

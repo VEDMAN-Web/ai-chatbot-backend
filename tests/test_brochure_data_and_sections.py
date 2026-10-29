@@ -29,70 +29,40 @@ from app.services.brochure_sections import (
 EM_DASH = "\u2014"
 
 
-def _pg_property(**overrides):
-    base = dict(
-        property_id="PROP-TEST-001",
-        property_name="Kata Sea View Villa",
-        property_type="Villa",
-        status="UNDER_CONSTRUCTION",
-        country="Thailand",
-        province="Phuket",
-        district="Kata",
-        address=None,
-        latitude=7.8,
-        longitude=98.3,
-        developer_name="Example Developer",
-        price_display="from 12,500,000 THB",
-        price_numeric_min=12_500_000,
-        price_numeric_max=None,
-        currency="THB",
-        bedrooms_display="3",
-        bedrooms_min=3,
-        bedrooms_max=3,
-        bathrooms=3,
-        area_display="280 sqm",
-        area_sqm_min=280,
-        area_sqm_max=None,
-        units=12,
-        total_floors=2,
-        description="A hillside villa overlooking Kata Bay with private pool.",
-        ownership_type="leasehold",
-        highlights=["Sea view", "Private pool"],
-        facilities=["pool", "parking", "plavatelnyy-basseyn"],
-        amenities=["gym", "security"],
-        nearby_places=[
+def test_load_from_firestore_maps_and_localizes_labels():
+    raw = {
+        "name": {"en": "Kata Sea View Villa"},
+        "cityId": "Kata",
+        "province": "Phuket",
+        "countryId": "thailand",
+        "priceFrom": 12_500_000,
+        "currency": "THB",
+        "completionStatus": "UNDER_CONSTRUCTION",
+        "ownershipType": "leasehold",
+        "description": "A hillside villa.",
+        "highlights": ["Sea view", "Private pool"],
+        "facilities": ["pool", "parking", "plavatelnyy-basseyn"],
+        "amenities": ["gym", "security"],
+        "coverImage": "https://cdn.example/a.jpg",
+        "images": ["https://cdn.example/a.jpg", "https://cdn.example/b.jpg"],
+        "floorPlans": ["https://cdn.example/fp.jpg"],
+        "masterPlan": ["https://cdn.example/master.jpg"],
+        "completionDate": "Q4 2027",
+        "parking": "2 cars",
+        "layouts": [{"name": "Type A", "bedrooms": 3, "bathrooms": 3, "area": "280 sqm", "units": 6}],
+        "nearbyPlaces": [
             {"category": "beach", "name": "Kata Beach", "distance": "5 min"},
             {"category": "airport", "name": "Phuket Airport", "distance_text": "45 min"},
         ],
-        images=[
-            SimpleNamespace(image_url="https://cdn.example/a.jpg", image_type="exterior"),
-            SimpleNamespace(image_url="https://cdn.example/b.jpg", image_type="interior"),
-            SimpleNamespace(image_url="https://cdn.example/fp.jpg", image_type="floor_plan"),
-        ],
-        raw_metadata={
-            "completion": "Q4 2027",
-            "parking": "2 cars",
-            "unit_types": [
-                {"name": "Type A", "bedrooms": 3, "bathrooms": 3, "area": "280 sqm", "units": 6}
-            ],
-            "master_plan": ["https://cdn.example/master.jpg"],
-        },
-        updated_at=None,
-    )
-    base.update(overrides)
-    return SimpleNamespace(**base)
+    }
+    card = {"property_id": "PROP-TEST-001", "name": "Kata Sea View Villa", "raw_firestore_data": raw}
 
-
-def test_load_from_postgres_maps_and_localizes_labels():
-    prop = _pg_property()
-    db = MagicMock()
-    db.query.return_value.filter.return_value.first.return_value = prop
-
-    data = load_brochure_data(db, "PROP-TEST-001", site_origin="thai.estate", language="en")
+    with patch("app.services.firestore_service.get_property_by_id_from_firestore", return_value=card):
+        data = load_brochure_data(MagicMock(), "PROP-TEST-001", site_origin="thai.estate", language="en")
 
     assert data.name == "Kata Sea View Villa"
     assert data.district == "Kata"
-    assert data.price_display == "from 12,500,000 THB"
+    assert data.price_display == "from 12.50M THB"
     assert data.status == "Under construction"
     assert "Swimming pool" in data.facilities
     assert "Parking" in data.facilities
@@ -110,7 +80,7 @@ def test_load_from_postgres_maps_and_localizes_labels():
 
 def test_load_firestore_fallback_no_invented_price_or_description():
     db = MagicMock()
-    db.query.return_value.filter.return_value.first.return_value = None
+    
 
     fs_card = {
         "property_id": "isla-kata-sea-view-villa",
@@ -156,7 +126,7 @@ def test_load_firestore_fallback_no_invented_price_or_description():
 
 def test_load_neither_store_raises():
     db = MagicMock()
-    db.query.return_value.filter.return_value.first.return_value = None
+    
     with patch(
         "app.services.firestore_service.get_property_by_id_from_firestore",
         return_value=None,
@@ -182,34 +152,10 @@ def test_status_and_amenity_labels_no_raw_slugs():
     assert "rooftop-cinema" != unknown
 
 
-def test_sparse_postgres_does_not_invent():
-    prop = _pg_property(
-        price_display=None,
-        price_numeric_min=None,
-        price_numeric_max=None,
-        description=None,
-        bedrooms_display=None,
-        bedrooms_min=None,
-        bedrooms_max=None,
-        bathrooms=None,
-        area_display=None,
-        area_sqm_min=None,
-        area_sqm_max=None,
-        developer_name=None,
-        ownership_type=None,
-        status=None,
-        highlights=[],
-        facilities=[],
-        amenities=[],
-        nearby_places=[],
-        images=[],
-        raw_metadata={},
-        units=None,
-        total_floors=None,
-    )
-    db = MagicMock()
-    db.query.return_value.filter.return_value.first.return_value = prop
-    data = load_brochure_data(db, "PROP-TEST-001", language="en")
+def test_sparse_firestore_doc_does_not_invent():
+    card = {"property_id": "PROP-TEST-001", "name": "Sparse Villa", "raw_firestore_data": {"name": "Sparse Villa"}}
+    with patch("app.services.firestore_service.get_property_by_id_from_firestore", return_value=card):
+        data = load_brochure_data(MagicMock(), "PROP-TEST-001", language="en")
 
     assert data.price_display is None
     assert data.description is None
@@ -319,7 +265,7 @@ def test_page_plan_paginates_facilities_and_skips_empty():
 
 def test_firestore_real_price_and_pl_description():
     db = MagicMock()
-    db.query.return_value.filter.return_value.first.return_value = None
+    
     fs_card = {
         "property_id": "proj-1",
         "name": "Fallback",

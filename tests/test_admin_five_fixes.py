@@ -74,10 +74,9 @@ def test_is_read_only_audit_tool_classification():
 
 def test_record_audit_read_only_does_not_raise_on_db_error(monkeypatch):
     monkeypatch.setattr("app.core.config.settings.ENABLE_AUDIT_LOGGING", True)
-    # Exercise Postgres failure path (default STORE_AUDIT is firestore)
-    monkeypatch.setattr("app.core.config.settings.STORE_AUDIT", "postgres")
+    # Firestore write failure
+    monkeypatch.setattr("app.repositories.audit_repo.create", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("firestore unavailable")))
     db = MagicMock()
-    db.commit.side_effect = RuntimeError("relation audit_logs does not exist")
 
     entry = record_audit_log(
         db=db,
@@ -87,14 +86,12 @@ def test_record_audit_read_only_does_not_raise_on_db_error(monkeypatch):
     )
     assert getattr(entry, "audit_write_failed", False) is True
     assert getattr(entry, "is_ephemeral", False) is True
-    db.rollback.assert_called()
 
 
 def test_record_audit_write_raises_fixed_message(monkeypatch):
     monkeypatch.setattr("app.core.config.settings.ENABLE_AUDIT_LOGGING", True)
-    monkeypatch.setattr("app.core.config.settings.STORE_AUDIT", "postgres")
+    monkeypatch.setattr("app.repositories.audit_repo.create", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("firestore unavailable")))
     db = MagicMock()
-    db.commit.side_effect = RuntimeError("missing table")
 
     with pytest.raises(AuditPersistenceError, match="Could not record the audit log"):
         record_audit_log(
@@ -104,7 +101,6 @@ def test_record_audit_write_raises_fixed_message(monkeypatch):
             proposed_payload={"property_id": "x"},
             status="PENDING",
         )
-    db.rollback.assert_called()
 
 
 def test_create_pending_rolls_back_when_audit_fails(monkeypatch):

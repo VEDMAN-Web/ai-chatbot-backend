@@ -2,8 +2,6 @@ import re
 import json
 import logging
 from typing import Dict, Any, Optional, Tuple, List
-from sqlalchemy.orm import Session
-from app.db.models import Property
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -255,12 +253,24 @@ def extract_property_data_regex(text: str, filename: Optional[str] = None) -> Di
     return data
 
 
+def _find_existing_property(property_id: str) -> Optional[Any]:
+    """The Firestore listing with this id as an attribute-accessible record, or None."""
+    try:
+        from app.services.firestore_service import get_property_by_id_from_firestore
+        from app.services.property_search import FirestorePropertyAdapter
+
+        card = get_property_by_id_from_firestore(property_id)
+        return FirestorePropertyAdapter(card) if card else None
+    except Exception:
+        return None
+
+
 def extract_property_from_document(
-    db: Session,
+    db: Any,
     raw_text: str,
     filename: Optional[str] = None,
     explicit_property_id: Optional[str] = None
-) -> Tuple[Dict[str, Any], str, Optional[Property]]:
+) -> Tuple[Dict[str, Any], str, Optional[Any]]:
     """
     Parses document text into the website property schema.
     Returns (extracted_fields, mode, matched_existing_property).
@@ -276,21 +286,21 @@ def extract_property_from_document(
     existing_prop = None
 
     if target_id:
-        existing_prop = db.query(Property).filter(Property.property_id == target_id).first()
+        existing_prop = _find_existing_property(str(target_id))
 
     # If no ID matched directly, try matching by exact or close property name
+    rows: List[Any] = []
+    try:
+        from app.repositories import properties_store
+        rows = properties_store.list_rows(db) or []
+    except Exception:
+        rows = []
     if not existing_prop and extracted.get("property_name"):
-        clean_name = extracted["property_name"].strip()
-        existing_prop = db.query(Property).filter(Property.property_name.ilike(f"%{clean_name}%")).first()
-        if existing_prop:
-            target_id = existing_prop.property_id
-
-    # If still not found, check project name
-    if not existing_prop and extracted.get("project_name"):
-        proj = extracted["project_name"].strip()
-        existing_prop = db.query(Property).filter(Property.project_name.ilike(f"%{proj}%")).first()
-        if existing_prop:
-            target_id = existing_prop.property_id
+        clean_name = extracted["property_name"].strip().lower()
+        match = next((r for r in rows if clean_name and clean_name in str(r.property_name).lower()), None)
+        if match is not None:
+            existing_prop = _find_existing_property(match.property_id) or match
+            target_id = match.property_id
 
     if existing_prop:
         mode = "update"
@@ -300,7 +310,7 @@ def extract_property_from_document(
         if not target_id:
             # Generate new clean property ID
             prefix = "PROP-PHK" if extracted.get("province", "Phuket") == "Phuket" else "PROP-SMU"
-            count = db.query(Property).count() + 1
+            count = len(rows) + 1
             target_id = f"{prefix}-{count:03d}"
         extracted["property_id"] = target_id
 
@@ -308,7 +318,7 @@ def extract_property_from_document(
 
 
 def generate_property_diff_table(
-    db: Session,
+    db: Any,
     target_property_id: str,
     extracted_data: Dict[str, Any],
     mode: str = "update",
@@ -318,7 +328,7 @@ def generate_property_diff_table(
     Builds an executive-grade Markdown before/after comparison diff table
     for staff review prior to applying changes.
     """
-    existing_prop = db.query(Property).filter(Property.property_id == target_property_id).first()
+    existing_prop = _find_existing_property(str(target_property_id))
     
     table_lines = [
         f"### 📋 Staged Property Listing Proposal: **{extracted_data.get('property_name', target_property_id)}**",

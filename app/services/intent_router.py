@@ -611,7 +611,7 @@ def detect_deterministic_intent(
                     )
                     if named:
                         prop_name = named.group(1).strip(" .,?!")
-                        prop_id = prop_name  # resolve via Firestore/SQL by name
+                        prop_id = prop_name  # resolve via Firestore by name
                     elif len(last_result_ids) == 1:
                         prop_id = last_result_ids[0]
                     elif state.get("selected_property_ids"):

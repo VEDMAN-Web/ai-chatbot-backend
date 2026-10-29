@@ -11,9 +11,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Security, Request,
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.security import HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field, ConfigDict, model_validator
-from sqlalchemy.orm import Session
 
-from app.db.session import get_db
+from app.core.deps import get_db
 from app.repositories import users_repo
 from app.core.config import settings
 from app.core.auth import (
@@ -178,11 +177,11 @@ def google_oauth_callback(
     code: Optional[str] = None,
     state: Optional[str] = None,
     error: Optional[str] = None,
-    db: Session = Depends(get_db)
+    db: Any = Depends(get_db)
 ):
     """
     Receives authorization code from Google, exchanges it for access & refresh tokens,
-    and stores them isolated under the specific staff member's record in PostgreSQL.
+    and stores them isolated under the specific staff member's record in Firestore.
     """
     if error:
         return HTMLResponse(
@@ -303,7 +302,7 @@ def google_oauth_callback(
 @router.get("/google/status", response_model=GoogleStatusResponse)
 def get_google_status(
     staff: AuthenticatedStaff = Depends(get_current_user_from_db),
-    db: Session = Depends(get_db)
+    db: Any = Depends(get_db)
 ):
     """
     Returns the Google Workspace connection status for the authenticated user.
@@ -335,7 +334,7 @@ def get_google_status(
 @router.post("/google/disconnect")
 def disconnect_google_oauth(
     staff: AuthenticatedStaff = Depends(get_current_user_from_db),
-    db: Session = Depends(get_db)
+    db: Any = Depends(get_db)
 ):
     """
     Revokes and unlinks the connected Google account for the authenticated staff member.
@@ -373,7 +372,7 @@ def disconnect_google_oauth(
 
 
 # =========================================================================
-# User Login, Logout & Session Management Endpoints
+# User Login, Logout & Any Management Endpoints
 # =========================================================================
 
 class GoogleAuthInfo(BaseModel):
@@ -602,7 +601,7 @@ class ChangePasswordResponse(BaseModel):
 def user_login(
     req: UserLoginRequest,
     request: Request,
-    db: Session = Depends(get_db)
+    db: Any = Depends(get_db)
 ):
     """
     Authenticates an administrative / staff user with email and password,
@@ -788,7 +787,7 @@ def user_login(
 def user_logout(
     body: Optional[UserLogoutRequest] = None,
     bearer_creds: Optional[HTTPAuthorizationCredentials] = Security(security_bearer),
-    db: Session = Depends(get_db)
+    db: Any = Depends(get_db)
 ):
     """
     Terminates the active user session and revokes the token.
@@ -835,7 +834,7 @@ def user_logout(
 @router.get("/me", response_model=UserInfoResponse, tags=["Authentication"])
 def get_current_user_profile(
     staff: AuthenticatedStaff = Depends(get_current_user_from_db),
-    db: Session = Depends(get_db)
+    db: Any = Depends(get_db)
 ):
     """
     Returns the authenticated user's profile based on the active session token,
@@ -869,7 +868,7 @@ def list_admin_users_with_google_status(
     is_active: Optional[bool] = Query(None, description="Filter by active status"),
     status: Optional[str] = Query(None, description="Filter by status: active, blocked, deactivated"),
     staff: AuthenticatedStaff = Depends(require_admin_or_super_admin),
-    db: Session = Depends(get_db)
+    db: Any = Depends(get_db)
 ):
     """
     Directory endpoint for admins and super admins to inspect staff users.
@@ -939,7 +938,7 @@ def list_admin_users_with_google_status(
 def create_admin_user(
     req: CreateUserRequest,
     staff: AuthenticatedStaff = Depends(require_admin_or_super_admin),
-    db: Session = Depends(get_db)
+    db: Any = Depends(get_db)
 ):
     """
     Creates a new administrator or worker user account.
@@ -949,7 +948,7 @@ def create_admin_user(
     Website Access Delegation:
       - super_admin can grant access to: All websites, Multiple websites, or Single specific website.
       - admin can only grant access to websites that they themselves have access to.
-    Syncs with both PostgreSQL and Cloud Firestore admin_authentication.
+    Syncs with both Cloud Firestore admin_authentication.
     """
     active_env_key = get_current_env_domain_key()
     staff_domain_key = staff.domain_key or get_user_domain_key(staff.email, staff.domain)
@@ -1069,7 +1068,7 @@ def create_admin_user(
 def get_admin_user_details(
     user_id: str,
     staff: AuthenticatedStaff = Depends(require_admin_or_super_admin),
-    db: Session = Depends(get_db)
+    db: Any = Depends(get_db)
 ):
     """
     Retrieves details and status for a specific user account.
@@ -1123,7 +1122,7 @@ def update_admin_user(
     user_id: str,
     req: UpdateUserRequest,
     staff: AuthenticatedStaff = Depends(require_admin_or_super_admin),
-    db: Session = Depends(get_db)
+    db: Any = Depends(get_db)
 ):
     """
     Updates user details (name, password reset, role, active status, domain, allowed_websites).
@@ -1133,7 +1132,7 @@ def update_admin_user(
     Strict Domain & Website Isolation:
       - Super admin can assign any canonical websites (all, multiple, single).
       - Admin can only grant websites within their own allowed_websites.
-    Syncs with PostgreSQL and Cloud Firestore.
+    Syncs with Cloud Firestore.
     """
     user = _store_call(lambda: users_repo.get_by_id(db, user_id))
     if not user:
@@ -1270,7 +1269,7 @@ def update_admin_user(
 def delete_admin_user(
     user_id: str,
     staff: AuthenticatedStaff = Depends(require_admin_or_super_admin),
-    db: Session = Depends(get_db)
+    db: Any = Depends(get_db)
 ):
     """
     Deletes a user account and cascades active sessions.
@@ -1279,7 +1278,7 @@ def delete_admin_user(
       - admin can delete worker accounts only within this domain.
       - No user can delete their own currently authenticated account.
       - Cross-domain deletion is strictly blocked (403).
-    Removes account from PostgreSQL and Cloud Firestore admin_authentication.
+    Removes account from Cloud Firestore admin_authentication.
     """
     user = _store_call(lambda: users_repo.get_by_id(db, user_id))
     if not user:
@@ -1347,12 +1346,12 @@ def block_admin_user(
     user_id: str,
     req: BlockUserRequest,
     staff: AuthenticatedStaff = Depends(require_super_admin),
-    db: Session = Depends(get_db)
+    db: Any = Depends(get_db)
 ):
     """
     Super Admin API to block or unblock any administrator or worker user.
     When a user is blocked:
-      - All active sessions are immediately revoked in PostgreSQL.
+      - All active sessions are immediately revoked in Firestore.
       - Account status is set to 'blocked' and is_active to False.
       - Status is synced to Cloud Firestore admin_authentication collection (isBlocked=True).
       - Blocked users cannot log in (403 Forbidden) and cannot call any admin APIs (chat, CRUD, etc.).
@@ -1420,7 +1419,7 @@ def block_admin_user(
 @router.post("/register", response_model=AdminUserDirectoryItem, status_code=status.HTTP_201_CREATED, tags=["Authentication"])
 def register_user(
     req: RegisterRequest,
-    db: Session = Depends(get_db),
+    db: Any = Depends(get_db),
     bearer_creds: Optional[HTTPAuthorizationCredentials] = Security(security_bearer)
 ):
     """
@@ -1560,7 +1559,7 @@ def _deliver_password_reset(email: str, token: str) -> None:
 def forgot_password_endpoint(
     req: ForgotPasswordRequest,
     request: Request,
-    db: Session = Depends(get_db)
+    db: Any = Depends(get_db)
 ):
     """
     Always returns the same body. The reset token is emailed, never returned in production.
@@ -1589,7 +1588,11 @@ def forgot_password_endpoint(
         logger.warning("Forgot-password lookup failed: %s", exc)
 
     # Same cryptographic work either way so the response timing stays close.
-    reset_token = generate_password_reset_token(email_clean, expires_in_seconds=1800)
+    try:
+        reset_token = generate_password_reset_token(email_clean, expires_in_seconds=1800)
+    except Exception as exc:
+        logger.warning("Forgot-password token could not be created: %s", exc)
+        return ForgotPasswordResponse(success=True, message=_RESET_GENERIC_MESSAGE)
     if account_exists:
         _deliver_password_reset(email_clean, reset_token)
         try:
@@ -1618,11 +1621,11 @@ def forgot_password_endpoint(
 def reset_password_endpoint(
     req: ResetPasswordRequest,
     request: Request,
-    db: Session = Depends(get_db)
+    db: Any = Depends(get_db)
 ):
     """
     Resets the administrator password using a valid cryptographic reset token.
-    Updates password in Cloud Firestore `admin_authentication` and PostgreSQL.
+    Updates password in Cloud Firestore `admin_authentication`.
     Revokes any active user sessions to force a fresh login.
     """
     from app.core.rate_limit import enforce_rate_limit
@@ -1686,12 +1689,12 @@ def reset_password_endpoint(
 def change_password_endpoint(
     req: ChangePasswordRequest,
     staff: AuthenticatedStaff = Depends(get_current_user_from_db),
-    db: Session = Depends(get_db)
+    db: Any = Depends(get_db)
 ):
     """
     Changes the authenticated administrator's password.
     Requires current password verification.
-    Updates password in Cloud Firestore `admin_authentication` and PostgreSQL.
+    Updates password in Cloud Firestore `admin_authentication`.
     """
 
     old_pw = req.old_password.strip()

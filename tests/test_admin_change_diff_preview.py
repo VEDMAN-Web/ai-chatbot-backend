@@ -226,7 +226,7 @@ def test_confirm_refuses_stale_and_reproposes(staff):
     assert str(created[0].id) in (out.get("message") or "")
 
 
-def test_confirm_applies_only_previewed_fields(staff):
+def test_confirm_applies_only_previewed_fields(staff, monkeypatch):
     """Extra fields in payload that were not in the diff table must not be written."""
     change_diff = {
         "property_id": "prop-1",
@@ -248,17 +248,12 @@ def test_confirm_applies_only_previewed_fields(staff):
             "change_diff": change_diff,
         }
     )
-    old_prop = SimpleNamespace(
-        property_id="prop-1",
-        property_name="Keep Name",
-        status="Available",
-        price_display="10M THB",
-        websites=["tajlandia.com"],
-    )
-    prop_q = MagicMock()
-    prop_q.filter.return_value.first.return_value = old_prop
+    fake = patch_firestore(monkeypatch)
+    fake.docs[("projects", "prop-1")] = {
+        "name": "Keep Name", "status": "Available", "priceDisplay": "10M THB",
+        "websites": ["tajlandia.com"], "isActive": True,
+    }
     db = MagicMock()
-    db.query.return_value = prop_q
 
     with patch("app.services.action_service.get_pending_action", return_value=action), patch(
         "app.services.action_service.record_audit_log", return_value=SimpleNamespace(id="a1")
@@ -279,9 +274,10 @@ def test_confirm_applies_only_previewed_fields(staff):
 
     assert out["status"] == action_service.ACTION_STATUS_EXECUTED
     # Only price_display from the preview should have been applied
-    assert getattr(old_prop, "price_display", None) == "12M THB"
-    assert getattr(old_prop, "property_name", None) == "Keep Name"
-    assert getattr(old_prop, "status", None) == "Available"
+    stored = fake.docs[("projects", "prop-1")]
+    assert stored["priceDisplay"] == "12M THB"
+    assert stored["name"] == "Keep Name"
+    assert stored["status"] == "Available"
     assert out["execution_result"].get("operation_id") == "op_preview1"
 
 
@@ -410,7 +406,7 @@ def test_proposal_shows_real_current_price_not_dash():
     assert "5,000,000" in str(price_rows[0]["new"]) or "5000000" in str(price_rows[0]["new"]).replace(",", "")
 
 
-def test_confirm_right_after_proposal_succeeds_no_stale(staff):
+def test_confirm_right_after_proposal_succeeds_no_stale(staff, monkeypatch):
     """Same current at confirm → apply; no endless stale loop."""
     change_diff = {
         "property_id": "pirak-villa",
@@ -440,18 +436,12 @@ def test_confirm_right_after_proposal_succeeds_no_stale(staff):
         "price_display": "39,990,000 THB",
         "_readable": {"price_numeric_min": True, "price_display": True},
     }
-    old_prop = SimpleNamespace(
-        property_id="pirak-villa",
-        property_name="Pirak Villa",
-        status="Available",
-        price_display="39,990,000 THB",
-        price_numeric_min=39_990_000,
-        websites=["tajlandia.com"],
-    )
-    prop_q = MagicMock()
-    prop_q.filter.return_value.first.return_value = old_prop
+    fake = patch_firestore(monkeypatch)
+    fake.docs[("projects", "pirak-villa")] = {
+        "name": "Pirak Villa", "status": "Available", "priceDisplay": "39,990,000 THB",
+        "priceFrom": 39_990_000, "websites": ["tajlandia.com"], "isActive": True,
+    }
     db = MagicMock()
-    db.query.return_value = prop_q
 
     with patch("app.services.action_service.get_pending_action", return_value=action), patch(
         "app.services.action_service.record_audit_log", return_value=SimpleNamespace(id="aud1")
@@ -472,7 +462,7 @@ def test_confirm_right_after_proposal_succeeds_no_stale(staff):
         )
 
     assert out["status"] == action_service.ACTION_STATUS_EXECUTED
-    assert float(old_prop.price_numeric_min) == 5_000_000
+    assert float(fake.docs[("projects", "pirak-villa")]["priceFrom"]) == 5_000_000
 
 
 def test_real_stale_refused_once_then_fresh_confirmable(staff):

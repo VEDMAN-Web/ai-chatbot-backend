@@ -33,6 +33,26 @@ from app.services.report_service import (
 )
 
 
+
+def _seed_lead(lead_id, name, email, created, **extra):
+    """Write one lead into the (fake) Firestore `leads` collection."""
+    from app.services.firestore_service import get_firestore_client
+
+    doc = {
+        "contact_name": name,
+        "contact_email": email,
+        "contact_phone": "",
+        "preferred_location": "Phuket",
+        "budget_max": 1_000_000,
+        "lead_score": 50,
+        "status": "new",
+        "buying_signals": [],
+        "created_at": created.isoformat(),
+    }
+    doc.update(extra)
+    get_firestore_client("user").collection("leads").document(lead_id).set(doc)
+
+
 # ---------------------------------------------------------------------------
 # TASK 1 — period parsing / messaging
 # ---------------------------------------------------------------------------
@@ -79,73 +99,21 @@ def test_zero_result_message_offers_wider_window():
 
 def test_get_buyer_leads_defaults_all_time_not_seven(monkeypatch):
     """Tool handler: omitted days → all-time (days=0), not hidden 7."""
+    from app.core.deps import FirestoreSession
     from app.services import admin_agent as aa
 
-    captured = {}
-
-    class FakeLead:
-        def __init__(self, **kw):
-            for k, v in kw.items():
-                setattr(self, k, v)
-
-    leads_rows = [
-        FakeLead(
-            id="1",
-            contact_name="Alexander Smith",
-            contact_email="alex@corp.com",
-            contact_phone="+1",
-            preferred_location="Phuket",
-            budget_max=None,
-            budget_min=None,
-            lead_score=80,
-            status="new",
-            buying_signals=[],
-            created_at=datetime(2026, 10, 11, tzinfo=timezone.utc),
-        )
-    ]
-
-    class FakeQuery:
-        def __init__(self, rows):
-            self._rows = rows
-            self._filters = []
-
-        def filter(self, *a, **k):
-            self._filters.append((a, k))
-            return self
-
-        def order_by(self, *a):
-            return self
-
-        def limit(self, n):
-            self._limit = n
-            return self
-
-        def count(self):
-            return len(self._rows)
-
-        def all(self):
-            return list(self._rows)
-
-        def first(self):
-            return self._rows[0] if self._rows else None
-
-    class FakeDB:
-        def query(self, model):
-            return FakeQuery(leads_rows)
-
-    monkeypatch.setattr(aa.settings, "ENABLE_LEAD_SAVING", False)
-    monkeypatch.setattr(aa.settings, "STORE_LEADS_READ", "postgres")
-    monkeypatch.setattr(
-        "app.services.firestore_service.get_firestore_client",
-        lambda *a, **k: None,
+    _seed_lead(
+        "1", "Alexander Smith", "alex@corp.com", datetime(2026, 10, 11, tzinfo=timezone.utc),
+        contact_phone="+1", lead_score=80,
     )
+    monkeypatch.setattr(aa.settings, "ENABLE_LEAD_SAVING", False)
     staff = MagicMock()
     staff.email = "admin@test.com"
     staff.selected_websites = None
     monkeypatch.setattr(aa, "record_audit_log", lambda **k: None)
 
     res, _, _ = aa._execute_admin_tool(
-        FakeDB(), "get_buyer_leads", {"limit": 10}, staff, "c1"
+        FirestoreSession(), "get_buyer_leads", {"limit": 10}, staff, "c1"
     )
     assert res["days"] == 0 or res.get("all_time") is True
     assert res["total"] >= 1
@@ -162,63 +130,19 @@ def test_is_possible_test_lead_flags_example_com():
 
 
 def test_leads_report_no_filters_includes_all(monkeypatch, tmp_path):
+    from app.core.deps import FirestoreSession
     from app.services import report_service as rs
 
     monkeypatch.setattr(rs.settings, "REPORT_STORAGE_DIR", str(tmp_path / "reports"))
-    monkeypatch.setattr(rs.settings, "STORE_LEADS_READ", "postgres")
     monkeypatch.setattr(rs, "is_s3_configured", lambda: False)  # independent of AWS env vars
-    monkeypatch.setattr(
-        "app.services.firestore_service.get_firestore_client",
-        lambda *a, **k: None,
-    )
     store = InMemoryStorageProvider()
 
-    class L:
-        def __init__(self, i, name, email, created):
-            self.id = str(i)
-            self.contact_name = name
-            self.contact_email = email
-            self.contact_phone = ""
-            self.preferred_location = "Phuket"
-            self.budget_max = 1_000_000
-            self.budget_min = None
-            self.lead_score = 50
-            self.status = "new"
-            self.buying_signals = []
-            self.created_at = created
-
-    rows = [
-        L(1, "A One", "a@corp.com", datetime(2026, 9, 1, tzinfo=timezone.utc)),
-        L(2, "B Two", "test@example.com", datetime(2026, 10, 11, tzinfo=timezone.utc)),
-        L(3, "C Three", "c@corp.com", datetime(2026, 10, 5, tzinfo=timezone.utc)),
-    ]
-
-    class FakeQuery:
-        def filter(self, *a, **k):
-            return self
-
-        def order_by(self, *a):
-            return self
-
-        def limit(self, n):
-            self._n = n
-            return self
-
-        def count(self):
-            return len(rows)
-
-        def all(self):
-            return rows[: getattr(self, "_n", len(rows))]
-
-        def first(self):
-            return rows[0]
-
-    class FakeDB:
-        def query(self, model):
-            return FakeQuery()
+    _seed_lead("1", "A One", "a@corp.com", datetime(2026, 9, 1, tzinfo=timezone.utc))
+    _seed_lead("2", "B Two", "test@example.com", datetime(2026, 10, 11, tzinfo=timezone.utc))
+    _seed_lead("3", "C Three", "c@corp.com", datetime(2026, 10, 5, tzinfo=timezone.utc))
 
     out = generate_report(
-        FakeDB(),
+        FirestoreSession(),
         "pdf",
         report_type="leads",
         days=0,
@@ -228,80 +152,28 @@ def test_leads_report_no_filters_includes_all(monkeypatch, tmp_path):
     assert out.get("total_leads") == 3
     assert "all stored" in (out.get("period_label") or "").lower() or out["total_leads"] == 3
     # test-entry flag on example.com lead
-    row = serialize_lead_row(rows[1])
+    from app.repositories import leads_read_repo
+
+    flagged = next(r for r in leads_read_repo.query_leads(None, limit=10) if r.contact_email == "test@example.com")
+    row = serialize_lead_row(flagged)
     assert row["possible_test_entry"] is True
     assert row.get("test_entry_tag") == "possible test entry"
 
 
 def test_leads_report_empty_period_offers_wider(monkeypatch, tmp_path):
+    from app.core.deps import FirestoreSession
     from app.services import report_service as rs
 
     monkeypatch.setattr(rs.settings, "REPORT_STORAGE_DIR", str(tmp_path / "reports"))
-    monkeypatch.setattr(rs.settings, "STORE_LEADS_READ", "postgres")
-    monkeypatch.setattr(
-        "app.services.firestore_service.get_firestore_client",
-        lambda *a, **k: None,
-    )
+    monkeypatch.setattr(rs, "is_s3_configured", lambda: False)
 
-    class FakeQuery:
-        def __init__(self, empty=True):
-            self.empty = empty
-
-        def filter(self, *a, **k):
-            return FakeQuery(empty=True)
-
-        def order_by(self, *a):
-            return self
-
-        def limit(self, n):
-            return self
-
-        def count(self):
-            return 0 if self.empty else 12
-
-        def all(self):
-            return []
-
-        def first(self):
-            return SimpleNamespace(
-                created_at=datetime(2026, 10, 11, tzinfo=timezone.utc)
-            )
-
-    class FakeDB:
-        def query(self, model):
-            # first calls for period query return empty; wider uses same — simplify
-            return FakeQuery(empty=True)
-
-    # Patch wider count path: after empty, generate_report queries again for wider.
-    # leads_read_repo.count_leads / most_recent use .all(), not .count().
-    calls = {"n": 0}
-    recent = SimpleNamespace(
-        id="r1",
-        contact_name="Recent",
-        contact_email="r@corp.com",
-        contact_phone="",
-        preferred_location="",
-        preferred_type=None,
-        budget_min=None,
-        budget_max=None,
-        lead_score=10,
-        buying_signals=[],
-        status="new",
-        created_at=datetime(2026, 10, 11, tzinfo=timezone.utc),
-    )
-
-    class TrackingDB:
-        def query(self, model):
-            calls["n"] += 1
-            q = FakeQuery(empty=True)
-            if calls["n"] > 2:
-                q = FakeQuery(empty=False)
-                q.all = lambda: [recent] * 12
-                q.first = lambda: recent
-            return q
+    # Twelve leads, all about two weeks old: the 7-day window is empty, a wider one is not.
+    two_weeks_ago = datetime.now(timezone.utc) - timedelta(days=14)
+    for i in range(12):
+        _seed_lead(f"r{i}", f"Recent {i}", f"r{i}@corp.com", two_weeks_ago)
 
     out = generate_report(
-        TrackingDB(),
+        FirestoreSession(),
         "pdf",
         report_type="leads",
         days=7,
@@ -309,8 +181,9 @@ def test_leads_report_empty_period_offers_wider(monkeypatch, tmp_path):
     )
     assert out.get("empty_period") is True
     assert out.get("file_url") is None
-    assert "Want the last" in (out.get("message") or "") or "most recent" in (out.get("message") or "").lower()
-    assert "2026-10-11" in (out.get("message") or "") or out.get("most_recent_lead_date") == "2026-10-11"
+    message = out.get("message") or ""
+    assert "Want the last" in message or "most recent" in message.lower()
+    assert two_weeks_ago.strftime("%Y-%m-%d") in message or out.get("most_recent_lead_date") == two_weeks_ago.strftime("%Y-%m-%d")
 
 
 # ---------------------------------------------------------------------------

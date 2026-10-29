@@ -2,11 +2,9 @@ import re
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, Optional, List, Tuple
-from sqlalchemy.orm import Session
 from fastapi import HTTPException, status
 import logging
 
-from app.db.models import Property
 from app.core.config import settings
 from app.core.auth import AuthenticatedStaff
 from app.services.audit_service import record_audit_log
@@ -250,7 +248,7 @@ def validate_property_data(
     existing_property: Optional[Any] = None
 ) -> Tuple[bool, List[str], str]:
     """
-    Validates data completeness before adding or updating any property in PostgreSQL or Cloud Firestore.
+    Validates data completeness before adding or updating any property in Cloud Firestore.
     If ANY required value is missing, empty, or null, blocks insertion and returns:
     (False, missing_fields, error_message).
 
@@ -268,7 +266,7 @@ def validate_property_data(
         str(mode).lower() == "create"
         and existing_property is None
         and not payload.get("is_update_only")
-        and str(payload.get("resolve_source") or "").lower() not in ("postgres", "firestore")
+        and str(payload.get("resolve_source") or "").lower() not in ("firestore",)
     )
 
     errors: Dict[str, str] = {}
@@ -317,7 +315,7 @@ def validate_property_data(
 
 
 def create_pending_action(
-    db: Session,
+    db: Any,
     staff_user_id: str,
     tool_name: str,
     action_payload: Dict[str, Any],
@@ -403,13 +401,13 @@ def create_pending_action(
     return action
 
 
-def get_pending_action(db: Session, pending_action_id: str) -> PendingAction:
+def get_pending_action(db: Any, pending_action_id: str) -> PendingAction:
     """Retrieves a pending action and lazily marks it as EXPIRED if the timeout elapsed."""
     return pending_actions_repo.get(db, pending_action_id)
 
 
 def _append_action_lifecycle_note(
-    db: Session,
+    db: Any,
     *,
     conversation_id: Optional[str],
     pending_action_id: str,
@@ -564,7 +562,7 @@ def _assert_confirm_authorized(action, staff: AuthenticatedStaff, confirmation_t
 
 
 def confirm_and_execute_action(
-    db: Session,
+    db: Any,
     pending_action_id: str,
     authenticated_staff: AuthenticatedStaff,
     confirmation_token: Optional[str] = None
@@ -886,18 +884,17 @@ def confirm_and_execute_action(
                     }
                 elif operation_id:
                     audit_payload["operation_id"] = operation_id
-                audit.proposed_payload = audit_payload
-                audit.tool_arguments = {"operation_id": operation_id} if operation_id else None
-                audit.execution_result = str(result_data)
-                audit.status = "SUCCESS"
-                db.add(audit)
-                db.commit()
+                from app.repositories import audit_repo
+                audit_repo.update_fields(
+                    db,
+                    str(audit.id),
+                    proposed_payload=audit_payload,
+                    tool_arguments={"operation_id": operation_id} if operation_id else None,
+                    execution_result=str(result_data),
+                    status="SUCCESS",
+                )
             except Exception as enrich_exc:
                 logger.warning(f"Could not enrich confirm audit row: {enrich_exc}")
-                try:
-                    db.rollback()
-                except Exception:
-                    pass
 
         from app.core.config import settings as _settings
         audit_disabled = bool(
@@ -1000,7 +997,7 @@ def confirm_and_execute_action(
 
 
 def reject_pending_action(
-    db: Session,
+    db: Any,
     pending_action_id: str,
     authenticated_staff: AuthenticatedStaff,
     reason: Optional[str] = None
@@ -1049,7 +1046,7 @@ def reject_pending_action(
 
 
 def _execute_batch_property_action(
-    db: Session,
+    db: Any,
     payload: Dict[str, Any],
     authenticated_staff: AuthenticatedStaff,
 ) -> Dict[str, Any]:
@@ -1110,40 +1107,15 @@ def _execute_batch_property_action(
     )
 
 
-def _serialize_property_snapshot(prop: Any) -> Dict[str, Any]:
-    """Capture a plain dict of listing fields for the 6-day undo snapshot."""
-    if prop is None:
-        return {}
-    keys = (
-        "property_id", "property_name", "project_name", "property_type", "status",
-        "country", "province", "district", "subdistrict", "area", "address",
-        "price_display", "price_numeric_min", "price_numeric_max", "currency", "price_note",
-        "bedrooms_display", "bedrooms_min", "bedrooms_max", "bathrooms",
-        "area_display", "area_sqm_min", "area_sqm_max", "usable_area_sqm", "land_area_sqm",
-        "description", "has_pool", "beach_access", "sea_view",
-        "features", "facilities", "amenities", "highlights", "developer_name", "ownership_type",
-        "websites", "is_public",
-    )
-    out: Dict[str, Any] = {}
-    for k in keys:
-        if hasattr(prop, k):
-            out[k] = getattr(prop, k, None)
-    # Also keep common aliases used by Firestore restore
-    if out.get("property_name"):
-        out.setdefault("name", out["property_name"])
-        out.setdefault("title", out["property_name"])
-    return out
-
-
 def _execute_update_listing(
-    db: Session,
+    db: Any,
     payload: Dict[str, Any],
     authenticated_staff: Optional[AuthenticatedStaff] = None,
     conversation_id: Optional[str] = None,
     pending_action_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Safely creates or updates property listings in PostgreSQL via parameterized ORM.
+    Safely creates or updates property listings in Cloud Firestore.
     Handles mode == 'create' (or missing property) and mode == 'update'.
     Saves a 6-day undo snapshot BEFORE writing when staff_user is provided (chat confirm path).
     """
@@ -1175,16 +1147,7 @@ def _execute_update_listing(
         format_price_thb,
     )
 
-    from app.repositories import properties_store
-
-    sql_on = properties_store.sql_enabled()
-    resolve_source, resolved = resolve_existing_property(db if sql_on else None, property_id)
-    if not sql_on:
-        prop = None
-    else:
-        prop = resolved if resolve_source == "postgres" else (
-            db.query(Property).filter(Property.property_id == property_id).first()
-        )
+    resolve_source, resolved = resolve_existing_property(db, property_id)
     if resolve_source == "firestore" and isinstance(resolved, dict):
         property_id = str(resolved.get("property_id") or resolved.get("_firestore_doc_id") or property_id)
         payload = dict(payload)
@@ -1213,7 +1176,7 @@ def _execute_update_listing(
         validation_payload["mode"] = "update"
         validation_payload["resolve_source"] = resolve_source
     is_valid, missing, err_msg = validate_property_data(
-        validation_payload, existing_property=resolved if resolve_source else prop
+        validation_payload, existing_property=resolved if resolve_source else None
     )
     if not is_valid:
         raise HTTPException(
@@ -1232,15 +1195,12 @@ def _execute_update_listing(
         "websites"
     }
 
-    updated_fields = {}
-    is_created = False
     operation_id: Optional[str] = None
 
     # Snapshot BEFORE mutation (6-day undo window) — chat confirm path only
-    previous_state = _serialize_property_snapshot(prop) if prop else None
-    # A listing that exists only in Firestore (no SQL row) is still an update, not a create:
-    # undo of a "create" deletes the document.
-    existing_listing = prop is not None or resolve_source is not None
+    previous_state = None  # record_crud_operation_snapshot reads the raw Firestore document
+    # undo of a "create" deletes the document, so an existing listing must be snapshotted as update.
+    existing_listing = resolve_source is not None
     snapshot_action = "create" if not existing_listing else ("delete" if mode == "delete" else "update")
     if authenticated_staff is not None:
         try:
@@ -1272,10 +1232,8 @@ def _execute_update_listing(
         target_websites = payload.get("websites") or payload.get("selected_websites")
     norm_websites = normalize_website_list(target_websites) if target_websites else None
 
-    firestore_only = (resolve_source == "firestore" and prop is None)
-
-    if not sql_on and not existing_listing:
-        # STORE_PROPERTIES_WRITE=firestore: brand-new listing goes straight to Firestore.
+    if not existing_listing:
+        # Brand-new listing goes straight to Firestore.
         prop_name = str(fields.get("property_name") or payload.get("title") or property_id).strip()
         ws = norm_websites or normalize_website_list([payload.get("site_origin") or get_current_env_domain()])
         to_write = {k: v for k, v in fields.items() if k in allowed_fields and v is not None and k != "websites"}
@@ -1312,161 +1270,57 @@ def _execute_update_listing(
             "success": True,
         }
 
-    if firestore_only:
-        # Firestore-only listing: write Firestore; do NOT invent an incomplete PG row
-        is_created = False
-        updated_fields = dict(fields)
-        if getattr(settings, "ENABLE_FIRESTORE_SYNC", True) or True:
-            try:
-                from app.services.firestore_service import save_or_update_property_firestore
-                save_or_update_property_firestore(
-                    property_id=property_id,
-                    fields=fields,
-                    images=payload.get("images") or fields.get("images") or [],
-                    cover_image=payload.get("cover_image") or fields.get("cover_image"),
-                    target="admin",
-                )
-            except Exception as e:
-                logger.warning(f"Firestore-only listing update failed: {e}")
-                raise
-        # Verify read-back
-        from app.services.admin_change_diff import read_stored_property_fields
-        live = read_stored_property_fields(db, property_id, list(fields.keys()))
-        verified = {}
-        for k, v in fields.items():
-            verified[k] = live.get(k)
-        from app.services.cache_service import search_cache
-        search_cache.invalidate()
-        _bump_properties_version()
-        title = (
-            (resolved or {}).get("property_name")
-            if isinstance(resolved, dict)
-            else property_id
-        )
-        return {
-            "property_id": property_id,
-            "title": title,
-            "mode": "update",
-            "updated_fields": updated_fields,
-            "images_count": 0,
-            "images": [],
-            "current_status": live.get("status") or (resolved or {}).get("status") if isinstance(resolved, dict) else None,
-            "operation_id": operation_id,
-            "undoable": bool(operation_id),
-            "undo_window_days": 6 if operation_id else None,
-            "resolve_source": "firestore",
-            "verified_fields": verified,
-            "success": True,
-        }
-    elif not prop:
-        # Create a new property (truly new id)
-        is_created = True
-        prop_name = fields.get("property_name") or payload.get("title") or property_id
-        prop = Property(
-            property_id=property_id,
-            property_name=prop_name,
-            is_public=True,
-            created_at=datetime.now(timezone.utc),
-            updated_at=datetime.now(timezone.utc)
-        )
-        if norm_websites:
-            prop.websites = norm_websites
-            updated_fields["websites"] = norm_websites
-        else:
-            default_site = payload.get("site_origin") or get_current_env_domain()
-            prop.websites = normalize_website_list([default_site])
-            updated_fields["websites"] = prop.websites
-
-        for k, v in fields.items():
-            if k in allowed_fields and hasattr(prop, k) and v is not None and k != "websites":
-                setattr(prop, k, v)
-                updated_fields[k] = v
-        db.add(prop)
-        db.commit()
-        db.refresh(prop)
-    else:
-        # Update existing Postgres property — never inject websites
-        if explicit_websites and norm_websites is not None:
-            prop.websites = norm_websites
-            updated_fields["websites"] = norm_websites
-
-        for k, v in fields.items():
-            if k in allowed_fields and hasattr(prop, k) and v is not None and k != "websites":
-                setattr(prop, k, v)
-                updated_fields[k] = v
-        prop.updated_at = datetime.now(timezone.utc)
-        db.commit()
-        db.refresh(prop)
-
-    # 1. Process property images in PostgreSQL
-    input_images = payload.get("images") or fields.get("images") or fields.get("image_urls") or []
-    cover_image = payload.get("cover_image") or fields.get("cover_image") or fields.get("coverImage")
-    if isinstance(input_images, str):
-        input_images = [img.strip() for img in input_images.split(",") if img.strip()]
-
-    if input_images:
-        try:
-            from app.db.models import PropertyImage
-            for img_url in input_images:
-                if img_url and str(img_url).strip():
-                    clean_url = str(img_url).strip()
-                    # Check if already attached to avoid duplicates
-                    existing_img = db.query(PropertyImage).filter(
-                        PropertyImage.property_id == prop.property_id,
-                        PropertyImage.image_url == clean_url
-                    ).first()
-                    if not existing_img:
-                        db.add(PropertyImage(
-                            property_id=prop.property_id,
-                            image_url=clean_url,
-                            image_type="cover" if clean_url == cover_image else "exterior"
-                        ))
-            db.commit()
-        except Exception as e:
-            logger.warning(f"Error persisting property images in SQL: {e}")
-
-    # 2. Sync property info and images directly to Cloud Firestore
-    if getattr(settings, "ENABLE_FIRESTORE_SYNC", True):
+    # Existing Firestore listing: update the document.
+    is_created = False
+    updated_fields = dict(fields)
+    if getattr(settings, "ENABLE_FIRESTORE_SYNC", True) or True:
         try:
             from app.services.firestore_service import save_or_update_property_firestore
-            mirror = {**fields, **updated_fields}
-            if prop is not None:
-                mirror.setdefault("property_name", prop.property_name)
-                mirror.setdefault("province", prop.province)
-                mirror.setdefault("status", prop.status)
-                mirror.setdefault("property_type", prop.property_type)
             save_or_update_property_firestore(
-                property_id=prop.property_id,
-                fields=mirror,
-                images=input_images,
-                cover_image=cover_image
+                property_id=property_id,
+                fields=fields,
+                images=payload.get("images") or fields.get("images") or [],
+                cover_image=payload.get("cover_image") or fields.get("cover_image"),
+                target="admin",
             )
         except Exception as e:
-            logger.warning(f"Error syncing updated property to Firestore: {e}")
-
-    # 3. Invalidate search cache so updated property data is immediately reflected
+            logger.warning(f"Firestore-only listing update failed: {e}")
+            raise
+    # Verify read-back
+    from app.services.admin_change_diff import read_stored_property_fields
+    live = read_stored_property_fields(db, property_id, list(fields.keys()))
+    verified = {}
+    for k, v in fields.items():
+        verified[k] = live.get(k)
     from app.services.cache_service import search_cache
     search_cache.invalidate()
     _bump_properties_version()
-
+    title = (
+        (resolved or {}).get("property_name")
+        if isinstance(resolved, dict)
+        else property_id
+    )
     return {
-        "property_id": prop.property_id,
-        "title": prop.property_name,
-        "mode": "create" if is_created else "update",
+        "property_id": property_id,
+        "title": title,
+        "mode": "update",
         "updated_fields": updated_fields,
-        "images_count": len(input_images),
-        "images": input_images,
-        "current_status": prop.status,
+        "images_count": 0,
+        "images": [],
+        "current_status": live.get("status") or (resolved or {}).get("status") if isinstance(resolved, dict) else None,
         "operation_id": operation_id,
         "undoable": bool(operation_id),
         "undo_window_days": 6 if operation_id else None,
+        "resolve_source": "firestore",
+        "verified_fields": verified,
+        "success": True,
     }
 
 
 def _execute_send_email(
     payload: Dict[str, Any],
     staff_user_email: Optional[str] = None,
-    db: Optional[Session] = None
+    db: Optional[Any] = None
 ) -> Dict[str, Any]:
     """Executes email dispatch via Google Workspace Gmail API, SMTP, or local test dispatcher."""
     to_email = payload.get("to")
@@ -1503,7 +1357,7 @@ def _execute_send_email(
 def _execute_create_calendar_event(
     payload: Dict[str, Any],
     staff_user_email: Optional[str] = None,
-    db: Optional[Session] = None
+    db: Optional[Any] = None
 ) -> Dict[str, Any]:
     """Executes calendar event creation via Google Calendar API or local test dispatcher."""
     title = payload.get("title")
@@ -1548,22 +1402,6 @@ def name_slug(value: Optional[str]) -> str:
     return re.sub(r"[^a-z0-9]+", "-", (value or "").lower()).strip("-")[:64]
 
 
-def _is_real_db_session(db: Any) -> bool:
-    from app.repositories import properties_store
-
-    if not properties_store.sql_enabled():
-        return False  # STORE_PROPERTIES_WRITE=firestore: properties never touch SQL
-    if db is None:
-        return False
-    return not type(db).__module__.startswith("unittest.mock")
-
-
-def _load_sql_property(db: Any, property_id: str) -> Optional[Property]:
-    if not _is_real_db_session(db):
-        return None
-    return db.query(Property).filter(Property.property_id == property_id).first()
-
-
 def _read_raw_firestore(property_id: str) -> Optional[Dict[str, Any]]:
     from app.services.firestore_service import get_raw_property_document
     return get_raw_property_document(property_id, target="admin")
@@ -1591,25 +1429,6 @@ def _invalidate_search_cache() -> None:
     except Exception as exc:
         logger.warning("Search cache invalidation failed: %s", exc)
     _bump_properties_version()
-
-
-def _summary_sql(prop: Any) -> Optional[Dict[str, Any]]:
-    if prop is None:
-        return None
-    price = getattr(prop, "price_numeric_min", None)
-    try:
-        price_out = float(price) if price is not None else None
-    except (TypeError, ValueError):
-        price_out = None
-    return {
-        "property_id": getattr(prop, "property_id", None),
-        "name": getattr(prop, "property_name", None),
-        "price": price_out,
-        "status": getattr(prop, "status", None),
-        "isActive": bool(prop.is_public) if getattr(prop, "is_public", None) is not None else None,
-        "websites": list(getattr(prop, "websites", None) or []),
-        "property_type": getattr(prop, "property_type", None),
-    }
 
 
 def _fs_display_name(raw: Dict[str, Any]) -> Optional[str]:
@@ -1709,36 +1528,6 @@ def _require_undo_snapshot(
     return operation_id
 
 
-_SQL_MUTABLE = {
-    "property_name", "project_name", "property_type", "status",
-    "country", "province", "district", "subdistrict", "area", "address",
-    "price_display", "price_numeric_min", "price_numeric_max", "currency", "price_note",
-    "bedrooms_display", "bedrooms_min", "bedrooms_max", "bathrooms",
-    "area_display", "area_sqm_min", "area_sqm_max", "usable_area_sqm", "land_area_sqm",
-    "description", "has_pool", "beach_access", "sea_view",
-    "features", "facilities", "amenities", "highlights", "developer_name", "ownership_type",
-    "websites", "raw_metadata",
-}
-
-
-def _apply_sql_fields(prop: Property, fields: Dict[str, Any], websites: Optional[List[str]] = None) -> None:
-    data = dict(fields or {})
-    if data.get("bedrooms") is not None and data.get("bedrooms_min") is None:
-        beds = int(data["bedrooms"])
-        data["bedrooms_min"] = beds
-        data["bedrooms_max"] = beds
-        data["bedrooms_display"] = str(beds)
-    if _is_blank(data.get("province")) and not _is_blank(data.get("location")):
-        data["province"] = data["location"]
-    for key, value in data.items():
-        if key in _SQL_MUTABLE and value is not None and hasattr(prop, key):
-            setattr(prop, key, value)
-    if websites is not None:
-        prop.websites = list(websites)
-    if data.get("is_public") is not None:
-        prop.is_public = bool(data["is_public"])
-
-
 def _duplicate_property_message(db: Any, property_id: str, name: str) -> Optional[str]:
     slug = name_slug(name)
     seen_ids = []
@@ -1773,78 +1562,12 @@ def _duplicate_property_message(db: Any, property_id: str, name: str) -> Optiona
     except Exception as exc:
         logger.warning("Firestore duplicate scan failed: %s", exc)
 
-    if _is_real_db_session(db):
-        for row in db.query(Property).all():
-            if row.property_id in (property_id, slug) or (slug and name_slug(row.property_name or "") == slug):
-                return (
-                    f"Property '{name or property_id}' already exists in Postgres as '{row.property_id}'. "
-                    "Use update instead of create."
-                )
     return None
-
-
-def firestore_document_from_sql(prop: Property, extra_fields: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """Complete Firestore project document built from a Postgres row. Never nameless."""
-    name = (getattr(prop, "property_name", None) or "").strip()
-    price = getattr(prop, "price_numeric_min", None)
-    try:
-        price_from = float(price) if price is not None else None
-    except (TypeError, ValueError):
-        price_from = None
-    websites = list(getattr(prop, "websites", None) or [])
-    doc: Dict[str, Any] = {
-        "name": name,
-        "title": name,
-        "propertyType": getattr(prop, "property_type", None),
-        "province": getattr(prop, "province", None),
-        "priceFrom": price_from,
-        "isActive": bool(prop.is_public) if getattr(prop, "is_public", None) is not None else True,
-        "websites": websites,
-        "domains": list(websites),
-        "status": getattr(prop, "status", None),
-        "property_id": getattr(prop, "property_id", None),
-    }
-    if getattr(prop, "price_numeric_max", None) is not None:
-        doc["priceTo"] = float(prop.price_numeric_max)
-    if getattr(prop, "price_display", None):
-        doc["priceDisplay"] = prop.price_display
-    if getattr(prop, "description", None):
-        doc["description"] = prop.description
-    if extra_fields:
-        if extra_fields.get("property_name"):
-            doc["name"] = extra_fields["property_name"]
-            doc["title"] = extra_fields["property_name"]
-        if extra_fields.get("property_type"):
-            doc["propertyType"] = extra_fields["property_type"]
-        if extra_fields.get("province"):
-            doc["province"] = extra_fields["province"]
-        elif extra_fields.get("location") and not doc.get("province"):
-            doc["province"] = extra_fields["location"]
-        if extra_fields.get("status"):
-            doc["status"] = extra_fields["status"]
-        if extra_fields.get("price_numeric_min") is not None:
-            doc["priceFrom"] = float(extra_fields["price_numeric_min"])
-        if extra_fields.get("price_numeric_max") is not None:
-            doc["priceTo"] = float(extra_fields["price_numeric_max"])
-        if extra_fields.get("price_display"):
-            doc["priceDisplay"] = extra_fields["price_display"]
-        if extra_fields.get("description"):
-            doc["description"] = extra_fields["description"]
-        if extra_fields.get("websites") is not None:
-            doc["websites"] = list(extra_fields["websites"])
-            doc["domains"] = list(extra_fields["websites"])
-        if extra_fields.get("is_public") is not None:
-            doc["isActive"] = bool(extra_fields["is_public"])
-    if not doc.get("name"):
-        doc["name"] = name
-        doc["title"] = name
-    return doc
 
 
 def _raise_store_failure(
     *,
     message: str,
-    sql_ok: bool,
     fs_ok: bool,
     failed: str,
     property_id: str,
@@ -1854,7 +1577,6 @@ def _raise_store_failure(
         status_code=status.HTTP_502_BAD_GATEWAY,
         detail={
             "message": message,
-            "sql": sql_ok,
             "firestore": fs_ok,
             "failed": failed,
             "property_id": property_id,
@@ -1864,7 +1586,7 @@ def _raise_store_failure(
 
 
 def rest_create_property(
-    db: Session,
+    db: Any,
     staff: AuthenticatedStaff,
     fields: Dict[str, Any],
     *,
@@ -1874,7 +1596,7 @@ def rest_create_property(
     cover_image: Optional[str] = None,
     allow_without_undo: bool = False,
 ) -> Dict[str, Any]:
-    """Validate, snapshot, then write Postgres and Firestore together."""
+    """Validate, snapshot, then write the Firestore property document."""
     errors = validate_listing_values(
         fields, property_id=property_id, is_create=True, check_property_id=True
     )
@@ -1897,89 +1619,38 @@ def rest_create_property(
         allow_without_undo=allow_without_undo,
     )
 
-    from app.repositories import properties_store
-
-    sql_on = properties_store.sql_enabled()
-    fs_required = _fs_sync_enabled() or not sql_on  # Firestore is the only store when SQL is off
     is_public = True if fields.get("is_public") is None else bool(fields.get("is_public"))
-    prop = None
-    if sql_on:
-        prop = Property(
+    try:
+        from app.services.firestore_service import save_or_update_property_firestore
+        wrote = save_or_update_property_firestore(
             property_id=property_id,
-            property_name=str(fields.get("property_name")).strip(),
-            is_public=is_public,
-            created_at=datetime.now(timezone.utc),
-            updated_at=datetime.now(timezone.utc),
-            websites=list(websites or []),
+            fields={**fields, "websites": list(websites or []), "is_public": is_public},
+            images=images or [],
+            cover_image=cover_image,
+            target="admin",
         )
-        _apply_sql_fields(prop, fields, websites=websites)
-        try:
-            db.add(prop)
-            db.commit()
-            db.refresh(prop)
-        except Exception as exc:
-            db.rollback()
-            _raise_store_failure(
-                message=f"Postgres write failed: {exc}",
-                sql_ok=False,
-                fs_ok=False,
-                failed="sql",
-                property_id=property_id,
-                operation_id=operation_id,
-            )
-
-    fs_ok = False
-    if fs_required:
-        try:
-            from app.services.firestore_service import save_or_update_property_firestore
-            wrote = save_or_update_property_firestore(
-                property_id=property_id,
-                fields={**fields, "websites": list(websites or []), "is_public": is_public},
-                images=images or [],
-                cover_image=cover_image,
-                target="admin",
-            )
-            if not wrote:
-                raise RuntimeError("Firestore write returned failure")
-            fs_ok = True
-        except Exception as exc:
-            if sql_on:
-                try:
-                    db.query(Property).filter(Property.property_id == property_id).delete(
-                        synchronize_session="fetch"
-                    )
-                    db.commit()
-                    db.expire_all()
-                except Exception:
-                    db.rollback()
-            _raise_store_failure(
-                message=(
-                    f"Firestore write failed; Postgres row was rolled back. {exc}"
-                    if sql_on else f"Firestore write failed. {exc}"
-                ),
-                sql_ok=False,
-                fs_ok=False,
-                failed="firestore",
-                property_id=property_id,
-                operation_id=operation_id,
-            )
+        if not wrote:
+            raise RuntimeError("Firestore write returned failure")
+    except Exception as exc:
+        _raise_store_failure(
+            message=f"Firestore write failed. {exc}",
+            fs_ok=False,
+            failed="firestore",
+            property_id=property_id,
+            operation_id=operation_id,
+        )
 
     _invalidate_search_cache()
-    stores = {"sql": sql_on, "firestore": fs_ok}
-    after = {
-        "sql": _summary_sql(prop) if sql_on else None,
-        "firestore": _summary_fs(_read_raw_firestore(property_id)) if fs_ok else None,
-    }
+    stores = {"firestore": True}
+    after = {"firestore": _summary_fs(_read_raw_firestore(property_id))}
     audit = _audit_rest(db, staff, "create", property_id, operation_id, stores, None, after)
-    written = (["Postgres"] if sql_on else []) + (["Firestore"] if fs_ok else [])
     return {
         "status": "CREATED",
-        "message": f"Property '{property_id}' written to {' and '.join(written)}.",
+        "message": f"Property '{property_id}' written to Firestore.",
         "property_id": property_id,
         "operation_id": operation_id,
         "undo_window_days": 6 if operation_id else None,
-        "sql": sql_on,
-        "firestore": fs_ok,
+        "firestore": True,
         "stores": stores,
         "websites": list(websites or []),
         "audit": audit,
@@ -1987,7 +1658,7 @@ def rest_create_property(
 
 
 def rest_update_property(
-    db: Session,
+    db: Any,
     staff: AuthenticatedStaff,
     property_id: str,
     fields: Dict[str, Any],
@@ -1997,7 +1668,7 @@ def rest_update_property(
     cover_image: Optional[str] = None,
     allow_without_undo: bool = False,
 ) -> Dict[str, Any]:
-    """Update the stores that already hold the property. Never invent a nameless Firestore doc."""
+    """Update the Firestore property document. Never invents a nameless document."""
     errors = validate_listing_values(fields, is_create=False)
     if errors:
         raise HTTPException(
@@ -2005,13 +1676,12 @@ def rest_update_property(
             detail={"message": "Validation failed", "fields": errors},
         )
     raw = _read_raw_firestore(property_id)
-    prop = _load_sql_property(db, property_id)
-    if raw is None and prop is None:
+    if raw is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Property with ID '{property_id}' not found.",
         )
-    before = {"sql": _summary_sql(prop), "firestore": _summary_fs(raw)}
+    before = {"firestore": _summary_fs(raw)}
     operation_id = _require_undo_snapshot(
         db=db,
         staff=staff,
@@ -2021,105 +1691,48 @@ def rest_update_property(
         allow_without_undo=allow_without_undo,
     )
 
-    sql_ok = False
-    fs_ok = False
-    if prop is not None:
-        try:
-            _apply_sql_fields(prop, fields, websites=websites)
-            prop.updated_at = datetime.now(timezone.utc)
-            db.commit()
-            db.refresh(prop)
-            sql_ok = True
-        except Exception as exc:
-            db.rollback()
-            _raise_store_failure(
-                message=f"Postgres update failed. Snapshot kept for undo. {exc}",
-                sql_ok=False,
-                fs_ok=False,
-                failed="sql",
-                property_id=property_id,
-                operation_id=operation_id,
-            )
-
-    if raw is not None:
-        try:
-            from app.services.firestore_service import save_or_update_property_firestore
-            fs_fields = dict(fields)
-            if websites is not None:
-                fs_fields["websites"] = websites
-            wrote = save_or_update_property_firestore(
-                property_id=property_id,
-                fields=fs_fields,
-                images=images,
-                cover_image=cover_image,
-                target="admin",
-            )
-            if not wrote:
-                raise RuntimeError("Firestore update failed")
-            fs_ok = True
-        except Exception as exc:
-            _raise_store_failure(
-                message=f"Firestore update failed. Snapshot kept for undo. {exc}",
-                sql_ok=sql_ok,
-                fs_ok=False,
-                failed="firestore",
-                property_id=property_id,
-                operation_id=operation_id,
-            )
-    elif prop is not None and _fs_sync_enabled():
-        document = firestore_document_from_sql(prop, fields)
-        if not (document.get("name") or document.get("title")):
-            _raise_store_failure(
-                message="Refusing to create a nameless Firestore document. Snapshot kept for undo.",
-                sql_ok=sql_ok,
-                fs_ok=False,
-                failed="firestore",
-                property_id=property_id,
-                operation_id=operation_id,
-            )
-        from app.services.firestore_service import write_admin_property_document
-        if not write_admin_property_document(property_id, document, merge=False, target="admin"):
-            _raise_store_failure(
-                message="Firestore sync from Postgres failed. Snapshot kept for undo.",
-                sql_ok=sql_ok,
-                fs_ok=False,
-                failed="firestore",
-                property_id=property_id,
-                operation_id=operation_id,
-            )
-        fs_ok = True
+    try:
+        from app.services.firestore_service import save_or_update_property_firestore
+        fs_fields = dict(fields)
+        if websites is not None:
+            fs_fields["websites"] = websites
+        wrote = save_or_update_property_firestore(
+            property_id=property_id,
+            fields=fs_fields,
+            images=images,
+            cover_image=cover_image,
+            target="admin",
+        )
+        if not wrote:
+            raise RuntimeError("Firestore update failed")
+    except Exception as exc:
+        _raise_store_failure(
+            message=f"Firestore update failed. Snapshot kept for undo. {exc}",
+            fs_ok=False,
+            failed="firestore",
+            property_id=property_id,
+            operation_id=operation_id,
+        )
 
     _invalidate_search_cache()
-    stores = {"sql": sql_ok, "firestore": fs_ok}
-    after = {
-        "sql": _summary_sql(prop) if sql_ok else None,
-        "firestore": _summary_fs(_read_raw_firestore(property_id)) if fs_ok else None,
-    }
+    stores = {"firestore": True}
+    after = {"firestore": _summary_fs(_read_raw_firestore(property_id))}
     audit = _audit_rest(db, staff, "update", property_id, operation_id, stores, before, after)
-    parts = []
-    if sql_ok:
-        parts.append("Postgres")
-    if fs_ok:
-        parts.append("Firestore")
-    where = " and ".join(parts) if parts else "no store"
     return {
         "status": "UPDATED",
-        "message": f"Property '{property_id}' written to {where}.",
+        "message": f"Property '{property_id}' written to Firestore.",
         "property_id": property_id,
         "operation_id": operation_id,
         "undo_window_days": 6 if operation_id else None,
-        "sql": sql_ok,
-        "firestore": fs_ok,
+        "firestore": True,
         "stores": stores,
-        "websites": websites if websites is not None else (
-            list(prop.websites or []) if prop is not None else (raw.get("websites") if raw else [])
-        ),
+        "websites": websites if websites is not None else (raw.get("websites") or []),
         "audit": audit,
     }
 
 
 def rest_delete_property(
-    db: Session,
+    db: Any,
     staff: AuthenticatedStaff,
     property_id: str,
     *,
@@ -2134,13 +1747,12 @@ def rest_delete_property(
             detail="hard_delete requires confirm_property_id equal to the property id",
         )
     raw = _read_raw_firestore(property_id)
-    prop = _load_sql_property(db, property_id)
-    if raw is None and prop is None:
+    if raw is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Property with ID '{property_id}' not found.",
         )
-    before = {"sql": _summary_sql(prop), "firestore": _summary_fs(raw)}
+    before = {"firestore": _summary_fs(raw)}
     operation_id = _require_undo_snapshot(
         db=db,
         staff=staff,
@@ -2150,56 +1762,28 @@ def rest_delete_property(
         allow_without_undo=allow_without_undo,
     )
 
-    sql_ok = False
-    fs_ok = False
-    if raw is not None:
-        from app.services.firestore_service import delete_property_firestore
-        try:
-            fs_ok = bool(delete_property_firestore(
-                property_id=property_id,
-                hard_delete=hard_delete,
-                staff_email=getattr(staff, "email", None),
-                target="admin",
-            ))
-            if not fs_ok:
-                raise RuntimeError("Firestore delete returned failure")
-        except Exception as exc:
-            _raise_store_failure(
-                message=f"Firestore delete failed. Snapshot kept for undo. {exc}",
-                sql_ok=False,
-                fs_ok=False,
-                failed="firestore",
-                property_id=property_id,
-                operation_id=operation_id,
-            )
-    if prop is not None:
-        try:
-            if hard_delete:
-                db.query(Property).filter(Property.property_id == property_id).delete(
-                    synchronize_session="fetch"
-                )
-            else:
-                prop.is_public = False
-                prop.status = "Archived"
-            db.commit()
-            sql_ok = True
-        except Exception as exc:
-            db.rollback()
-            _raise_store_failure(
-                message=f"Postgres delete failed. Snapshot kept for undo. {exc}",
-                sql_ok=False,
-                fs_ok=fs_ok,
-                failed="sql",
-                property_id=property_id,
-                operation_id=operation_id,
-            )
+    from app.services.firestore_service import delete_property_firestore
+    try:
+        fs_ok = bool(delete_property_firestore(
+            property_id=property_id,
+            hard_delete=hard_delete,
+            staff_email=getattr(staff, "email", None),
+            target="admin",
+        ))
+        if not fs_ok:
+            raise RuntimeError("Firestore delete returned failure")
+    except Exception as exc:
+        _raise_store_failure(
+            message=f"Firestore delete failed. Snapshot kept for undo. {exc}",
+            fs_ok=False,
+            failed="firestore",
+            property_id=property_id,
+            operation_id=operation_id,
+        )
 
     _invalidate_search_cache()
-    stores = {"sql": sql_ok, "firestore": fs_ok}
-    after = {
-        "sql": _summary_sql(_load_sql_property(db, property_id)) if not hard_delete else None,
-        "firestore": _summary_fs(_read_raw_firestore(property_id)),
-    }
+    stores = {"firestore": fs_ok}
+    after = {"firestore": _summary_fs(_read_raw_firestore(property_id))}
     audit = _audit_rest(db, staff, "delete", property_id, operation_id, stores, before, after)
     verb = "permanently deleted" if hard_delete else "archived"
     return {
@@ -2209,51 +1793,14 @@ def rest_delete_property(
         "operation_id": operation_id,
         "undo_window_days": 6 if operation_id else None,
         "hard_delete": hard_delete,
-        "sql": sql_ok,
         "firestore": fs_ok,
         "stores": stores,
         "audit": audit,
     }
 
 
-def _norm_compare(value: Any) -> Any:
-    if isinstance(value, list):
-        return sorted(str(v) for v in value)
-    if isinstance(value, float):
-        return round(value, 2)
-    return value
-
-
-def rest_property_consistency(db: Session, property_id: str) -> Dict[str, Any]:
-    """Compare Firestore and Postgres for one property. Admin callers only."""
-    raw = _read_raw_firestore(property_id)
-    prop = _load_sql_property(db, property_id)
-    if raw is None and prop is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Property with ID '{property_id}' not found.",
-        )
-    fs_view = _summary_fs(raw)
-    sql_view = _summary_sql(prop)
-    differences = []
-    for field in ("name", "price", "status", "websites", "isActive"):
-        fs_val = None if fs_view is None else fs_view.get(field)
-        sql_val = None if sql_view is None else sql_view.get(field)
-        if _norm_compare(fs_val) != _norm_compare(sql_val):
-            differences.append({"field": field, "firestore": fs_val, "sql": sql_val})
-    return {
-        "property_id": property_id,
-        "consistent": not differences and fs_view is not None and sql_view is not None,
-        "in_firestore": raw is not None,
-        "in_sql": prop is not None,
-        "differences": differences,
-        "firestore": fs_view,
-        "sql": sql_view,
-    }
-
-
 def save_ingested_listing(
-    db: Session,
+    db: Any,
     staff: AuthenticatedStaff,
     draft: Dict[str, Any],
 ) -> Dict[str, Any]:
@@ -2294,9 +1841,9 @@ def save_ingested_listing(
     }
     existing_meta: Dict[str, Any] = {}
     if mode == "update":
-        current = _load_sql_property(db, property_id)
-        if current is not None and isinstance(getattr(current, "raw_metadata", None), dict):
-            existing_meta = dict(current.raw_metadata)
+        current = _read_raw_firestore(property_id)
+        if isinstance(current, dict) and isinstance(current.get("raw_metadata"), dict):
+            existing_meta = dict(current["raw_metadata"])
     existing_meta["ingest"] = ingest_meta
     fields["raw_metadata"] = existing_meta
 
@@ -2325,8 +1872,8 @@ def save_ingested_listing(
             "property_id": property_id,
         }
 
-    stored = _load_sql_property(db, property_id)
-    stored_name = getattr(stored, "property_name", None) if stored is not None else None
+    stored = _read_raw_firestore(property_id)
+    stored_name = _fs_display_name(stored) if stored else None
     if not stored_name:
         return {
             "saved": False,
@@ -2389,6 +1936,5 @@ def save_ingested_listing(
         "operation_id": result.get("operation_id"),
         "audit": audit_flag,
         "property_id": property_id,
-        "sql": result.get("sql"),
         "firestore": result.get("firestore"),
     }

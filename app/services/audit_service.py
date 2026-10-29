@@ -1,6 +1,5 @@
 from typing import Optional, Dict, Any, FrozenSet, List
 from datetime import datetime, timezone
-from sqlalchemy.orm import Session
 import logging
 
 logger = logging.getLogger(__name__)
@@ -75,7 +74,7 @@ def sanitize_payload(obj: Any) -> Any:
 
 
 def record_audit_log(
-    db: Session,
+    db: Any,
     tool_name: str,
     staff_user_id: Optional[str] = None,
     tool_arguments: Optional[Dict[str, Any]] = None,
@@ -90,7 +89,7 @@ def record_audit_log(
     raise_on_failure: Optional[bool] = None,
 ):
     """
-    Creates an immutable audit log entry via audit_repo (Postgres / Firestore / both).
+    Creates an immutable audit log entry via audit_repo (Firestore).
     Does not write the legacy admin_audit_log mirror.
 
     On failure: read-only tools return an ephemeral entry; write tools raise
@@ -181,7 +180,7 @@ def record_audit_log(
 
 
 def query_admin_activity_logs(
-    db: Session,
+    db: Any,
     admin_email: Optional[str] = None,
     action: Optional[str] = None,
     status: Optional[str] = None,
@@ -235,7 +234,7 @@ def query_admin_activity_logs(
 
 
 def query_data_change_history(
-    db: Session,
+    db: Any,
     target_type: Optional[str] = None,
     target_id: Optional[str] = None,
     updated_by: Optional[str] = None,

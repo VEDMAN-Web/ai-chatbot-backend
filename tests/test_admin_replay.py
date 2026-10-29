@@ -8,9 +8,6 @@ from types import SimpleNamespace
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
 
 from app.api.v1.admin import router as admin_router
 from app.core.auth import (
@@ -20,8 +17,8 @@ from app.core.auth import (
 )
 from app.core.config import settings
 from app.core.rate_limit import reset_rate_limiter
-from app.db.models import AuditLog, Conversation, Lead, PendingAction, Property
-from app.db.session import get_db
+from app.core.deps import FirestoreSession, get_db
+from tests import fs_helpers as fsh
 from app.services.admin_agent import _clean_property_for_admin_tool, _prop_to_dict
 from app.services.admin_chat_quality import (
     draft_still_open_note,
@@ -72,33 +69,25 @@ def _staff(email="admin@tajlandia.com", role="admin"):
     )
 
 
-def _sqlite():
-    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
-    for table in (Property.__table__, AuditLog.__table__, PendingAction.__table__, Conversation.__table__, Lead.__table__):
-        for idx in list(table.indexes):
-            if getattr(idx, "dialect_kwargs", {}).get("postgresql_using") == "gin":
-                table.indexes.discard(idx)
-        table.create(bind=engine, checkfirst=True)
-    return sessionmaker(bind=engine, autocommit=False, autoflush=False)()
-
-
-def _property(**extra):
-    payload = dict(
+def _seed(fs, **extra):
+    """Write one Firestore `projects` listing (defaults describe Probe Villa)."""
+    data = dict(
         property_id="probe-villa",
-        property_name="Probe Villa",
-        property_type="Villa",
+        name="Probe Villa",
+        propertyType="Villa",
         province="phuket",
         status="Available",
-        price_numeric_min=10000000,
-        price_display="10,000,000 THB",
+        priceFrom=10000000,
         bedrooms_min=2,
         bedrooms_max=3,
         developer_name="Probe Dev",
         websites=["tajlandia.com"],
-        is_public=True,
+        isActive=True,
     )
-    payload.update(extra)
-    return Property(**payload)
+    data.update(extra)
+    pid = data.pop("property_id")
+    data.setdefault("cityId", str(data.get("province") or "").lower().replace(" ", "-"))
+    fs.set("projects", pid, data)
 
 
 def _clean(text):
@@ -108,21 +97,18 @@ def _clean(text):
 
 
 @pytest.fixture
-def db():
-    session = _sqlite()
-    session.add(_property())
-    session.add(_property(property_id="palm-one", property_name="Palm One", province="Phuket"))
-    session.add(_property(property_id="palm-two", property_name="Palm Two", province="Phuket", price_numeric_min=8000000))
-    session.add(_property(
-        property_id="sql-only-beds",
-        property_name="SQL Only Beds",
-        bedrooms_min=2,
-        bedrooms_max=3,
-        bedrooms_display=None,
-    ))
-    session.commit()
-    yield session
-    session.close()
+def db(monkeypatch):
+    fs = FakeFirestore()
+    monkeypatch.setattr("app.services.firestore_service.get_admin_firestore_client", lambda: fs)
+    monkeypatch.setattr("app.services.firestore_service.get_user_firestore_client", lambda: fs)
+    monkeypatch.setattr(
+        "app.services.firestore_service.get_firestore_client", lambda target="user", *a, **k: fs
+    )
+    _seed(fs)
+    _seed(fs, property_id="palm-one", name="Palm One", province="Phuket")
+    _seed(fs, property_id="palm-two", name="Palm Two", province="Phuket", priceFrom=8000000)
+    _seed(fs, property_id="sql-only-beds", name="SQL Only Beds", bedrooms_min=2, bedrooms_max=3)
+    yield FirestoreSession()
 
 
 def test_preview_uses_human_labels_and_plain_sentences():
@@ -251,13 +237,12 @@ def test_safety_near_misses_are_allowed(phrase):
 
 @pytest.fixture
 def world(monkeypatch):
-    session = _sqlite()
-    session.add(_property())
-    session.add(_property(property_id="palm-one", property_name="Palm One"))
-    session.add(_property(property_id="palm-two", property_name="Palm Two", price_numeric_min=8000000))
-    session.add(_property(property_id="laguna-villa", property_name="Laguna Villa", price_numeric_min=20000000))
-    session.commit()
+    session = FirestoreSession()
     admin_fs = FakeFirestore()
+    _seed(admin_fs)
+    _seed(admin_fs, property_id="palm-one", name="Palm One")
+    _seed(admin_fs, property_id="palm-two", name="Palm Two", priceFrom=8000000)
+    _seed(admin_fs, property_id="laguna-villa", name="Laguna Villa", priceFrom=20000000)
     admin_fs.set("projects", "fs-only-tower", {
         "name": "Firestore Only Tower",
         "province": "Pattaya",
@@ -270,10 +255,6 @@ def world(monkeypatch):
         "app.services.firestore_service.get_firestore_client",
         lambda target="user", *a, **k: admin_fs,
     )
-    monkeypatch.setattr("app.services.firestore_service.search_properties_firestore", lambda **kwargs: [])
-    monkeypatch.setattr(settings, "STORE_PENDING_ACTIONS", "both")
-    monkeypatch.setattr(settings, "STORE_AUDIT", "both")
-    monkeypatch.setattr(settings, "STORE_LEADS_READ", "both")
     monkeypatch.setattr(settings, "ENABLE_FIRESTORE_SYNC", True)
     monkeypatch.setattr(settings, "ADMIN_ENABLE_FIRESTORE_SYNC", True)
     monkeypatch.setattr(settings, "ENABLE_AUDIT_LOGGING", True)
@@ -325,9 +306,7 @@ def world(monkeypatch):
 
 
 def _keep_pending(world):
-    for row in world["db"].query(PendingAction).filter(PendingAction.status == "PENDING"):
-        row.expires_at = datetime.now() + timedelta(hours=2)
-    world["db"].commit()
+    """Firestore pending actions keep timezone-aware expiry; nothing to adjust."""
 
 
 def _say(world, message, staff=None, attached_images=None):
@@ -349,9 +328,7 @@ def _say(world, message, staff=None, attached_images=None):
 
 
 def _price(world, property_id="probe-villa"):
-    row = world["db"].query(Property).filter(Property.property_id == property_id).one()
-    world["db"].refresh(row)
-    return int(row.price_numeric_min)
+    return int(fsh.prop_one(world["fs"], property_id).price_numeric_min)
 
 
 def test_admin_replay_script(world):
@@ -424,8 +401,7 @@ def test_admin_replay_script(world):
         json={"confirmation_token": token},
     )
     assert button.status_code == 200, button.text
-    row = world["db"].query(Property).filter(Property.property_id == "probe-villa").one()
-    world["db"].refresh(row)
+    row = fsh.prop_one(world["fs"], "probe-villa")
     assert row.status == "Sold Out"
     second = world["client"].post(
         f"/api/v1/admin/actions/{action_id}/confirm",
@@ -455,7 +431,7 @@ def test_admin_replay_script(world):
     delete_reply = _say(world, "delete Laguna Villa")
     assert delete_reply["requires_confirmation"] is True
     assert "confirm" in delete_reply["text"].lower()
-    assert world["db"].query(Property).filter(Property.property_id == "laguna-villa").one()
+    assert fsh.prop_one(world["fs"], "laguna-villa")
     unknown = _say(world, "set Ghost Palace status to Sold Out")
     assert "could not find" in unknown["text"].lower()
     ambiguous_write = _say(world, "set Palm status to Reserved")
@@ -484,7 +460,7 @@ def test_admin_replay_script(world):
     assert "missing" in missing_fields["text"].lower() or "decision" in missing_fields["text"].lower()
     saved = _say(world, "confirm")
     assert "Saved" in saved["text"] or "saved" in saved["text"].lower()
-    imported = world["db"].query(Property).filter(Property.property_id == "layan-palm-villa").first()
+    imported = fsh.prop_first(world["fs"], "layan-palm-villa")
     assert imported is not None
     duplicate = _say(world, "https://example.com/layan-palm-villa")
     assert "Duplicate" in duplicate["text"]
@@ -495,7 +471,7 @@ def test_admin_replay_script(world):
     _say(world, "add https://example.com/no-price")
     blocked = _say(world, "confirm")
     assert "Nothing was saved" in blocked["text"] or "price" in blocked["text"].lower()
-    assert world["db"].query(Property).filter(Property.property_name == "No Price Villa").first() is None
+    assert fsh.prop_first(world["fs"], name="No Price Villa") is None
     unrelated = _say(world, "what is the weather in Bangkok?")
     assert "still open" in unrelated["text"].lower()
     assert "Your the" not in unrelated["text"]
@@ -665,30 +641,23 @@ def test_dossier_greeting_is_not_the_client(world, monkeypatch):
 
 
 def _image_rows(world, property_id="probe-villa"):
-    from app.db.models import PropertyImage
-
-    world["db"].expire_all()
-    rows = (
-        world["db"].query(PropertyImage)
-        .filter(PropertyImage.property_id == property_id)
-        .order_by(PropertyImage.sort_order, PropertyImage.image_url)
-        .all()
-    )
-    return [(row.image_url, row.image_type) for row in rows]
+    doc = world["fs"].get("projects", property_id) or {}
+    cover = doc.get("coverImage")
+    return [(url, "cover" if url == cover else "exterior") for url in (doc.get("images") or [])]
 
 
 def _prepare_images(world, monkeypatch):
-    from app.db.models import PropertyImage
-
-    PropertyImage.__table__.create(bind=world["db"].get_bind(), checkfirst=True)
     monkeypatch.setattr("app.services.admin_image_commands.lookup_image_content_type", lambda url: "")
     one = "https://cdn.example.com/one.jpg"
     two = "https://cdn.example.com/two.jpg"
-    world["db"].add(PropertyImage(property_id="probe-villa", image_url=one, image_type="cover", sort_order=0, image_host="cdn.example.com"))
-    world["db"].add(PropertyImage(property_id="probe-villa", image_url=two, image_type="exterior", sort_order=1, image_host="cdn.example.com"))
-    world["db"].commit()
     world["fs"].set("projects", "probe-villa", {
         "name": "Probe Villa",
+        "propertyType": "Villa",
+        "province": "phuket",
+        "cityId": "phuket",
+        "status": "Available",
+        "websites": ["tajlandia.com"],
+        "isActive": True,
         "images": [one, two],
         "coverImage": one,
         "priceFrom": 10000000,
@@ -705,7 +674,7 @@ def test_add_images_confirms_in_both_stores_and_undoes(world, monkeypatch):
     assert "1 image" in proposed["text"]
     assert "Nothing has been changed" in proposed["text"]
     assert _image_rows(world) == [(one, "cover"), (two, "exterior")]
-    pending = world["db"].query(PendingAction).filter(PendingAction.status == "PENDING").one()
+    pending = fsh.pending_one(world["fs"], "PENDING")
     assert pending.action_payload["previous_images"][0]["image_url"] == one
     from app.services.cache_service import search_cache
 
@@ -726,7 +695,7 @@ def test_add_images_confirms_in_both_stores_and_undoes(world, monkeypatch):
     doc = world["fs"].get("projects", "probe-villa")
     assert doc["images"] == [one, two, added]
     assert doc["coverImage"] == one
-    audit = world["db"].query(AuditLog).filter(AuditLog.tool_name == "manage_property_images").all()
+    audit = fsh.audit_rows(world["fs"], "manage_property_images")
     assert audit and audit[-1].confirmed_by_staff is True
     undone = _say(world, "undo")
     assert "undo" in undone["text"].lower() or "restored" in undone["text"].lower()
@@ -905,9 +874,6 @@ def test_attached_images_ask_for_property_then_action(world, monkeypatch):
 
 
 def test_firestore_only_image_confirm_and_undo(world, monkeypatch):
-    from app.db.models import PropertyImage
-
-    PropertyImage.__table__.create(bind=world["db"].get_bind(), checkfirst=True)
     monkeypatch.setattr("app.services.admin_image_commands.lookup_image_content_type", lambda url: "")
     old = "https://cdn.example.com/tower-old.jpg"
     world["fs"].set("projects", "fs-only-tower", {

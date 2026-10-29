@@ -26,7 +26,6 @@ _INTERNAL_KEYS = (
     "authoritative_total_properties",
     "is_complete_database_count",
     "firestore_live_projects_count",
-    "postgresql_listings_count",
     "firestore_count_unavailable",
 )
 
@@ -248,28 +247,12 @@ def format_inventory_reply(stats: dict, language: str = "en") -> str:
     data = stats if isinstance(stats, dict) else {}
     polish = (language or "en").lower().startswith("pl")
     total = _as_int(data.get("authoritative_total_properties"))
-    postgres = _store_count(data, "postgresql_listings_count")
     firestore = _store_count(data, "firestore_live_projects_count", "firestore_count_unavailable")
     if data.get("firestore_count_unavailable"):
         firestore = None
     if total is None:
-        total = postgres if postgres is not None else firestore
+        total = firestore
     active, archived = _active_archived(data)
-
-    if postgres is not None and firestore is not None and postgres != firestore:
-        gap = abs(postgres - firestore)
-        shown = total if total is not None else max(postgres, firestore)
-        noun = "property" if shown == 1 else "properties"
-        if polish:
-            pl_noun = "nieruchomość" if shown == 1 else "nieruchomości"
-            return (
-                f"Masz {shown} {pl_noun}. Postgres ma {postgres}, a Firestore {firestore}; "
-                f"{gap} się różni. Powiedz 'pokaż różnice', żeby je zobaczyć."
-            )
-        return (
-            f"You have {shown} {noun}. Postgres has {postgres} and Firestore has {firestore}; "
-            f"{gap} differ - say 'show differences' to list them."
-        )
 
     if total is None:
         if polish:
@@ -295,8 +278,6 @@ def format_inventory_reply(stats: dict, language: str = "en") -> str:
             head = f"You have {total} {noun}."
 
     missing = []
-    if "postgresql_listings_count" in data and postgres is None:
-        missing.append("Postgres")
     if data.get("firestore_count_unavailable") or (
         "firestore_live_projects_count" in data and firestore is None
     ):
@@ -306,63 +287,16 @@ def format_inventory_reply(stats: dict, language: str = "en") -> str:
     if polish:
         named = " i ".join(missing)
         return f"{head} Liczba w {named} jest niedostępna."
-    if len(missing) == 1:
-        return f"{head} {missing[0]}'s count is unavailable."
-    return f"{head} Postgres's count is unavailable and Firestore's count is unavailable."
+    return f"{head} {missing[0]}'s count is unavailable."
 
 
-def format_store_differences(diff: dict) -> str:
-    if not isinstance(diff, dict):
-        return "I could not compare the two stores."
-    error = diff.get("error")
-    if error:
-        return str(error)
-    items = diff.get("items") or []
-    if not isinstance(items, list) or not items:
-        return "Both stores match."
-    lines: List[str] = []
-    for item in items[:20]:
-        if not isinstance(item, dict):
-            continue
-        property_id = str(item.get("property_id") or "a property")
-        issue = str(item.get("issue") or "differs").strip()
-        if issue == "only in Postgres":
-            lines.append(f"- {property_id} is only in Postgres.")
-        elif issue == "only in Firestore":
-            lines.append(f"- {property_id} is only in Firestore.")
-        elif issue.startswith("differs in "):
-            fields = issue[len("differs in "):].replace(", ", " and ")
-            lines.append(f"- {property_id}: {fields} differ.")
-        else:
-            lines.append(f"- {property_id}: {issue}.")
-    extra = len(items) - len(lines[:20])
-    if len(items) > 20:
-        extra = len(items) - 20
-        text = "\n".join(lines[:20])
-        return f"{text}\nand {extra} more"
-    return "\n".join(lines) if lines else "Both stores match."
-
-
-def describe_store_check(pg_state: str, fs_state: str) -> str:
-    pg = (pg_state or "").strip().lower()
+def describe_store_check(fs_state: str) -> str:
     fs = (fs_state or "").strip().lower()
-    if pg == "saved" and fs == "saved":
-        return "I checked both databases and the change is saved."
-    if pg == "saved" and fs == "unavailable":
-        return "I checked Postgres and the change is saved; the Firestore check was unavailable."
-    if pg == "saved" and fs == "missing":
-        return "The change is saved in Postgres but I could not find it in Firestore."
-    if pg == "missing" and fs == "saved":
-        return "I could not find the change in Postgres, but it is saved in Firestore."
-    if pg == "missing" and fs == "missing":
-        return "I could not find the change in Postgres or Firestore."
-    if pg == "missing" and fs == "unavailable":
-        return "I could not find the change in Postgres, and the Firestore check was unavailable."
-    if pg == "could not be checked" and fs == "saved":
-        return "I could not check Postgres; the change is saved in Firestore."
-    if pg == "could not be checked" and fs == "missing":
-        return "I could not check Postgres, and I could not find the change in Firestore."
-    return "I could not check Postgres, and the Firestore check was unavailable."
+    if fs == "saved":
+        return "I checked the database and the change is saved."
+    if fs == "missing":
+        return "I could not find the change in the database."
+    return "I could not check the database."
 
 
 def audit_note_for_reply(role: Any, message: str, audit_disabled: bool) -> str:
@@ -519,50 +453,12 @@ def _closest_property_names(db: Any, query: str, limit: int = 3) -> List[str]:
 
 
 def _name_matches(db: Any, name: str) -> List[Any]:
-    from app.repositories import properties_store
-
-    if not properties_store.sql_enabled():
-        folded = (name or "").casefold()
-        rows = _property_name_rows(db)
-        exact = [r for r in rows if r.property_name.casefold() == folded]
-        if exact:
-            return exact[:6]
-        return [r for r in rows if folded and folded in r.property_name.casefold()][:6]
-    try:
-        from app.db.models import Property
-
-        exact = (
-            db.query(Property)
-            .filter(Property.property_name.ilike(name))
-            .limit(6)
-            .all()
-        )
-        rows = exact if isinstance(exact, list) else []
-        rows = [row for row in rows if _usable_record(row)]
-        if rows:
-            return rows
-        contains = (
-            db.query(Property)
-            .filter(Property.property_name.ilike(f"%{name}%"))
-            .limit(6)
-            .all()
-        )
-        if not isinstance(contains, list):
-            contains = []
-        else:
-            contains = [row for row in contains if _usable_record(row)]
-        if contains:
-            return contains
-        import difflib
-
-        rows = _property_name_rows(db)
-        folded = {str(row.property_name).casefold(): row for row in rows}
-        close = difflib.get_close_matches(name.casefold(), list(folded), n=1, cutoff=0.82)
-        if len(close) == 1:
-            return [folded[close[0]]]
-        return []
-    except Exception:
-        return []
+    folded = (name or "").casefold()
+    rows = _property_name_rows(db)
+    exact = [r for r in rows if r.property_name.casefold() == folded]
+    if exact:
+        return exact[:6]
+    return [r for r in rows if folded and folded in r.property_name.casefold()][:6]
 
 
 def _not_recorded(name: str, field_label: str) -> str:
@@ -693,14 +589,7 @@ def try_direct_property_answer(db: Any, message: str) -> Optional[dict]:
         except Exception:
             record = None
     if not _usable_record(record):
-        real_query = False
-        try:
-            from app.db.models import Property
-
-            real_query = isinstance(db.query(Property).all(), list)
-        except Exception:
-            real_query = False
-        if not real_query:
+        if not _property_name_rows(db):
             return None
         suggestions = _closest_property_names(db, name)
         shown = ", ".join(suggestions[:3])

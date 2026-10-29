@@ -11,9 +11,6 @@ import time
 from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Any, Optional, Tuple
 from abc import ABC, abstractmethod
-from sqlalchemy import or_
-from sqlalchemy.orm import Session
-from app.db.models import Property, PropertySpec, Lead
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -1253,7 +1250,7 @@ def _finalize_report_save(
 
 # 3. Main Generation Entrypoint
 def generate_report(
-    db: Session,
+    db: Any,
     format_type: str,
     property_ids: Optional[List[str]] = None,
     lead_ids: Optional[List[str]] = None,
@@ -1431,22 +1428,15 @@ def generate_report(
     report_title = title or "Tajlandia AI Property Intelligence Inventory Report"
     if _style_notes:
         report_title = f"{report_title}\n{_style_notes[:400]}"
-    from app.services.property_search import build_property_query, PropertyFilterParams
+    from app.services.property_search import filter_properties, PropertyFilterParams
 
-    # build_property_query expects a Session (not an existing Query)
-    params = PropertyFilterParams(websites=websites or None)
-    query = build_property_query(db, params)
+    params = PropertyFilterParams(websites=websites or None, is_public=None)
+    properties = filter_properties(params, target="admin")
     if property_ids:
-        clean_ids = [str(pid).strip() for pid in property_ids if pid]
-        # Match both exact IDs and case variants used in Firestore/SQL
-        upper_ids = [c.upper() for c in clean_ids]
-        query = query.filter(
-            or_(
-                Property.property_id.in_(clean_ids),
-                Property.property_id.in_(upper_ids),
-            )
-        )
-    properties = query.all()
+        # Match both exact IDs and case variants used in Firestore
+        wanted = {str(pid).strip() for pid in property_ids if pid}
+        wanted |= {w.upper() for w in wanted}
+        properties = [p for p in properties if p.property_id in wanted]
 
     properties_data = []
     for prop in properties:

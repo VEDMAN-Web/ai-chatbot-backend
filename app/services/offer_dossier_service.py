@@ -15,9 +15,7 @@ from reportlab.lib import colors
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
-from sqlalchemy.orm import Session
 
-from app.db.models import Property
 from app.services.report_service import default_storage_provider
 
 logger = logging.getLogger(__name__)
@@ -73,28 +71,9 @@ def safe_text(value: Any, default: str = "") -> str:
 
 
 def normalize_dossier_property(obj: Any) -> Any:
-    """Normalise Postgres ORM or Firestore dict into an attribute-accessible object."""
+    """Normalise a Firestore dict or adapter into an attribute-accessible object."""
     if obj is None:
         return None
-    if isinstance(obj, Property):
-        return SimpleNamespace(
-            property_id=safe_text(getattr(obj, "property_id", ""), ""),
-            property_name=safe_text(getattr(obj, "property_name", None), "Property"),
-            project_name=safe_text(getattr(obj, "project_name", None), ""),
-            property_type=safe_text(getattr(obj, "property_type", None), "Villa"),
-            status=safe_text(getattr(obj, "status", None), ""),
-            province=safe_text(getattr(obj, "province", None), ""),
-            district=safe_text(getattr(obj, "district", None), ""),
-            area=safe_text(getattr(obj, "area", None), ""),
-            price_display=safe_text(getattr(obj, "price_display", None), "On request"),
-            area_display=safe_text(getattr(obj, "area_display", None), ""),
-            description=safe_text(getattr(obj, "description", None), ""),
-            rental_information=safe_text(getattr(obj, "rental_information", None), ""),
-            investment_information=safe_text(getattr(obj, "investment_information", None), ""),
-            ownership_type=safe_text(getattr(obj, "ownership_type", None), ""),
-            has_pool=bool(getattr(obj, "has_pool", False)),
-            amenities=getattr(obj, "amenities", None) or [],
-        )
     if isinstance(obj, dict):
         from app.services.admin_property_fields import (
             localize_name,
@@ -351,7 +330,7 @@ class DossierPropertyFallback:
 def _get_default_dossier_properties() -> List[DossierPropertyFallback]:
     """
     Production-only: never return hardcoded PROP-PHK / placeholder listings.
-    Dossier generation must use live Firestore/SQL inventory only.
+    Dossier generation must use live Firestore inventory only.
     """
     return []
 
@@ -456,7 +435,7 @@ def _draw_footer(can: canvas.Canvas, client_str: str, country_str: str, date_str
 
 
 def generate_offer_dossier_pdf(
-    db: Session,
+    db: Any,
     client_name: str,
     budget_amount: Optional[str] = None,
     investment_goal: Optional[str] = None,
@@ -482,7 +461,7 @@ def generate_offer_dossier_pdf(
 
     logo_path = resolve_logo_path(brand)
 
-    # 2. Fetch properties from live production Firestore first, then SQL — never invent placeholders
+    # 2. Fetch properties from live production Firestore — never invent placeholders
     props: List[Any] = []
     try:
         from app.services.property_search import get_property_by_id, FirestorePropertyAdapter
@@ -503,16 +482,6 @@ def generate_offer_dossier_pdf(
                     p = get_property_by_id(db, pid_clean)
                 except Exception:
                     p = None
-            if p is None and db is not None:
-                p = (
-                    db.query(Property)
-                    .filter(
-                        (Property.property_id.ilike(pid_clean))
-                        | (Property.property_name.ilike(f"%{pid_clean}%"))
-                        | (Property.project_name.ilike(f"%{pid_clean}%"))
-                    )
-                    .first()
-                )
             if p and p not in props:
                 props.append(p)
 
@@ -538,24 +507,13 @@ def generate_offer_dossier_pdf(
         except Exception as e:
             logger.warning(f"Firestore dossier property fetch failed: {e}")
 
-    if len(props) < 4 and db is not None:
-        needed = 4 - len(props)
-        existing_ids = [p.property_id for p in props if getattr(p, "property_id", None)]
-        query = db.query(Property)
-        if existing_ids:
-            query = query.filter(~Property.property_id.in_(existing_ids))
-        additional = query.order_by(Property.price_numeric_min.desc()).limit(needed).all()
-        for p in additional:
-            if p not in props:
-                props.append(p)
-
     if not props:
         raise ValueError(
             "No verified production properties available to build the offer dossier. "
             "Cannot generate PDF with placeholder or invented listings."
         )
 
-    # Normalise PG + Firestore records so NaN/float fields never reach canvas text drawing
+    # Normalise Firestore records so NaN/float fields never reach canvas text drawing
     props = [normalize_dossier_property(p) for p in props if p is not None]
     props = [p for p in props if p is not None]
     if not props:

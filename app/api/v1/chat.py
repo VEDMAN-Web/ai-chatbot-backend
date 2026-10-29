@@ -1,16 +1,16 @@
 import os
+import uuid
 import logging
 import time
 from decimal import Decimal
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse, FileResponse
-from sqlalchemy.orm import Session
 from pydantic import BaseModel, Field, EmailStr, field_validator
 import io
 from typing import Optional, List, Dict, Any
 from app.core.config import settings
 from app.core.rate_limit import enforce_rate_limit, injected_request
-from app.db.session import get_user_db as get_db
+from app.core.deps import get_user_db as get_db
 from app.services.conversation_service import (
     get_or_create_conversation,
     append_conversation_turn,
@@ -20,7 +20,6 @@ from app.services.conversation_service import (
 )
 from app.services.public_agent import public_agent, format_property_card
 from app.services.lead_service import record_or_update_lead
-from app.db.models import Property
 
 logger = logging.getLogger(__name__)
 
@@ -140,7 +139,7 @@ class ChatHistoryResponse(BaseModel):
     messages: List[Dict[str, Any]]
 
 class LeadSubmitRequest(BaseModel):
-    session_id: str = Field(..., description="Session identifier")
+    session_id: str = Field(..., description="Any identifier")
     contact_name: Optional[str] = Field(None, max_length=100)
     contact_email: Optional[str] = Field(None, max_length=100)
     contact_phone: Optional[str] = Field(None, max_length=50)
@@ -165,7 +164,7 @@ class LeadSubmitResponse(BaseModel):
 )
 def handle_public_chat(
     req: PublicChatRequest,
-    db: Session = Depends(get_db),
+    db: Any = Depends(get_db),
     request: Request = Depends(injected_request),
 ):
     enforce_rate_limit(
@@ -405,7 +404,7 @@ def handle_public_chat(
 )
 def get_chat_history(
     session_id: str,
-    db: Session = Depends(get_db)
+    db: Any = Depends(get_db)
 ):
     conversation = get_or_create_conversation(
         db=db,
@@ -460,7 +459,7 @@ def get_chat_history(
 )
 def submit_direct_lead(
     req: LeadSubmitRequest,
-    db: Session = Depends(get_db)
+    db: Any = Depends(get_db)
 ):
     conversation = get_or_create_conversation(
         db=db,
@@ -530,7 +529,7 @@ def download_property_brochure(
     site_origin: Optional[str] = Query(None, description="Tenant site origin domain"),
     session_id: Optional[str] = Query(None, description="Optional session ID to link lead to conversation"),
     format: Optional[str] = Query(None, description="Optional response format ('json' returns download link)"),
-    db: Session = Depends(get_db)
+    db: Any = Depends(get_db)
 ):
     """
     Public endpoint — generates a branded 8-page luxury presentation property brochure PDF on-demand.
@@ -551,7 +550,12 @@ def download_property_brochure(
             try:
                 from app.services.lead_service import enqueue_lead_save
                 conv = get_or_create_conversation(db=db, session_id=session_id, site_origin=tenant.site_origin)
-                prop = db.query(Property).filter(Property.property_id == property_id.upper()).first()
+                prop = None
+                try:
+                    from app.services.property_search import get_property_by_id
+                    prop = get_property_by_id(db, property_id)
+                except Exception:
+                    prop = None
                 pref_loc = f"{prop.district}, {prop.province}" if prop and prop.district else (prop.province if prop else None)
                 enqueue_lead_save(
                     db=db,

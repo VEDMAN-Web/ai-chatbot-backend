@@ -47,12 +47,10 @@ tajlandia/
 ├── app/
 │   ├── api/v1/          # REST API endpoints (chat, admin)
 │   ├── core/            # Auth, config, and middleware
-│   ├── db/              # SQLAlchemy models and database session
 │   ├── services/        # AI agents, search, integrations, i18n
 │   └── static/          # Frontend UI (HTML, CSS, JS)
-├── alembic/             # Database migration scripts
 ├── data/                # Property catalog and knowledge seed data
-├── scripts/             # Database init and property ingestion
+├── scripts/             # One-off tools (e.g. the SQL-to-Firestore user migration)
 ├── Dockerfile
 ├── requirements.txt
 ├── run.py               # Application entrypoint
@@ -75,7 +73,7 @@ Required variables:
 
 | Variable | Description |
 |---|---|
-| `DATABASE_URL` | PostgreSQL connection string (with pgvector) |
+| `ADMIN_FIREBASE_*` / `USER_FIREBASE_*` | Firestore service account settings |
 | `OPENAI_API_KEY` | OpenAI API key for the public chatbot |
 | `ANTHROPIC_API_KEY` | Anthropic API key for the admin advisor |
 | `INTERNAL_API_SECRET` | A secure random string for internal API auth |

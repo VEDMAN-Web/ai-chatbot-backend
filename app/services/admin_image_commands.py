@@ -2,7 +2,7 @@
 Admin chat commands that add, replace, cover, or remove property images.
 
 They only propose a pending action. Confirm (button or "yes confirm") writes
-PostgreSQL and Firestore, and undo restores the previous image list.
+Firestore, and undo restores the previous image list.
 """
 
 from __future__ import annotations
@@ -259,10 +259,7 @@ def _checked_urls(urls: List[str]) -> Tuple[List[str], Optional[str]]:
 
 
 def load_property_images(db: Any, property_id: str) -> List[Dict[str, Any]]:
-    """Current images from PostgreSQL, or from Firestore when SQL has none."""
-    rows = _sql_image_rows(db, property_id)
-    if rows:
-        return rows
+    """Current images from the Firestore property document."""
     try:
         from app.services.firestore_service import get_property_by_id_from_firestore
 
@@ -284,33 +281,6 @@ def load_property_images(db: Any, property_id: str) -> List[Dict[str, Any]]:
             "sort_order": index,
         })
     return loaded
-
-
-def _sql_image_rows(db: Any, property_id: str) -> List[Dict[str, Any]]:
-    if db is None:
-        return []
-    try:
-        from app.db.models import PropertyImage
-
-        rows = (
-            db.query(PropertyImage)
-            .filter(PropertyImage.property_id == property_id)
-            .order_by(PropertyImage.sort_order, PropertyImage.image_url)
-            .all()
-        )
-    except Exception:
-        return []
-    if not isinstance(rows, list):
-        return []
-    return [
-        {
-            "image_url": row.image_url,
-            "image_type": row.image_type or "exterior",
-            "sort_order": int(row.sort_order or 0),
-        }
-        for row in rows
-        if getattr(row, "image_url", None)
-    ]
 
 
 def _cover_url(items: List[Dict[str, Any]]) -> Optional[str]:
@@ -439,12 +409,6 @@ def _remember_images(db: Any, conv: Any, payload: Optional[Dict[str, Any]]) -> N
     else:
         prefs[_PENDING_KEY] = payload
     conv.preferences = prefs
-    try:
-        from sqlalchemy.orm.attributes import flag_modified
-
-        flag_modified(conv, "preferences")
-    except Exception:
-        pass
     try:
         if db is not None:
             db.commit()
@@ -994,7 +958,6 @@ def execute_property_image_change(db: Any, payload: Dict[str, Any], staff: Any) 
         except Exception:
             operation_id = None
 
-    _write_sql_images(db, property_id, planned)
     cover = _cover_url(planned)
     save_or_update_property_firestore(
         property_id=property_id,
@@ -1022,23 +985,3 @@ def execute_property_image_change(db: Any, payload: Dict[str, Any], staff: Any) 
         "operation_id": operation_id,
         "previous_images": current,
     }
-
-
-def _write_sql_images(db: Any, property_id: str, items: List[Dict[str, Any]]) -> None:
-    if db is None:
-        return
-    from urllib.parse import urlparse as _parse
-
-    from app.db.models import PropertyImage
-
-    db.query(PropertyImage).filter(PropertyImage.property_id == property_id).delete(synchronize_session=False)
-    for index, item in enumerate(items):
-        host = _parse(item["image_url"]).hostname or ""
-        db.add(PropertyImage(
-            property_id=property_id,
-            image_url=item["image_url"],
-            image_type=item.get("image_type") or "exterior",
-            image_host=host[:100],
-            sort_order=index,
-        ))
-    db.commit()

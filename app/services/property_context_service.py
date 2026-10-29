@@ -2,7 +2,7 @@
 Persistent property-aware conversation context for the public chatbot.
 
 Memory decides WHICH property the user means.
-Live Firestore/SQL retrieval decides WHAT is currently true.
+Live Firestore retrieval decides WHAT is currently true.
 """
 
 from __future__ import annotations
@@ -684,5 +684,5 @@ def fetch_authorized_property(db: Any, property_id: str) -> Tuple[Optional[Any],
                 "name": getattr(prop, "property_name", None),
                 "price": getattr(prop, "price_display", None),
             }
-        return prop, card, "sql"
+        return prop, card, "firestore"
     return None, None, "missing"

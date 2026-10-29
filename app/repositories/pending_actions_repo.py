@@ -1,5 +1,5 @@
 """
-Pending actions repository — Postgres / Firestore / both.
+Pending actions repository — Firestore.
 
 Callers must use this module; never query PendingAction or the Firestore client directly.
 """
@@ -13,14 +13,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from app.repositories import _fs_utils as fs
-from app.repositories.store_mode import (
-    reads_firestore_first,
-    reads_postgres,
-    require_firestore_client,
-    store_mode,
-    writes_firestore,
-    writes_postgres,
-)
+from app.repositories.store_mode import require_firestore_client
 
 logger = logging.getLogger(__name__)
 
@@ -88,31 +81,6 @@ class PendingActionRecord:
         }
 
 
-def _mode() -> str:
-    return store_mode("STORE_PENDING_ACTIONS")
-
-
-def _from_orm(row: Any) -> PendingActionRecord:
-    return PendingActionRecord({
-        "id": str(getattr(row, "id", "")),
-        "confirmation_token": getattr(row, "confirmation_token", None),
-        "staff_email": getattr(row, "staff_user_id", None),
-        "staff_user_id": getattr(row, "staff_user_id", None),
-        "tool_name": getattr(row, "tool_name", None),
-        "action_payload": getattr(row, "action_payload", None) or {},
-        "status": getattr(row, "status", None),
-        "conversation_id": getattr(row, "conversation_id", None),
-        "result": getattr(row, "execution_result", None),
-        "error": getattr(row, "error_message", None),
-        "expires_at": getattr(row, "expires_at", None),
-        "confirmed_at": getattr(row, "confirmed_at", None),
-        "executed_at": getattr(row, "executed_at", None),
-        "created_at": getattr(row, "created_at", None),
-        "confirmed_by": getattr(row, "confirmed_by", None) if hasattr(row, "confirmed_by") else None,
-        "undo_info": getattr(row, "undo_info", None) if hasattr(row, "undo_info") else None,
-    })
-
-
 def _is_expired(action: PendingActionRecord, now: Optional[datetime] = None) -> bool:
     now = now or datetime.now(timezone.utc)
     exp = action.expires_at
@@ -158,56 +126,16 @@ def create(
         "created_at": now,
     })
 
-    mode = _mode()
-    if writes_postgres(mode) and db is not None:
-        _pg_insert(db, record)
-    if writes_firestore(mode):
-        client = fs.admin_fs_client()
-        if mode == "firestore":
-            client = require_firestore_client(client, store_name="pending_actions")
-        if client is not None:
-            fs.set_document(client, COLLECTION, record.id, record.to_firestore_dict())
+    client = require_firestore_client(fs.admin_fs_client(), store_name="pending_actions")
+    if client is not None:
+        fs.set_document(client, COLLECTION, record.id, record.to_firestore_dict())
     return record
 
 
-def _pg_insert(db: Any, record: PendingActionRecord) -> None:
-    from app.db.models import PendingAction
-
-    row = PendingAction(
-        id=uuid.UUID(record.id) if len(record.id) == 36 else uuid.uuid4(),
-        confirmation_token=record.confirmation_token,
-        staff_user_id=record.staff_user_id,
-        tool_name=record.tool_name,
-        action_payload=record.action_payload,
-        status=record.status,
-        conversation_id=record.conversation_id,
-        expires_at=record.expires_at.replace(tzinfo=None) if record.expires_at and record.expires_at.tzinfo else record.expires_at,
-        created_at=record.created_at.replace(tzinfo=None) if record.created_at and record.created_at.tzinfo else record.created_at,
-    )
-    # Keep ids aligned when UUID parse worked
-    try:
-        record.id = str(row.id)
-    except Exception:
-        pass
-    db.add(row)
-    db.commit()
-    try:
-        db.refresh(row)
-        record.id = str(row.id)
-    except Exception:
-        pass
-
-
 def get(db: Any, pending_action_id: str) -> PendingActionRecord:
-    mode = _mode()
     action: Optional[PendingActionRecord] = None
 
-    if reads_firestore_first(mode):
-        action = _fs_get(pending_action_id)
-    if action is None and reads_postgres(mode) and db is not None:
-        action = _pg_get(db, pending_action_id)
-    if action is None and writes_firestore(mode) and not reads_firestore_first(mode):
-        action = _fs_get(pending_action_id)
+    action = _fs_get(pending_action_id)
 
     if action is None:
         from fastapi import HTTPException, status
@@ -250,59 +178,6 @@ def _fs_get(pending_action_id: str) -> Optional[PendingActionRecord]:
     return None
 
 
-def _is_real_orm_row(row: Any) -> bool:
-    """Reject MagicMock / non-ORM objects that look truthy but have no real columns."""
-    if row is None:
-        return False
-    status = getattr(row, "status", None)
-    if status is not None and not isinstance(status, str):
-        return False
-    row_id = getattr(row, "id", None)
-    if row_id is None:
-        return False
-    if not isinstance(row_id, (uuid.UUID, str)):
-        return False
-    return True
-
-
-def _pg_get(db: Any, pending_action_id: str) -> Optional[PendingActionRecord]:
-    from app.db.models import PendingAction
-
-    action = None
-    if isinstance(pending_action_id, str) and pending_action_id.startswith("act_"):
-        try:
-            action = db.query(PendingAction).filter(
-                PendingAction.confirmation_token == pending_action_id
-            ).first()
-        except Exception:
-            action = None
-    if not action:
-        target_uuid = None
-        if isinstance(pending_action_id, uuid.UUID):
-            target_uuid = pending_action_id
-        elif isinstance(pending_action_id, str):
-            clean = pending_action_id.replace("act_", "").strip()
-            try:
-                target_uuid = uuid.UUID(clean)
-            except Exception:
-                target_uuid = None
-        if target_uuid:
-            try:
-                action = db.query(PendingAction).filter(PendingAction.id == target_uuid).first()
-            except Exception:
-                action = None
-    if not action and isinstance(pending_action_id, str):
-        try:
-            action = db.query(PendingAction).filter(
-                PendingAction.confirmation_token == pending_action_id
-            ).first()
-        except Exception:
-            action = None
-    if not _is_real_orm_row(action):
-        return None
-    return _from_orm(action)
-
-
 def list_by_conversation(
     db: Any,
     conversation_id: str,
@@ -310,12 +185,8 @@ def list_by_conversation(
     status: Optional[str] = None,
     limit: int = 20,
 ) -> List[PendingActionRecord]:
-    mode = _mode()
     rows: List[PendingActionRecord] = []
-    if reads_firestore_first(mode):
-        rows = _fs_list_conversation(conversation_id, status=status, limit=limit)
-    if (not rows) and reads_postgres(mode) and db is not None:
-        rows = _pg_list_conversation(db, conversation_id, status=status, limit=limit)
+    rows = _fs_list_conversation(conversation_id, status=status, limit=limit)
     return rows
 
 
@@ -360,22 +231,6 @@ def _fs_list_conversation(
     return [PendingActionRecord(d) for d in docs[:limit]]
 
 
-def _pg_list_conversation(
-    db: Any,
-    conversation_id: str,
-    *,
-    status: Optional[str] = None,
-    limit: int = 20,
-) -> List[PendingActionRecord]:
-    from app.db.models import PendingAction
-
-    q = db.query(PendingAction).filter(PendingAction.conversation_id == str(conversation_id))
-    if status:
-        q = q.filter(PendingAction.status == status)
-    rows = q.order_by(PendingAction.created_at.desc()).limit(limit).all()
-    return [_from_orm(r) for r in rows or []]
-
-
 def list_pending_for_property(
     db: Any,
     *,
@@ -383,22 +238,16 @@ def list_pending_for_property(
     conversation_id: Optional[str] = None,
 ) -> List[PendingActionRecord]:
     """PENDING rows that target the same property (for supersede)."""
-    mode = _mode()
     candidates: List[PendingActionRecord] = []
     if conversation_id:
         candidates = list_by_conversation(db, conversation_id, status=ACTION_STATUS_PENDING, limit=50)
     else:
-        if reads_firestore_first(mode):
-            client = fs.admin_fs_client()
-            if client:
-                for snap in fs.stream_collection(client, COLLECTION):
-                    d = fs.doc_to_dict(snap)
-                    if str(d.get("status") or "") == ACTION_STATUS_PENDING:
-                        candidates.append(PendingActionRecord(d))
-        if (not candidates) and reads_postgres(mode) and db is not None:
-            from app.db.models import PendingAction
-            for row in db.query(PendingAction).filter(PendingAction.status == ACTION_STATUS_PENDING).all():
-                candidates.append(_from_orm(row))
+        client = fs.admin_fs_client()
+        if client:
+            for snap in fs.stream_collection(client, COLLECTION):
+                d = fs.doc_to_dict(snap)
+                if str(d.get("status") or "") == ACTION_STATUS_PENDING:
+                    candidates.append(PendingActionRecord(d))
 
     pid = str(property_id).strip().lower()
     matched = []
@@ -419,14 +268,11 @@ def update_fields(
     pending_action_id: str,
     **fields: Any,
 ) -> Optional[PendingActionRecord]:
-    mode = _mode()
     current = None
     try:
         current = get(db, pending_action_id)
     except Exception:
-        current = _fs_get(pending_action_id) or (
-            _pg_get(db, pending_action_id) if db is not None else None
-        )
+        current = _fs_get(pending_action_id)
     if current is None:
         return None
 
@@ -450,71 +296,16 @@ def update_fields(
             if attr == "error_message":
                 current.error = fields[key]
 
-    if writes_firestore(mode):
-        client = fs.admin_fs_client()
-        if client is not None:
-            fs.set_document(client, COLLECTION, current.id, current.to_firestore_dict(), merge=True)
-    if writes_postgres(mode) and db is not None:
-        _pg_update(db, current)
+    client = fs.admin_fs_client()
+    if client is not None:
+        fs.set_document(client, COLLECTION, current.id, current.to_firestore_dict(), merge=True)
     return current
 
 
-def _pg_update(db: Any, record: PendingActionRecord) -> None:
-    from app.db.models import PendingAction
-
-    try:
-        row = db.query(PendingAction).filter(PendingAction.id == uuid.UUID(str(record.id))).first()
-    except Exception:
-        row = None
-    if row is None:
-        try:
-            row = db.query(PendingAction).filter(
-                PendingAction.confirmation_token == record.confirmation_token
-            ).first()
-        except Exception:
-            row = None
-    if row is None:
-        return
-    row.status = record.status
-    row.execution_result = record.execution_result
-    row.error_message = record.error_message
-    row.confirmed_at = (
-        record.confirmed_at.replace(tzinfo=None)
-        if record.confirmed_at and getattr(record.confirmed_at, "tzinfo", None)
-        else record.confirmed_at
-    )
-    row.executed_at = (
-        record.executed_at.replace(tzinfo=None)
-        if record.executed_at and getattr(record.executed_at, "tzinfo", None)
-        else record.executed_at
-    )
-    row.action_payload = record.action_payload
-    db.commit()
-    try:
-        db.refresh(row)
-    except Exception:
-        pass
-
-
 def delete(db: Any, pending_action_id: str) -> None:
-    mode = _mode()
-    if writes_firestore(mode):
-        client = fs.admin_fs_client()
-        if client is not None:
-            fs.delete_document(client, COLLECTION, pending_action_id)
-    if writes_postgres(mode) and db is not None:
-        from app.db.models import PendingAction
-        try:
-            row = db.query(PendingAction).filter(PendingAction.id == uuid.UUID(str(pending_action_id))).first()
-            if row:
-                db.delete(row)
-                db.commit()
-        except Exception as e:
-            logger.warning("Postgres pending delete failed: %s", e)
-            try:
-                db.rollback()
-            except Exception:
-                pass
+    client = fs.admin_fs_client()
+    if client is not None:
+        fs.delete_document(client, COLLECTION, pending_action_id)
 
 
 def _as_record(action: Any) -> PendingActionRecord:
@@ -549,60 +340,56 @@ def claim_confirm(
     Atomically claim a PENDING (non-expired) action for confirm.
     Double-confirm races: only the first caller gets CONFIRMED; others see current status.
     """
-    mode = _mode()
     now = datetime.now(timezone.utc)
 
-    if writes_firestore(mode):
-        client = fs.admin_fs_client()
-        # Skip clients that cannot run transactions (mocks / broken stubs) without logging noise.
-        if client is not None and hasattr(client, "run_transaction"):
-            def _txn(txn):
-                ref = client.collection(COLLECTION).document(str(pending_action_id))
-                snap = txn.get(ref)
-                data = None
-                if hasattr(snap, "to_dict"):
-                    exists = getattr(snap, "exists", True)
-                    data = snap.to_dict() if exists else None
-                elif isinstance(snap, dict):
-                    data = snap
-                if not data:
-                    # Fake overlay may return Snap with exists False
-                    raise LookupError("not_found")
-                data = dict(data)
-                data["id"] = data.get("id") or pending_action_id
-                status = str(data.get("status") or "")
-                if status != ACTION_STATUS_PENDING:
-                    rec = PendingActionRecord(data)
-                    setattr(rec, "claim_won", False)
-                    return rec
-                exp = fs.parse_dt(data.get("expires_at"))
-                if exp and (exp < now if exp.tzinfo else exp < now.replace(tzinfo=None)):
-                    data["status"] = ACTION_STATUS_EXPIRED
-                    data["error"] = "Expired"
-                    txn.set(ref, data, merge=True)
-                    rec = PendingActionRecord(data)
-                    setattr(rec, "claim_won", False)
-                    return rec
-                data["status"] = ACTION_STATUS_CONFIRMED
-                data["confirmed_by"] = staff_email
-                data["confirmed_at"] = fs.to_iso(now)
+    client = fs.admin_fs_client()
+    # Skip clients that cannot run transactions (mocks / broken stubs) without logging noise.
+    if client is not None and hasattr(client, "run_transaction"):
+        def _txn(txn):
+            ref = client.collection(COLLECTION).document(str(pending_action_id))
+            snap = txn.get(ref)
+            data = None
+            if hasattr(snap, "to_dict"):
+                exists = getattr(snap, "exists", True)
+                data = snap.to_dict() if exists else None
+            elif isinstance(snap, dict):
+                data = snap
+            if not data:
+                # Fake overlay may return Snap with exists False
+                raise LookupError("not_found")
+            data = dict(data)
+            data["id"] = data.get("id") or pending_action_id
+            status = str(data.get("status") or "")
+            if status != ACTION_STATUS_PENDING:
+                rec = PendingActionRecord(data)
+                setattr(rec, "claim_won", False)
+                return rec
+            exp = fs.parse_dt(data.get("expires_at"))
+            if exp and (exp < now if exp.tzinfo else exp < now.replace(tzinfo=None)):
+                data["status"] = ACTION_STATUS_EXPIRED
+                data["error"] = "Expired"
                 txn.set(ref, data, merge=True)
                 rec = PendingActionRecord(data)
-                setattr(rec, "claim_won", True)
+                setattr(rec, "claim_won", False)
                 return rec
+            data["status"] = ACTION_STATUS_CONFIRMED
+            data["confirmed_by"] = staff_email
+            data["confirmed_at"] = fs.to_iso(now)
+            txn.set(ref, data, merge=True)
+            rec = PendingActionRecord(data)
+            setattr(rec, "claim_won", True)
+            return rec
 
-            try:
-                claimed = fs.run_transaction(client, _txn)
-                if writes_postgres(mode) and db is not None:
-                    _pg_update(db, claimed)
-                return claimed
-            except LookupError:
-                # Doc missing in FS — fall through to postgres / known_action
-                pass
-            except Exception as e:
-                logger.warning("Firestore confirm transaction failed (%s); falling back", e)
+        try:
+            claimed = fs.run_transaction(client, _txn)
+            return claimed
+        except LookupError:
+            # Doc missing in FS — fall through to known_action
+            pass
+        except Exception as e:
+            logger.warning("Firestore confirm transaction failed (%s); falling back", e)
 
-    # Postgres / fallback path (no FS txn available)
+    # Fallback path (no Firestore transaction available)
     action: Optional[PendingActionRecord] = None
     try:
         action = get(db, pending_action_id)
@@ -624,47 +411,7 @@ def claim_confirm(
         setattr(expired, "claim_won", False)
         return expired
 
-    won = False
-    if writes_postgres(_mode()) and db is not None:
-        from app.db.models import PendingAction as PA
-        try:
-            import uuid as _uuid
-            updated = (
-                db.query(PA)
-                .filter(PA.id == _uuid.UUID(str(action.id)), PA.status == ACTION_STATUS_PENDING)
-                .update({
-                    "status": ACTION_STATUS_CONFIRMED,
-                    "confirmed_at": now.replace(tzinfo=None),
-                }, synchronize_session=False)
-            )
-            db.commit()
-            # Real SQLAlchemy returns int rowcount; MagicMock returns MagicMock.
-            if isinstance(updated, int):
-                won = updated > 0
-            else:
-                # Mock/stub session: claim in-process (unit tests with patched get_pending_action)
-                won = True
-        except Exception:
-            try:
-                db.rollback()
-            except Exception:
-                pass
-            # No real row or broken session — still allow known PENDING action (unit tests)
-            won = known_action is not None and str(
-                getattr(known_action, "status", "")
-            ) == ACTION_STATUS_PENDING
-    else:
-        # In-memory / firestore-unavailable fallback: last writer wins (single-threaded tests)
-        won = True
-
-    if not won:
-        try:
-            current = get(db, pending_action_id)
-        except Exception:
-            current = action
-        setattr(current, "claim_won", False)
-        return current
-
+    # Firestore transaction unavailable or the doc was missing: last writer wins.
     confirmed = update_fields(
         db,
         action.id,
@@ -683,42 +430,38 @@ def claim_reject(
     staff_email: str,
     reason: Optional[str] = None,
 ) -> PendingActionRecord:
-    mode = _mode()
     now = datetime.now(timezone.utc)
 
-    if writes_firestore(mode):
-        client = fs.admin_fs_client()
-        if client is not None:
-            def _txn(txn):
-                ref = client.collection(COLLECTION).document(str(pending_action_id))
-                snap = txn.get(ref)
-                data = snap.to_dict() if hasattr(snap, "to_dict") else None
-                if data is None and getattr(snap, "exists", False) is False:
-                    raise LookupError("not_found")
-                if not data:
-                    raise LookupError("not_found")
-                data = dict(data)
-                data["id"] = data.get("id") or pending_action_id
-                if str(data.get("status") or "") != ACTION_STATUS_PENDING:
-                    return PendingActionRecord(data)
-                data["status"] = ACTION_STATUS_REJECTED
-                data["error"] = reason or "Rejected by staff."
-                data["error_message"] = data["error"]
-                data["confirmed_by"] = staff_email
-                data["confirmed_at"] = fs.to_iso(now)
-                txn.set(ref, data, merge=True)
+    client = fs.admin_fs_client()
+    if client is not None:
+        def _txn(txn):
+            ref = client.collection(COLLECTION).document(str(pending_action_id))
+            snap = txn.get(ref)
+            data = snap.to_dict() if hasattr(snap, "to_dict") else None
+            if data is None and getattr(snap, "exists", False) is False:
+                raise LookupError("not_found")
+            if not data:
+                raise LookupError("not_found")
+            data = dict(data)
+            data["id"] = data.get("id") or pending_action_id
+            if str(data.get("status") or "") != ACTION_STATUS_PENDING:
                 return PendingActionRecord(data)
+            data["status"] = ACTION_STATUS_REJECTED
+            data["error"] = reason or "Rejected by staff."
+            data["error_message"] = data["error"]
+            data["confirmed_by"] = staff_email
+            data["confirmed_at"] = fs.to_iso(now)
+            txn.set(ref, data, merge=True)
+            return PendingActionRecord(data)
 
-            try:
-                rejected = fs.run_transaction(client, _txn)
-                if writes_postgres(mode) and db is not None:
-                    _pg_update(db, rejected)
-                return rejected
-            except LookupError:
-                from fastapi import HTTPException, status
-                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Pending action not found.")
-            except Exception as e:
-                logger.warning("Firestore reject transaction failed (%s); falling back", e)
+        try:
+            rejected = fs.run_transaction(client, _txn)
+            return rejected
+        except LookupError:
+            from fastapi import HTTPException, status
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Pending action not found.")
+        except Exception as e:
+            logger.warning("Firestore reject transaction failed (%s); falling back", e)
 
     action = get(db, pending_action_id)
     if action.status != ACTION_STATUS_PENDING:

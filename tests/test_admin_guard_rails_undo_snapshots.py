@@ -11,14 +11,8 @@ from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import create_engine
-from sqlalchemy.dialects.postgresql import JSONB, UUID
-from sqlalchemy.ext.compiler import compiles
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
-
 from app.core.auth import AuthenticatedStaff
-from app.db.models import Base, Property
+from app.core.deps import FirestoreSession
 from app.services import action_service
 from app.services.action_service import (
     ACTION_STATUS_PENDING,
@@ -36,28 +30,11 @@ def _firestore_stores_for_undo_file(monkeypatch):
     set_store_modes(monkeypatch)
 
 
-@compiles(JSONB, "sqlite")
-def _compile_jsonb_sqlite(type_, compiler, **kw):
-    return "JSON"
-
-
-@compiles(UUID, "sqlite")
-def _compile_uuid_sqlite(type_, compiler, **kw):
-    return "CHAR(36)"
-
-
 @pytest.fixture
 def db():
-    engine = create_engine(
-        "sqlite://",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    Base.metadata.create_all(bind=engine, tables=[Property.__table__])
-    Session = sessionmaker(bind=engine)
-    session = Session()
-    yield session
-    session.close()
+    return FirestoreSession()
+
+
 from app.services.admin_batch_service import (
     BatchOperationError,
     record_crud_operation_snapshot,
@@ -103,24 +80,15 @@ def _pending(**kwargs):
 def test_confirmed_chat_update_creates_snapshot_returns_operation_id(staff, db, monkeypatch):
     fake = patch_firestore(monkeypatch)
     set_store_modes(monkeypatch)
-    db.add(
-        Property(
-            property_id="prop-1",
-            property_name="Old Name",
-            status="Available",
-            price_display="10M THB",
-            price_numeric_min=10_000_000,
-            websites=["tajlandia.com"],
-        )
-    )
-    db.commit()
+    fake.docs[("projects", 'prop-1')] = {'isActive': True, 'name': 'Old Name', 'status': 'Available', 'priceDisplay': '10M THB', 'priceFrom': 10000000, 'websites': ['tajlandia.com']}
     snapshots = []
     fixed_op = "crud_testop123456"
 
     def fake_snapshot(**kwargs):
         snapshots.append(kwargs)
-        assert kwargs.get("previous_state") is not None
-        assert kwargs["previous_state"].get("property_name") == "Old Name"
+        # The snapshot helper reads the raw Firestore document itself, so it only needs the target.
+        assert kwargs["property_id"] == "prop-1"
+        assert kwargs["action_type"] == "update"
         return fixed_op
 
     action = create_pending_action(
@@ -163,16 +131,7 @@ def test_confirmed_chat_update_creates_snapshot_returns_operation_id(staff, db, 
 def test_rejected_or_pending_creates_no_snapshot(staff, db, monkeypatch):
     fake = patch_firestore(monkeypatch)
     set_store_modes(monkeypatch)
-    db.add(
-        Property(
-            property_id="prop-1",
-            property_name="Old Name",
-            status="Available",
-            price_display="10M THB",
-            price_numeric_min=10_000_000,
-        )
-    )
-    db.commit()
+    fake.docs[("projects", 'prop-1')] = {'isActive': True, 'name': 'Old Name', 'status': 'Available', 'priceDisplay': '10M THB', 'priceFrom': 10000000}
     action = create_pending_action(
         db,
         staff_user_id=staff.email,
@@ -253,16 +212,6 @@ def test_change_price_confirm_undo_restores_price(staff, db, monkeypatch):
         "priceFrom": original_price,
         "property_id": "prop-1",
     }
-    db.add(
-        Property(
-            property_id="prop-1",
-            property_name="Old Villa",
-            status="Available",
-            price_display="10M THB",
-            price_numeric_min=original_price,
-        )
-    )
-    db.commit()
 
     action = create_pending_action(
         db,
@@ -301,9 +250,6 @@ def test_change_price_confirm_undo_restores_price(staff, db, monkeypatch):
         undo_reply = _undo_last(db, conv, staff)
     assert "Undone" in (undo_reply.get("text") or "")
     assert fake.docs[("projects", "prop-1")]["priceFrom"] == original_price
-    prop = db.query(Property).filter(Property.property_id == "prop-1").first()
-    db.refresh(prop)
-    assert float(prop.price_numeric_min) == float(original_price)
 
     undo_audits = [
         d for d in audit_docs(fake)

@@ -7,14 +7,11 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
 
 from app.api.v1.admin import router as admin_router
 from app.core.auth import AuthenticatedStaff, require_admin_or_employee
 from app.core.rate_limit import reset_rate_limiter
-from app.db.session import get_db
+from app.core.deps import FirestoreSession, get_db
 from app.services.admin_image_commands import _NoRedirect, lookup_image_content_type
 from app.services.report_service import LocalStorageProvider
 
@@ -44,17 +41,7 @@ def _client(monkeypatch, *, authorize=True):
     )
     app = FastAPI()
     app.include_router(admin_router, prefix="/api/v1")
-    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
-    sessions = sessionmaker(bind=engine)
-
-    def _db():
-        db = sessions()
-        try:
-            yield db
-        finally:
-            db.close()
-
-    app.dependency_overrides[get_db] = _db
+    app.dependency_overrides[get_db] = lambda: FirestoreSession()
     if authorize:
         app.dependency_overrides[require_admin_or_employee] = lambda: _staff()
     return TestClient(app), folder

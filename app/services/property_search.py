@@ -1,11 +1,12 @@
+import logging
 import re
 from typing import Optional, List, Dict, Any
 from decimal import Decimal
-from sqlalchemy.orm import Session
-from sqlalchemy import and_, or_, cast, String
 from pydantic import BaseModel, Field, field_validator
-from app.db.models import Property, PropertyImage, PropertySpec
 from app.core.tenant import normalize_website_list, normalize_website_domain, normalize_tenant_domain_key
+
+logger = logging.getLogger(__name__)
+
 
 class PropertyFilterParams(BaseModel):
     location: Optional[str] = Field(None, max_length=100)
@@ -87,102 +88,6 @@ class PropertyFilterParams(BaseModel):
         from app.core.tenant import normalize_website_list
         return normalize_website_list(v)
 
-def build_property_query(db: Session, filters: PropertyFilterParams):
-    """
-    Safely builds parameterized SQLAlchemy queries from validated structured filters.
-    Zero raw or LLM-generated SQL is ever executed.
-    """
-    query = db.query(Property)
-    conditions = []
-    
-    if filters.is_public is not None:
-        conditions.append(Property.is_public == filters.is_public)
-
-    # General location lookup matching area, province, district, address, or property title
-    if filters.location:
-        loc = f"%{filters.location.strip()}%"
-        conditions.append(
-            or_(
-                Property.province.ilike(loc),
-                Property.area.ilike(loc),
-                Property.district.ilike(loc),
-                Property.address.ilike(loc),
-                Property.property_name.ilike(loc)
-            )
-        )
-
-    if filters.province:
-        conditions.append(Property.province.ilike(f"%{filters.province.strip()}%"))
-
-    if filters.district:
-        conditions.append(Property.district.ilike(f"%{filters.district.strip()}%"))
-
-    if filters.property_type:
-        conditions.append(Property.property_type.ilike(f"%{filters.property_type.strip()}%"))
-
-    if filters.status:
-        conditions.append(Property.status.ilike(f"%{filters.status.strip()}%"))
-
-    if filters.min_price is not None:
-        conditions.append(Property.price_numeric_min >= filters.min_price)
-
-    if filters.max_price is not None:
-        conditions.append(Property.price_numeric_min <= filters.max_price)
-
-    if filters.bedrooms is not None:
-        conditions.append(
-            and_(
-                Property.bedrooms_min <= filters.bedrooms,
-                Property.bedrooms_max >= filters.bedrooms
-            )
-        )
-
-    if filters.bathrooms is not None:
-        conditions.append(Property.bathrooms >= filters.bathrooms)
-
-    if filters.min_area is not None:
-        conditions.append(Property.area_sqm_min >= filters.min_area)
-
-    if filters.max_area is not None:
-        conditions.append(Property.area_sqm_max <= filters.max_area)
-
-    if filters.has_pool is not None:
-        conditions.append(Property.has_pool == filters.has_pool)
-
-    if filters.beach_access is not None:
-        conditions.append(Property.beach_access == filters.beach_access)
-
-    if filters.sea_view is not None:
-        conditions.append(Property.sea_view == filters.sea_view)
-
-    # Scoped Multi-Tenant Website Filter
-    if filters.websites:
-        site_conditions = []
-        for site in filters.websites:
-            canon = normalize_website_domain(site)
-            key = normalize_tenant_domain_key(site)
-            if canon:
-                site_conditions.append(cast(Property.websites, String).ilike(f'%"{canon}"%'))
-                site_conditions.append(cast(Property.websites, String).ilike(f'%{canon}%'))
-            if key:
-                site_conditions.append(cast(Property.websites, String).ilike(f'%"{key}"%'))
-
-        # If tajlandia.com is among the selected sites, also match unassigned legacy properties
-        if any("tajlandia" in s for s in filters.websites):
-            site_conditions.append(Property.websites == None)
-            site_conditions.append(cast(Property.websites, String) == "[]")
-            site_conditions.append(cast(Property.websites, String) == "null")
-            site_conditions.append(cast(Property.websites, String) == "")
-
-        if site_conditions:
-            conditions.append(or_(*site_conditions))
-
-    if conditions:
-        query = query.filter(and_(*conditions))
-
-    return query.order_by(Property.price_numeric_min.asc().nulls_last())
-
-
 def property_belongs_to_websites(prop: Optional[Any], target_websites: List[str]) -> bool:
     """
     Verifies if a Property record or Firestore property dict belongs to ANY of the given target_websites.
@@ -227,7 +132,7 @@ class _MockImage:
 
 class FirestorePropertyAdapter:
     """
-    Wraps a normalized Firestore project dictionary so it behaves like a SQLAlchemy Property model,
+    Wraps a normalized Firestore project dictionary so it behaves like the old Property model,
     enabling all downstream public and admin tools to seamlessly operate directly on live Firestore data.
     """
     def __init__(self, data: Dict[str, Any]):
@@ -290,6 +195,11 @@ class FirestorePropertyAdapter:
         self.developer_name = data.get("developer_name") or data.get("developer") or ""
         self.detail_page_url = data.get("detail_page_url") or ""
         self.raw_metadata = data.get("raw_firestore_data") or {}
+        self.country = data.get("country") or "Thailand"
+        self.developer_description = data.get("developer_description") or ""
+        self.websites = list(data.get("websites") or [])
+        self.units = data.get("units")
+        self.features = list(data.get("features") or [])
 
         # Images list with image_url attribute
         raw_images = data.get("images") or []
@@ -305,14 +215,81 @@ class FirestorePropertyAdapter:
         return item in self._data
 
 
-def search_properties_safe(db: Session, filters: PropertyFilterParams) -> List[Any]:
-    """Execute the safe query and fetch matched records with images."""
-    if db is None:
-        return []
-    query = build_property_query(db, filters)
-    return query.offset(filters.offset).limit(filters.limit).all()
+def _contains(haystack: Any, needle: str) -> bool:
+    return needle.strip().lower() in str(haystack or "").lower()
 
-def get_property_by_id(db: Session, property_id: str) -> Optional[Any]:
+
+def _matches_filters(p: Any, f: PropertyFilterParams) -> bool:
+    """Python equivalent of the old SQL filters, applied to a FirestorePropertyAdapter."""
+    if f.location:
+        if not any(_contains(getattr(p, attr, ""), f.location) for attr in
+                   ("province", "area", "district", "address", "property_name")):
+            return False
+    if f.province and not _contains(p.province, f.province):
+        return False
+    if f.district and not _contains(p.district, f.district):
+        return False
+    if f.property_type and not _contains(p.property_type, f.property_type):
+        return False
+    if f.status and not _contains(p.status, f.status):
+        return False
+
+    def _num(value: Any) -> Optional[Decimal]:
+        try:
+            return Decimal(str(value)) if value is not None and value != "" else None
+        except Exception:
+            return None
+
+    price = _num(p.price_numeric_min)
+    if f.min_price is not None and (price is None or price < f.min_price):
+        return False
+    if f.max_price is not None and (price is None or price > f.max_price):
+        return False
+    if f.bedrooms is not None:
+        if p.bedrooms_min is None or p.bedrooms_max is None:
+            return False
+        if not (p.bedrooms_min <= f.bedrooms <= p.bedrooms_max):
+            return False
+    if f.bathrooms is not None:
+        baths = _num(p.bathrooms)
+        if baths is None or baths < f.bathrooms:
+            return False
+    if f.min_area is not None:
+        area_min = _num(p.area_sqm_min)
+        if area_min is None or area_min < f.min_area:
+            return False
+    if f.max_area is not None:
+        area_max = _num(p.area_sqm_max)
+        if area_max is None or area_max > f.max_area:
+            return False
+    if f.has_pool is not None and bool(p.has_pool) != f.has_pool:
+        return False
+    if f.beach_access is not None and bool(p.beach_access) != f.beach_access:
+        return False
+    if f.sea_view is not None and bool(p.sea_view) != f.sea_view:
+        return False
+    if f.websites and not property_belongs_to_websites(p, f.websites):
+        return False
+    return True
+
+
+def filter_properties(filters: PropertyFilterParams, target: str = "user") -> List[Any]:
+    """All Firestore properties matching the structured filters, cheapest first (unpriced last)."""
+    from app.services.firestore_service import fetch_properties_from_firestore
+
+    cards = fetch_properties_from_firestore(limit=5000, active_only=True, target=target) or []
+    adapters = [FirestorePropertyAdapter(c) for c in cards if isinstance(c, dict)]
+    matched = [p for p in adapters if _matches_filters(p, filters)]
+    matched.sort(key=lambda p: (p.price_numeric_min is None, p.price_numeric_min or 0))
+    return matched
+
+
+def search_properties_safe(db: Any, filters: PropertyFilterParams, target: str = "user") -> List[Any]:
+    """Structured Firestore search. No LLM-generated queries are ever executed."""
+    return filter_properties(filters, target)[filters.offset: filters.offset + filters.limit]
+
+
+def get_property_by_id(db: Any, property_id: str) -> Optional[Any]:
     """Retrieve full public record for a specific Property ID, checking live Cloud Firestore first."""
     if not property_id or not isinstance(property_id, str):
         return None
@@ -327,21 +304,9 @@ def get_property_by_id(db: Session, property_id: str) -> Optional[Any]:
     except Exception as e:
         logger.debug(f"Firestore get_property_by_id fallback: {e}")
 
-    # 2. Local database only when Firestore client is unavailable (offline/dev) —
-    # never silently serve seed/placeholder rows when production Firestore is configured.
-    if db is not None:
-        try:
-            from app.services.firestore_service import get_firestore_client
-            if get_firestore_client("user") or get_firestore_client("admin"):
-                return None
-        except Exception:
-            pass
-        return db.query(Property).filter(
-            Property.property_id == clean_id
-        ).first()
     return None
 
-def get_property_by_name(db: Session, name_query: str) -> Optional[Any]:
+def get_property_by_name(db: Any, name_query: str) -> Optional[Any]:
     """Fuzzy lookup property by name, checking live Cloud Firestore first."""
     if not name_query or not isinstance(name_query, str):
         return None
@@ -356,24 +321,13 @@ def get_property_by_name(db: Session, name_query: str) -> Optional[Any]:
     except Exception as e:
         logger.debug(f"Firestore get_property_by_name fallback: {e}")
 
-    # 2. Local database only when Firestore is unavailable
-    if db is not None:
-        try:
-            from app.services.firestore_service import get_firestore_client
-            if get_firestore_client("user") or get_firestore_client("admin"):
-                return None
-        except Exception:
-            pass
-        return db.query(Property).filter(
-            Property.property_name.ilike(f"%{clean_name}%")
-        ).first()
     return None
 
 
 def to_compact_projection(p: Any, intent: str = "search") -> Dict[str, Any]:
     """
     Produces a minimal, token-efficient projection tailored to the specific query intent.
-    Saves 80%+ tokens compared to serializing the entire Property ORM object.
+    Saves 80%+ tokens compared to serializing the entire property record.
     Never exposes '.xx' placeholder in prices.
     """
     clean_area = re.sub(r"^0\s*[-–]\s*", "", getattr(p, "area_display", "") or "") if getattr(p, "area_display", None) else "N/A"
@@ -430,7 +384,7 @@ def to_compact_projection(p: Any, intent: str = "search") -> Dict[str, Any]:
     return compact
 
 
-def get_properties_by_ids(db: Session, property_ids: List[str]) -> List[Any]:
+def get_properties_by_ids(db: Any, property_ids: List[str]) -> List[Any]:
     """Retrieves multiple properties by IDs or names, preserving the requested order."""
     if not property_ids:
         return []

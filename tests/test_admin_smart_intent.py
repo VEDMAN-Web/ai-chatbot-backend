@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.core.config import settings
-from app.db.models import AuditLog, PendingAction, Property
+from tests import fs_helpers as fsh
 from app.services import admin_intent_parser as intent_parser
 from app.services.admin_intent_parser import parse_admin_write_intent, reset_smart_intent_budget, smart_intent_kind
 
@@ -133,7 +133,7 @@ def _install(payload, boom=None):
 
 
 def _pending(world):
-    return world["db"].query(PendingAction).filter(PendingAction.status == "PENDING").all()
+    return fsh.pending_rows(world["fs"], "PENDING")
 
 
 @pytest.mark.parametrize("phrase,name,language,url", PHRASES)
@@ -150,7 +150,7 @@ def test_natural_phrasings_only_propose(world, monkeypatch, phrase, name, langua
         assert "Sold Out" in reply["text"]
     if language != "en":
         assert "Potwierdź" in reply["text"] or "पुष्टि" in reply["text"] or "પુષ્ટિ" in reply["text"]
-    row = world["db"].query(Property).filter(Property.property_id == "probe-villa").one()
+    row = fsh.prop_one(world["fs"], "probe-villa")
     assert int(row.price_numeric_min) == 10000000
     assert row.status == "Available"
     assert len(_replay._image_rows(world)) == 2
@@ -198,14 +198,14 @@ def test_invented_url_is_dropped_and_injection_cannot_delete(world, monkeypatch)
     proposed = _replay._say(world, injected)
     assert proposed["requires_confirmation"] is True
     assert _pending(world)[-1].tool_name == "manage_property_images"
-    row = world["db"].query(Property).filter(Property.property_id == "probe-villa").one()
+    row = fsh.prop_one(world["fs"], "probe-villa")
     assert row.status == "Available"
     reset_smart_intent_budget()
     _install({"intent": "delete_everything", "confidence": 0.99, "property_text": "Probe Villa", "urls": [], "language": "en", "missing": []})
     fallback = _replay._say(world, "add image https://cdn.example.com/pool.jpg to Probe Villa")
     assert fallback["requires_confirmation"] is True
     assert "pool.jpg" in fallback["text"]
-    assert world["db"].query(Property).filter(Property.property_id == "probe-villa").one().status == "Available"
+    assert fsh.prop_one(world["fs"], "probe-villa").status == "Available"
 
 
 def test_two_properties_and_missing_property_keeps_urls(world, monkeypatch):
@@ -271,7 +271,7 @@ def test_cap_howto_and_audit(world, monkeypatch):
     assert second["requires_confirmation"] is True
     assert "pool.jpg" in second["text"]
     assert len(model.calls) == 1
-    audit = world["db"].query(AuditLog).filter(AuditLog.tool_name == "admin_smart_intent").all()
+    audit = fsh.audit_rows(world["fs"], "admin_smart_intent")
     assert audit
     assert audit[-1].confirmed_by_staff is False
     blob = json.dumps(audit[-1].tool_arguments)
@@ -292,7 +292,7 @@ def test_prompt_is_json_only_and_amounts_must_agree(world, monkeypatch):
     reply = _replay._say(world, "make Probe Villa 12 million")
     assert "does not match" in reply["text"].lower()
     assert reply["requires_confirmation"] is False
-    assert world["db"].query(Property).filter(Property.property_id == "probe-villa").one().price_numeric_min == 10000000
+    assert fsh.prop_one(world["fs"], "probe-villa").price_numeric_min == 10000000
     prompt = model.calls[0]["messages"][0]["content"]
     assert model.calls[0]["temperature"] == 0
     assert "JSON only" in prompt
@@ -307,7 +307,7 @@ def test_delete_image_never_reaches_property_delete(world):
     reply = _replay._say(world, "delete the image of Probe Villa")
     assert reply["requires_confirmation"] is False
     assert "image" in reply["text"].lower()
-    assert world["db"].query(Property).filter(Property.property_id == "probe-villa").one().status == "Available"
+    assert fsh.prop_one(world["fs"], "probe-villa").status == "Available"
     assert _pending(world) == []
 
 

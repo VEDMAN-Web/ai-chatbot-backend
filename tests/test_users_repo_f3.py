@@ -19,8 +19,6 @@ from tests.fake_firestore import FakeFirestore, docs_in_collection, patch_firest
 @pytest.fixture
 def fs(monkeypatch):
     fake = patch_firestore(monkeypatch, FakeFirestore())
-    monkeypatch.setattr(settings, "STORE_USERS", "firestore")
-    monkeypatch.setattr(settings, "STORE_AUDIT", "firestore")
     monkeypatch.setattr(settings, "ENABLE_AUDIT_LOGGING", True)
     monkeypatch.setattr(settings, "ENV", "test")
     monkeypatch.setattr(settings, "ALLOW_INSECURE_DEV_AUTH", False)
@@ -107,14 +105,12 @@ def test_sessions_store_only_a_token_hash(fs):
 
 
 def test_firestore_mode_without_client_fails_loudly(monkeypatch):
-    monkeypatch.setattr(settings, "STORE_USERS", "firestore")
     monkeypatch.setattr("app.services.firestore_service.get_firestore_client", lambda *a, **k: None)
     with pytest.raises(RuntimeError):
         users_repo.get_by_email(None, "x@tajlandia.com")
 
 
 def test_login_returns_503_when_store_is_down(monkeypatch):
-    monkeypatch.setattr(settings, "STORE_USERS", "firestore")
     monkeypatch.setattr("app.services.firestore_service.get_firestore_client", lambda *a, **k: None)
     r = TestClient(app, raise_server_exceptions=False).post(
         "/api/v1/auth/login", json={"email": "x@tajlandia.com", "password": "nope-nope"}

@@ -1,7 +1,7 @@
 """
 Canonical property field map for admin write/diff/knowledge paths.
 
-Model aliases (price, location, bedrooms, …) are normalized to Postgres/Firestore
+Model aliases (price, location, bedrooms, …) are normalized to Firestore
 column names. Unknown field names are rejected. Values are normalized before compare.
 """
 
@@ -63,7 +63,7 @@ _ALIAS_TO_CANONICAL: Dict[str, str] = {
     "haspool": "has_pool",
 }
 
-# Postgres attribute names used when reading ORM Property
+# Attribute names used when reading property row objects
 _PG_ATTRS: Dict[str, Sequence[str]] = {
     "property_name": ("property_name",),
     "project_name": ("project_name",),
@@ -822,41 +822,16 @@ def resolve_existing_property(
     property_id_or_name: Optional[str],
 ) -> Tuple[Optional[str], Optional[Any]]:
     """
-    Resolve a listing from Postgres first, then Firestore projects.
-    Returns (source, record) where source is 'postgres' | 'firestore' | None.
-    Postgres record is the ORM Property; Firestore record is a normalized dict
-    with canonical keys plus '_firestore_doc_id' and '_raw'.
+    Resolve a listing from the Firestore projects collection.
+    Returns (source, record) where source is 'firestore' | None.
+    The record is a normalized dict with canonical keys plus '_firestore_doc_id' and '_raw'.
     """
     raw = (property_id_or_name or "").strip()
     if not raw:
         return None, None
 
     aliases = {raw, raw.lower(), raw.upper()}
-    # 1) Postgres (skipped when STORE_PROPERTIES_WRITE=firestore)
-    from app.repositories import properties_store
-
-    if db is not None and properties_store.sql_enabled():
-        try:
-            from app.db.models import Property
-
-            prop = (
-                db.query(Property)
-                .filter(Property.property_id.in_(list(aliases)))
-                .first()
-            )
-            if not prop:
-                # Fuzzy name match (exact case-insensitive)
-                prop = (
-                    db.query(Property)
-                    .filter(Property.property_name.ilike(raw))
-                    .first()
-                )
-            if prop:
-                return "postgres", prop
-        except Exception as e:
-            logger.debug(f"resolve_existing_property PG skip: {e}")
-
-    # 2) Firestore (admin client, then user)
+    # Firestore (admin client, then user)
     try:
         from app.services.firestore_service import (
             get_firestore_client,
