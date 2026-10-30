@@ -12,14 +12,12 @@ import pytest
 
 from app.core.auth import AuthenticatedStaff
 from app.core.config import settings
-from app.core.security import hash_password
-from app.db.models import User
-from app.db.session import SessionLocal
+from tests import fs_users
 from app.services import drive_service
 from app.services.admin_agent import _execute_admin_tool_uncached
 from app.services.google_services import SCOPES, google_manager
 
-RUN = uuid.uuid4().hex[:6]
+RUN = uuid.uuid4().hex[:6].translate(str.maketrans("0123456789", "ghijklmnop"))  # letters only: digits in a name get parsed as a price
 ROLES = ["super_admin", "admin", "worker"]
 SHARED = object()   # stands for credentials/google_token.json or service_account.json
 
@@ -29,32 +27,17 @@ def _connected(refresh):
                                  "scopes": SCOPES, "email": f"{refresh}@gmail.example"}}
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def staff():
     people = {}
-    with SessionLocal() as db:
-        for role in ROLES:
-            email = f"gw_{RUN}_{role}@tajlandia.com"
-            db.add(User(email=email, name=role, role=role, password_hash=hash_password("x" * 10), is_active=True,
-                        allowed_websites=["tajlandia.com"], preferences=_connected(f"refresh-{role}")))
-            people[role] = email
-        email = f"gw_{RUN}_unconnected@tajlandia.com"
-        db.add(User(email=email, name="nogoogle", role="worker", password_hash=hash_password("x" * 10), is_active=True,
-                    allowed_websites=["tajlandia.com"], preferences={}))
-        people["unconnected"] = email
-        db.commit()
-    yield people
-    with SessionLocal() as db:
-        db.query(User).filter(User.email.like(f"gw_{RUN}_%")).delete(synchronize_session=False)
-        db.commit()
-
-
-@pytest.fixture
-def db():
-    session = SessionLocal()
-    yield session
-    session.rollback()
-    session.close()
+    for role in ROLES:
+        email = f"gw_{RUN}_{role}@tajlandia.com"
+        fs_users.seed_user(role, email, allowed_websites=["tajlandia.com"], preferences=_connected(f"refresh-{role}"))
+        people[role] = email
+    email = f"gw_{RUN}_unconnected@tajlandia.com"
+    fs_users.seed_user("worker", email, allowed_websites=["tajlandia.com"], preferences={})
+    people["unconnected"] = email
+    return people
 
 
 @pytest.fixture
@@ -146,19 +129,10 @@ def test_a_failed_token_refresh_does_not_fall_back_to_the_shared_account(db, sta
         raise RuntimeError("token revoked")
 
     monkeypatch.setattr(Credentials, "refresh", broken_refresh)
-    with SessionLocal() as other:
-        user = other.query(User).filter(User.email == staff["worker"]).first()
-        prefs = dict(user.preferences)
-        prefs["google_workspace"] = dict(prefs["google_workspace"], access_token=None)   # expired: forces a refresh
-        user.preferences = prefs
-        other.commit()
-    try:
-        assert google_manager.get_credentials_for_user(db, staff["worker"]) is None
-    finally:
-        with SessionLocal() as other:
-            user = other.query(User).filter(User.email == staff["worker"]).first()
-            user.preferences = _connected("refresh-worker")
-            other.commit()
+    prefs = fs_users.get_preferences(staff["worker"])
+    prefs["google_workspace"] = dict(prefs["google_workspace"], access_token=None)   # expired: forces a refresh
+    fs_users.set_preferences(staff["worker"], prefs)
+    assert google_manager.get_credentials_for_user(db, staff["worker"]) is None
 
 
 def test_the_shared_account_is_used_only_when_switched_on_or_for_system_work(db, staff, shared_credentials, monkeypatch):
@@ -226,8 +200,12 @@ def test_the_drive_text_cannot_issue_instructions(db, staff, shared_credentials,
     assert res["isolated_block"].startswith("<UNTRUSTED_DOCUMENT_DATA")
 
 
+def _listing_count() -> int:
+    from app.services import firestore_service as fsvc
+    return sum(1 for _ in fsvc.get_admin_firestore_client().collection("projects").stream())
+
+
 def test_an_admin_can_stage_a_listing_from_drive_but_nothing_is_written_before_the_yes(db, staff, shared_credentials, fake_google):
-    from app.db.models import PendingAction, Property
     fake_google.content = b"x"
     import googleapiclient.discovery as discovery
     original = discovery.build
@@ -235,12 +213,12 @@ def test_an_admin_can_stage_a_listing_from_drive_but_nothing_is_written_before_t
             b"Bedrooms: 3\n")
     discovery.build = lambda s, v, credentials=None, **kw: FakeDrive(credentials, text)
     try:
-        before_props = db.query(Property).count()
+        before_props = _listing_count()
         result, staged, action_id = _execute_admin_tool_uncached(
             db, "ingest_property_from_drive", {"file_id": "f1"}, _chat_staff(staff["admin"], "admin"), str(uuid.uuid4()), staff["admin"],
         )
     finally:
         discovery.build = original
     assert staged is True and result["status"] == "PROPOSED", result
-    assert db.query(Property).count() == before_props          # no listing until the admin confirms
-    assert db.query(PendingAction).filter(PendingAction.id == action_id).first().status == "PENDING"
+    assert _listing_count() == before_props          # no listing until the admin confirms
+    assert fs_users.pending_status(action_id) == "PENDING"

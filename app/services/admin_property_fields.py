@@ -1,7 +1,7 @@
 """
 Canonical property field map for admin write/diff/knowledge paths.
 
-Model aliases (price, location, bedrooms, …) are normalized to Postgres/Firestore
+Model aliases (price, location, bedrooms, …) are normalized to Firestore
 column names. Unknown field names are rejected. Values are normalized before compare.
 """
 
@@ -63,7 +63,7 @@ _ALIAS_TO_CANONICAL: Dict[str, str] = {
     "haspool": "has_pool",
 }
 
-# Postgres attribute names used when reading ORM Property
+# Attribute names used when reading property row objects
 _PG_ATTRS: Dict[str, Sequence[str]] = {
     "property_name": ("property_name",),
     "project_name": ("project_name",),
@@ -135,44 +135,213 @@ def localize_name(val: Any) -> Optional[str]:
     return s or None
 
 
-def parse_price_amount(raw: Any) -> Optional[float]:
-    """
-    Parse '5 million', '5M', '5 mln', '5,000,000', 5000000 → float THB.
-    Returns None if unclear.
-    """
-    if raw is None:
+# Same THB rates as intent_router.extract_search_filters_deterministic.
+_FX_TO_THB = {"usd": 35.0, "eur": 38.0, "pln": 8.5, "thb": 1.0}
+_UNIT_MULTIPLIER = {
+    "million": 1_000_000,
+    "millions": 1_000_000,
+    "mln": 1_000_000,
+    "mil": 1_000_000,
+    "mn": 1_000_000,
+    "m": 1_000_000,
+    "thousand": 1_000,
+    "tys": 1_000,
+    "tys.": 1_000,
+    "k": 1_000,
+    "billion": 1_000_000_000,
+    "bn": 1_000_000_000,
+    "b": 1_000_000_000,
+    "mld": 1_000_000_000,
+    "ล้าน": 1_000_000,
+    "แสน": 100_000,
+    "หมื่น": 10_000,
+}
+MONEY_PHRASE = (
+    r"(?:฿|\$|€)?\s*[0-9][0-9,.\s'_]*\s*"
+    r"(?:(?:millions|million|mln|mld|billion|thousand|tys\.?|ล้าน|แสน|หมื่น|bn|mn|mil|k|m|b)(?!\w))?"
+    r"(?:\s*(?:thb|baht|฿|usd|dollars?|eur|euros?|€|บาท|pln|zł))?"
+)
+_MONEY_RE = re.compile(
+    r"(?P<prefix>฿|\$|€)?\s*"
+    r"(?P<number>[0-9][0-9,.\s'_]*)"
+    r"\s*"
+    r"(?:(?P<unit>millions|million|mln|mld|billion|thousand|tys\.?|ล้าน|แสน|หมื่น|bn|mn|mil|k|m|b)(?!\w))?"
+    r"\s*"
+    r"(?P<suffix>thb|baht|฿|usd|dollars?|eur|euros?|€|บาท|pln|zł)?",
+    re.IGNORECASE,
+)
+
+
+def thb_per_unit(currency: str) -> float:
+    """THB per 1 unit of currency. Settings can override the project rates."""
+    code = (currency or "thb").lower()
+    try:
+        from app.core.config import settings
+
+        custom = getattr(settings, "FX_RATES", None)
+        if isinstance(custom, dict) and code in custom:
+            return float(custom[code])
+        override = getattr(settings, f"FX_{code.upper()}_TO_THB", None)
+        if override:
+            return float(override)
+    except Exception:
+        pass
+    return _FX_TO_THB.get(code, 1.0)
+
+
+def _parse_number_token(token: str) -> Optional[float]:
+    text = (token or "").strip().replace("\u00a0", "").replace("_", "").replace("'", "").replace("’", "")
+    text = re.sub(r"\s+", "", text)
+    if not text:
         return None
-    if isinstance(raw, bool):
+    if re.fullmatch(r"\d+,\d{1,2}", text):
+        text = text.replace(",", ".")
+    elif re.fullmatch(r"\d{1,3}(?:\.\d{3})+", text):
+        text = text.replace(".", "")
+    elif "," in text:
+        text = text.replace(",", "")
+    if text.count(".") > 1:
+        text = text.replace(".", "")
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def _currency_code(prefix: str, suffix: str) -> str:
+    blob = f"{prefix or ''} {suffix or ''}".lower()
+    if "$" in blob or "usd" in blob or "dollar" in blob:
+        return "USD"
+    if "€" in blob or "eur" in blob or "euro" in blob:
+        return "EUR"
+    if "pln" in blob or "zł" in blob:
+        return "PLN"
+    return "THB"
+
+
+def short_money(value: float) -> str:
+    number = abs(float(value))
+    sign = "-" if float(value) < 0 else ""
+
+    def compact(amount: float, word: str) -> str:
+        text = f"{amount:.2f}".rstrip("0").rstrip(".")
+        if word == "k":
+            return f"{sign}{text}k"
+        return f"{sign}{text} {word}"
+
+    if number >= 1_000_000_000:
+        return compact(number / 1_000_000_000, "billion")
+    if number >= 1_000_000:
+        return compact(number / 1_000_000, "million")
+    if number >= 1_000 and abs(number - round(number / 1000) * 1000) < 1:
+        return compact(number / 1000, "k")
+    return f"{sign}{number:,.0f} THB"
+
+
+def describe_money(raw: Any) -> Optional[Dict[str, Any]]:
+    """One money reading: THB amount, currency, and a conversion note when FX applies."""
+    if raw is None or isinstance(raw, bool):
         return None
     if isinstance(raw, (int, float, Decimal)):
         try:
-            return float(raw)
+            value = float(raw)
         except Exception:
             return None
-    s = str(raw).strip().lower().replace("\u00a0", " ")
-    if not s or s in ("none", "null", "n/a", "-", "—"):
+        return {
+            "thb": value,
+            "source_amount": value,
+            "currency": "THB",
+            "rate": 1.0,
+            "multiplier": False,
+            "note": "",
+            "short": short_money(value),
+        }
+    text = str(raw).strip().replace("\u00a0", " ")
+    if not text or text.lower() in {"none", "null", "n/a", "-", "—"}:
         return None
-    # Relative change phrases are not absolute amounts
-    if re.search(r"\b(increase|decrease|raise|lower|by)\b", s) and "%" in s:
+    best: Optional[Dict[str, Any]] = None
+    for match in _MONEY_RE.finditer(text):
+        number = _parse_number_token(match.group("number") or "")
+        if number is None:
+            continue
+        unit = (match.group("unit") or "").lower()
+        multiplier = _UNIT_MULTIPLIER.get(unit, 1.0)
+        source = number * multiplier
+        currency = _currency_code(match.group("prefix") or "", match.group("suffix") or "")
+        rate = thb_per_unit(currency)
+        thb = source * rate
+        note = ""
+        if currency != "THB":
+            note = f"Converted from {source:,.0f} {currency} at {rate:g} THB per {currency}."
+        candidate = {
+            "thb": thb,
+            "source_amount": source,
+            "currency": currency,
+            "rate": rate,
+            "multiplier": bool(match.group("unit") or match.group("prefix") or match.group("suffix")),
+            "note": note,
+            "short": short_money(thb),
+        }
+        explicit = bool(match.group("unit") or match.group("prefix") or match.group("suffix"))
+        candidate["multiplier"] = explicit
+        if best is None or explicit or not best.get("multiplier"):
+            best = candidate
+    return best
+
+
+def parse_money(raw: Any) -> Optional[float]:
+    """Parse a price phrase to THB. USD and EUR use the project FX rates."""
+    details = describe_money(raw)
+    if not details:
         return None
-    s = s.replace("thb", "").replace("baht", "").replace(",", "").strip()
-    m = re.search(
-        r"(\d+(?:\.\d+)?)\s*(million|mln|m\.?|m\b)?",
-        s,
-    )
-    if not m:
-        digits = re.sub(r"[^\d.]", "", s)
-        if not digits:
-            return None
+    return float(details["thb"])
+
+
+def money_phrase(value: float, details: Optional[Dict[str, Any]] = None) -> str:
+    """Full digits and the short form, plus an FX note when one was applied."""
+    amount = float(value)
+    phrase = f"{amount:,.0f} THB ({short_money(amount)})"
+    note = (details or {}).get("note") or ""
+    if note:
+        phrase = f"{phrase}. {note}"
+    return phrase
+
+
+def price_sanity_message(new_thb: float, current: Optional[float] = None) -> Optional[str]:
+    """Refuse a proposal when the new price is implausible. None means it can be proposed."""
+    try:
+        amount = float(new_thb)
+    except (TypeError, ValueError):
+        return "I could not read that price. Nothing was changed."
+    shown = f"{amount:,.0f} THB"
+    if amount < 100_000:
+        if amount > 0:
+            suggested = amount * 1_000_000
+            return f"{shown} looks too low. Did you mean {suggested:,.0f} THB? Nothing was changed."
+        return f"{shown} looks too low. Nothing was changed."
+    if amount > 1_000_000_000:
+        return f"{shown} looks too high. Please confirm the amount you want. Nothing was changed."
+    if current is not None:
         try:
-            return float(digits)
-        except ValueError:
-            return None
-    num = float(m.group(1))
-    unit = (m.group(2) or "").rstrip(".")
-    if unit in ("million", "mln", "m"):
-        num *= 1_000_000
-    return num
+            stored = float(current)
+        except (TypeError, ValueError):
+            stored = 0
+        if stored > 0 and (amount / stored > 10 or amount / stored < 0.1):
+            return (
+                f"{shown} is more than ten times away from the current price of {stored:,.0f} THB. "
+                f"Did you mean {shown}? Nothing was changed."
+            )
+    return None
+
+
+def parse_price_amount(raw: Any) -> Optional[float]:
+    """
+    Parse '5 million', '5M', '5 mln', '5,000,000', 5000000 → float THB.
+    Returns None if unclear. Percent phrases are not absolute amounts.
+    """
+    if isinstance(raw, str) and "%" in raw and re.search(r"\b(increase|decrease|raise|lower|by)\b", raw, re.I):
+        return None
+    return parse_money(raw)
 
 
 def parse_relative_price_change(message: str, current: Optional[float]) -> Optional[float]:
@@ -230,6 +399,57 @@ def parse_bedrooms(raw: Any) -> Dict[str, Any]:
         out["bedrooms_max"] = n
         out["bedrooms_display"] = str(n)
     return out
+
+
+def format_bedrooms_label(
+    bedrooms_min: Any = None,
+    bedrooms_max: Any = None,
+    bedrooms_display: Any = None,
+    bedrooms: Any = None,
+) -> str:
+    """
+    '2-3 beds', '3 beds', or 'beds not listed'.
+    Never invents 1-4 and never appends a second 'bed'.
+    """
+    def _int(value: Any) -> Optional[int]:
+        if value is None or isinstance(value, bool):
+            return None
+        if isinstance(value, (int, float)):
+            return int(value)
+        text = str(value).strip()
+        if not text or text.lower() in {"n/a", "none", "null", "beds not listed"}:
+            return None
+        parsed = parse_bedrooms(text)
+        if parsed.get("bedrooms_min") is None:
+            return None
+        return int(parsed["bedrooms_min"])
+
+    lo = _int(bedrooms_min)
+    hi = _int(bedrooms_max)
+    if lo is None and hi is None:
+        raw = bedrooms_display if bedrooms_display not in (None, "") else bedrooms
+        blob = str(raw or "").strip().lower()
+        if blob in {"", "n/a", "none", "1-4", "1-4 beds", "1–4 beds"}:
+            return "beds not listed"
+        parsed = parse_bedrooms(raw)
+        lo = parsed.get("bedrooms_min")
+        hi = parsed.get("bedrooms_max")
+        if lo is None:
+            return "beds not listed"
+    if hi is None or int(hi) == int(lo):
+        return f"{int(lo)} beds"
+    return f"{min(int(lo), int(hi))}-{max(int(lo), int(hi))} beds"
+
+
+def format_place_name(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    return re.sub(
+        r"[A-Za-z]+",
+        lambda match: match.group(0) if any(ch.isupper() for ch in match.group(0)[1:]) else match.group(0).capitalize(),
+        text,
+    )
 
 
 def resolve_alias(field: str) -> Optional[str]:
@@ -452,11 +672,63 @@ def read_pg_canonical(prop: Any, keys: Sequence[str]) -> Dict[str, Any]:
     return out
 
 
+def firestore_identity(doc: Dict[str, Any]) -> Dict[str, Any]:
+    """Name, place, bedrooms and status from the document fields, not the id."""
+    if not isinstance(doc, dict):
+        return {}
+
+    def text(*names: str) -> Optional[str]:
+        for key in names:
+            value = doc.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+            if isinstance(value, dict):
+                for item in value.values():
+                    if isinstance(item, str) and item.strip() and len(item.strip()) <= 120:
+                        return item.strip()
+        return None
+
+    name = text("name", "propertyName", "projectName", "title", "property_name")
+    place = text("province", "city", "district", "area", "location")
+    status = text("status", "saleStatus", "completionStatus")
+    if not status and "isActive" in doc:
+        status = "Available" if doc.get("isActive") else "Sold Out"
+    bedrooms = doc.get("bedroomsMin")
+    if bedrooms is None:
+        bedrooms = doc.get("bedrooms_min")
+    if bedrooms is None and isinstance(doc.get("bedrooms"), (int, float)):
+        bedrooms = doc.get("bedrooms")
+    bedrooms_max = doc.get("bedroomsMax") if doc.get("bedroomsMax") is not None else doc.get("bedrooms_max")
+    out: Dict[str, Any] = {}
+    if name:
+        out["name"] = name
+        out["property_name"] = name
+    if place:
+        out["province"] = place
+        out["location"] = place
+    if status:
+        out["status"] = status
+    if bedrooms is not None:
+        out["bedrooms"] = bedrooms
+        out["bedrooms_min"] = bedrooms
+    if bedrooms_max is not None:
+        out["bedrooms_max"] = bedrooms_max
+    return out
+
+
 def read_firestore_canonical(doc: Dict[str, Any], keys: Sequence[str]) -> Dict[str, Any]:
     out: Dict[str, Any] = {}
     if not doc:
         return out
-    name = localize_name(doc.get("name") or doc.get("title") or doc.get("property_name"))
+    identity = firestore_identity(doc)
+    name = localize_name(
+        identity.get("name")
+        or doc.get("name")
+        or doc.get("propertyName")
+        or doc.get("projectName")
+        or doc.get("title")
+        or doc.get("property_name")
+    )
     price_from = doc.get("priceFrom") or doc.get("price_numeric_min") or doc.get("price")
     price_to = doc.get("priceTo") or doc.get("price_numeric_max")
     if isinstance(price_from, dict):
@@ -466,19 +738,19 @@ def read_firestore_canonical(doc: Dict[str, Any], keys: Sequence[str]) -> Dict[s
 
     mapping = {
         "property_name": name,
-        "status": doc.get("status") or doc.get("saleStatus"),
+        "status": identity.get("status") or doc.get("status") or doc.get("saleStatus"),
         "price_numeric_min": parsed_min if parsed_min is not None else price_from,
         "price_numeric_max": parsed_max if parsed_max is not None else price_to,
         "price_display": doc.get("price_display")
         or (f"{parsed_min:,.0f} THB" if parsed_min is not None else localize_name(doc.get("price"))),
         "currency": doc.get("currency") or "THB",
-        "province": doc.get("province") or localize_name(doc.get("location")),
+        "province": identity.get("province") or doc.get("province") or localize_name(doc.get("location")),
         "district": doc.get("district") or doc.get("area"),
         "area": doc.get("area") or localize_name(doc.get("location")),
-        "location": localize_name(doc.get("location")) or doc.get("province"),
+        "location": identity.get("location") or localize_name(doc.get("location")) or doc.get("province"),
         "property_type": doc.get("property_type") or doc.get("type"),
-        "bedrooms_min": doc.get("bedrooms_min") or doc.get("bedrooms"),
-        "bedrooms_max": doc.get("bedrooms_max"),
+        "bedrooms_min": identity.get("bedrooms_min") or doc.get("bedrooms_min") or doc.get("bedroomsMin") or doc.get("bedrooms"),
+        "bedrooms_max": identity.get("bedrooms_max") or doc.get("bedrooms_max") or doc.get("bedroomsMax"),
         "bedrooms_display": doc.get("bedrooms_display") or (
             str(doc.get("bedrooms")) if doc.get("bedrooms") is not None else None
         ),
@@ -550,39 +822,16 @@ def resolve_existing_property(
     property_id_or_name: Optional[str],
 ) -> Tuple[Optional[str], Optional[Any]]:
     """
-    Resolve a listing from Postgres first, then Firestore projects.
-    Returns (source, record) where source is 'postgres' | 'firestore' | None.
-    Postgres record is the ORM Property; Firestore record is a normalized dict
-    with canonical keys plus '_firestore_doc_id' and '_raw'.
+    Resolve a listing from the Firestore projects collection.
+    Returns (source, record) where source is 'firestore' | None.
+    The record is a normalized dict with canonical keys plus '_firestore_doc_id' and '_raw'.
     """
     raw = (property_id_or_name or "").strip()
     if not raw:
         return None, None
 
     aliases = {raw, raw.lower(), raw.upper()}
-    # 1) Postgres
-    if db is not None:
-        try:
-            from app.db.models import Property
-
-            prop = (
-                db.query(Property)
-                .filter(Property.property_id.in_(list(aliases)))
-                .first()
-            )
-            if not prop:
-                # Fuzzy name match (exact case-insensitive)
-                prop = (
-                    db.query(Property)
-                    .filter(Property.property_name.ilike(raw))
-                    .first()
-                )
-            if prop:
-                return "postgres", prop
-        except Exception as e:
-            logger.debug(f"resolve_existing_property PG skip: {e}")
-
-    # 2) Firestore (admin client, then user)
+    # Firestore (admin client, then user)
     try:
         from app.services.firestore_service import (
             get_firestore_client,
@@ -614,6 +863,7 @@ def resolve_existing_property(
             raw_fs = fs_prop.get("raw_firestore_data") if isinstance(fs_prop.get("raw_firestore_data"), dict) else {}
             doc = dict(raw_fs or {})
             doc.update({k: v for k, v in fs_prop.items() if k != "raw_firestore_data" and v is not None})
+            doc.update(firestore_identity(raw_fs or {}))
         else:
             for target in ("admin", "user"):
                 fs = get_firestore_client(target=target) or (

@@ -7,13 +7,12 @@ from types import SimpleNamespace
 import pytest
 
 from app.core.config import settings
-from app.db.models import AuditLog
-from app.db.session import SessionLocal
+from tests.fs_users import audit_by_tool
 from app.services import chat_log_remarks as remarks
 from app.services import chat_log_service as logs
 
 # fixtures and helpers shared with the log review tests
-from test_chat_log_api import BASE, PREFIX, _at, _log, _staff, client, fs  # noqa: F401
+from tests.test_chat_log_api import BASE, PREFIX, _at, _log, _staff, client, fs  # noqa: F401
 
 ANSWER = "m000002"
 QUESTION = "m000001"
@@ -39,12 +38,6 @@ def world(fs, monkeypatch):
     yield SimpleNamespace(people=people, conv=conv, fs=fs)
     for name in (remarks.REMARKS, remarks.CORRECTIONS):
         fs.recursive_delete(fs.collection(name))
-    db = SessionLocal()
-    try:
-        db.query(AuditLog).filter(AuditLog.tool_name.like("correction:%")).delete(synchronize_session=False)
-        db.commit()
-    finally:
-        db.close()
 
 
 def _add_remark(w, who, issue="The price is outdated", suggested=None, message=ANSWER):
@@ -275,11 +268,8 @@ def test_correction_lists_and_visibility(world):
 # ---- audit: written first, and a failure blocks the change ----------------------------------------------
 
 def _audit_rows(tool):
-    db = SessionLocal()
-    try:
-        return [(r.status, r.staff_user_id, r.proposed_payload) for r in db.query(AuditLog).filter(AuditLog.tool_name == tool).order_by(AuditLog.created_at).all()]
-    finally:
-        db.close()
+    rows = sorted(audit_by_tool(tool), key=lambda r: str(r.get("created_at") or ""))
+    return [(r["status"], r["staff_user_id"], r["proposed_payload"]) for r in rows]
 
 
 def test_an_approval_is_audited_before_and_after(world):

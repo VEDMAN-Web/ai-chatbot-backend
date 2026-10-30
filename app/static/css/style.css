@@ -2007,6 +2007,78 @@ body {
   background: rgba(229, 195, 120, 0.1);
 }
 
+.image-attach-tray {
+  max-width: 860px;
+  width: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.image-attach-tray.drag-over,
+.bottom-input-container.drag-over .input-pill-box {
+  outline: 2px dashed var(--gold);
+  outline-offset: 2px;
+}
+
+.image-thumb {
+  position: relative;
+  width: 64px;
+  height: 64px;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid var(--border-subtle);
+  background: rgba(0, 0, 0, 0.25);
+}
+
+.image-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.image-thumb-remove {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 18px;
+  height: 18px;
+  border: none;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.75);
+  color: #fff;
+  cursor: pointer;
+  line-height: 16px;
+  font-size: 12px;
+}
+
+.image-thumb-status,
+.image-attach-error {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.image-attach-error {
+  color: #f87171;
+  width: 100%;
+}
+
+.message-image-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.message-image-row img {
+  width: 72px;
+  height: 72px;
+  object-fit: cover;
+  border-radius: 8px;
+}
+
 .batch-dropzone {
   border: 2px dashed rgba(229, 195, 120, 0.35);
   border-radius: var(--radius-md);
@@ -2337,4 +2409,134 @@ body {
   align-items: center;
   gap: 4px;
   margin-left: auto;
+}
+
+/* Visitor Logs */
+.visitor-logs-modal {
+  max-width: min(1100px, 96vw);
+  width: 96vw;
+}
+.visitor-logs-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-height: min(70vh, 720px);
+}
+.visitor-stats-strip {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+.visitor-stat {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.visitor-stat-label {
+  font-size: 11px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.visitor-stat-value {
+  font-size: 20px;
+  font-weight: 700;
+}
+.visitor-filters {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 8px;
+  align-items: center;
+}
+.visitor-flagged-toggle {
+  font-size: 12px;
+  color: var(--text-muted);
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+}
+.visitor-logs-layout {
+  display: grid;
+  grid-template-columns: minmax(240px, 0.9fr) minmax(280px, 1.1fr);
+  gap: 12px;
+  min-height: 320px;
+}
+.visitor-sessions-pane,
+.visitor-detail-pane {
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.15);
+  overflow: auto;
+  max-height: 420px;
+}
+.visitor-status {
+  padding: 12px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+.visitor-session-row {
+  width: 100%;
+  text-align: left;
+  border: 0;
+  border-bottom: 1px solid var(--border-subtle);
+  background: transparent;
+  color: inherit;
+  padding: 10px 12px;
+  cursor: pointer;
+}
+.visitor-session-row:hover,
+.visitor-session-row.active {
+  background: rgba(255, 255, 255, 0.05);
+}
+.visitor-session-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-bottom: 4px;
+}
+.visitor-session-q {
+  font-size: 13px;
+  line-height: 1.35;
+}
+.visitor-detail-empty {
+  padding: 20px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+.visitor-turn {
+  padding: 12px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.visitor-turn-meta {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-bottom: 6px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.visitor-turn-q,
+.visitor-turn-a {
+  font-size: 13px;
+  line-height: 1.4;
+  margin: 0 0 6px;
+}
+.visitor-correct-btn {
+  font-size: 11px;
+  opacity: 0.65;
+  cursor: not-allowed;
+}
+@media (max-width: 800px) {
+  .visitor-logs-layout {
+    grid-template-columns: 1fr;
+  }
+  .visitor-stats-strip {
+    grid-template-columns: 1fr;
+  }
 }

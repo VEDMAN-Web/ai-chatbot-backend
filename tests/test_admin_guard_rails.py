@@ -193,7 +193,8 @@ def test_c1_secret_request_refused_and_output_redacted(monkeypatch, staff):
             staff_user=staff,
         )
     assert "sk-" not in (res.get("text") or "")
-    assert "cannot" in (res.get("text") or "").lower() or "refus" in (res.get("text") or "").lower()
+    text = res.get("text") or ""
+    assert "I cannot share" in text
 
 
 # --- C2: honest errors ---

@@ -1,53 +1,47 @@
-"""TASK 4 — get_property_knowledge returns price fields."""
+"""TASK 4 — get_property_knowledge returns price fields (from the Firestore listing)."""
 
 from __future__ import annotations
 
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from app.services.admin_knowledge_service import get_property_knowledge
 
 
-def test_knowledge_includes_price_fields_from_pg():
-    prop = SimpleNamespace(
-        property_id="pirak-villa",
-        property_name="Pirak Villa",
-        status="Available",
-        province="Phuket",
-        district="Kata",
-        area="Phuket",
-        price_numeric_min=39_990_000,
-        price_numeric_max=None,
-        price_display="39,990,000 THB",
-        currency="THB",
-        bedrooms_min=3,
-        bedrooms_max=4,
-        bedrooms_display="3-4",
-        bathrooms=3,
-        area_display="250 sqm",
-        property_type="Villa",
-        has_pool=True,
-        developer_name="Dev Co",
-    )
-    db = MagicMock()
-    q_prop = MagicMock()
-    q_prop.filter.return_value.first.return_value = prop
-    q_spec = MagicMock()
-    q_spec.filter.return_value.first.return_value = None
+def _card(**extra):
+    card = {
+        "property_id": "pirak-villa",
+        "name": "Pirak Villa",
+        "property_name": "Pirak Villa",
+        "status": "Available",
+        "province": "Phuket",
+        "district": "Kata",
+        "area": "Phuket",
+        "price_numeric_min": 39_990_000,
+        "price_numeric_max": None,
+        "price_display": "39,990,000 THB",
+        "price": "39,990,000 THB",
+        "currency": "THB",
+        "bedrooms_min": 3,
+        "bedrooms_max": 4,
+        "bedrooms_display": "3-4",
+        "bedrooms": "3-4",
+        "bathrooms": 3,
+        "area_display": "250 sqm",
+        "property_type": "Villa",
+        "has_pool": True,
+        "developer_name": "Dev Co",
+        "raw_firestore_data": {},
+    }
+    card.update(extra)
+    return card
 
-    def query_side(model):
-        name = getattr(model, "__name__", str(model))
-        if "Spec" in name:
-            return q_spec
-        return q_prop
 
-    db.query.side_effect = query_side
-
+def test_knowledge_includes_price_fields_from_firestore():
     with patch(
         "app.services.firestore_service.get_property_by_id_from_firestore",
-        return_value=None,
+        return_value=_card(),
     ):
-        res = get_property_knowledge(db, "pirak-villa")
+        res = get_property_knowledge(MagicMock(), "pirak-villa")
 
     assert res is not None
     assert res["price_numeric_min"] == 39_990_000
@@ -60,58 +54,22 @@ def test_knowledge_includes_price_fields_from_pg():
 
 
 def test_knowledge_hides_internal_unless_asked():
-    prop = SimpleNamespace(
-        property_id="p1",
-        property_name="A",
-        status="Available",
-        province="Phuket",
-        district=None,
-        area=None,
-        price_numeric_min=1,
-        price_numeric_max=None,
-        price_display="1",
-        currency="THB",
-        bedrooms_min=1,
-        bedrooms_max=1,
-        bedrooms_display="1",
-        bathrooms=1,
-        area_display=None,
-        property_type="Villa",
-        has_pool=False,
+    card = _card(
+        property_id="p1", name="A", property_name="A", price_numeric_min=1, price_display="1",
         developer_name="Secret Dev",
+        raw_firestore_data={"investmentHighlights": ["CONFIDENTIAL ROI 9.7%"]},
     )
-    spec = SimpleNamespace(
-        roof_material=None,
-        roof_colour=None,
-        flooring=None,
-        walls=None,
-        doors_windows=None,
-        exterior_materials=None,
-        interior_materials=None,
-        architectural_style=None,
-        construction_details={},
-        internal_notes="CONFIDENTIAL ROI 9.7%",
-    )
-    db = MagicMock()
-    q_prop = MagicMock()
-    q_prop.filter.return_value.first.return_value = prop
-    q_spec = MagicMock()
-    q_spec.filter.return_value.first.return_value = spec
-
-    def query_side(model):
-        name = getattr(model, "__name__", str(model))
-        if "Spec" in name:
-            return q_spec
-        return q_prop
-
-    db.query.side_effect = query_side
-
     with patch(
         "app.services.firestore_service.get_property_by_id_from_firestore",
-        return_value=None,
+        return_value=card,
     ):
-        hidden = get_property_knowledge(db, "p1", include_internal_notes=False)
-        shown = get_property_knowledge(db, "p1", include_internal_notes=True)
+        hidden = get_property_knowledge(MagicMock(), "p1", include_internal_notes=False)
+        shown = get_property_knowledge(MagicMock(), "p1", include_internal_notes=True)
 
     assert "internal_notes" not in hidden
     assert shown.get("internal_notes") and "CONFIDENTIAL" in shown["internal_notes"]
+
+
+def test_knowledge_unknown_property_returns_none():
+    with patch("app.services.firestore_service.get_property_by_id_from_firestore", return_value=None):
+        assert get_property_knowledge(MagicMock(), "nope") is None

@@ -2,7 +2,6 @@ import time
 import logging
 from dataclasses import dataclass, field
 from typing import Dict, Any, List, Optional
-from sqlalchemy.orm import Session
 from app.services.audit_service import record_audit_log
 
 logger = logging.getLogger(__name__)
@@ -49,7 +48,7 @@ class TokenTracker:
     def log_turn(
         self,
         metrics: TurnTokenMetrics,
-        db: Optional[Session] = None
+        db: Optional[Any] = None
     ) -> None:
         metrics.compute_cost()
         sess = metrics.session_id

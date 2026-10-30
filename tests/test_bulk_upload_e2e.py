@@ -3,10 +3,9 @@ Bulk Property Operations (upload Excel/CSV/PDF/DOCX, Update / Delete / Create, 6
 
 The Admin Panel modal calls: POST /admin/properties/batch-file, POST /admin/actions/{id}/confirm,
 GET /admin/operations/history, POST /admin/operations/{id}/undo. They are called here with real files and real accounts.
-Firestore is the emulator (a unique project per run); PostgreSQL is the throwaway database. Nothing live is touched.
+Firestore is the in-memory fake (tests/fake_firestore.py). Nothing live is touched.
 """
 import io
-import os
 import uuid
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -15,55 +14,36 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.core.config import settings
-from app.core.security import hash_password
-from app.db.models import PendingAction, User
-from app.db.session import SessionLocal
 from app.main import app
+from tests import fs_users
 
 client = TestClient(app)
 TAJ, VAR, THAI = "tajlandia.com", "varsoviaestate.com", "thai.estate"
-RUN = uuid.uuid4().hex[:6]
+RUN = uuid.uuid4().hex[:6].translate(str.maketrans("0123456789", "ghijklmnop"))  # letters only: digits in a name get parsed as a price
 PASSWORD = "BulkE2e#123"
 BASE = "/api/v1/admin"
 
 
-@pytest.fixture(scope="module")
-def fs():
-    if not os.environ.get("FIRESTORE_EMULATOR_HOST"):
-        pytest.skip("Firestore emulator not available (set FIRESTORE_EMULATOR_HOST)")
-    from google.cloud import firestore
-    return firestore.Client(project=f"bulk-e2e-{RUN}")
+@pytest.fixture
+def fs(_default_fake_firestore):
+    return _default_fake_firestore
 
 
 @pytest.fixture(autouse=True)
-def wiring(fs, monkeypatch):
+def wiring(monkeypatch):
     monkeypatch.setattr(settings, "ENABLE_FIRESTORE_SYNC", False)
-    for target in ("app.services.admin_batch_service.get_firestore_client",
-                   "app.services.admin_batch_service.get_snapshot_client",
-                   "app.services.firestore_service.get_firestore_client"):
-        monkeypatch.setattr(target, lambda *a, **kw: fs)
-    monkeypatch.setattr("app.services.firestore_auth_service.get_firestore_client", lambda *a, **kw: None)
 
 
 def _user(role, sites):
     email = f"bulk_{RUN}_{role}_{uuid.uuid4().hex[:4]}@tajlandia.com"
-    with SessionLocal() as db:
-        db.add(User(email=email, name=role, role=role, password_hash=hash_password(PASSWORD), is_active=True,
-                    allowed_websites=list(sites), domain=TAJ))
-        db.commit()
-    token = client.post("/api/v1/auth/login", json={"email": email, "password": PASSWORD}).json()["access_token"]
-    return SimpleNamespace(email=email, headers={"Authorization": f"Bearer {token}"})
+    made = fs_users.make_user(client, role, email=email, password=PASSWORD, allowed_websites=list(sites))
+    return SimpleNamespace(email=email, headers=made["headers"])
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def people():
-    ppl = SimpleNamespace(boss=_user("super_admin", [TAJ, VAR, THAI]), taj=_user("admin", [TAJ]),
-                          var=_user("admin", [VAR]), worker=_user("worker", [TAJ]))
-    yield ppl
-    with SessionLocal() as db:
-        db.query(PendingAction).filter(PendingAction.staff_user_id.like(f"bulk_{RUN}_%")).delete(synchronize_session=False)
-        db.query(User).filter(User.email.like(f"bulk_{RUN}_%")).delete(synchronize_session=False)
-        db.commit()
+    return SimpleNamespace(boss=_user("super_admin", [TAJ, VAR, THAI]), taj=_user("admin", [TAJ]),
+                           var=_user("admin", [VAR]), worker=_user("worker", [TAJ]))
 
 
 def _pid(tag):
@@ -156,7 +136,8 @@ def _upload(who, content, name, action, *sites):
 
 
 def _confirm(who, pending_id):
-    return client.post(f"{BASE}/actions/{pending_id}/confirm", headers=who.headers, json={})
+    return client.post(f"{BASE}/actions/{pending_id}/confirm", headers=who.headers,
+                       json={"confirmation_token": fs_users.pending_token(pending_id)})
 
 
 def _history(who):
@@ -375,8 +356,13 @@ def test_confirming_twice_applies_once(fs, people):
     a = _pid("H3")
     _seed(fs, a, TAJ)
     up = _upload(people.taj, _csv([f"{a},Seed {a},Sold Out"]), "t.csv", "update", TAJ).json()
-    assert _confirm(people.taj, up["pending_action_id"]).status_code == 200
-    assert _confirm(people.taj, up["pending_action_id"]).status_code >= 400
+    first = _confirm(people.taj, up["pending_action_id"])
+    assert first.status_code == 200
+    again = _confirm(people.taj, up["pending_action_id"])
+    # The second confirm returns the first result and does not run the change again.
+    assert again.status_code >= 400 or (again.json().get("idempotent") is True)
+    ops = [d for d in fs.collection("admin_batch_operations").stream()]
+    assert len(ops) == 1
 
 
 # ======================================================================================================

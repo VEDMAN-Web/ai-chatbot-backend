@@ -1,12 +1,11 @@
 """Proposed emails and calendar events are validated by the backend before they can be staged for confirmation."""
 from datetime import datetime, timedelta, timezone
-from unittest.mock import MagicMock
 
 import pytest
 from fastapi import HTTPException
 
-from app.db.models import AuditLog, PendingAction
-from app.db.session import SessionLocal
+from app.core.deps import FirestoreSession
+from tests import fs_users
 from app.services.action_service import (
     create_pending_action,
     validate_calendar_action,
@@ -68,22 +67,26 @@ def test_zulu_time_is_accepted():
     ("send_email", {**GOOD_EMAIL, "to": "bad"}),
     ("create_calendar_event", {**GOOD_EVENT, "start_time": "2030-01-01T10:00:00"}),
 ])
+def _staged_for(email: str) -> int:
+    from app.services import firestore_service as fsvc
+    client = fsvc.get_admin_firestore_client()
+    return sum(1 for d in client.collection("pending_actions").stream() if (d.to_dict() or {}).get("staff_user_id") == email)
+
+
+@pytest.mark.parametrize("tool,payload", [
+    ("send_email", {**GOOD_EMAIL, "to": "bad"}),
+    ("create_calendar_event", {**GOOD_EVENT, "start_time": "2030-01-01T10:00:00"}),
+])
 def test_an_invalid_action_is_never_staged(tool, payload):
-    db = MagicMock()
+    db = FirestoreSession()
     with pytest.raises(HTTPException) as err:
         create_pending_action(db=db, staff_user_id=STAFF, tool_name=tool, action_payload=payload)
     assert err.value.status_code == 422 and "Cannot stage this action" in err.value.detail
-    db.add.assert_not_called()
+    assert _staged_for(STAFF) == 0
 
 
 @pytest.mark.parametrize("tool,payload", [("send_email", GOOD_EMAIL), ("create_calendar_event", GOOD_EVENT)])
 def test_a_valid_action_is_staged_as_pending(tool, payload):
-    db = SessionLocal()
-    try:
-        action = create_pending_action(db=db, staff_user_id=STAFF, tool_name=tool, action_payload=payload)
-        assert action.status == "PENDING" and action.staff_user_id == STAFF
-    finally:
-        db.query(PendingAction).filter(PendingAction.staff_user_id == STAFF).delete(synchronize_session=False)
-        db.query(AuditLog).filter(AuditLog.staff_user_id == STAFF).delete(synchronize_session=False)
-        db.commit()
-        db.close()
+    action = create_pending_action(db=FirestoreSession(), staff_user_id=STAFF, tool_name=tool, action_payload=payload)
+    assert action.status == "PENDING" and action.staff_user_id == STAFF
+    assert fs_users.pending_status(str(action.id)) == "PENDING"

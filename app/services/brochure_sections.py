@@ -8,6 +8,7 @@ verified data are skipped; page numbers renumber. No empty boxes, no "N/A".
 from __future__ import annotations
 
 import re
+from typing import Optional
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence

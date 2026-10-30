@@ -10,11 +10,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from test_chat_log_api import _at, client, fs, logs, world  # noqa: F401  (fixtures and helpers)
+from tests.test_chat_log_api import _at, client, fs, logs, world  # noqa: F401  (fixtures and helpers)
 
 from app.core.config import settings
-from app.db.models import AuditLog
-from app.db.session import SessionLocal
+from tests.fs_users import audit_by_tool
 from app.services import instruction_store
 
 BASE = "/api/v1/admin/superadmin/conversations"
@@ -205,9 +204,8 @@ def test_no_token_is_401(world, long_chat):
 
 def test_the_review_is_audited_and_blocked_when_auditing_is_off(world, long_chat, monkeypatch, fs):
     assert _post(world.people.boss, long_chat.key, is_satisfactory=True).status_code == 200
-    with SessionLocal() as db:
-        rows = db.query(AuditLog).filter(AuditLog.tool_name == "conversation_review", AuditLog.staff_user_id == world.people.boss["email"]).all()
-        assert len(rows) == 1 and rows[0].proposed_payload["satisfactory"] is True
+    rows = [r for r in audit_by_tool("conversation_review") if r["staff_user_id"] == world.people.boss["email"]]
+    assert len(rows) == 1 and rows[0]["proposed_payload"]["satisfactory"] is True
     monkeypatch.setattr(settings, "ENABLE_AUDIT_LOGGING", False)
     res = _post(world.people.boss, long_chat.key, instructions=GUIDANCE, website="thai.estate")
     assert res.status_code == 503 and "Audit" in res.json()["detail"]

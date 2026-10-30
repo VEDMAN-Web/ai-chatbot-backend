@@ -1,5 +1,5 @@
 """
-Brochure data model and honest loaders (PostgreSQL then Firestore).
+Brochure data model and honest loaders (Firestore).
 
 Never invents prices, specs, descriptions, or marketing copy.
 Missing fields stay None or empty lists. Multilingual dicts resolve to
@@ -14,7 +14,6 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Union
 
 from pydantic import BaseModel, Field
-from sqlalchemy.orm import Session
 
 from app.core.tenant import resolve_tenant
 
@@ -547,150 +546,8 @@ def _tenant_bundle(site_origin: Optional[str]) -> tuple[BrochureTenantInfo, Broc
 
 
 # ---------------------------------------------------------------------------
-# PostgreSQL mapper
+# Firestore mapper
 # ---------------------------------------------------------------------------
-
-def _from_postgres(prop: Any, language: str, site_origin: Optional[str]) -> BrochureData:
-    lang = _normalize_lang(language)
-    tenant_info, contact = _tenant_bundle(site_origin)
-
-    images = _collect_images(getattr(prop, "images", None) or [])
-    # Prefer exterior / gallery before floor plans for hero
-    hero = images[0] if images else None
-
-    floor_plans: List[str] = []
-    gallery: List[str] = []
-    for img in getattr(prop, "images", None) or []:
-        url = _image_url(img)
-        if not url:
-            continue
-        itype = str(getattr(img, "image_type", "") or "").lower()
-        if "floor" in itype:
-            if url not in floor_plans:
-                floor_plans.append(url)
-        else:
-            if url not in gallery:
-                gallery.append(url)
-    if not gallery:
-        gallery = list(images)
-
-    district = getattr(prop, "district", None) or None
-    province = getattr(prop, "province", None) or None
-    country = getattr(prop, "country", None) or None
-    if country is not None:
-        country = str(country).strip() or None
-
-    price_min = _safe_float(getattr(prop, "price_numeric_min", None))
-    price_max = _safe_float(getattr(prop, "price_numeric_max", None))
-    currency = getattr(prop, "currency", None) or None
-    price_display = _format_price_display(
-        price_min,
-        price_max,
-        currency,
-        existing_display=getattr(prop, "price_display", None),
-    )
-
-    beds_disp = getattr(prop, "bedrooms_display", None)
-    if not beds_disp:
-        bmin = getattr(prop, "bedrooms_min", None)
-        bmax = getattr(prop, "bedrooms_max", None)
-        if bmin is not None and bmax is not None and bmin != bmax:
-            beds_disp = f"{bmin}-{bmax}"
-        elif bmin is not None:
-            beds_disp = str(bmin)
-        elif bmax is not None:
-            beds_disp = str(bmax)
-
-    area_disp = getattr(prop, "area_display", None)
-    if not area_disp:
-        amin = getattr(prop, "area_sqm_min", None)
-        amax = getattr(prop, "area_sqm_max", None)
-        if amin is not None and amax is not None and amin != amax:
-            area_disp = f"{amin}-{amax} sqm"
-        elif amin is not None:
-            area_disp = f"{amin} sqm"
-        elif amax is not None:
-            area_disp = f"{amax} sqm"
-
-    meta = getattr(prop, "raw_metadata", None) or {}
-    if not isinstance(meta, dict):
-        meta = {}
-
-    completion = resolve_localized(
-        meta.get("completion")
-        or meta.get("completion_date")
-        or meta.get("completionDate"),
-        lang,
-    )
-    parking = resolve_localized(meta.get("parking") or meta.get("parking_text"), lang)
-
-    master_plan = _collect_images(meta.get("master_plan") or meta.get("masterPlan") or [])
-    unit_types = _parse_unit_types(meta.get("unit_types") or meta.get("layouts") or [], lang)
-
-    updated = getattr(prop, "updated_at", None)
-    updated_at = None
-    if isinstance(updated, datetime):
-        updated_at = updated.isoformat()
-    elif updated:
-        updated_at = str(updated)
-
-    return BrochureData(
-        property_id=str(getattr(prop, "property_id", "") or "").strip() or None,
-        name=str(getattr(prop, "property_name", "") or "").strip() or None,
-        slug=None,
-        tenant=tenant_info,
-        language=lang,
-        hero_image=hero,
-        images=gallery,
-        location_text=_build_location_text(
-            district,
-            province,
-            country,
-            address=getattr(prop, "address", None),
-        ),
-        district=str(district).strip() if district else None,
-        province=str(province).strip() if province else None,
-        country=country,
-        lat=_safe_float(getattr(prop, "latitude", None)),
-        lng=_safe_float(getattr(prop, "longitude", None)),
-        developer_name=(
-            str(getattr(prop, "developer_name", "") or "").strip() or None
-        ),
-        developer_logo=None,
-        description=resolve_localized(getattr(prop, "description", None), lang),
-        highlights=localize_tag_list(getattr(prop, "highlights", None) or [], lang),
-        facilities=localize_tag_list(
-            getattr(prop, "facilities", None) or [], lang, AMENITY_LABELS
-        ),
-        amenities=localize_tag_list(
-            getattr(prop, "amenities", None) or [], lang, AMENITY_LABELS
-        ),
-        nearby_places=_parse_nearby(getattr(prop, "nearby_places", None), lang),
-        property_type=_title_case_slug(getattr(prop, "property_type", None) or "")
-        or None,
-        status=localize_label(getattr(prop, "status", None), lang, STATUS_LABELS),
-        ownership_type=localize_label(
-            getattr(prop, "ownership_type", None), lang, OWNERSHIP_LABELS
-        ),
-        price_display=price_display,
-        price_min=price_min,
-        price_max=price_max,
-        currency=str(currency).strip() if currency else None,
-        bedrooms_display=str(beds_disp).strip() if beds_disp else None,
-        bathrooms=_safe_int_or_str(getattr(prop, "bathrooms", None)),
-        area_display=str(area_disp).strip() if area_disp else None,
-        units=_safe_int_or_str(getattr(prop, "units", None)),
-        total_floors=_safe_int_or_str(getattr(prop, "total_floors", None)),
-        completion=str(completion) if completion else None,
-        parking=str(parking) if parking else None,
-        unit_types=unit_types,
-        floor_plans=floor_plans,
-        master_plan=master_plan,
-        contact=contact,
-        updated_at=updated_at,
-        investment_info=_investment_info_from_raw(meta, lang),
-    )
-
 
 # ---------------------------------------------------------------------------
 # Firestore mapper (uses raw document; never uses invented normaliser strings)
@@ -956,29 +813,15 @@ def _from_firestore_card(card: Dict[str, Any], language: str, site_origin: Optio
 # Public loader
 # ---------------------------------------------------------------------------
 
-def _load_postgres_property(db: Session, property_id: str) -> Any:
-    if db is None:
-        return None
-    try:
-        from app.db.models import Property
-        prop = db.query(Property).filter(Property.property_id == property_id.upper()).first()
-        if not prop:
-            prop = db.query(Property).filter(Property.property_id.ilike(property_id.strip())).first()
-        return prop
-    except Exception as e:
-        logger.warning(f"PostgreSQL brochure data lookup failed for '{property_id}': {e}")
-        return None
-
-
 def load_brochure_data(
-    db: Session,
+    db: Any,
     property_id: str,
     site_origin: Optional[str] = None,
     language: str = "en",
 ) -> BrochureData:
     """
-    Load BrochureData from PostgreSQL first, then Firestore (read-only).
-    Raises ValueError if the property exists in neither store.
+    Load BrochureData from Firestore (read-only).
+    Raises ValueError if the property is not found.
     Never invents missing values.
     """
     pid = (property_id or "").strip()
@@ -986,10 +829,6 @@ def load_brochure_data(
         raise ValueError("Property with ID '' not found.")
 
     lang = _normalize_lang(language)
-    prop = _load_postgres_property(db, pid)
-    if prop is not None:
-        return _from_postgres(prop, lang, site_origin)
-
     try:
         from app.services.firestore_service import get_property_by_id_from_firestore
         fs_card = get_property_by_id_from_firestore(pid)

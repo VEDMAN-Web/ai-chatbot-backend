@@ -6,9 +6,8 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.api.v1 import auth as auth_module
-from app.core.security import hash_password
-from app.db.models import User
-from app.db.session import SessionLocal
+from tests import fs_users
+from app.repositories import users_repo
 
 client = TestClient(app)
 PREFIX = "goauth_test_"
@@ -17,21 +16,8 @@ PREFIX = "goauth_test_"
 @pytest.fixture
 def staff_user():
     email = f"{PREFIX}{uuid.uuid4().hex[:6]}@tajlandia.com"
-    db = SessionLocal()
-    try:
-        db.add(User(email=email, name="G", role="admin", password_hash=hash_password("x" * 10), is_active=True))
-        db.commit()
-        uid = str(db.query(User).filter(User.email == email).first().id)
-    finally:
-        db.close()
-    yield {"email": email, "id": uid}
-    db = SessionLocal()
-    try:
-        for u in db.query(User).filter(User.email.like(f"{PREFIX}%")).all():
-            db.delete(u)
-        db.commit()
-    finally:
-        db.close()
+    fs_users.seed_user("admin", email, preferences={})
+    return {"email": email, "id": str(users_repo.get_by_email(None, email).id)}
 
 
 class _Resp:
@@ -79,11 +65,7 @@ def test_google_error_body_is_not_returned(staff_user, monkeypatch):
     resp = client.get("/api/v1/auth/google/callback", params={"code": "c", "state": state})
     assert resp.status_code == 500
     assert "LEAKY-UPSTREAM-TEXT" not in resp.text and "invalid_grant" not in resp.text
-    db = SessionLocal()
-    try:
-        assert "google_workspace" not in (db.query(User).filter(User.email == staff_user["email"]).first().preferences or {})
-    finally:
-        db.close()
+    assert "google_workspace" not in fs_users.get_preferences(staff_user["email"])
 
 
 def test_success_page_escapes_the_google_email_and_stores_the_connection(staff_user, monkeypatch):
@@ -96,9 +78,5 @@ def test_success_page_escapes_the_google_email_and_stores_the_connection(staff_u
     resp = client.get("/api/v1/auth/google/callback", params={"code": "c", "state": state})
     assert resp.status_code == 200
     assert "<img src=x" not in resp.text and "&lt;img" in resp.text
-    db = SessionLocal()
-    try:
-        gw = (db.query(User).filter(User.email == staff_user["email"]).first().preferences or {}).get("google_workspace")
-        assert gw and gw["connected"] is True
-    finally:
-        db.close()
+    gw = fs_users.get_preferences(staff_user["email"]).get("google_workspace")
+    assert gw and gw["connected"] is True
