@@ -30,8 +30,8 @@ if not _app_log.handlers:
     _h.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
     _app_log.addHandler(_h)
 
-# API docs list every route, so they are off unless ENABLE_API_DOCS=true (e.g. on a developer machine).
-_DOCS_ON = os.getenv("ENABLE_API_DOCS", "").strip().lower() in ("1", "true", "yes")
+# API docs list every route, enabled by default in local/staging (disable with ENABLE_API_DOCS=false in prod)
+_DOCS_ON = os.getenv("ENABLE_API_DOCS", "true").strip().lower() in ("1", "true", "yes")
 # Background purge of expired admin undo snapshots (every 6 hours)
 _snapshot_purge_task: Optional[Any] = None
 _SNAPSHOT_PURGE_INTERVAL_SEC = 6 * 60 * 60
