@@ -40,6 +40,7 @@ tests/*
 !tests/test_*.py
 !tests/conftest.py
 !tests/fake_firestore.py
+!tests/fs_users.py
 !tests/__init__.py
 !tests/fixtures/
 !tests/fixtures/**
