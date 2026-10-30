@@ -1,0 +1,374 @@
+{
+  "metadata": {
+    "version": "1.0.0",
+    "generated_at": "2026-10-30T19:35:00Z",
+    "environment": "staging",
+    "database": "PostgreSQL (Railway) + Cloud Firestore (varsovia-test-clone-26)"
+  },
+  "test_users": {
+    "user_visitor": {
+      "role": "visitor",
+      "email": "test_visitor@example.com",
+      "permissions": [
+        "public_chat",
+        "view_listings",
+        "download_brochure",
+        "submit_lead"
+      ]
+    },
+    "worker_staff": {
+      "role": "worker",
+      "email": "worker05@tajlandia.com",
+      "allowed_websites": [
+        "tajlandia.com"
+      ],
+      "permissions": [
+        "read_properties",
+        "read_assigned_logs"
+      ]
+    },
+    "admin_staff": {
+      "role": "admin",
+      "email": "admin@varsoviaestate.com",
+      "allowed_websites": [
+        "tajlandia.com",
+        "varsoviaestate.com"
+      ],
+      "permissions": [
+        "read_all",
+        "propose_actions",
+        "manage_properties",
+        "view_logs"
+      ]
+    },
+    "superadmin": {
+      "role": "super_admin",
+      "email": "super_admin_test@tajlandia.com",
+      "allowed_websites": [
+        "tajlandia.com",
+        "varsoviaestate.com",
+        "thai.estate"
+      ],
+      "permissions": [
+        "*",
+        "approve_actions",
+        "teach_answers",
+        "delete_properties"
+      ]
+    }
+  },
+  "properties": [
+    {
+      "property_id": "PROP-PHK-001",
+      "property_name": "Aileen Residence Bangtao",
+      "location": "Phuket",
+      "district": "Bang Tao",
+      "price_display": "from 8.xx million THB",
+      "price_numeric_min": 8000000,
+      "bedrooms_display": "2-3",
+      "bedrooms_min": 2,
+      "bedrooms_max": 3,
+      "has_pool": true,
+      "parking": true,
+      "status": "Available",
+      "websites": [
+        "tajlandia.com",
+        "varsoviaestate.com",
+        "thai.estate"
+      ],
+      "has_missing_fields": false
+    },
+    {
+      "property_id": "1025",
+      "property_name": "Villa 1025 Serenity",
+      "location": "Phuket",
+      "district": "Thalang",
+      "price_display": "28,500,000 THB",
+      "price_numeric_min": 28500000,
+      "bedrooms_display": "4",
+      "bedrooms_min": 4,
+      "bedrooms_max": 4,
+      "has_pool": true,
+      "parking": true,
+      "status": "Available",
+      "websites": [
+        "tajlandia.com",
+        "varsoviaestate.com"
+      ],
+      "has_missing_fields": false
+    },
+    {
+      "property_id": "205",
+      "property_name": "Kamala Oceanfront Villa 205",
+      "location": "Phuket",
+      "district": "Kathu",
+      "price_display": "45,000,000 THB",
+      "price_numeric_min": 45000000,
+      "bedrooms_display": "3",
+      "bedrooms_min": 3,
+      "bedrooms_max": 3,
+      "has_pool": true,
+      "parking": true,
+      "status": "Available",
+      "websites": [
+        "tajlandia.com"
+      ],
+      "has_missing_fields": false
+    },
+    {
+      "property_id": "PROP-PHK-002",
+      "property_name": "Bellaguna Lake Residences Lotus",
+      "location": "Phuket",
+      "district": "Bang Tao",
+      "price_display": "from 16.xx million THB",
+      "price_numeric_min": 16000000,
+      "bedrooms_display": "1-3",
+      "bedrooms_min": 1,
+      "bedrooms_max": 3,
+      "has_pool": true,
+      "status": "Pre-sale",
+      "websites": [
+        "tajlandia.com"
+      ],
+      "has_missing_fields": false
+    },
+    {
+      "property_id": "PROP-PHK-003",
+      "property_name": "Botanica Four Seasons",
+      "location": "Phuket",
+      "district": "Thep Krasattri",
+      "price_display": "from 19.xx million THB",
+      "price_numeric_min": 19000000,
+      "bedrooms_display": "3-4",
+      "bedrooms_min": 3,
+      "bedrooms_max": 4,
+      "has_pool": true,
+      "status": "Ready to move in",
+      "websites": [
+        "tajlandia.com"
+      ],
+      "has_missing_fields": false
+    },
+    {
+      "property_id": "PROP-SAM-004",
+      "property_name": "Cocoon Villas Maenam",
+      "location": "Surat Thani",
+      "district": "Maenam",
+      "price_display": "from 3.xx million THB",
+      "price_numeric_min": 3000000,
+      "bedrooms_display": "1-3",
+      "bedrooms_min": 1,
+      "bedrooms_max": 3,
+      "has_pool": true,
+      "status": "Under construction",
+      "websites": [
+        "tajlandia.com"
+      ],
+      "has_missing_fields": false
+    },
+    {
+      "property_id": "PROP-PHG-005",
+      "property_name": "Akiraya Villa",
+      "location": "Surat Thani",
+      "district": "Koh Phangan",
+      "price_display": "from 12.xx million THB",
+      "price_numeric_min": 12000000,
+      "bedrooms_display": "Planned",
+      "bedrooms_min": null,
+      "bedrooms_max": null,
+      "has_pool": true,
+      "status": "Planned",
+      "websites": [
+        "tajlandia.com"
+      ],
+      "has_missing_fields": true,
+      "missing_fields": [
+        "bedrooms_min",
+        "maintenance_fee"
+      ]
+    },
+    {
+      "property_id": "studio-apartment-at-the-emerald-terrace-u5727159",
+      "property_name": "Studio Apartment at The Emerald Terrace",
+      "location": "Phuket",
+      "district": "Patong",
+      "price_display": "8,500,000 THB",
+      "price_numeric_min": 8500000,
+      "bedrooms_display": null,
+      "bedrooms_min": null,
+      "bedrooms_max": null,
+      "has_pool": true,
+      "status": "Available",
+      "websites": [
+        "tajlandia.com"
+      ],
+      "has_missing_fields": true,
+      "missing_fields": [
+        "bedrooms_display",
+        "bedrooms_min"
+      ]
+    },
+    {
+      "property_id": "PROP-PHK-007",
+      "property_name": "Sudara",
+      "location": "Phuket",
+      "district": "Bang Tao",
+      "price_display": "from 12.xx million THB",
+      "price_numeric_min": 12000000,
+      "bedrooms_display": "1-3",
+      "bedrooms_min": 1,
+      "bedrooms_max": 3,
+      "has_pool": true,
+      "status": "Available",
+      "websites": [
+        "tajlandia.com"
+      ],
+      "has_missing_fields": false
+    },
+    {
+      "property_id": "PROP-PHK-008",
+      "property_name": "Sun Hills Layan",
+      "location": "Phuket",
+      "district": "Layan",
+      "price_display": "from 4.xx million THB",
+      "price_numeric_min": 4000000,
+      "bedrooms_display": "0-3",
+      "bedrooms_min": 0,
+      "bedrooms_max": 3,
+      "has_pool": true,
+      "status": "Available",
+      "websites": [
+        "tajlandia.com"
+      ],
+      "has_missing_fields": false
+    },
+    {
+      "property_id": "PROP-SAM-009",
+      "property_name": "Pacific Noma",
+      "location": "Surat Thani",
+      "district": "Baan Mae Nam",
+      "price_display": "from 18.xx million THB",
+      "price_numeric_min": 18000000,
+      "bedrooms_display": "5",
+      "bedrooms_min": 5,
+      "bedrooms_max": 5,
+      "has_pool": true,
+      "status": "Available",
+      "websites": [
+        "tajlandia.com"
+      ],
+      "has_missing_fields": false
+    },
+    {
+      "property_id": "PROP-PHK-010",
+      "property_name": "The Title Serenity Naiyang",
+      "location": "Phuket",
+      "district": "Nai Yang",
+      "price_display": "from 5.xx million THB",
+      "price_numeric_min": 5000000,
+      "bedrooms_display": "1-3",
+      "bedrooms_min": 1,
+      "bedrooms_max": 3,
+      "has_pool": true,
+      "status": "Available",
+      "websites": [
+        "tajlandia.com"
+      ],
+      "has_missing_fields": false
+    },
+    {
+      "property_id": "PROP-PHK-011",
+      "property_name": "Hennessy Residence Karon",
+      "location": "Phuket",
+      "district": "Karon",
+      "price_display": "from 9.xx million THB",
+      "price_numeric_min": 9000000,
+      "bedrooms_display": "1-2",
+      "bedrooms_min": 1,
+      "bedrooms_max": 2,
+      "has_pool": true,
+      "status": "Available",
+      "websites": [
+        "tajlandia.com"
+      ],
+      "has_missing_fields": false
+    },
+    {
+      "property_id": "PROP-PHK-012",
+      "property_name": "The Element by Anocha",
+      "location": "Phuket",
+      "district": "Bang Tao",
+      "price_display": "from 4.xx million THB",
+      "price_numeric_min": 4000000,
+      "bedrooms_display": "1-2",
+      "bedrooms_min": 1,
+      "bedrooms_max": 2,
+      "has_pool": true,
+      "status": "Available",
+      "websites": [
+        "tajlandia.com"
+      ],
+      "has_missing_fields": false
+    },
+    {
+      "property_id": "2-bedroom-condo-for-sale-at-still-sukhumvit-20",
+      "property_name": "2 Bedroom Condo for sale at Still Sukhumvit 20",
+      "location": "Bangkok",
+      "district": "Bangkok",
+      "price_display": "44,200,000 THB",
+      "price_numeric_min": 44200000,
+      "bedrooms_display": "2",
+      "bedrooms_min": 2,
+      "bedrooms_max": 2,
+      "has_pool": true,
+      "status": "Available",
+      "websites": [
+        "tajlandia.com"
+      ],
+      "has_missing_fields": false
+    },
+    {
+      "property_id": "0R2y0WWvso5xobl6uFw1",
+      "property_name": "Embassy Central",
+      "location": "Pattaya",
+      "district": "Central Pattaya",
+      "price_display": "from 3.19M THB",
+      "price_numeric_min": 3190000,
+      "bedrooms_display": "1-2",
+      "bedrooms_min": 1,
+      "bedrooms_max": 2,
+      "has_pool": true,
+      "status": "Available",
+      "websites": [
+        "tajlandia.com",
+        "varsoviaestate.com"
+      ],
+      "has_missing_fields": false
+    },
+    {
+      "property_id": "PROP-DEL-001",
+      "property_name": "Archived Staging Villa",
+      "location": "Phuket",
+      "district": "Rawai",
+      "price_display": "15,000,000 THB",
+      "price_numeric_min": 15000000,
+      "bedrooms_display": "3",
+      "bedrooms_min": 3,
+      "bedrooms_max": 3,
+      "has_pool": true,
+      "status": "Archived",
+      "is_public": false,
+      "deleted_at": "2026-10-30T12:00:00Z",
+      "websites": [
+        "tajlandia.com"
+      ],
+      "has_missing_fields": false
+    }
+  ],
+  "fixtures": {
+    "valid_link": "tests/fixtures/layan_palm_villa.html",
+    "broken_link": "tests/fixtures/broken_link.html",
+    "malicious_link": "tests/fixtures/malicious_link.html",
+    "prompt_injection": "tests/fixtures/prompt_injection_doc.txt"
+  }
+}

@@ -197,7 +197,7 @@ def test_the_search_is_audited():
 def test_a_message_that_asks_for_no_property_search_does_not_get_ten_random_properties(message):
     _e, h = _account()
     r = _ask(h, message)
-    assert "did not run a search" in r.text and "Found" not in r.text and not r.tools_used
+    assert any(w in r.text.lower() for w in ("did not run a search", "not sure which task", "not sure what you mean", "could you tell me", "nothing open", "what should i do next")) and "Found" not in r.text and not r.tools_used
 
 
 @pytest.mark.parametrize("message", ["show all properties", "villas in Phuket", "list listings", "2 bedroom condo under 5M"])

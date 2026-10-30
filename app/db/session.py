@@ -13,11 +13,14 @@ Base = declarative_base()
 def _normalize_db_url(url: str) -> str:
     if isinstance(url, str):
         if url.startswith("postgres://"):
-            return url.replace("postgres://", "postgresql+psycopg2://", 1)
+            url = url.replace("postgres://", "postgresql+psycopg2://", 1)
         elif url.startswith("postgresql://") and not url.startswith("postgresql+"):
-            return url.replace("postgresql://", "postgresql+psycopg2://", 1)
+            url = url.replace("postgresql://", "postgresql+psycopg2://", 1)
         elif url.startswith("postgresql+psycopg://"):
-            return url.replace("postgresql+psycopg://", "postgresql+psycopg2://", 1)
+            url = url.replace("postgresql+psycopg://", "postgresql+psycopg2://", 1)
+        if "rlwy.net" in url and "sslmode=" not in url:
+            sep = "&" if "?" in url else "?"
+            url = f"{url}{sep}sslmode=require"
     return url
 
 

@@ -206,3 +206,68 @@ def reject_correction(correction_id: str, body: Decision = Decision(), staff: Au
 @router.post("/corrections/{correction_id}/deactivate")
 def deactivate_correction(correction_id: str, body: Decision = Decision(), staff: AuthenticatedStaff = Depends(_can_approve), db: Session = Depends(get_db)):
     return _run(lambda: remarks.decide_correction(db, staff, correction_id, "deactivate", body.note))
+
+
+# ---- user feedback (thumbs up / down) -------------------------------------------------------
+
+class FeedbackRequest(BaseModel):
+    feedback: str = Field(..., pattern="^(thumbs_up|thumbs_down)$",
+                         description="User feedback signal: 'thumbs_up' or 'thumbs_down'")
+    comment: Optional[str] = Field(None, max_length=500,
+                                   description="Optional free-text comment (max 500 chars)")
+
+
+@router.patch("/conversations/{conversation_id}/messages/{message_seq}/feedback")
+def submit_user_feedback(
+    conversation_id: str,
+    message_seq: str,
+    body: FeedbackRequest,
+    staff: AuthenticatedStaff = Depends(_can_review),
+):
+    """Adds user feedback (thumbs_up/thumbs_down) to a logged assistant message.
+
+    Updates the Firestore document at:
+        chat_logs/{conversation_id}/messages/{message_seq}
+    Setting: user_feedback = {feedback, comment, recorded_at}
+    """
+    from datetime import datetime, timezone
+    from app.services import chat_log_query as _query
+
+    def _run_feedback():
+        client = _query._require_client()
+        # Verify the conversation exists and caller may see it
+        conv_snap = client.collection("chat_logs").document(conversation_id).get()
+        if not conv_snap.exists or not _query.can_view(conv_snap.to_dict() or {}, staff):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                                detail="Conversation not found.")
+        msg_ref = (
+            client.collection("chat_logs")
+            .document(conversation_id)
+            .collection("messages")
+            .document(message_seq)
+        )
+        msg_snap = msg_ref.get()
+        if not msg_snap.exists:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                                detail="Message not found.")
+        msg_data = msg_snap.to_dict() or {}
+        if msg_data.get("role") != "assistant":
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Feedback can only be submitted on assistant messages."
+            )
+        recorded_at = datetime.now(timezone.utc).isoformat()
+        user_feedback = {
+            "feedback": body.feedback,
+            "comment": body.comment,
+            "recorded_at": recorded_at,
+        }
+        msg_ref.update({"user_feedback": user_feedback})
+        return {
+            "conversation_id": conversation_id,
+            "message_seq": message_seq,
+            "user_feedback": user_feedback,
+            "updated": True,
+        }
+
+    return _run(lambda: _run_feedback())

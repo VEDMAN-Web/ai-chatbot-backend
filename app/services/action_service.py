@@ -809,11 +809,8 @@ def confirm_and_execute_action(
     result_data: Dict[str, Any] = {}
     try:
         if action.tool_name == "ingest_property_from_url":
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Reply 'confirm' in the chat to save this import. There is no Confirm button for a URL draft.",
-            )
-        if action.tool_name in ["create_or_update_listing", "ingest_property_from_drive"]:
+            result_data = save_ingested_listing(db, authenticated_staff, payload)
+        elif action.tool_name in ["create_or_update_listing", "ingest_property_from_drive"]:
             result_data = _execute_update_listing(
                 db, payload, authenticated_staff=authenticated_staff
             )

@@ -1462,7 +1462,7 @@ def _admin_secret_matches(supplied: Optional[str]) -> bool:
     candidates = []
     if not is_weak_secret(settings.INTERNAL_API_SECRET):
         candidates.append(settings.INTERNAL_API_SECRET)
-    if settings.ADMIN_PASSWORD:
+    if settings.ADMIN_PASSWORD and not is_weak_secret(settings.ADMIN_PASSWORD):
         candidates.append(settings.ADMIN_PASSWORD)
     supplied_bytes = supplied.encode("utf-8")
     return any(hmac.compare_digest(supplied_bytes, c.encode("utf-8")) for c in candidates)

@@ -298,24 +298,60 @@ def get_session_lead(conversation: Any) -> Optional[SessionLead]:
 
 def _persist_sql_lead(db: Session, conversation: Any, session_lead: SessionLead) -> None:
     conv_id = getattr(conversation, "id", None)
-    lead = None
+    session_id = getattr(conversation, "session_id", None) or getattr(session_lead, "session_id", None)
+    if not session_id and not conv_id:
+        return
+
+    sql_conv = None
     if conv_id and not isinstance(conv_id, str):
         try:
-            lead = db.query(Lead).filter(Lead.conversation_id == conv_id).first()
+            sql_conv = db.query(Conversation).filter(Conversation.id == conv_id).first()
         except Exception as qe:
-            logger.warning("Lead lookup in SQL failed: %s", qe)
+            logger.warning("Conversation lookup by ID in SQL failed: %s", qe)
+
+    if not sql_conv and session_id:
+        try:
+            sql_conv = db.query(Conversation).filter(Conversation.session_id == session_id).first()
+        except Exception as qe:
+            logger.warning("Conversation lookup by session_id in SQL failed: %s", qe)
+
+    if not sql_conv and session_id:
+        try:
+            sql_conv = Conversation(
+                session_id=session_id,
+                site_origin=getattr(conversation, "site_origin", "varsoviaestate.com") or "varsoviaestate.com",
+                agent_type=getattr(conversation, "agent_type", "public") or "public",
+                lead_score=float(getattr(session_lead, "lead_score", 0.0) or 0.0),
+            )
+            db.add(sql_conv)
+            db.flush()
+        except Exception as ce:
+            logger.warning("Conversation SQL create failed: %s", ce)
+            db.rollback()
             return
 
-    if not lead and hasattr(conversation, "__table__") and conv_id and not isinstance(conv_id, str):
+    if not sql_conv:
+        return
+
+    lead = None
+    try:
+        lead = db.query(Lead).filter(Lead.conversation_id == sql_conv.id).first()
+    except Exception as qe:
+        logger.warning("Lead lookup in SQL failed: %s", qe)
+        return
+
+    if not lead:
         try:
             lead = Lead(
-                conversation_id=conversation.id,
+                conversation_id=sql_conv.id,
                 status="new",
                 buying_signals=[],
             )
             db.add(lead)
+            db.flush()
         except Exception as e:
             logger.warning("Lead create skipped: %s", e)
+            db.rollback()
             return
 
     if not lead:

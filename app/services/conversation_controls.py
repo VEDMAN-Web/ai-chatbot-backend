@@ -81,27 +81,27 @@ def slots_to_clear(message: str) -> Set[str]:
     if is_full_reset(message):
         return {"all"}
     cleared: Set[str] = set()
-    if any(p in low for p in (
+    if any(re.search(r"\b" + re.escape(p) + r"\b", low) for p in (
         "any location", "no location", "anywhere", "any area",
         "bez lokalizacji", "ใดก็ได้", "कोई भी जगह", "કોઈ પણ જગ્યા",
     )):
         cleared.add("location")
-    if any(p in low for p in (
+    if any(re.search(r"\b" + re.escape(p) + r"\b", low) for p in (
         "no budget limit", "any budget", "any price", "no price limit", "all prices",
         "bez limitu", "ไม่จำกัดงบ", "कोई बजट नहीं", "બજેટ મર્યાદા નથી",
     )):
         cleared.add("budget")
-    if any(p in low for p in (
+    if any(re.search(r"\b" + re.escape(p) + r"\b", low) for p in (
         "any bedrooms", "any number of bedrooms", "any beds", "remove the bedroom",
         "bez sypialni", "ห้องนอนไม่จำกัด",
     )):
         cleared.add("bedrooms")
-    if any(p in low for p in (
+    if any(re.search(r"\b" + re.escape(p) + r"\b", low) for p in (
         "remove the pool filter", "no pool filter", "any pool", "without pool filter",
         "usuń filtr basenu", "usun filtr basenu",
     )):
         cleared.add("pool")
-    if any(p in low for p in ("any type", "any property type", "remove property type")):
+    if any(re.search(r"\b" + re.escape(p) + r"\b", low) for p in ("any type", "any property type", "remove property type")):
         cleared.add("property_type")
     return cleared
 
@@ -268,17 +268,17 @@ def is_foreign_ownership_question(message: str) -> bool:
     if not low:
         return False
     buy = bool(re.search(
-        r"\b(buy|own|purchase|mortgage|tax|taxes|residency|residence|freehold|leasehold)\b"
+        r"\b(buy\w*|own\w*|purchas\w*|mortgage\w*|tax\w*|residenc\w*|freehold|leasehold|rule\w*|law\w*|legal\w*)\b"
         r"|kupić|kupic|cudzoziem|ภาษี|จำนอง|วีซ่า|ซื้อได้",
         low,
     ))
     who = bool(re.search(
-        r"\b(foreigner|foreign|indian|india|european|can i|can an|can a)\b|ชาวต่างชาติ|cudzoziem",
+        r"\b(foreign\w*|indian\w*|european\w*|can i|can an|can a)\b|ชาวต่างชาติ|cudzoziem",
         low,
     ))
     if "can i buy" in low or "can indian buy" in low or "can an indian buy" in low:
         return True
-    if "can a foreigner buy" in low or "can foreigners buy" in low:
+    if "can a foreigner buy" in low or "can foreigners buy" in low or "foreigners buying" in low:
         return True
     return buy and who
 

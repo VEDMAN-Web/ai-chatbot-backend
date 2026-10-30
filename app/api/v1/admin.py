@@ -694,7 +694,10 @@ def list_admin_properties_endpoint(
             "price_display": p.price_display,
             "bedrooms": p.bedrooms_display,
             "has_pool": p.has_pool,
-            "websites": p.websites or [],
+            # Unassigned legacy properties are served under tajlandia.com (see build_property_query /
+            # property_belongs_to_websites); report that here too so the list never claims a property
+            # belongs to "no site" while actually returning it under a selected one.
+            "websites": list(p.websites) if p.websites else ["tajlandia.com"],
             "images": [img.image_url for img in p.images] if p.images else [],
             "is_public": p.is_public
         })
@@ -1093,7 +1096,7 @@ def _brochure_config_labels() -> Dict[str, Any]:
             getattr(settings, "BROCHURE_LLM_MODEL", "claude-sonnet-5-5") or "claude-sonnet-5-5"
         ),
         "brochure_engine": str(getattr(settings, "BROCHURE_ENGINE", "reportlab") or "reportlab"),
-        "openai_model_label": str(getattr(settings, "OPENAI_MODEL", "") or ""),
+        "openai_model_label": str(getattr(settings, "ANTHROPIC_MODEL", "") or "claude-opus-5-5"),
     }
 
 
@@ -1154,6 +1157,87 @@ def admin_brochure_preview(
         media_type="application/pdf",
         headers={"Content-Disposition": f'inline; filename="{filename}"'},
     )
+
+
+# ==============================================================================
+# 10. Admin Answer Corrections (direct, without chat log remark)
+# ==============================================================================
+
+VALID_CORRECTION_SCOPES = ("global", "site_specific", "admin_only")
+VALID_CORRECTION_CATEGORIES = ("property_fact", "agency_policy", "pricing_rule", "contact_info", "clarification")
+
+
+class AdminCorrectionCreateRequest(BaseModel):
+    trigger_query: str = Field(..., min_length=3, max_length=2000,
+                              description="The user query this correction applies to")
+    original_bot_answer: Optional[str] = Field(None,
+                                              description="The original bot answer (read-only snapshot)")
+    corrected_answer: str = Field(..., min_length=3, max_length=5000,
+                                 description="The ground-truth corrected answer")
+    scope: str = Field("global", description="'global', 'site_specific', or 'admin_only'")
+    category: str = Field("clarification",
+                         description="'property_fact', 'agency_policy', 'pricing_rule', 'contact_info', 'clarification'")
+    expires_at: Optional[str] = Field(None, description="Optional ISO 8601 expiry date")
+
+
+@router.post("/corrections", tags=["Admin Chat Logs"], status_code=status.HTTP_201_CREATED)
+def create_admin_correction(
+    body: AdminCorrectionCreateRequest,
+    staff: AuthenticatedStaff = Depends(require_admin_or_super_admin),
+    db: Session = Depends(get_db)
+):
+    """
+    Create a new answer correction directly (without going through a chat log remark).
+    Immediately proposes it for review. Super admins are auto-approved inline.
+    """
+    from app.services import chat_log_remarks as remarks_svc
+
+    scope_val = (body.scope or "global").strip()
+    category_val = (body.category or "clarification").strip()
+
+    if scope_val not in VALID_CORRECTION_SCOPES:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"scope must be one of {VALID_CORRECTION_SCOPES}."
+        )
+    if category_val not in VALID_CORRECTION_CATEGORIES:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"category must be one of {VALID_CORRECTION_CATEGORIES}."
+        )
+
+    try:
+        correction = remarks_svc.create_correction_direct(
+            staff=staff,
+            trigger_query=body.trigger_query,
+            corrected_answer=body.corrected_answer,
+            original_answer=body.original_bot_answer,
+            scope_type=scope_val,
+            category=category_val,
+            expires_at=body.expires_at,
+        )
+    except remarks_svc.RemarkError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message)
+
+    # Super admins auto-approve the correction immediately
+    if staff.role == "super_admin":
+        try:
+            correction = remarks_svc.decide_correction_direct(
+                db=db,
+                staff=staff,
+                correction_id=correction["correction_id"],
+                decision="approve",
+                note="Auto-approved by super_admin on creation.",
+            )
+        except remarks_svc.RemarkError as exc:
+            # Non-fatal: correction was created but not auto-approved
+            logger.warning("Auto-approve failed for correction %s: %s", correction.get("correction_id"), exc.message)
+
+    return {
+        "correction_id": correction.get("correction_id"),
+        "status": correction.get("status"),
+        **correction,
+    }
 
 
 router.get("/users", response_model=List[AdminUserDirectoryItem], tags=["Admin Directory Management"])(list_admin_users_with_google_status)

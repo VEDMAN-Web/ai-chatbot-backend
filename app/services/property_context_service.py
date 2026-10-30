@@ -680,7 +680,8 @@ def fetch_authorized_property(db: Any, property_id: str) -> Tuple[Optional[Any],
     Returns (orm_or_adapter, card_dict, source_label).
     Never invents data.
     """
-    from app.services.property_search import get_property_by_id, get_property_by_name, format_property_card
+    from app.services.property_search import get_property_by_id, get_property_by_name
+    from app.services.public_agent import format_property_card
 
     pid = _normalize_id(property_id)
     if not pid:

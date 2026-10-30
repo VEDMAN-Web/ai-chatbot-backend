@@ -403,6 +403,8 @@ CLAUDE_ADMIN_TOOLS = [
                 "bedrooms": {"type": "integer", "description": "Bedrooms"},
                 "bathrooms": {"type": "integer", "description": "Bathrooms"},
                 "has_pool": {"type": "boolean", "description": "Whether private pool is present"},
+                "has_parking": {"type": "boolean", "description": "Whether parking space or garage is present"},
+                "required_amenities": {"type": "array", "items": {"type": "string"}, "description": "Specific amenities required (e.g. ['swimming pool', 'parking', 'gym'])"},
                 "status": {"type": "string", "description": "Construction or sale status"},
                 "limit": {"type": "integer", "description": "Max results (default 10)"}
             }
@@ -1193,14 +1195,19 @@ def try_admin_fast_path(
         stats = t_res if isinstance(t_res, dict) else {}
         total = stats.get("authoritative_total_properties") or stats.get("firestore_live_projects_count") or 0
         by_loc = stats.get("location_breakdown") or {}
-        # Location-specific ask
+        # Location-specific ask (checks all locations dynamically with Thai city fallback)
         loc_hit = None
-        for key in ("phuket", "samui", "bangkok", "pattaya", "hua hin"):
-            if key in msg_l:
-                loc_hit = next((k for k in by_loc if key in str(k).lower()), None)
-                if loc_hit is None and key == "samui":
-                    loc_hit = next((k for k in by_loc if "samui" in str(k).lower()), None)
+        for loc_name in by_loc.keys():
+            if str(loc_name).lower() in msg_l:
+                loc_hit = loc_name
                 break
+        if loc_hit is None:
+            for key in ("phuket", "samui", "bangkok", "pattaya", "hua hin"):
+                if key in msg_l:
+                    loc_hit = next((k for k in by_loc if key in str(k).lower()), None)
+                    if loc_hit is None and key == "samui":
+                        loc_hit = next((k for k in by_loc if "samui" in str(k).lower()), None)
+                    break
         if loc_hit is not None:
             n = by_loc.get(loc_hit, 0)
             text = (
@@ -1588,6 +1595,101 @@ def _process_admin_chat_inner(
         )
         if ingest_turn is not None:
             return ingest_turn
+
+    # Requirement 7: Admin Direct Teaching & Persistent Rule Ingestion
+    if clean_message and staff_user is not None:
+        from app.services.admin_teaching_service import (
+            is_teaching_intent,
+            extract_teaching_content,
+            stage_knowledge_entry,
+            activate_knowledge_entry,
+        )
+        conv_prefs = dict(conv.preferences or {})
+        pending_teach_id = conv_prefs.get('pending_teach_entry_id')
+        is_conf = is_strict_confirm_message(clean_message) or action == 'confirm'
+        is_rej = is_strict_reject_message(clean_message) or action == 'reject'
+        if pending_teach_id and is_conf and not is_rej:
+            activate_knowledge_entry(pending_teach_id, staff_user)
+            conv_prefs.pop('pending_teach_entry_id', None)
+            conv_prefs.pop('pending_teach_subject', None)
+            conv.preferences = conv_prefs
+            if db is not None:
+                try:
+                    db.commit()
+                except Exception:
+                    pass
+            confirm_reply = (
+                'Understood Admin. Rule activated across all future public and admin answers.\n'
+                f'- **Status:** Active\n'
+                f'- **ID:** `{pending_teach_id}`'
+            )
+            append_conversation_turn(db, conv, clean_message, confirm_reply)
+            return {
+                'type': 'text',
+                'text': confirm_reply,
+                'session_id': conv.session_id,
+                'conversation_id': str(conv.id),
+                'requires_confirmation': False,
+                'pending_action_id': None,
+                'action_status': 'executed',
+                'tools_used': [],
+                'download_link': None,
+                'language': active_lang,
+            }
+        elif pending_teach_id and is_rej:
+            conv_prefs.pop('pending_teach_entry_id', None)
+            conv_prefs.pop('pending_teach_subject', None)
+            conv.preferences = conv_prefs
+            if db is not None:
+                try:
+                    db.commit()
+                except Exception:
+                    pass
+            reject_reply = 'Teaching command discarded. No rule was activated.'
+            append_conversation_turn(db, conv, clean_message, reject_reply)
+            return {
+                'type': 'text',
+                'text': reject_reply,
+                'session_id': conv.session_id,
+                'conversation_id': str(conv.id),
+                'requires_confirmation': False,
+                'pending_action_id': None,
+                'action_status': 'rejected',
+                'tools_used': [],
+                'download_link': None,
+                'language': active_lang,
+            }
+        elif is_teaching_intent(clean_message):
+            extracted = extract_teaching_content(clean_message)
+            staged = stage_knowledge_entry(
+                db=db,
+                rule_text=extracted['rule_text'],
+                subject=extracted['subject'],
+                staff_user=staff_user,
+                conversation_id=str(conv.id),
+            )
+            conv_prefs['pending_teach_entry_id'] = staged['entry_id']
+            conv_prefs['pending_teach_subject'] = staged['subject']
+            conv.preferences = conv_prefs
+            if db is not None:
+                try:
+                    db.commit()
+                except Exception:
+                    pass
+            reply_text = staged['preview_message']
+            append_conversation_turn(db, conv, clean_message, reply_text)
+            return {
+                'type': 'action_proposal',
+                'text': reply_text,
+                'session_id': conv.session_id,
+                'conversation_id': str(conv.id),
+                'requires_confirmation': True,
+                'pending_action_id': staged['entry_id'],
+                'action_status': 'proposed',
+                'tools_used': [],
+                'download_link': None,
+                'language': active_lang,
+            }
 
     # Explicit UI button/parameter OR short free-text only — never substring matches in long messages
     has_confirm_intent = (action == "confirm") or bool(_named_confirm) or (
@@ -2048,6 +2150,25 @@ def _process_admin_chat_inner(
     if _drive_search is not None and staff_user is not None:
         return _attach_timing_debug(_handle_drive_search(db, conv, clean_message, _drive_search, staff_user, active_lang), timer)
 
+    if clean_message and _is_workspace_status_question(clean_message) and staff_user is not None:
+        status_res, _needs_confirmation, _pending = _execute_admin_tool(
+            db, 'check_google_workspace_status', {}, staff_user, str(conv.id)
+        )
+        reply = _workspace_status_reply(status_res if isinstance(status_res, dict) else {}, active_lang)
+        append_conversation_turn(db, conv, clean_message, reply)
+        return _attach_timing_debug({
+            'type': 'text',
+            'text': reply,
+            'session_id': conv.session_id,
+            'conversation_id': str(conv.id),
+            'requires_confirmation': False,
+            'pending_action_id': None,
+            'action_status': None,
+            'tools_used': [{'name': 'check_google_workspace_status', 'args': {}}],
+            'download_link': None,
+            'language': active_lang,
+        }, timer)
+
     if not is_undo_request(clean_message) and not is_portfolio_followup_waiting:
         fast_res = try_admin_fast_path(
             db, conv, clean_message, staff_user,
@@ -2057,6 +2178,42 @@ def _process_admin_chat_inner(
         )
         if fast_res is not None:
             return _attach_timing_debug(fast_res, timer)
+
+    _is_report_followup = any(
+        p in clean_message.lower()
+        for p in (
+            "that report again", "same report", "previous report", "the report again",
+            "download that report", "send that report again", "generate report",
+            "download report", "ten raport", "poprzedni raport", "ten sam raport",
+        )
+    ) or ("report" in clean_message.lower() and any(w in clean_message.lower() for w in ("again", "download", "generate", "export", "pdf")))
+
+    if is_off_topic_query(clean_message) and not _is_report_followup and not _WORKSPACE_WORDS.search(clean_message):
+        if active_lang == "pl":
+            off_reply = (
+                "Jako wewnetrzny asystent AI Tajlandia specjalizuje sie wylacznie w zarzadzaniu i analizie bazy nieruchomosci w Tajlandii (Phuket, Koh Samui, Koh Phangan, Bangkok). "
+                "Nie obsluguje zapytan ogolnych ani tematow niezwiazanych z naszym portfolio. "
+                "W czym moge Ci pomoc w zakresie nieruchomosci, leadow lub specyfikacji technicznych?"
+            )
+        else:
+            off_reply = (
+                "As the Tajlandia Internal AI Assistant, I specialize exclusively in managing and querying our Thailand real estate portfolio (Phuket, Koh Samui, Koh Phangan, Bangkok). "
+                "I do not process general off-topic requests. "
+                "How may I assist you with our properties, buyer leads, or technical dossiers today?"
+            )
+        append_conversation_turn(db, conv, clean_message, off_reply)
+        return _attach_timing_debug({
+            "type": "text",
+            "text": off_reply,
+            "session_id": conv.session_id,
+            "conversation_id": str(conv.id),
+            "requires_confirmation": False,
+            "pending_action_id": None,
+            "action_status": None,
+            "tools_used": [],
+            "download_link": None,
+            "language": active_lang
+        }, timer)
 
     # 4. AI Model Intent Classification & Safety Evaluation
     client = None
@@ -4920,6 +5077,10 @@ def _execute_admin_tool_uncached(
         if _name_query:
             return _search_listing_by_name(db, _name_query, selected_websites), False, None
         res = []
+        _has_parking = tool_args.get("has_parking")
+        _amenities = list(tool_args.get("required_amenities") or [])
+        if _has_parking and "parking" not in [a.lower() for a in _amenities]:
+            _amenities.append("parking")
         try:
             from app.services.firestore_service import search_properties_firestore
             fs_props = search_properties_firestore(
@@ -4929,6 +5090,7 @@ def _execute_admin_tool_uncached(
                 max_price=float(tool_args["max_price"]) if tool_args.get("max_price") else None,
                 bedrooms=tool_args.get("bedrooms"),
                 has_pool=tool_args.get("has_pool"),
+                required_amenities=_amenities if _amenities else None,
                 websites=selected_websites,
                 target="admin",
                 limit=tool_args.get("limit", 10)
@@ -4947,6 +5109,7 @@ def _execute_admin_tool_uncached(
                 max_price=tool_args.get("max_price"),
                 bedrooms=tool_args.get("bedrooms"),
                 has_pool=tool_args.get("has_pool"),
+                required_amenities=_amenities if _amenities else None,
                 status=tool_args.get("status"),
                 limit=tool_args.get("limit", 10),
                 websites=selected_websites

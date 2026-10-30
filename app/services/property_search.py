@@ -1,3 +1,4 @@
+import logging
 import re
 from typing import Optional, List, Dict, Any
 from decimal import Decimal
@@ -6,6 +7,8 @@ from sqlalchemy import and_, or_, cast, String
 from pydantic import BaseModel, Field, field_validator
 from app.db.models import Property, PropertyImage, PropertySpec
 from app.core.tenant import normalize_website_list, normalize_website_domain, normalize_tenant_domain_key
+
+logger = logging.getLogger(__name__)
 
 class PropertyFilterParams(BaseModel):
     location: Optional[str] = Field(None, max_length=100)
@@ -80,7 +83,7 @@ class PropertyFilterParams(BaseModel):
         v_low = v.strip().lower()
         if "villa" in v_low:
             return "Villa"
-        elif "condo" in v_low or "apartment" in v_low:
+        elif "condo" in v_low or "apartment" in v_low or "flat" in v_low:
             return "Condominium"
         return v.strip()
 
@@ -101,6 +104,19 @@ def build_property_query(db: Session, filters: PropertyFilterParams):
     
     if filters.is_public is not None:
         conditions.append(Property.is_public == filters.is_public)
+
+    if filters.query:
+        q = f"%{filters.query.strip()}%"
+        conditions.append(
+            or_(
+                Property.property_name.ilike(q),
+                Property.description.ilike(q),
+                Property.area.ilike(q),
+                cast(Property.highlights, String).ilike(q),
+                cast(Property.amenities, String).ilike(q),
+                cast(Property.nearby_places, String).ilike(q),
+            )
+        )
 
     # General location lookup matching area, province, district, address, or property title
     if filters.location:
@@ -199,6 +215,8 @@ def build_property_query(db: Session, filters: PropertyFilterParams):
     if conditions:
         query = query.filter(and_(*conditions))
 
+    if filters.sort_by_price == "desc":
+        return query.order_by(Property.price_numeric_min.desc().nulls_last())
     return query.order_by(Property.price_numeric_min.asc().nulls_last())
 
 
@@ -233,7 +251,10 @@ def property_belongs_to_websites(prop: Optional[Any], target_websites: List[str]
             for s in prop_sites
         )
 
-    # Fallback for unassigned legacy properties: default to tajlandia.com
+    # Fallback for unassigned legacy properties: default to tajlandia.com only.
+    # (Not "accessible to all sites" — this function also gates RBAC on PUT/DELETE,
+    # so treating every unassigned property as visible on every tenant site would
+    # leak one customer's listings onto another customer's website.)
     if any("tajlandia" in t for t in normalized_targets):
         return True
 
@@ -252,6 +273,7 @@ class FirestorePropertyAdapter:
     def __init__(self, data: Dict[str, Any]):
         self._data = dict(data)
         self.property_id = str(data.get("property_id") or data.get("id") or "").strip()
+        self.id = self.property_id
         self.property_name = str(data.get("name") or data.get("property_name") or self.property_id)
         self.project_name = data.get("project_name") or self.property_name
         self.property_type = data.get("property_type") or "Villa / Condo"
@@ -270,6 +292,11 @@ class FirestorePropertyAdapter:
         self.price_note = data.get("price_note")
 
         self.bedrooms_display = str(data.get("bedrooms") or "")
+        if not self.bedrooms_display:
+            full_t = f"{data.get('title', '')} {data.get('name', '')} {data.get('property_name', '')}"
+            m = re.search(r"\b(\d+)\s*(?:bhk|bedroom|bed|br)\b", full_t, re.IGNORECASE)
+            if m:
+                self.bedrooms_display = f"{m.group(1)} Beds"
         self.bedrooms_min = None
         self.bedrooms_max = None
         if self.bedrooms_display:
@@ -346,18 +373,17 @@ def get_property_by_id(db: Session, property_id: str) -> Optional[Any]:
     except Exception as e:
         logger.debug(f"Firestore get_property_by_id fallback: {e}")
 
-    # 2. Local database only when Firestore client is unavailable (offline/dev) —
-    # never silently serve seed/placeholder rows when production Firestore is configured.
+    # 2. Check database (fallback when not in Firestore)
     if db is not None:
-        try:
-            from app.services.firestore_service import get_firestore_client
-            if get_firestore_client("user") or get_firestore_client("admin"):
-                return None
-        except Exception:
-            pass
-        return db.query(Property).filter(
-            Property.property_id == clean_id
+        prop = db.query(Property).filter(
+            Property.property_id.ilike(clean_id)
         ).first()
+        if not prop and clean_id:
+            prop = db.query(Property).filter(
+                (Property.property_id.ilike(f"%{clean_id}%")) |
+                (Property.property_name.ilike(f"%{clean_id}%"))
+            ).first()
+        return prop
     return None
 
 def get_property_by_name(db: Session, name_query: str) -> Optional[Any]:
@@ -375,14 +401,8 @@ def get_property_by_name(db: Session, name_query: str) -> Optional[Any]:
     except Exception as e:
         logger.debug(f"Firestore get_property_by_name fallback: {e}")
 
-    # 2. Local database only when Firestore is unavailable
+    # 2. Check database (fallback when not in Firestore)
     if db is not None:
-        try:
-            from app.services.firestore_service import get_firestore_client
-            if get_firestore_client("user") or get_firestore_client("admin"):
-                return None
-        except Exception:
-            pass
         return db.query(Property).filter(
             Property.property_name.ilike(f"%{clean_name}%")
         ).first()

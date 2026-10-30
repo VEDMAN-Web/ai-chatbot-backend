@@ -11,6 +11,7 @@ from app.services.firestore_service import get_admin_firestore_client as get_fir
 logger = logging.getLogger(__name__)
 
 ADMIN_AUTH_COLLECTION = "admin_authentication"
+_LOCAL_ADMIN_STORE: Dict[str, Dict[str, Any]] = {}
 
 
 def get_admin_from_firestore(email: str) -> Optional[Dict[str, Any]]:
@@ -18,13 +19,32 @@ def get_admin_from_firestore(email: str) -> Optional[Dict[str, Any]]:
     Looks up an administrative user directly in Cloud Firestore `admin_authentication` collection.
     Checks document ID directly (e.g. 'user@domain.com') and queries by 'email' field.
     """
-    client = get_firestore_client()
-    if not client:
-        logger.warning("Firestore client not available to fetch admin.")
-        return None
-
     email_clean = (email or "").strip().lower()
     if not email_clean:
+        return None
+
+    client = get_firestore_client()
+    if not client:
+        if email_clean in _LOCAL_ADMIN_STORE:
+            return dict(_LOCAL_ADMIN_STORE[email_clean])
+        try:
+            from app.db.session import SessionLocal
+            with SessionLocal() as db:
+                u = db.query(User).filter(User.email.ilike(email_clean)).first()
+                if u:
+                    return {
+                        "id": u.email,
+                        "email": u.email,
+                        "name": u.name or "Admin Staff",
+                        "role": u.role or "super_admin",
+                        "password_hash": u.password_hash,
+                        "passwordHash": u.password_hash,
+                        "is_active": u.is_active,
+                        "isActive": u.is_active,
+                        "allowed_websites": u.allowed_websites or ["tajlandia.com"]
+                    }
+        except Exception:
+            pass
         return None
 
     try:
@@ -122,10 +142,6 @@ def add_or_update_admin_in_firestore(
     Adds or updates an admin user in Cloud Firestore `admin_authentication` collection.
     Stores both hashed and structured credentials for live authentication.
     """
-    client = get_firestore_client()
-    if not client:
-        raise RuntimeError("Firestore client is not initialized or unavailable.")
-
     email_clean = (email or "").strip().lower()
     if not email_clean:
         raise ValueError("Admin email cannot be empty.")
@@ -148,6 +164,38 @@ def add_or_update_admin_in_firestore(
     if allowed_websites:
         payload["allowed_websites"] = list(allowed_websites)
         payload["websites"] = list(allowed_websites)
+
+    client = get_firestore_client()
+    if not client:
+        payload["createdAt"] = now_iso
+        payload["status"] = "active"
+        _LOCAL_ADMIN_STORE[email_clean] = payload
+        try:
+            from app.db.session import SessionLocal
+            with SessionLocal() as db:
+                user = db.query(User).filter(User.email.ilike(email_clean)).first()
+                if not user:
+                    user = User(
+                        email=email_clean,
+                        name=name,
+                        role=role,
+                        domain=target_domain,
+                        password_hash=hashed,
+                        is_active=is_active,
+                        status="active" if is_active else "blocked",
+                        allowed_websites=list(allowed_websites or [target_domain])
+                    )
+                    db.add(user)
+                else:
+                    user.password_hash = hashed
+                    user.role = role
+                    user.is_active = is_active
+                    if allowed_websites:
+                        user.allowed_websites = list(allowed_websites)
+                db.commit()
+        except Exception as e:
+            logger.debug(f"Local db sync fallback: {e}")
+        return payload
 
     doc_ref = client.collection(ADMIN_AUTH_COLLECTION).document(email_clean)
     existing_doc = doc_ref.get()
@@ -229,17 +277,30 @@ def update_admin_password_in_firestore(email: str, new_password: str) -> bool:
     """
     Updates the admin's password and passwordHash in Cloud Firestore `admin_authentication` collection.
     """
-    client = get_firestore_client()
-    if not client:
-        logger.warning("Firestore client not available to update password.")
-        return False
-
     email_clean = (email or "").strip().lower()
     if not email_clean or not new_password:
         return False
 
     now_iso = datetime.now(timezone.utc).isoformat()
     hashed = hash_password(new_password)
+
+    client = get_firestore_client()
+    if not client:
+        if email_clean in _LOCAL_ADMIN_STORE:
+            _LOCAL_ADMIN_STORE[email_clean]["password"] = new_password
+            _LOCAL_ADMIN_STORE[email_clean]["passwordHash"] = hashed
+            _LOCAL_ADMIN_STORE[email_clean]["updatedAt"] = now_iso
+        try:
+            from app.db.session import SessionLocal
+            with SessionLocal() as db:
+                user = db.query(User).filter(User.email.ilike(email_clean)).first()
+                if user:
+                    user.password_hash = hashed
+                    db.commit()
+                    return True
+        except Exception:
+            pass
+        return email_clean in _LOCAL_ADMIN_STORE
 
     try:
         col = client.collection(ADMIN_AUTH_COLLECTION)

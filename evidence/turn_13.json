@@ -1,0 +1,205 @@
+{
+  "turn": 13,
+  "session_id": "qa-master-25turn-81b0d2d9",
+  "requirement": "A4, A8",
+  "user_message": "Compare property PROP-PHG-005 and PROP-PHK-001",
+  "expected": "Shows 'price not available' or 'Planned' for missing field; no guessing",
+  "curl_command": "curl -sS -X POST \"http://127.0.0.1:8000/api/v1/chat/public\" -H \"Content-Type: application/json\" -d '{\"session_id\": \"qa-master-25turn-81b0d2d9\", \"site_origin\": \"tajlandia.com\", \"message\": \"Compare property PROP-PHG-005 and PROP-PHK-001\"}'",
+  "http_status": 200,
+  "latency_ms": 18869.1,
+  "response_headers": {
+    "date": "Fri, 30 Oct 2026 14:16:15 GMT",
+    "server": "uvicorn",
+    "content-type": "application/json"
+  },
+  "response_type": "property_cards",
+  "response_text": "Here's a side-by-side look at both verified listings:\n\n**1. Akiraya Villa**\n\u2022 \ud83c\udd94 **Property ID:** PROP-PHG-005\n\u2022 \ud83d\udccd **Location:** Koh Phangan, Surat Thani\n\u2022 \ud83d\udcb0 **Starting Price:** **from 12.50 million THB**\n\u2022 \ud83c\udfe1 **Property Type:** Villa\n\u2022 \ud83d\udecf\ufe0f **Bedrooms:** Planned (final count not yet confirmed) | \ud83d\udec1 **Bathrooms:** 2\n\u2022 \ud83d\udcd0 **Built Area:** 201 sqm\n\u2022 \ud83c\udfca **Private Pool:** Yes\n\u2022 \ud83c\udf0a **Highlights:** Sea view, boutique development on Phangan, handover January 2027\n\u2022 \ud83d\udea7 **Status:** Planned\n\u2022 \ud83d\udcdc **Ownership:** Leasehold / Freehold (as listed; please confirm the exact structure with your advisor)\n\n**2. Prop Phk 001**\n\u2022 \ud83c\udd94 **Property ID:** PROP-PHK-001\n\u2022 \ud83d\udccd **Location:** Thailand (exact area not specified in our data)\n\u2022 \ud83d\udcb0 **Starting Price:** **from 7.13 million THB**\n\u2022 \ud83c\udfe1 **Property Type:** Not specified in our verified data\n\u2022 \ud83d\udecf\ufe0f **Bedrooms:** Not available | \ud83d\udec1 **Bathrooms:** Not available\n\u2022 \ud83d\udcd0 **Built Area:** Not available\n\u2022 \ud83c\udfca **Private Pool:** No\n\u2022 \u2705 **Status:** Available\n\u2022 \ud83d\udcdc **Ownership:** Please confirm the ownership structure with your advisor\n\n**Summary:** Akiraya Villa is a fully described, sea-view pool villa on Koh Phangan with handover planned for January 2027, priced from 12.50 million THB. PROP-PHK-001 is available now at a lower entry point of 7.13 million THB, but its location, type, size and layout are not yet in our verified data, so an advisor should confirm those details before you compare value directly. **Next steps:**\n\u2022 \ud83d\udcc4 **Brochure:** I can generate a PDF brochure for either property. \u2022 \ud83d\udcc5 **Viewing:** I can submit a viewing request for the one that interests you. \u2022 \ud83d\udcde **Advisor contact:** Share your name and contact details, and an advisor will follow up with the missing details for",
+  "property_cards_count": 1,
+  "property_cards": [
+    {
+      "property_id": "PROP-PHK-001",
+      "title": "Prop Phk 001",
+      "price": "from 7.13M THB",
+      "link": "https://varsoviaestate.com/en/properties/thailand/phuket/PROP-PHK-001"
+    }
+  ],
+  "verdict": "PASS",
+  "hallucination_verdict": "SUPPORTED",
+  "raw_response": {
+    "type": "property_cards",
+    "text": "Here's a side-by-side look at both verified listings:\n\n**1. Akiraya Villa**\n\u2022 \ud83c\udd94 **Property ID:** PROP-PHG-005\n\u2022 \ud83d\udccd **Location:** Koh Phangan, Surat Thani\n\u2022 \ud83d\udcb0 **Starting Price:** **from 12.50 million THB**\n\u2022 \ud83c\udfe1 **Property Type:** Villa\n\u2022 \ud83d\udecf\ufe0f **Bedrooms:** Planned (final count not yet confirmed) | \ud83d\udec1 **Bathrooms:** 2\n\u2022 \ud83d\udcd0 **Built Area:** 201 sqm\n\u2022 \ud83c\udfca **Private Pool:** Yes\n\u2022 \ud83c\udf0a **Highlights:** Sea view, boutique development on Phangan, handover January 2027\n\u2022 \ud83d\udea7 **Status:** Planned\n\u2022 \ud83d\udcdc **Ownership:** Leasehold / Freehold (as listed; please confirm the exact structure with your advisor)\n\n**2. Prop Phk 001**\n\u2022 \ud83c\udd94 **Property ID:** PROP-PHK-001\n\u2022 \ud83d\udccd **Location:** Thailand (exact area not specified in our data)\n\u2022 \ud83d\udcb0 **Starting Price:** **from 7.13 million THB**\n\u2022 \ud83c\udfe1 **Property Type:** Not specified in our verified data\n\u2022 \ud83d\udecf\ufe0f **Bedrooms:** Not available | \ud83d\udec1 **Bathrooms:** Not available\n\u2022 \ud83d\udcd0 **Built Area:** Not available\n\u2022 \ud83c\udfca **Private Pool:** No\n\u2022 \u2705 **Status:** Available\n\u2022 \ud83d\udcdc **Ownership:** Please confirm the ownership structure with your advisor\n\n**Summary:** Akiraya Villa is a fully described, sea-view pool villa on Koh Phangan with handover planned for January 2027, priced from 12.50 million THB. PROP-PHK-001 is available now at a lower entry point of 7.13 million THB, but its location, type, size and layout are not yet in our verified data, so an advisor should confirm those details before you compare value directly. **Next steps:**\n\u2022 \ud83d\udcc4 **Brochure:** I can generate a PDF brochure for either property. \u2022 \ud83d\udcc5 **Viewing:** I can submit a viewing request for the one that interests you. \u2022 \ud83d\udcde **Advisor contact:** Share your name and contact details, and an advisor will follow up with the missing details for",
+    "properties": [
+      {
+        "property_id": "PROP-PHK-001",
+        "name": "Prop Phk 001",
+        "property_type": "Villa / Condo",
+        "price": "from 7.13M THB",
+        "bedrooms": "Beds: on request",
+        "area": "N/A",
+        "location": "Thailand",
+        "status": "Available",
+        "has_pool": false,
+        "beach_access": false,
+        "images": [
+          "https://images.unsplash.com/photo-1580587771525-78b9dba3b914?auto=format&fit=crop&w=1200&q=80"
+        ],
+        "detail_page_url": "https://varsoviaestate.com/en/properties/thailand/phuket/PROP-PHK-001",
+        "highlights": [],
+        "latitude": null,
+        "longitude": null,
+        "maps_url": "https://www.google.com/maps/search/?api=1&query=Prop+Phk+001+Thailand",
+        "maps_embed_url": "https://www.google.com/maps/embed/v1/place?key=AIzaSyBq0CYgO3bdauwF6Pfs8jpRFU4E2s2tbsc&q=Prop%20Phk%20001%20Thailand&zoom=14",
+        "calendar_url": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=Viewing%3A+Prop+Phk+001+%28PROP-PHK-001%29&dates=20261031T141618Z%2F20261031T151618Z&details=Property+viewing+appointment+for+Prop+Phk+001+in+Thailand.+Ref%3A+PROP-PHK-001.+Price%3A+from+7.13M+THB.&location=Prop+Phk+001%2C+Thailand%2C+Thailand"
+      }
+    ],
+    "quick_replies": [
+      "Schedule viewing for PROP-PHG-005",
+      "Schedule viewing for PROP-PHK-001",
+      "Can foreigners own these freehold?"
+    ],
+    "lead_captured": false,
+    "preferences": {
+      "language": "en",
+      "property_context": {
+        "conversation_id": "public__qa-master-25turn-81b0d2d9",
+        "active_property_id": "PROP-PHG-005",
+        "active_property_reference": "Akiraya Villa",
+        "recently_discussed_ids": [
+          "PROP-PHG-005",
+          "PROP-PHK-001",
+          "the-title-artrio",
+          "Jo5t4clIFRL6hi1A1tRX",
+          "the-trees-residence",
+          "citygate-phuket",
+          "8-atelier-residence",
+          "777-beach-condo",
+          "3-bedroom-villa-for-sale-at-baan-maneekram-jomthong-thani-for-29"
+        ],
+        "reference_map": {
+          "3 bedroom villa for sale at baan maneekram-jomthong thani for $293,000 | u5928175": "3-bedroom-villa-for-sale-at-baan-maneekram-jomthong-thani-for-29",
+          "3 Bedroom Villa for Sale at Baan Maneekram-Jomthong Thani for $293,000 | U5928175": "3-bedroom-villa-for-sale-at-baan-maneekram-jomthong-thani-for-29",
+          "777 beach condo": "777-beach-condo",
+          "777 Beach Condo": "777-beach-condo",
+          "8 atelier residence": "8-atelier-residence",
+          "8 Atelier Residence": "8-atelier-residence",
+          "sun hills layan phuket": "Jo5t4clIFRL6hi1A1tRX",
+          "Sun Hills Layan Phuket": "Jo5t4clIFRL6hi1A1tRX",
+          "first property": "PROP-PHG-005",
+          "1st": "PROP-PHG-005",
+          "first one": "PROP-PHG-005",
+          "1": "PROP-PHG-005",
+          "second property": "PROP-PHK-001",
+          "2nd": "PROP-PHK-001",
+          "second one": "PROP-PHK-001",
+          "2": "PROP-PHK-001",
+          "third property": "the-trees-residence",
+          "3rd": "the-trees-residence",
+          "third one": "the-trees-residence",
+          "3": "the-trees-residence",
+          "fourth property": "Jo5t4clIFRL6hi1A1tRX",
+          "4th": "Jo5t4clIFRL6hi1A1tRX",
+          "fourth one": "Jo5t4clIFRL6hi1A1tRX",
+          "4": "Jo5t4clIFRL6hi1A1tRX",
+          "3 bedroom villa for sale at baan maneekram jomthong thani for 29": "3-bedroom-villa-for-sale-at-baan-maneekram-jomthong-thani-for-29",
+          "3 Bedroom Villa For Sale At Baan Maneekram Jomthong Thani For 29": "3-bedroom-villa-for-sale-at-baan-maneekram-jomthong-thani-for-29",
+          "citygate phuket": "citygate-phuket",
+          "CityGate Phuket": "citygate-phuket",
+          "the title artrio": "the-title-artrio",
+          "The Title Artrio": "the-title-artrio",
+          "the trees residence": "the-trees-residence",
+          "The Trees Residence": "the-trees-residence",
+          "prop phk 001": "PROP-PHK-001",
+          "Prop Phk 001": "PROP-PHK-001",
+          "akiraya villa": "PROP-PHG-005",
+          "Akiraya Villa": "PROP-PHG-005"
+        },
+        "comparison_set": [
+          "PROP-PHG-005",
+          "PROP-PHK-001"
+        ],
+        "user_preferences": {},
+        "decisions_summary": "active=PROP-PHK-001; recent=PROP-PHK-001,Jo5t4clIFRL6hi1A1tRX,the-trees-residence,the-title-artrio,citygate-phuket; compare=; turns=6",
+        "unresolved_questions": [],
+        "rolling_summary": "active=PROP-PHK-001 | Q:Show me full details of property PROP-PHK-001 | discussed:PROP-PHK-001 || active=PROP-PHK-001 | Q:Does it have a gym? | discussed:PROP-PHK-001 || active=PROP-PHK-001 | Q:How far is it from the airport? | discussed:PROP-PHK-001 || active=PROP-PHK-001 | Q:What will the price be next year? | discussed:PROP-PHK-001 || active=PROP-PHK-001 | Q:Is this a good investment? What is the rental yield? | discussed:PROP-PHK-001 || active=PROP-PHK-001 | Q:Show cards for 3 properties near the beach | discussed:PROP-PHK-001",
+        "turn_count": 6,
+        "updated_at": "2026-10-30T14:16:29.666669+00:00"
+      },
+      "active_filters": {
+        "location": "Phuket",
+        "property_type": null,
+        "bedrooms": 2,
+        "min_bedrooms": null,
+        "max_bedrooms": null,
+        "max_price": 8000000.0,
+        "has_pool": true,
+        "beach_access": null,
+        "required_amenities": [
+          "pool"
+        ]
+      },
+      "seen_property_ids": [
+        "8-atelier-residence",
+        "3-bedroom-villa-for-sale-at-baan-maneekram-jomthong-thani-for-29",
+        "the-trees-residence",
+        "777-beach-condo",
+        "citygate-phuket",
+        "the-title-artrio",
+        "Jo5t4clIFRL6hi1A1tRX",
+        "PROP-PHK-001",
+        "PROP-PHG-005"
+      ],
+      "last_result_ids": [
+        "PROP-PHG-005",
+        "PROP-PHK-001",
+        "the-trees-residence",
+        "Jo5t4clIFRL6hi1A1tRX"
+      ],
+      "last_shown_names": [
+        "CityGate Phuket",
+        "The Title Artrio",
+        "The Trees Residence",
+        "Sun Hills Layan Phuket"
+      ],
+      "asked_slots": [
+        "budget"
+      ],
+      "location": "Phuket",
+      "what_we_fetched": [
+        "\ud83d\udccd Location: Phuket",
+        "\ud83d\udecf\ufe0f Bedrooms: 2 Bedrooms",
+        "\ud83d\udcb0 Budget: Under 8M THB (~$228,571 USD)",
+        "\u2728 Features: Private Pool"
+      ],
+      "focus_summary": "Focusing on 2 Bedrooms properties in Phuket with private pool (Under 8M THB (~$228,571 USD)).",
+      "focus_validated": true,
+      "session_message_count": 13,
+      "selected_property_ids": [
+        "PROP-PHG-005"
+      ],
+      "budget_max": 8000000,
+      "max_price_exclusive": true,
+      "bedrooms_num": 2,
+      "bedrooms": "2 Bedrooms",
+      "budget_display": "Under 8M THB (~$228,571 USD)",
+      "has_pool": true,
+      "features": [
+        "Private Pool"
+      ],
+      "comparison_set": [
+        "PROP-PHG-005",
+        "PROP-PHK-001"
+      ]
+    },
+    "session_id": "qa-master-25turn-81b0d2d9",
+    "conversation_id": "public__qa-master-25turn-81b0d2d9",
+    "language": "en",
+    "brochure_property_id": null,
+    "pdf_url": null,
+    "download_url": null,
+    "lead_id": null,
+    "lead_saved": null,
+    "session_limit_reached": false,
+    "message_limit": 50,
+    "session_limit_warning": false
+  }
+}
