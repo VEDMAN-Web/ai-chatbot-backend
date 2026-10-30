@@ -308,8 +308,11 @@ def execute_turn(turn_info: Dict[str, Any]) -> Dict[str, Any]:
     }
     
     evidence_path = os.path.join(EVIDENCE_DIR, f"turn_{turn_no:02d}.json")
+    record_json = json.dumps(record, indent=2)
+    # Strict secret redaction: scrub Google API keys and tokens before saving to disk
+    record_json = re.sub(r"AIzaSy[A-Za-z0-9_-]{33}", "***REDACTED***", record_json)
     with open(evidence_path, "w", encoding="utf-8") as f:
-        json.dump(record, f, indent=2)
+        f.write(record_json)
         
     print(f"Turn {turn_no:02d}: [{record['verdict']}] HTTP {status_code} ({latency_ms}ms) | {msg[:40]}...")
     return record
@@ -333,15 +336,18 @@ def main():
             fail_cnt += 1
         
     summary_path = os.path.join(EVIDENCE_DIR, "25_turn_summary.json")
+    summary_data = {
+        "session_id": SESSION_ID,
+        "total_turns": len(all_turns),
+        "pass_count": pass_cnt,
+        "fail_count": fail_cnt,
+        "pass_rate": f"{round(pass_cnt / len(all_turns) * 100, 1)}%",
+        "turns": all_turns
+    }
+    summary_json = json.dumps(summary_data, indent=2)
+    summary_json = re.sub(r"AIzaSy[A-Za-z0-9_-]{33}", "***REDACTED***", summary_json)
     with open(summary_path, "w", encoding="utf-8") as f:
-        json.dump({
-            "session_id": SESSION_ID,
-            "total_turns": len(all_turns),
-            "pass_count": pass_cnt,
-            "fail_count": fail_cnt,
-            "pass_rate": f"{round(pass_cnt / len(all_turns) * 100, 1)}%",
-            "turns": all_turns
-        }, f, indent=2)
+        f.write(summary_json)
         
     print("=" * 80)
     print(f"25-TURN TEST COMPLETE: {pass_cnt}/{len(all_turns)} PASS ({round(pass_cnt / len(all_turns) * 100, 1)}%)")

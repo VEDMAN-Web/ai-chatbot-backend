@@ -130,7 +130,7 @@
         "latitude": 8.027819,
         "longitude": 98.291311,
         "maps_url": "https://www.google.com/maps/search/?api=1&query=8.027819%2C98.291311",
-        "maps_embed_url": "https://www.google.com/maps/embed/v1/place?key=AIzaSyBq0CYgO3bdauwF6Pfs8jpRFU4E2s2tbsc&q=8.027819%2C98.291311&zoom=14",
+        "maps_embed_url": "https://www.google.com/maps/embed/v1/place?key=***REDACTED***&q=8.027819%2C98.291311&zoom=14",
         "calendar_url": null
       },
       {
@@ -253,7 +253,7 @@
         "latitude": 8.092075,
         "longitude": 98.303057,
         "maps_url": "https://www.google.com/maps/search/?api=1&query=8.092075%2C98.303057",
-        "maps_embed_url": "https://www.google.com/maps/embed/v1/place?key=AIzaSyBq0CYgO3bdauwF6Pfs8jpRFU4E2s2tbsc&q=8.092075%2C98.303057&zoom=14",
+        "maps_embed_url": "https://www.google.com/maps/embed/v1/place?key=***REDACTED***&q=8.092075%2C98.303057&zoom=14",
         "calendar_url": null
       }
     ],

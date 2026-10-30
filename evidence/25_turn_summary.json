@@ -64,7 +64,7 @@
             "latitude": 8.168902,
             "longitude": 98.298483,
             "maps_url": "https://www.google.com/maps/search/?api=1&query=8.168902%2C98.298483",
-            "maps_embed_url": "https://www.google.com/maps/embed/v1/place?key=AIzaSyBq0CYgO3bdauwF6Pfs8jpRFU4E2s2tbsc&q=8.168902%2C98.298483&zoom=14",
+            "maps_embed_url": "https://www.google.com/maps/embed/v1/place?key=***REDACTED***&q=8.168902%2C98.298483&zoom=14",
             "calendar_url": null
           },
           {
@@ -160,7 +160,7 @@
             "latitude": 8.007227,
             "longitude": 98.317074,
             "maps_url": "https://www.google.com/maps/search/?api=1&query=8.007227%2C98.317074",
-            "maps_embed_url": "https://www.google.com/maps/embed/v1/place?key=AIzaSyBq0CYgO3bdauwF6Pfs8jpRFU4E2s2tbsc&q=8.007227%2C98.317074&zoom=14",
+            "maps_embed_url": "https://www.google.com/maps/embed/v1/place?key=***REDACTED***&q=8.007227%2C98.317074&zoom=14",
             "calendar_url": null
           }
         ],
@@ -375,7 +375,7 @@
             "latitude": 7.952013,
             "longitude": 98.287885,
             "maps_url": "https://www.google.com/maps/search/?api=1&query=7.952013%2C98.287885",
-            "maps_embed_url": "https://www.google.com/maps/embed/v1/place?key=AIzaSyBq0CYgO3bdauwF6Pfs8jpRFU4E2s2tbsc&q=7.952013%2C98.287885&zoom=14",
+            "maps_embed_url": "https://www.google.com/maps/embed/v1/place?key=***REDACTED***&q=7.952013%2C98.287885&zoom=14",
             "calendar_url": null
           },
           {
@@ -433,7 +433,7 @@
             "latitude": 7.990011,
             "longitude": 98.305459,
             "maps_url": "https://www.google.com/maps/search/?api=1&query=7.990011%2C98.305459",
-            "maps_embed_url": "https://www.google.com/maps/embed/v1/place?key=AIzaSyBq0CYgO3bdauwF6Pfs8jpRFU4E2s2tbsc&q=7.990011%2C98.305459&zoom=14",
+            "maps_embed_url": "https://www.google.com/maps/embed/v1/place?key=***REDACTED***&q=7.990011%2C98.305459&zoom=14",
             "calendar_url": null
           },
           {
@@ -554,7 +554,7 @@
             "latitude": 7.979442,
             "longitude": 98.305258,
             "maps_url": "https://www.google.com/maps/search/?api=1&query=7.979442%2C98.305258",
-            "maps_embed_url": "https://www.google.com/maps/embed/v1/place?key=AIzaSyBq0CYgO3bdauwF6Pfs8jpRFU4E2s2tbsc&q=7.979442%2C98.305258&zoom=14",
+            "maps_embed_url": "https://www.google.com/maps/embed/v1/place?key=***REDACTED***&q=7.979442%2C98.305258&zoom=14",
             "calendar_url": null
           }
         ],
@@ -2245,7 +2245,7 @@
             "latitude": null,
             "longitude": null,
             "maps_url": "https://www.google.com/maps/search/?api=1&query=Prop+Phk+001+Thailand",
-            "maps_embed_url": "https://www.google.com/maps/embed/v1/place?key=AIzaSyBq0CYgO3bdauwF6Pfs8jpRFU4E2s2tbsc&q=Prop%20Phk%20001%20Thailand&zoom=14",
+            "maps_embed_url": "https://www.google.com/maps/embed/v1/place?key=***REDACTED***&q=Prop%20Phk%20001%20Thailand&zoom=14",
             "calendar_url": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=Viewing%3A+Prop+Phk+001+%28PROP-PHK-001%29&dates=20261031T141543Z%2F20261031T151543Z&details=Property+viewing+appointment+for+Prop+Phk+001+in+Thailand.+Ref%3A+PROP-PHK-001.+Price%3A+from+7.13M+THB.&location=Prop+Phk+001%2C+Thailand%2C+Thailand"
           },
           {
@@ -2303,7 +2303,7 @@
             "latitude": 7.990011,
             "longitude": 98.305459,
             "maps_url": "https://www.google.com/maps/search/?api=1&query=7.990011%2C98.305459",
-            "maps_embed_url": "https://www.google.com/maps/embed/v1/place?key=AIzaSyBq0CYgO3bdauwF6Pfs8jpRFU4E2s2tbsc&q=7.990011%2C98.305459&zoom=14",
+            "maps_embed_url": "https://www.google.com/maps/embed/v1/place?key=***REDACTED***&q=7.990011%2C98.305459&zoom=14",
             "calendar_url": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=Viewing%3A+The+Title+Artrio+%28the-title-artrio%29&dates=20261031T141543Z%2F20261031T151543Z&details=Property+viewing+appointment+for+The+Title+Artrio+in+phuket%2C+Phuket.+Ref%3A+the-title-artrio.+Price%3A+from+4.26M+THB.&location=The+Title+Artrio%2C+phuket%2C+Phuket%2C+Thailand"
           }
         ],
@@ -2510,7 +2510,7 @@
             "latitude": null,
             "longitude": null,
             "maps_url": "https://www.google.com/maps/search/?api=1&query=Prop+Phk+001+Thailand",
-            "maps_embed_url": "https://www.google.com/maps/embed/v1/place?key=AIzaSyBq0CYgO3bdauwF6Pfs8jpRFU4E2s2tbsc&q=Prop%20Phk%20001%20Thailand&zoom=14",
+            "maps_embed_url": "https://www.google.com/maps/embed/v1/place?key=***REDACTED***&q=Prop%20Phk%20001%20Thailand&zoom=14",
             "calendar_url": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=Viewing%3A+Prop+Phk+001+%28PROP-PHK-001%29&dates=20261031T141600Z%2F20261031T151600Z&details=Property+viewing+appointment+for+Prop+Phk+001+in+Thailand.+Ref%3A+PROP-PHK-001.+Price%3A+from+7.13M+THB.&location=Prop+Phk+001%2C+Thailand%2C+Thailand"
           },
           {
@@ -2568,7 +2568,7 @@
             "latitude": 7.990011,
             "longitude": 98.305459,
             "maps_url": "https://www.google.com/maps/search/?api=1&query=7.990011%2C98.305459",
-            "maps_embed_url": "https://www.google.com/maps/embed/v1/place?key=AIzaSyBq0CYgO3bdauwF6Pfs8jpRFU4E2s2tbsc&q=7.990011%2C98.305459&zoom=14",
+            "maps_embed_url": "https://www.google.com/maps/embed/v1/place?key=***REDACTED***&q=7.990011%2C98.305459&zoom=14",
             "calendar_url": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=Viewing%3A+The+Title+Artrio+%28the-title-artrio%29&dates=20261031T141600Z%2F20261031T151600Z&details=Property+viewing+appointment+for+The+Title+Artrio+in+phuket%2C+Phuket.+Ref%3A+the-title-artrio.+Price%3A+from+4.26M+THB.&location=The+Title+Artrio%2C+phuket%2C+Phuket%2C+Thailand"
           }
         ],
@@ -2769,7 +2769,7 @@
             "latitude": null,
             "longitude": null,
             "maps_url": "https://www.google.com/maps/search/?api=1&query=Prop+Phk+001+Thailand",
-            "maps_embed_url": "https://www.google.com/maps/embed/v1/place?key=AIzaSyBq0CYgO3bdauwF6Pfs8jpRFU4E2s2tbsc&q=Prop%20Phk%20001%20Thailand&zoom=14",
+            "maps_embed_url": "https://www.google.com/maps/embed/v1/place?key=***REDACTED***&q=Prop%20Phk%20001%20Thailand&zoom=14",
             "calendar_url": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=Viewing%3A+Prop+Phk+001+%28PROP-PHK-001%29&dates=20261031T141618Z%2F20261031T151618Z&details=Property+viewing+appointment+for+Prop+Phk+001+in+Thailand.+Ref%3A+PROP-PHK-001.+Price%3A+from+7.13M+THB.&location=Prop+Phk+001%2C+Thailand%2C+Thailand"
           }
         ],
@@ -3001,7 +3001,7 @@
             "latitude": 13.7458279,
             "longitude": 100.5586829,
             "maps_url": "https://www.google.com/maps/search/?api=1&query=13.7458279%2C100.5586829",
-            "maps_embed_url": "https://www.google.com/maps/embed/v1/place?key=AIzaSyBq0CYgO3bdauwF6Pfs8jpRFU4E2s2tbsc&q=13.7458279%2C100.5586829&zoom=14",
+            "maps_embed_url": "https://www.google.com/maps/embed/v1/place?key=***REDACTED***&q=13.7458279%2C100.5586829&zoom=14",
             "calendar_url": null
           },
           {
@@ -3040,7 +3040,7 @@
             "latitude": 13.7420051,
             "longitude": 100.5580817,
             "maps_url": "https://www.google.com/maps/search/?api=1&query=13.7420051%2C100.5580817",
-            "maps_embed_url": "https://www.google.com/maps/embed/v1/place?key=AIzaSyBq0CYgO3bdauwF6Pfs8jpRFU4E2s2tbsc&q=13.7420051%2C100.5580817&zoom=14",
+            "maps_embed_url": "https://www.google.com/maps/embed/v1/place?key=***REDACTED***&q=13.7420051%2C100.5580817&zoom=14",
             "calendar_url": null
           },
           {
@@ -3073,7 +3073,7 @@
             "latitude": null,
             "longitude": null,
             "maps_url": "https://www.google.com/maps/search/?api=1&query=2+Bedroom+Condo+For+Sale+At+Still+Sukhumvit+20+Bangkok+Thailand",
-            "maps_embed_url": "https://www.google.com/maps/embed/v1/place?key=AIzaSyBq0CYgO3bdauwF6Pfs8jpRFU4E2s2tbsc&q=2%20Bedroom%20Condo%20For%20Sale%20At%20Still%20Sukhumvit%2020%20Bangkok%20Thailand&zoom=14",
+            "maps_embed_url": "https://www.google.com/maps/embed/v1/place?key=***REDACTED***&q=2%20Bedroom%20Condo%20For%20Sale%20At%20Still%20Sukhumvit%2020%20Bangkok%20Thailand&zoom=14",
             "calendar_url": null
           }
         ],
@@ -3376,7 +3376,7 @@
             "latitude": 8.027819,
             "longitude": 98.291311,
             "maps_url": "https://www.google.com/maps/search/?api=1&query=8.027819%2C98.291311",
-            "maps_embed_url": "https://www.google.com/maps/embed/v1/place?key=AIzaSyBq0CYgO3bdauwF6Pfs8jpRFU4E2s2tbsc&q=8.027819%2C98.291311&zoom=14",
+            "maps_embed_url": "https://www.google.com/maps/embed/v1/place?key=***REDACTED***&q=8.027819%2C98.291311&zoom=14",
             "calendar_url": null
           },
           {
@@ -3499,7 +3499,7 @@
             "latitude": 8.092075,
             "longitude": 98.303057,
             "maps_url": "https://www.google.com/maps/search/?api=1&query=8.092075%2C98.303057",
-            "maps_embed_url": "https://www.google.com/maps/embed/v1/place?key=AIzaSyBq0CYgO3bdauwF6Pfs8jpRFU4E2s2tbsc&q=8.092075%2C98.303057&zoom=14",
+            "maps_embed_url": "https://www.google.com/maps/embed/v1/place?key=***REDACTED***&q=8.092075%2C98.303057&zoom=14",
             "calendar_url": null
           }
         ],

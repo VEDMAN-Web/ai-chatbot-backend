@@ -75,7 +75,7 @@
         "latitude": 13.7458279,
         "longitude": 100.5586829,
         "maps_url": "https://www.google.com/maps/search/?api=1&query=13.7458279%2C100.5586829",
-        "maps_embed_url": "https://www.google.com/maps/embed/v1/place?key=AIzaSyBq0CYgO3bdauwF6Pfs8jpRFU4E2s2tbsc&q=13.7458279%2C100.5586829&zoom=14",
+        "maps_embed_url": "https://www.google.com/maps/embed/v1/place?key=***REDACTED***&q=13.7458279%2C100.5586829&zoom=14",
         "calendar_url": null
       },
       {
@@ -114,7 +114,7 @@
         "latitude": 13.7420051,
         "longitude": 100.5580817,
         "maps_url": "https://www.google.com/maps/search/?api=1&query=13.7420051%2C100.5580817",
-        "maps_embed_url": "https://www.google.com/maps/embed/v1/place?key=AIzaSyBq0CYgO3bdauwF6Pfs8jpRFU4E2s2tbsc&q=13.7420051%2C100.5580817&zoom=14",
+        "maps_embed_url": "https://www.google.com/maps/embed/v1/place?key=***REDACTED***&q=13.7420051%2C100.5580817&zoom=14",
         "calendar_url": null
       },
       {
@@ -147,7 +147,7 @@
         "latitude": null,
         "longitude": null,
         "maps_url": "https://www.google.com/maps/search/?api=1&query=2+Bedroom+Condo+For+Sale+At+Still+Sukhumvit+20+Bangkok+Thailand",
-        "maps_embed_url": "https://www.google.com/maps/embed/v1/place?key=AIzaSyBq0CYgO3bdauwF6Pfs8jpRFU4E2s2tbsc&q=2%20Bedroom%20Condo%20For%20Sale%20At%20Still%20Sukhumvit%2020%20Bangkok%20Thailand&zoom=14",
+        "maps_embed_url": "https://www.google.com/maps/embed/v1/place?key=***REDACTED***&q=2%20Bedroom%20Condo%20For%20Sale%20At%20Still%20Sukhumvit%2020%20Bangkok%20Thailand&zoom=14",
         "calendar_url": null
       }
     ],

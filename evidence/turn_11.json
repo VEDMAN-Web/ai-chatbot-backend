@@ -54,7 +54,7 @@
         "latitude": null,
         "longitude": null,
         "maps_url": "https://www.google.com/maps/search/?api=1&query=Prop+Phk+001+Thailand",
-        "maps_embed_url": "https://www.google.com/maps/embed/v1/place?key=AIzaSyBq0CYgO3bdauwF6Pfs8jpRFU4E2s2tbsc&q=Prop%20Phk%20001%20Thailand&zoom=14",
+        "maps_embed_url": "https://www.google.com/maps/embed/v1/place?key=***REDACTED***&q=Prop%20Phk%20001%20Thailand&zoom=14",
         "calendar_url": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=Viewing%3A+Prop+Phk+001+%28PROP-PHK-001%29&dates=20261031T141543Z%2F20261031T151543Z&details=Property+viewing+appointment+for+Prop+Phk+001+in+Thailand.+Ref%3A+PROP-PHK-001.+Price%3A+from+7.13M+THB.&location=Prop+Phk+001%2C+Thailand%2C+Thailand"
       },
       {
@@ -112,7 +112,7 @@
         "latitude": 7.990011,
         "longitude": 98.305459,
         "maps_url": "https://www.google.com/maps/search/?api=1&query=7.990011%2C98.305459",
-        "maps_embed_url": "https://www.google.com/maps/embed/v1/place?key=AIzaSyBq0CYgO3bdauwF6Pfs8jpRFU4E2s2tbsc&q=7.990011%2C98.305459&zoom=14",
+        "maps_embed_url": "https://www.google.com/maps/embed/v1/place?key=***REDACTED***&q=7.990011%2C98.305459&zoom=14",
         "calendar_url": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=Viewing%3A+The+Title+Artrio+%28the-title-artrio%29&dates=20261031T141543Z%2F20261031T151543Z&details=Property+viewing+appointment+for+The+Title+Artrio+in+phuket%2C+Phuket.+Ref%3A+the-title-artrio.+Price%3A+from+4.26M+THB.&location=The+Title+Artrio%2C+phuket%2C+Phuket%2C+Thailand"
       }
     ],
