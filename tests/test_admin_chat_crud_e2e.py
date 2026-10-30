@@ -18,7 +18,7 @@ from tests import fs_users
 
 client = TestClient(app)
 TAJ, VAR = "tajlandia.com", "varsoviaestate.com"
-RUN = uuid.uuid4().hex[:6]
+RUN = uuid.uuid4().hex[:6].translate(str.maketrans("0123456789", "ghijklmnop"))  # letters only: digits in a name get parsed as a price
 PW = "ChatCrud#123"
 
 

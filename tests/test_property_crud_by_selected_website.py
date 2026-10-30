@@ -26,7 +26,7 @@ from app.services.admin_agent import _execute_admin_tool
 client = TestClient(app)
 TAJ, VAR, THAI = "tajlandia.com", "varsoviaestate.com", "thai.estate"
 PASSWORD = "CrudSite#123"
-RUN = uuid.uuid4().hex[:6]
+RUN = uuid.uuid4().hex[:6].translate(str.maketrans("0123456789", "ghijklmnop"))  # letters only: digits in a name get parsed as a price
 URL = "/api/v1/admin/properties"
 
 

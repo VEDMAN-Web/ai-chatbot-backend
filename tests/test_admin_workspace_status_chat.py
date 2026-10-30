@@ -14,7 +14,7 @@ from app.services.admin_agent import _granted_google_services, _is_workspace_sta
 from app.services.google_services import SCOPES
 
 client = TestClient(app)
-RUN = uuid.uuid4().hex[:6]
+RUN = uuid.uuid4().hex[:6].translate(str.maketrans("0123456789", "ghijklmnop"))  # letters only: digits in a name get parsed as a price
 PASSWORD = "WsStatus#123"
 QUESTIONS = ["my drive is connected ?", "is my google drive connected", "Is my Gmail connected?", "check google workspace status",
              "is my calendar linked?"]

@@ -17,7 +17,7 @@ from app.services.audit_service import dedupe_log_sections
 from tests import fs_users
 
 client = TestClient(app)
-RUN = uuid.uuid4().hex[:6]
+RUN = uuid.uuid4().hex[:6].translate(str.maketrans("0123456789", "ghijklmnop"))  # letters only: digits in a name get parsed as a price
 TABLE = ("| Field | Current | New |\n|---|---|---|\n| price_numeric_min | 3,000,000 THB | 4,000,000 THB |\n"
          "| status | Available | Sold Out |")
 

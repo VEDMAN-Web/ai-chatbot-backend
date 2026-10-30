@@ -427,7 +427,9 @@ def test_admin_replay_script(world):
     )
     assert missing_token.status_code in {400, 403}
     boss = _say(world, "yes confirm", staff=_staff("boss@example.com", "super_admin"))
-    assert "Done." in boss["text"] or boss.get("action_status") in {"executed", "confirmed"}
+    # staging hardening: only the proposer confirms; a super admin cannot confirm someone else's action
+    assert "Only the staff member who proposed this action can confirm or reject it" in boss["text"]
+    assert boss.get("action_status") not in {"executed", "confirmed"}
     world["holder"]["staff"] = _staff()
 
     delete_reply = _say(world, "delete Laguna Villa")
