@@ -6,15 +6,13 @@ proposed and again when it is confirmed) and on the Drive ingest path (missing, 
 """
 import io
 import uuid
-from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi import HTTPException
 
 from app.core import permissions
 from app.core.auth import AuthenticatedStaff
-from app.db.models import PendingAction
-from app.db.session import SessionLocal
+from tests import fs_users
 from app.services import drive_service
 from app.services.action_service import confirm_and_execute_action
 from app.services.admin_agent import _execute_admin_tool_uncached
@@ -32,14 +30,13 @@ def _staff(role: str, email: str = None) -> AuthenticatedStaff:
     )
 
 
-@pytest.fixture
-def db():
-    session = SessionLocal()
-    try:
-        yield session
-    finally:
-        session.rollback()
-        session.close()
+def _pending_count(email: str) -> int:
+    from app.services import firestore_service as fsvc
+    client = fsvc.get_admin_firestore_client()
+    return sum(
+        1 for doc in client.collection("pending_actions").stream()
+        if (doc.to_dict() or {}).get("staff_user_id") == email
+    )
 
 
 # --- the matrix itself -------------------------------------------------------------------------------------------
@@ -80,7 +77,7 @@ def test_role_cannot_be_raised_by_tool_arguments(db):
 ])
 def test_worker_cannot_propose_property_changes_in_chat(db, tool):
     staff = _staff("worker")
-    before = db.query(PendingAction).filter(PendingAction.staff_user_id == staff.email).count()
+    before = _pending_count(staff.email)
     result, needs_confirmation, pending_id = _execute_admin_tool_uncached(
         db, tool,
         {"property_id": "X-1", "file_id": "anything", "url": "https://example.com/p",
@@ -89,7 +86,7 @@ def test_worker_cannot_propose_property_changes_in_chat(db, tool):
     )
     assert result["status"] == "FORBIDDEN"
     assert needs_confirmation is False and pending_id is None
-    assert db.query(PendingAction).filter(PendingAction.staff_user_id == staff.email).count() == before
+    assert _pending_count(staff.email) == before
 
 
 # --- confirming ---------------------------------------------------------------------------------------------------
@@ -97,27 +94,18 @@ def test_worker_cannot_propose_property_changes_in_chat(db, tool):
 def test_worker_cannot_confirm_a_property_change_even_for_their_own_pending_action(db):
     """A pending action can exist from before a role change; confirming re-checks the role."""
     staff = _staff("worker")
-    action = PendingAction(
-        confirmation_token=f"act_{uuid.uuid4().hex}",
-        staff_user_id=staff.email,
+    action_id = fs_users.make_pending(
+        staff.email,
         tool_name="create_or_update_listing",
-        action_payload={"property_id": "X-1", "fields": {"price_thb": 1}},
-        status="PENDING",
+        payload={"property_id": "X-1", "fields": {"price_thb": 1}},
         conversation_id=str(uuid.uuid4()),
-        expires_at=datetime.now(timezone.utc) + timedelta(minutes=30),
+        minutes=30,
     )
-    db.add(action)
-    db.commit()
-    try:
-        with pytest.raises(HTTPException) as exc:
-            confirm_and_execute_action(db, str(action.id), staff)
-        assert exc.value.status_code == 403
-        assert "not allowed to change property data" in exc.value.detail
-        db.refresh(action)
-        assert action.status == "PENDING"   # nothing ran
-    finally:
-        db.delete(action)
-        db.commit()
+    with pytest.raises(HTTPException) as exc:
+        confirm_and_execute_action(db, action_id, staff, fs_users.pending_token(action_id))
+    assert exc.value.status_code == 403
+    assert "not allowed to change property data" in exc.value.detail
+    assert fs_users.pending_status(action_id) == "PENDING"   # nothing ran
 
 
 # --- Drive: what a file can turn into ------------------------------------------------------------------------------
@@ -236,10 +224,10 @@ def test_oversized_api_file_is_not_usable(monkeypatch):
 def test_ingest_refuses_unreadable_drive_files_and_stages_nothing(db, drive_dir, make):
     make(drive_dir)
     staff = _staff("admin")
-    before = db.query(PendingAction).filter(PendingAction.staff_user_id == staff.email).count()
+    before = _pending_count(staff.email)
     result, needs_confirmation, pending_id = _execute_admin_tool_uncached(
         db, "ingest_property_from_drive", {"file_id": "scan.pdf"}, staff, str(uuid.uuid4()), staff.email,
     )
     assert result["status"] == "DRIVE_FILE_UNUSABLE"
     assert needs_confirmation is False and pending_id is None
-    assert db.query(PendingAction).filter(PendingAction.staff_user_id == staff.email).count() == before
+    assert _pending_count(staff.email) == before

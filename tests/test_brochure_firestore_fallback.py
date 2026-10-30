@@ -103,52 +103,6 @@ def test_1_firestore_fallback_generates_pdf():
     assert res["pages"] == 8
 
 
-def test_2_postgres_path_still_works():
-    pg_prop = SimpleNamespace(
-        property_id="PROP-PG-001",
-        property_name="Postgres Villa",
-        district="Layan",
-        province="Phuket",
-        property_type="Villa",
-        status="Available",
-        price_display="from 12M THB",
-        price_numeric_min=12_000_000,
-        ownership_type="Leasehold",
-        has_pool=True,
-        developer_name="Dev Co",
-        description="A verified PG listing.",
-        bedrooms_min=3,
-        bedrooms_display="3 Beds",
-        bathrooms=3,
-        area_sqm_min=200,
-        area_display="200 sqm",
-        images=[],
-    )
-    db = _mock_db_with_prop(pg_prop)
-    with patch(
-        "app.services.firestore_service.get_property_by_id_from_firestore"
-    ) as fs_mock, patch(
-        "app.services.brochure_service.fetch_property_image_reader",
-        return_value=MagicMock(),
-    ), patch(
-        "app.services.brochure_service.default_storage_provider"
-    ) as storage, patch(
-        "app.services.brochure_service.resolve_logo_path",
-        return_value=None,
-    ):
-        storage.save_file.return_value = "https://cdn.example.com/pg.pdf"
-        res = generate_single_property_brochure_pdf(
-            db=db,
-            property_id="PROP-PG-001",
-            site_origin="varsoviaestate.com",
-            language="en",
-        )
-    assert res["success"] is True
-    assert res["pdf_bytes"].startswith(b"%PDF")
-    assert res["property_id"] == "PROP-PG-001"
-    fs_mock.assert_not_called()
-
-
 def test_3_missing_everywhere_raises_and_endpoint_404():
     db = _mock_db_no_prop()
     with patch(

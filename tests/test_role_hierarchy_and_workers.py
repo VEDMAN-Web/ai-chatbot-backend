@@ -1,20 +1,15 @@
 import pytest
 from fastapi.testclient import TestClient
 from app.main import app
-from app.db.session import SessionLocal
-from app.db.models import User, Property
+from app.repositories import users_repo
 from app.core.security import hash_password
 
 client = TestClient(app)
 
 @pytest.fixture(autouse=True)
-def mock_firestore_for_tests(monkeypatch):
-    """Disable live Firestore network calls during fast local test execution."""
+def _no_sync(monkeypatch):
     from app.core.config import settings
     monkeypatch.setattr(settings, "ENABLE_FIRESTORE_SYNC", False)
-    monkeypatch.setattr("app.services.firestore_auth_service.get_firestore_client", lambda *a, **kw: None)
-    monkeypatch.setattr("app.services.firestore_service.get_firestore_client", lambda *a, **kw: None)
-    monkeypatch.setattr("app.services.admin_batch_service.get_firestore_client", lambda *a, **kw: None)
     yield
 
 
@@ -30,31 +25,19 @@ def _seed_test_accounts():
         ("worker04@tajlandia.com", "Worker 04", "worker", "worker04@123", ["tajlandia.com"]),
         ("worker05@tajlandia.com", "Worker 05", "worker", "worker05@123", ["tajlandia.com"]),
     ]
-    with SessionLocal() as db:
-        for email, name, role, pw, websites in accounts:
-            u = db.query(User).filter(User.email.ilike(email)).first()
-            if not u:
-                u = User(
-                    email=email.lower(),
-                    name=name,
-                    role=role,
-                    domain="tajlandia.com",
-                    password_hash=hash_password(pw),
-                    allowed_websites=list(websites),
-                    preferences={"allowed_websites": list(websites)},
-                    is_active=True
-                )
-                db.add(u)
-            else:
-                u.name = name
-                u.role = role
-                u.password_hash = hash_password(pw)
-                u.allowed_websites = list(websites)
-                prefs = dict(u.preferences or {})
-                prefs["allowed_websites"] = list(websites)
-                u.preferences = prefs
-                u.is_active = True
-            db.commit()
+    for email, name, role, pw, websites in accounts:
+        fields = dict(
+            email=email.lower(), name=name, role=role, domain="tajlandia.com",
+            password_hash=hash_password(pw), allowed_websites=list(websites),
+            preferences={"allowed_websites": list(websites)}, is_active=True, status="active",
+        )
+        u = users_repo.get_by_email(None, email)
+        if u is None:
+            users_repo.create_user(None, **fields)
+        else:
+            for k, v in fields.items():
+                setattr(u, k, v)
+            users_repo.save_user(None, u)
 
 
 def test_all_requested_users_login():
@@ -102,7 +85,7 @@ def test_worker_cannot_create_update_delete_properties():
 
     # 2. Worker CANNOT create properties (403 Forbidden)
     create_resp = client.post("/api/v1/admin/properties", headers=headers, json={
-        "property_id": "TEST-WORKER-BLOCKED",
+        "property_id": "test-worker-blocked",
         "property_name": "Worker Should Not Create",
         "property_type": "Villa",
         "price_display": "10,000,000 THB",
@@ -134,9 +117,7 @@ def test_admin_can_promote_worker_to_admin_with_all_websites():
     sa_headers = {"Authorization": f"Bearer {sa_token}"}
 
     # 2. Get worker01 user ID
-    with SessionLocal() as db:
-        w1 = db.query(User).filter(User.email == "worker01@tajlandia.com").first()
-        w1_id = str(w1.id)
+    w1_id = str(users_repo.get_by_email(None, "worker01@tajlandia.com").id)
 
     # 3. Promote worker01 to admin with all 3 websites
     promote_resp = client.patch(
@@ -165,7 +146,7 @@ def test_admin_can_promote_worker_to_admin_with_all_websites():
         "Authorization": f"Bearer {new_token}",
         "X-Selected-Websites": "thai.estate"
     }
-    create_as_admin = client.post("/api/v1/admin/properties?allow_without_undo=true", headers=admin_headers, json={
+    create_as_admin = client.post("/api/v1/admin/properties", headers=admin_headers, json={
         "property_id": "test-promoted-admin-01",
         "property_name": "Promoted Admin Luxury Villa",
         "property_type": "Villa",

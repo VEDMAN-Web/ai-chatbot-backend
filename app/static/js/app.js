@@ -282,11 +282,24 @@ const API_ROUTES = {
   publicHistory: (id) => `/api/v1/chat/history/${id}`,
   adminHistory: (id) => `/api/v1/admin/chat/history/${id}`,
   confirmAction: (id) => `/api/v1/admin/actions/${id}/confirm`,
+  inspectAction: (id) => `/api/v1/admin/actions/${id}`,
   rejectAction: (id) => `/api/v1/admin/actions/${id}/reject`,
   properties: '/api/v1/properties',
   login: '/api/v1/auth/login',
   logout: '/api/v1/auth/logout',
+  queryLogSessions: '/api/v1/admin/query-logs/sessions',
+  queryLogSession: (id) => `/api/v1/admin/query-logs/sessions/${encodeURIComponent(id)}`,
+  queryLogStats: '/api/v1/admin/query-logs/stats',
+  adminChatLogSessions: '/api/v1/admin/chat-logs/sessions',
+  adminChatLogSession: (id) => `/api/v1/admin/chat-logs/sessions/${encodeURIComponent(id)}`,
+  adminChatLogStats: '/api/v1/admin/chat-logs/stats',
 };
+
+const confirmationTokens = {};
+
+function rememberConfirmationToken(actionId, token) {
+  if (actionId && token) confirmationTokens[actionId] = token;
+}
 
 const ADMIN_TOKEN_KEY = 'tajlandia_admin_access_token';
 const ADMIN_USER_KEY = 'tajlandia_admin_user';
@@ -312,6 +325,22 @@ function adminAuthHeaders(extra = {}) {
   const headers = { ...extra };
   if (token) headers['Authorization'] = `Bearer ${token}`;
   return headers;
+}
+
+// FastAPI sends `detail` as a string, an object or a list of validation errors. Never print it as "[object Object]".
+function formatApiError(detail, fallback) {
+  if (!detail) return fallback;
+  if (typeof detail === 'string') return detail;
+  const one = (item) => {
+    if (typeof item === 'string') return item;
+    if (item && typeof item === 'object') {
+      const where = Array.isArray(item.loc) ? item.loc.filter((p) => p !== 'body').join('.') : '';
+      const text = item.msg || item.message || '';
+      if (text) return where ? `${where}: ${text}` : text;
+    }
+    try { return JSON.stringify(item); } catch (e) { return fallback; }
+  };
+  return (Array.isArray(detail) ? detail.map(one).join('; ') : one(detail)) || fallback;
 }
 
 function isProtectedAdminDownloadUrl(url) {
@@ -471,6 +500,166 @@ function updateAdminLoginUI() {
     avatar.innerText = initials;
     avatar.title = loggedIn ? `${user.email || user.name} (${user.role || 'staff'})` : 'Staff Account';
   }
+  updateVisitorLogsButtonVisibility();
+}
+
+function canViewVisitorLogs() {
+  const role = String(getAdminUser()?.role || '').toLowerCase();
+  return isAdminLoggedIn() && (role === 'admin' || role === 'super_admin');
+}
+
+function canViewAdminChatLogs() {
+  return isAdminLoggedIn() && String(getAdminUser()?.role || '').toLowerCase() === 'super_admin';
+}
+
+function updateVisitorLogsButtonVisibility() {
+  const btn = document.getElementById('btnVisitorLogs');
+  if (!btn) return;
+  btn.style.display = (currentMode === 'admin' && canViewVisitorLogs()) ? 'inline-flex' : 'none';
+  const adminTab = document.getElementById('tabBtnAdminChatLogs');
+  if (adminTab) adminTab.style.display = canViewAdminChatLogs() ? 'inline-flex' : 'none';
+}
+
+let visitorLogsKind = 'visitor';
+
+function openVisitorLogsModal() {
+  if (!canViewVisitorLogs()) {
+    openAdminLoginModal();
+    return;
+  }
+  const overlay = document.getElementById('visitorLogsOverlay');
+  const modal = document.getElementById('visitorLogsModal');
+  if (overlay) overlay.style.display = 'block';
+  if (modal) modal.style.display = 'block';
+  switchVisitorLogsTab(canViewAdminChatLogs() && visitorLogsKind === 'admin' ? 'admin' : 'visitor');
+}
+
+function closeVisitorLogsModal() {
+  const overlay = document.getElementById('visitorLogsOverlay');
+  const modal = document.getElementById('visitorLogsModal');
+  if (overlay) overlay.style.display = 'none';
+  if (modal) modal.style.display = 'none';
+}
+
+function switchVisitorLogsTab(kind) {
+  visitorLogsKind = kind === 'admin' && canViewAdminChatLogs() ? 'admin' : 'visitor';
+  const vBtn = document.getElementById('tabBtnVisitorSessions');
+  const aBtn = document.getElementById('tabBtnAdminChatLogs');
+  if (vBtn) vBtn.classList.toggle('active', visitorLogsKind === 'visitor');
+  if (aBtn) aBtn.classList.toggle('active', visitorLogsKind === 'admin');
+  loadVisitorLogs();
+}
+
+function visitorFilterQuery() {
+  const params = new URLSearchParams();
+  const site = document.getElementById('visitorFilterSite')?.value?.trim();
+  const from = document.getElementById('visitorFilterFrom')?.value;
+  const to = document.getElementById('visitorFilterTo')?.value;
+  const q = document.getElementById('visitorFilterQ')?.value?.trim();
+  const lang = document.getElementById('visitorFilterLang')?.value;
+  const flagged = document.getElementById('visitorFilterFlagged')?.checked;
+  if (site) params.set('site', site);
+  if (from) params.set('date_from', from);
+  if (to) params.set('date_to', to);
+  if (q) params.set('q', q);
+  if (lang) params.set('language', lang);
+  if (flagged) params.set('flagged', 'true');
+  params.set('limit', '50');
+  return params.toString();
+}
+
+async function loadVisitorLogs() {
+  const status = document.getElementById('visitorSessionsStatus');
+  const table = document.getElementById('visitorSessionsTable');
+  const empty = document.getElementById('visitorDetailEmpty');
+  const content = document.getElementById('visitorDetailContent');
+  if (status) status.innerText = 'Loading…';
+  if (table) table.innerHTML = '';
+  if (empty) empty.style.display = 'block';
+  if (content) { content.style.display = 'none'; content.innerHTML = ''; }
+  const sessionsUrl = visitorLogsKind === 'admin' ? API_ROUTES.adminChatLogSessions : API_ROUTES.queryLogSessions;
+  const statsUrl = visitorLogsKind === 'admin' ? API_ROUTES.adminChatLogStats : API_ROUTES.queryLogStats;
+  try {
+    const [sessionsRes, statsRes] = await Promise.all([
+      fetch(`${sessionsUrl}?${visitorFilterQuery()}`, { headers: adminAuthHeaders() }),
+      fetch(statsUrl, { headers: adminAuthHeaders() }),
+    ]);
+    if (sessionsRes.status === 401 || sessionsRes.status === 403) {
+      if (status) status.innerText = sessionsRes.status === 401 ? 'Sign in required.' : 'Not allowed for your role.';
+      return;
+    }
+    const sessionsData = await sessionsRes.json().catch(() => ({}));
+    const statsData = await statsRes.json().catch(() => ({}));
+    renderVisitorStats(statsData);
+    if (sessionsData.message && !(sessionsData.rows || []).length) {
+      if (status) status.innerText = sessionsData.message;
+      return;
+    }
+    const rows = sessionsData.rows || [];
+    if (status) status.innerText = rows.length ? `${rows.length} session(s)` : 'No sessions match these filters.';
+    if (!table) return;
+    rows.forEach((row) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'visitor-session-row';
+      btn.innerHTML = `<div class="visitor-session-meta"><span>${row.site_origin || '—'} · ${row.language || '—'}</span><span>${row.turns || 0} turns${row.flagged_turns ? ` · ${row.flagged_turns} flagged` : ''}</span></div><div class="visitor-session-q">${escapeHtml(row.last_question || '(no question)')}</div>`;
+      btn.onclick = () => openVisitorSession(row.session_id, btn);
+      table.appendChild(btn);
+    });
+  } catch (err) {
+    if (status) status.innerText = 'Could not load logs right now.';
+  }
+}
+
+function renderVisitorStats(stats) {
+  const today = new Date().toISOString().slice(0, 10);
+  const day = (stats.days || []).find((item) => item.date === today) || {};
+  const turns = document.getElementById('visitorStatTurns');
+  const sessions = document.getElementById('visitorStatSessions');
+  const flagged = document.getElementById('visitorStatFlagged');
+  if (turns) turns.innerText = day.turns != null ? day.turns : '0';
+  if (sessions) sessions.innerText = day.sessions != null ? day.sessions : '0';
+  if (flagged) flagged.innerText = day.flagged != null ? day.flagged : '0';
+}
+
+async function openVisitorSession(sessionId, rowBtn) {
+  document.querySelectorAll('.visitor-session-row').forEach((el) => el.classList.remove('active'));
+  if (rowBtn) rowBtn.classList.add('active');
+  const empty = document.getElementById('visitorDetailEmpty');
+  const content = document.getElementById('visitorDetailContent');
+  if (empty) empty.style.display = 'none';
+  if (content) {
+    content.style.display = 'block';
+    content.innerHTML = '<div class="visitor-status">Loading conversation…</div>';
+  }
+  const url = visitorLogsKind === 'admin'
+    ? API_ROUTES.adminChatLogSession(sessionId)
+    : API_ROUTES.queryLogSession(sessionId);
+  try {
+    const res = await fetch(url, { headers: adminAuthHeaders() });
+    const data = await res.json().catch(() => ({}));
+    if (!content) return;
+    if (data.message && !(data.rows || []).length) {
+      content.innerHTML = `<div class="visitor-status">${escapeHtml(data.message)}</div>`;
+      return;
+    }
+    const turns = data.rows || [];
+    content.innerHTML = turns.map((turn) => `
+      <div class="visitor-turn">
+        <div class="visitor-turn-meta">
+          <span>${escapeHtml(turn.created_at || '')}</span>
+          <span>cards: ${turn.cards_count || 0}</span>
+          <span>fallback: ${escapeHtml(turn.fallback_type || 'none')}</span>
+          ${turn.flagged ? '<span>flagged</span>' : ''}
+        </div>
+        <p class="visitor-turn-q"><strong>Q:</strong> ${escapeHtml(turn.user_message || '')}</p>
+        <p class="visitor-turn-a"><strong>A:</strong> ${escapeHtml(turn.bot_reply || '')}</p>
+        <button type="button" class="btn-secondary visitor-correct-btn" disabled title="Available in the next update">Correct this answer</button>
+      </div>
+    `).join('') || '<div class="visitor-status">No turns in this session.</div>';
+  } catch (err) {
+    if (content) content.innerHTML = '<div class="visitor-status">Could not load this conversation.</div>';
+  }
 }
 
 function openAdminLoginModal() {
@@ -521,7 +710,7 @@ async function submitAdminLogin() {
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
-      const detail = data.detail || data.message || `Login failed (${res.status})`;
+      const detail = formatApiError(data.detail || data.message, `Login failed (${res.status})`);
       throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail));
     }
     const token = data.access_token;
@@ -685,8 +874,12 @@ function setAgentMode(mode, createNew = true) {
   // Toggle Admin-only controls (Batch operations button & attachment paperclip)
   const btnBatchOps = document.getElementById('btnBatchOps');
   const btnAttachment = document.getElementById('btnAttachment');
+  const btnPropertyImages = document.getElementById('btnPropertyImages');
   if (btnBatchOps) btnBatchOps.style.display = (mode === 'admin') ? 'inline-flex' : 'none';
   if (btnAttachment) btnAttachment.style.display = (mode === 'admin') ? 'inline-flex' : 'none';
+  if (btnPropertyImages) btnPropertyImages.style.display = (mode === 'admin') ? 'inline-flex' : 'none';
+  updateVisitorLogsButtonVisibility();
+  if (mode !== 'admin') clearPropertyImageTray();
 
   // Update Hero texts & prompt cards according to current mode & language
   updateHeroAndInputUI();
@@ -791,7 +984,8 @@ async function handleSendMessage() {
   if (isTypingActive) return; // Prevent overlapping requests while streaming
   const input = document.getElementById('chatInput');
   const text = input.value.trim();
-  if (!text) return;
+  const stagedImages = currentMode === 'admin' ? pendingPropertyImages.slice() : [];
+  if (!text && stagedImages.length === 0) return;
 
   if (currentMode === 'admin' && !isAdminLoggedIn()) {
     openAdminLoginModal();
@@ -803,8 +997,21 @@ async function handleSendMessage() {
   const hero = document.getElementById('welcomeHero');
   if (hero) hero.style.display = 'none';
 
+  let attachedUrls = [];
+  if (stagedImages.length) {
+    setPropertyImageStatus('Uploading images…');
+    try {
+      attachedUrls = await uploadPropertyImages(stagedImages);
+    } catch (err) {
+      setPropertyImageStatus('');
+      showPropertyImageError(err.message || 'Image upload failed.');
+      return;
+    }
+    clearPropertyImageTray();
+  }
+
   // Render user message bubble
-  appendMessageRow('user', text);
+  appendMessageRow('user', text, attachedUrls);
   input.value = '';
   input.style.height = 'auto';
 
@@ -819,6 +1026,17 @@ async function handleSendMessage() {
     site_origin: activeTenantOrigin,
     language: currentLanguage
   };
+  if (currentMode === 'admin' && attachedUrls.length) {
+    payload.attached_images = attachedUrls;
+  }
+  const pendingIds = Object.keys(confirmationTokens);
+  const shortConfirm = /^(yes|ok|okay|confirm|apply)(\s+(confirm|yes|ok|apply))?$/i.test((text || '').trim());
+  if (currentMode !== 'public' && shortConfirm && pendingIds.length) {
+    const pendingId = pendingIds[pendingIds.length - 1];
+    payload.action = 'confirm';
+    payload.pending_action_id = pendingId;
+    payload.confirmation_token = confirmationTokens[pendingId];
+  }
 
   // Long client timeout (10 min) so multi-turn LLM + Firestore never shows premature "unavailable"
   const CHAT_TIMEOUT_MS = 600000;
@@ -855,7 +1073,7 @@ async function handleSendMessage() {
         return;
       }
       const fb = fallbackByLang[currentLanguage] || fallbackByLang.en;
-      appendMessageRow('assistant', errData.detail ? `⚠️ **Error (${res.status}):** ${errData.detail}` : fb);
+      appendMessageRow('assistant', errData.detail ? `⚠️ **Error (${res.status}):** ${formatApiError(errData.detail, 'Error')}` : fb);
       return;
     }
 
@@ -884,7 +1102,9 @@ async function appendAssistantResponse(data, animate = false) {
   const quickReplies = data.quick_replies || [];
   const requiresConfirm = data.requires_confirmation || false;
   const pendingActionId = data.pending_action_id || null;
+  const confirmationToken = data.confirmation_token || '';
   const confirmViaChatOnly = data.confirm_via_chat_only === true;
+  if (pendingActionId && confirmationToken) rememberConfirmationToken(pendingActionId, confirmationToken);
 
   // Sync active language if backend changed or confirmed language
   if (data.language && data.language !== currentLanguage) {
@@ -1089,6 +1309,7 @@ async function appendAssistantResponse(data, animate = false) {
     const actionCard = document.createElement('div');
     actionCard.className = 'action-confirmation-card';
     actionCard.id = `action-card-${pendingActionId}`;
+    if (confirmationToken) actionCard.dataset.confirmationToken = confirmationToken;
 
     actionCard.innerHTML = `
       <div class="action-card-header">
@@ -1097,7 +1318,7 @@ async function appendAssistantResponse(data, animate = false) {
       </div>
       <div class="action-card-body">
         <strong>Staged Pending Action:</strong> <code>${pendingActionId}</code><br/>
-        This write action has been safely staged in PostgreSQL and will not execute until confirmed.
+        This write action has been safely staged in Firestore and will not execute until confirmed.
       </div>
       <div class="action-card-buttons">
         <button class="btn-confirm" onclick="confirmAction('${pendingActionId}')">
@@ -1177,10 +1398,21 @@ async function confirmAction(actionId) {
   }
 
   try {
+    let token = confirmationTokens[actionId] || (card && card.dataset.confirmationToken) || '';
+    if (!token) {
+      const inspect = await fetch(API_ROUTES.inspectAction(actionId), {
+        headers: adminAuthHeaders()
+      });
+      if (inspect.ok) {
+        const inspected = await inspect.json();
+        token = inspected.confirmation_token || '';
+        if (token) rememberConfirmationToken(actionId, token);
+      }
+    }
     const res = await fetch(API_ROUTES.confirmAction(actionId), {
       method: 'POST',
       headers: adminAuthHeaders({ 'Content-Type': 'application/json' }),
-      body: JSON.stringify({})
+      body: JSON.stringify({ confirmation_token: token })
     });
 
     const data = await res.json();
@@ -1209,7 +1441,7 @@ async function confirmAction(actionId) {
       }
     } else {
       if (card) {
-        card.innerHTML = `<div style="color: var(--accent-red); font-size: 13px;">Execution failed: ${escapeHtml(data.detail || 'Error')}</div>`;
+        card.innerHTML = `<div style="color: var(--accent-red); font-size: 13px;">Execution failed: ${escapeHtml(formatApiError(data.detail, 'Error'))}</div>`;
       }
     }
   } catch (err) {
@@ -1593,8 +1825,15 @@ async function loadHistorySession(sessionId, mode) {
     : API_ROUTES.adminHistory(sessionId);
 
   try {
-    const res = await fetch(endpoint);
-    if (!res.ok) return;
+    // The admin history endpoint is staff-only, so it needs the Bearer token like every other admin call.
+    const res = await fetch(endpoint, mode === 'admin' ? { headers: adminAuthHeaders() } : undefined);
+    if (!res.ok) {
+      const reason = (res.status === 401 || res.status === 403)
+        ? 'Your session has expired. Please sign in again to see this conversation.'
+        : `Could not load this conversation (error ${res.status}).`;
+      if (messagesArea) messagesArea.innerHTML = `<div class="batch-empty-placeholder" style="padding:16px;color:#f87171;">${escapeHtml(reason)}</div>`;
+      return;
+    }
 
     const data = await res.json();
     if (mode === 'public' && data.preferences) {
@@ -1687,7 +1926,7 @@ function renderHistoryList() {
 }
 
 // UI Helpers
-function appendMessageRow(role, content) {
+function appendMessageRow(role, content, imageUrls) {
   const area = document.getElementById('messagesArea');
   const row = document.createElement('div');
   row.className = `message-row ${role}`;
@@ -1700,8 +1939,21 @@ function appendMessageRow(role, content) {
 
   const bubble = document.createElement('div');
   bubble.className = 'message-bubble';
+  if (role === 'user' && imageUrls && imageUrls.length) {
+    const thumbs = document.createElement('div');
+    thumbs.className = 'message-image-row';
+    imageUrls.forEach((url) => {
+      const img = document.createElement('img');
+      img.src = url;
+      img.alt = 'Attached property image';
+      thumbs.appendChild(img);
+    });
+    bubble.appendChild(thumbs);
+  }
   if (content) {
-    bubble.innerHTML = parseMarkdown(content);
+    const textNode = document.createElement('div');
+    textNode.innerHTML = parseMarkdown(content);
+    bubble.appendChild(textNode);
   }
 
   if (role === 'assistant') {
@@ -2063,6 +2315,102 @@ function clearSelectedBatchFile(event) {
   if (chip) chip.style.display = 'none';
 }
 
+// --- Add/Create from an offer document: preview, then confirm -------------------------------------------
+let pendingDocumentImport = null;
+
+function renderBatchDocumentPreview(data) {
+  const resultBox = document.getElementById('batchExecutionResult');
+  if (!resultBox) return;
+  pendingDocumentImport = { id: data.pending_action_id, token: data.confirmation_token };
+  const num = (v) => (v === null || v === undefined || v === '') ? '—' : Number(v).toLocaleString('en-US');
+  const range = (a, b) => (a === null || a === undefined) ? '—' : (b !== null && b !== undefined && b !== a ? `${num(a)}–${num(b)}` : num(a));
+  const rows = (data.listings || []).map((l) => `
+    <tr>
+      <td>${escapeHtml(l.name || '')}</td>
+      <td>${escapeHtml(l.province || '—')}</td>
+      <td>${escapeHtml(l.property_type || '—')}</td>
+      <td>${escapeHtml(l.status || '—')}</td>
+      <td>${range(l.price_min, l.price_max)} THB</td>
+      <td>${range(l.bedrooms_min, l.bedrooms_max)}</td>
+      <td>${range(l.area_sqm_min, l.area_sqm_max)}</td>
+      <td style="color:${l.ready ? '#4ade80' : '#fbbf24'};">${escapeHtml(l.outcome || '')}</td>
+    </tr>`).join('');
+  resultBox.className = 'batch-result-box';
+  resultBox.style.display = 'flex';
+  resultBox.style.flexDirection = 'column';
+  resultBox.innerHTML = `
+    <div style="font-weight: 700; font-size: 13.5px;">📄 Review before creating</div>
+    <div style="font-size: 12px;">${escapeHtml(data.message || '')}</div>
+    <div style="font-size: 12px;"><strong>Target website(s):</strong> ${escapeHtml((data.websites || []).join(', ') || 'none selected')}</div>
+    <div style="overflow-x:auto;">
+      <table style="width:100%; font-size:11.5px; border-collapse:collapse;">
+        <thead><tr style="text-align:left; opacity:.8;">
+          <th>Name</th><th>Province</th><th>Type</th><th>Status</th><th>Price</th><th>Beds</th><th>m²</th><th>Result</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+    <div style="font-size: 11.5px; opacity: 0.85;">Only values written in the document are used. Nothing is saved until you confirm.</div>
+    <div style="margin-top: 6px; display: flex; gap: 8px;">
+      <button class="btn-refresh-history" id="btnConfirmDocImport" ${data.ready_count ? '' : 'disabled'}
+        onclick="confirmBatchDocumentImport()">Confirm &amp; create ${Number(data.ready_count || 0)}</button>
+      <button class="btn-refresh-history" onclick="discardBatchDocumentImport()">Discard</button>
+    </div>`;
+}
+
+async function confirmBatchDocumentImport() {
+  const resultBox = document.getElementById('batchExecutionResult');
+  if (!pendingDocumentImport || !resultBox) return;
+  const { id, token } = pendingDocumentImport;
+  const btn = document.getElementById('btnConfirmDocImport');
+  if (btn) { btn.disabled = true; btn.textContent = 'Creating…'; }
+  try {
+    const res = await fetch(`/api/v1/admin/actions/${encodeURIComponent(id)}/confirm`, {
+      method: 'POST',
+      headers: adminAuthHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ confirmation_token: token })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(formatApiError(data.detail, 'Could not create the listings'));
+    const out = data.execution_result || {};
+    const created = (out.created || []).map((c) =>
+      `<li><strong>${escapeHtml(c.name)}</strong> <code>${escapeHtml(c.property_id)}</code> — undo id <code>${escapeHtml(c.operation_id || '')}</code></li>`).join('');
+    const skipped = (out.skipped || []).map((s) =>
+      `<li>${escapeHtml(s.name)}: ${escapeHtml(s.reason)}</li>`).join('');
+    pendingDocumentImport = null;
+    resultBox.className = 'batch-result-box success';
+    resultBox.innerHTML = `
+      <div style="font-weight: 700; font-size: 13.5px;">✅ ${(out.created || []).length} listing(s) created and verified in the database</div>
+      <ul style="margin: 4px 0 0 18px; font-size: 12px;">${created}</ul>
+      ${skipped ? `<div style="font-weight:600; font-size:12px; margin-top:6px;">Not created</div><ul style="margin: 2px 0 0 18px; font-size: 12px;">${skipped}</ul>` : ''}`;
+    clearSelectedBatchFile();
+    loadBatchHistory(false);
+  } catch (err) {
+    console.error('Document import confirm error:', err);
+    resultBox.className = 'batch-result-box error';
+    resultBox.innerHTML = `
+      <div style="font-weight: 700;">❌ Nothing was created</div>
+      <div>${escapeHtml(err.message || 'Unknown error')}</div>`;
+    pendingDocumentImport = null;
+  }
+}
+
+async function discardBatchDocumentImport() {
+  const resultBox = document.getElementById('batchExecutionResult');
+  const current = pendingDocumentImport;
+  pendingDocumentImport = null;
+  if (current) {
+    try {
+      await fetch(`/api/v1/admin/actions/${encodeURIComponent(current.id)}/reject`, {
+        method: 'POST',
+        headers: adminAuthHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ reason: 'Discarded from the bulk upload preview' })
+      });
+    } catch (e) { /* the pending action expires on its own */ }
+  }
+  if (resultBox) { resultBox.style.display = 'none'; resultBox.innerHTML = ''; }
+}
+
 async function submitBatchOperation() {
   if (!selectedBatchFile) {
     alert('Please select or drop a property file (.xlsx, .xls, .csv, .pdf, .docx, .json).');
@@ -2084,7 +2432,8 @@ async function submitBatchOperation() {
 
   const formData = new FormData();
   formData.append('file', selectedBatchFile);
-  formData.append('operation_type', selectedBatchActionType);
+  // The backend form field is named `action`.
+  formData.append('action', selectedBatchActionType);
   if (notesInput && notesInput.value.trim()) {
     formData.append('notes', notesInput.value.trim());
   }
@@ -2102,7 +2451,12 @@ async function submitBatchOperation() {
 
     const data = await res.json();
     if (!res.ok) {
-      throw new Error(data.detail || 'Batch operation failed');
+      throw new Error(formatApiError(data.detail, 'Batch operation failed'));
+    }
+
+    if (data.status === 'PREVIEW') {
+      renderBatchDocumentPreview(data);
+      return;
     }
 
     if (resultBox) {
@@ -2111,7 +2465,7 @@ async function submitBatchOperation() {
       resultBox.innerHTML = `
         <div style="font-weight: 700; font-size: 13.5px;">✅ Operation Applied Instantly!</div>
         <div><strong>Operation ID:</strong> <code>${escapeHtml(data.operation_id)}</code></div>
-        <div><strong>Items Affected:</strong> ${data.items_affected || 0} properties modified in Firestore & PostgreSQL.</div>
+        <div><strong>Items Affected:</strong> ${data.items_affected || 0} properties modified in Firestore.</div>
         <div style="font-size: 11.5px; opacity: 0.9;">
           🛡️ <strong>6-Day Rollback Guaranteed:</strong> Pre-modification snapshot saved until <strong>${new Date(data.expires_at).toLocaleString()}</strong>.
         </div>
@@ -2254,7 +2608,7 @@ async function executeBatchUndo(operationId, count) {
 
     const data = await res.json();
     if (!res.ok) {
-      throw new Error(data.detail || 'Rollback failed');
+      throw new Error(formatApiError(data.detail, 'Rollback failed'));
     }
 
     alert(`✅ Success: Rollback completed!\n${data.restored_count || count} properties have been restored to their pre-change snapshot.`);
@@ -2265,5 +2619,157 @@ async function executeBatchUndo(operationId, count) {
     alert(`❌ Rollback error: ${err.message || 'Could not complete rollback'}`);
   }
 }
+
+const pendingPropertyImages = [];
+const PROPERTY_IMAGE_MAX_BYTES = 10 * 1024 * 1024;
+const PROPERTY_IMAGE_EXT = /\.(jpe?g|png|webp)$/i;
+
+function openPropertyImagePicker() {
+  if (currentMode !== 'admin') return;
+  const input = document.getElementById('propertyImageInput');
+  if (input) input.click();
+}
+
+function clearPropertyImageTray() {
+  pendingPropertyImages.splice(0, pendingPropertyImages.length);
+  renderPropertyImageTray();
+}
+
+function setPropertyImageStatus(text) {
+  const tray = document.getElementById('imageAttachTray');
+  if (!tray) return;
+  let note = tray.querySelector('.image-thumb-status');
+  if (!text) {
+    if (note) note.remove();
+    return;
+  }
+  if (!note) {
+    note = document.createElement('div');
+    note.className = 'image-thumb-status';
+    tray.appendChild(note);
+  }
+  note.textContent = text;
+}
+
+function showPropertyImageError(text) {
+  const tray = document.getElementById('imageAttachTray');
+  if (!tray) return;
+  tray.style.display = 'flex';
+  let note = tray.querySelector('.image-attach-error');
+  if (!note) {
+    note = document.createElement('div');
+    note.className = 'image-attach-error';
+    tray.appendChild(note);
+  }
+  note.textContent = text;
+}
+
+function renderPropertyImageTray() {
+  const tray = document.getElementById('imageAttachTray');
+  if (!tray) return;
+  tray.innerHTML = '';
+  if (!pendingPropertyImages.length) {
+    tray.style.display = 'none';
+    return;
+  }
+  tray.style.display = 'flex';
+  pendingPropertyImages.forEach((item, index) => {
+    const thumb = document.createElement('div');
+    thumb.className = 'image-thumb';
+    const img = document.createElement('img');
+    img.src = item.previewUrl;
+    img.alt = item.name || 'Selected image';
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'image-thumb-remove';
+    remove.textContent = '×';
+    remove.title = 'Remove image';
+    remove.onclick = () => {
+      pendingPropertyImages.splice(index, 1);
+      renderPropertyImageTray();
+    };
+    thumb.appendChild(img);
+    thumb.appendChild(remove);
+    tray.appendChild(thumb);
+  });
+}
+
+function addPropertyImageFiles(fileList) {
+  if (currentMode !== 'admin') return;
+  const incoming = Array.from(fileList || []);
+  if (pendingPropertyImages.length + incoming.length > 10) {
+    showPropertyImageError('Upload between 1 and 10 images.');
+    return;
+  }
+  let error = '';
+  incoming.forEach((file) => {
+    const name = file.name || '';
+    if (!PROPERTY_IMAGE_EXT.test(name)) {
+      error = 'Only jpg, jpeg, png, and webp images are allowed.';
+      return;
+    }
+    if (file.size > PROPERTY_IMAGE_MAX_BYTES) {
+      error = 'Each image must be 10 MB or smaller.';
+      return;
+    }
+    pendingPropertyImages.push({
+      file,
+      name,
+      previewUrl: URL.createObjectURL(file),
+    });
+  });
+  renderPropertyImageTray();
+  if (error) showPropertyImageError(error);
+}
+
+async function uploadPropertyImages(items) {
+  const body = new FormData();
+  items.forEach((item) => body.append('files', item.file, item.name));
+  const res = await fetch('/api/v1/admin/property-images/upload', {
+    method: 'POST',
+    headers: adminAuthHeaders(),
+    body,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const detail = formatApiError(data.detail, 'Image upload failed.');
+    throw new Error(typeof detail === 'string' ? detail : 'Image upload failed.');
+  }
+  const files = data.files || [];
+  if (!files.length) throw new Error('Image upload failed.');
+  return files.map((file) => file.url).filter(Boolean);
+}
+
+function initPropertyImageAttach() {
+  const input = document.getElementById('propertyImageInput');
+  if (input) {
+    input.addEventListener('change', () => {
+      addPropertyImageFiles(input.files);
+      input.value = '';
+    });
+  }
+  const dropTarget = document.getElementById('bottomInputContainer');
+  if (!dropTarget) return;
+  ['dragenter', 'dragover'].forEach((name) => {
+    dropTarget.addEventListener(name, (event) => {
+      if (currentMode !== 'admin') return;
+      event.preventDefault();
+      dropTarget.classList.add('drag-over');
+    });
+  });
+  ['dragleave', 'drop'].forEach((name) => {
+    dropTarget.addEventListener(name, (event) => {
+      if (currentMode !== 'admin') return;
+      event.preventDefault();
+      dropTarget.classList.remove('drag-over');
+    });
+  });
+  dropTarget.addEventListener('drop', (event) => {
+    if (currentMode !== 'admin') return;
+    addPropertyImageFiles(event.dataTransfer && event.dataTransfer.files);
+  });
+}
+
+initPropertyImageAttach();
 
 

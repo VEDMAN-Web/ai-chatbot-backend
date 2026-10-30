@@ -4,7 +4,7 @@ from fastapi import HTTPException
 from app.services.guardrails import ThaiPropertyLegalGuardrail
 from app.services.action_service import validate_property_data, create_pending_action, _execute_update_listing
 from app.services.admin_agent import _execute_admin_tool
-from app.db.models import Property, PendingAction
+
 
 
 @pytest.fixture
@@ -127,7 +127,7 @@ class TestAdminDataCompletenessValidation:
         assert "property_id" in missing
 
     def test_validate_update_property_with_null_value(self):
-        mock_existing = MagicMock(spec=Property)
+        mock_existing = MagicMock()
         mock_existing.property_id = "PROP-EXISTING-001"
 
         update_payload = {

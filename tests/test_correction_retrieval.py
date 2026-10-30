@@ -17,7 +17,7 @@ from app.services import correction_retrieval as retrieval
 from app.services.public_agent import PublicAgentService
 
 # helpers shared with the remarks tests
-from test_chat_log_remarks import BASE, _add_remark, _decide, _propose, client, fs, world  # noqa: F401
+from tests.test_chat_log_remarks import BASE, _add_remark, _decide, _propose, client, fs, world  # noqa: F401
 
 # A tiny stand-in for the embedding provider: words that mean the same map to one concept.
 CONCEPTS = {"price": "PRICE", "cost": "PRICE", "costs": "PRICE", "much": "PRICE", "pool": "POOL", "swimming": "POOL",

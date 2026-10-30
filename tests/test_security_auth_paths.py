@@ -6,10 +6,8 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.core.config import settings, DEFAULT_INTERNAL_API_SECRET
-from app.core.security import hash_password
-from app.core.tenant import ALL_CANONICAL_WEBSITES
-from app.db.models import User
-from app.db.session import SessionLocal
+from app.repositories import users_repo
+from tests import fs_users
 
 client = TestClient(app)
 PREFIX = "sec_test_"
@@ -19,30 +17,11 @@ PASSWORD = "SecTestPass123!"
 @pytest.fixture(autouse=True)
 def isolated(monkeypatch):
     monkeypatch.setattr(settings, "ENABLE_FIRESTORE_SYNC", False)
-    monkeypatch.setattr("app.services.firestore_auth_service.get_firestore_client", lambda *a, **kw: None)
-    monkeypatch.setattr("app.services.firestore_service.get_firestore_client", lambda *a, **kw: None)
     yield
-    db = SessionLocal()
-    try:
-        for user in db.query(User).filter(User.email.like(f"{PREFIX}%")).all():
-            db.delete(user)
-        db.commit()
-    finally:
-        db.close()
 
 
 def _make_user(role: str) -> str:
-    email = f"{PREFIX}{role}_{uuid.uuid4().hex[:6]}@tajlandia.com"
-    db = SessionLocal()
-    try:
-        db.add(User(
-            email=email, name=role, role=role, password_hash=hash_password(PASSWORD),
-            is_active=True, allowed_websites=list(ALL_CANONICAL_WEBSITES),
-        ))
-        db.commit()
-    finally:
-        db.close()
-    return email
+    return fs_users.make_user(client, role, prefix=PREFIX, password=PASSWORD)["email"]
 
 
 def _token(email: str) -> dict:
@@ -93,11 +72,7 @@ def test_register_without_credentials_is_forbidden():
     body = _new_account("super_admin")
     resp = client.post("/api/v1/auth/register", json=body)
     assert resp.status_code == 403
-    db = SessionLocal()
-    try:
-        assert db.query(User).filter(User.email == body["email"]).first() is None
-    finally:
-        db.close()
+    assert users_repo.get_by_email(None, body["email"]) is None
 
 
 def test_register_with_worker_session_is_forbidden():
@@ -126,12 +101,7 @@ def test_register_existing_email_is_a_conflict_and_changes_nothing():
     resp = client.post("/api/v1/auth/register", headers=headers, json={
         "email": victim, "password": "TakeOver12345!", "name": "x", "role": "worker"})
     assert resp.status_code == 409
-    db = SessionLocal()
-    try:
-        row = db.query(User).filter(User.email == victim).first()
-        assert row.role == "super_admin"
-    finally:
-        db.close()
+    assert users_repo.get_by_email(None, victim).role == "super_admin"
     assert client.post("/api/v1/auth/login", json={"email": victim, "password": PASSWORD}).status_code == 200
 
 

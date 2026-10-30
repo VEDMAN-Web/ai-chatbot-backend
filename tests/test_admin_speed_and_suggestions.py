@@ -177,11 +177,13 @@ def test_followup_suggestions_for_leads():
         [{"result": {"leads": [{"email": "a@b.com"}]}}],
         language="en",
     )
-    assert 1 <= len(tips) <= 3
+    assert 1 <= len(tips) <= 2
     assert any("Email" in t or "Export" in t for t in tips)
     text = append_followup_suggestions("Here are the leads.", tips)
     assert "Suggestions" in text
-    assert "do not run an action" in text.lower()
+    assert "do not run an action" not in text.lower()
+    from app.services.admin_chat_quality import reply_hygiene_violations
+    assert reply_hygiene_violations(text) == []
 
 
 def test_timeout_returns_slow_message(staff, monkeypatch):

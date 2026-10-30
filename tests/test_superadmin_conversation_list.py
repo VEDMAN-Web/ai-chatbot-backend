@@ -8,7 +8,7 @@ Each row's `conversation_id` is the session id, because the panel only accepts a
 import pytest
 from types import SimpleNamespace
 
-from test_chat_log_api import _at, client, fs, logs, world  # noqa: F401  (fixtures and helpers)
+from tests.test_chat_log_api import _at, client, fs, logs, world  # noqa: F401  (fixtures and helpers)
 
 URL = "/api/v1/admin/superadmin/conversations"
 

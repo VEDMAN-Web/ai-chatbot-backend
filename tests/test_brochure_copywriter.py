@@ -304,7 +304,7 @@ def test_html_pipeline_uses_copy_and_fallback_pdf(monkeypatch):
     monkeypatch.setattr(
         bs.default_storage_provider,
         "save_file",
-        lambda **k: "https://example.com/brochure.pdf",
+        lambda *a, **k: "https://example.com/brochure.pdf",
     )
 
     res = bs._generate_html_brochure_pdf(db=MagicMock(), property_id="demo-villa-kata", language="en")

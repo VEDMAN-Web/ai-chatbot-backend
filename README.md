@@ -47,12 +47,10 @@ tajlandia/
 ├── app/
 │   ├── api/v1/          # REST API endpoints (chat, admin)
 │   ├── core/            # Auth, config, and middleware
-│   ├── db/              # SQLAlchemy models and database session
 │   ├── services/        # AI agents, search, integrations, i18n
 │   └── static/          # Frontend UI (HTML, CSS, JS)
-├── alembic/             # Database migration scripts
 ├── data/                # Property catalog and knowledge seed data
-├── scripts/             # Database init and property ingestion
+├── scripts/             # One-off tools (e.g. the SQL-to-Firestore user migration)
 ├── Dockerfile
 ├── requirements.txt
 ├── run.py               # Application entrypoint
@@ -75,7 +73,7 @@ Required variables:
 
 | Variable | Description |
 |---|---|
-| `DATABASE_URL` | PostgreSQL connection string (with pgvector) |
+| `ADMIN_FIREBASE_*` / `USER_FIREBASE_*` | Firestore service account settings |
 | `OPENAI_API_KEY` | OpenAI API key for the public chatbot |
 | `ANTHROPIC_API_KEY` | Anthropic API key for the admin advisor |
 | `INTERNAL_API_SECRET` | A secure random string for internal API auth |
@@ -118,6 +116,18 @@ python run.py
 See [RAILWAY_DEPLOYMENT_GUIDE.md](./RAILWAY_DEPLOYMENT_GUIDE.md) for a step-by-step guide to deploying on Railway with a one-click PostgreSQL database.
 
 ---
+
+## Admin replay (staging only)
+
+Vedant can replay the admin conversations against staging with a real model key. Do not point this at production.
+
+```bash
+set REPLAY_BASE_URL=https://<staging-host>
+set REPLAY_TOKEN=<super-admin bearer token>
+python scripts/admin_replay.py
+```
+
+The script reads `tests/replay/admin_conversations.yaml`, creates only a property whose name starts with `ZZ_TEST_`, prints a pass/fail scorecard with latency, writes `replay_report.json`, and deletes the test property through the API. It exits immediately if the name does not start with `ZZ_TEST_` or the URL looks like production. Turns written as `Probe Villa` are rewritten to that test name before they are sent, so a real listing is never the target. After a confirmed write it reads the property and the store-consistency endpoint.
 
 ## API Reference
 

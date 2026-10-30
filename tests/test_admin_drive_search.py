@@ -9,9 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.core.config import settings
-from app.core.security import hash_password
-from app.db.models import AuditLog, User
-from app.db.session import SessionLocal
+from tests.fs_users import audit_by_tool, make_user
 from app.main import app
 from app.services.admin_drive_chat import detect_drive_search
 from app.services.google_services import SCOPES
@@ -95,30 +93,14 @@ def fake_google(monkeypatch):
     ]}
     monkeypatch.setattr(discovery, "build", lambda service, version, credentials=None, **kw: FakeDrive(credentials))
     monkeypatch.setattr(settings, "ENABLE_FIRESTORE_SYNC", False)
-    for target in ("app.services.firestore_auth_service.get_firestore_client", "app.services.firestore_service.get_firestore_client"):
-        monkeypatch.setattr(target, lambda *a, **kw: None)
     monkeypatch.setattr(settings, "GOOGLE_SHARED_CREDENTIAL_FALLBACK", False)
 
 
 def _account(role="admin", connected=True):
-    email = f"dr_{RUN}_{role}_{uuid.uuid4().hex[:4]}@tajlandia.com"
     prefs = {"google_workspace": {"connected": True, "google_email": f"{role}@gmail.example", "refresh_token": f"refresh-{role}",
                                   "access_token": "a", "scopes": SCOPES}} if connected else {}
-    with SessionLocal() as db:
-        db.add(User(email=email, name=role, role=role, password_hash=hash_password("Drive#12345"), is_active=True,
-                    allowed_websites=["tajlandia.com"], preferences=prefs))
-        db.commit()
-    token = client.post("/api/v1/auth/login", json={"email": email, "password": "Drive#12345"}).json()["access_token"]
-    return email, {"Authorization": f"Bearer {token}", "X-Selected-Websites": "tajlandia.com"}
-
-
-@pytest.fixture(scope="module", autouse=True)
-def cleanup():
-    yield
-    with SessionLocal() as db:
-        db.query(AuditLog).filter(AuditLog.staff_user_id.like(f"dr_{RUN}_%")).delete(synchronize_session=False)
-        db.query(User).filter(User.email.like(f"dr_{RUN}_%")).delete(synchronize_session=False)
-        db.commit()
+    made = make_user(client, role, f"dr_{RUN}_", allowed_websites=["tajlandia.com"], password="Drive#12345", preferences=prefs)
+    return made["email"], {**made["headers"], "X-Selected-Websites": "tajlandia.com"}
 
 
 def _ask(headers, text):
@@ -186,9 +168,8 @@ def test_a_quote_in_the_name_cannot_break_the_drive_query():
 def test_the_search_is_audited():
     email, h = _account()
     _ask(h, "find folder named varsovia")
-    with SessionLocal() as db:
-        rows = db.query(AuditLog).filter(AuditLog.staff_user_id == email, AuditLog.tool_name == "search_drive_files").all()
-        assert len(rows) == 1 and rows[0].status == "SUCCESS" and rows[0].tool_arguments["query"] == "varsovia"
+    rows = [r for r in audit_by_tool("search_drive_files") if r["staff_user_id"] == email]
+    assert len(rows) == 1 and rows[0]["status"] == "SUCCESS" and rows[0]["tool_arguments"]["query"] == "varsovia"
 
 
 # ---- the generic property dump ------------------------------------------------------------------------------------------
@@ -197,7 +178,9 @@ def test_the_search_is_audited():
 def test_a_message_that_asks_for_no_property_search_does_not_get_ten_random_properties(message):
     _e, h = _account()
     r = _ask(h, message)
-    assert "did not run a search" in r.text and "Found" not in r.text and not r.tools_used
+    # either safe answer is fine: "did not run a search", or (for a bare "ok ...") "nothing waiting for confirmation"
+    assert ("did not run a search" in r.text or "nothing waiting for confirmation" in r.text)
+    assert "Found" not in r.text and not r.tools_used
 
 
 @pytest.mark.parametrize("message", ["show all properties", "villas in Phuket", "list listings", "2 bedroom condo under 5M"])

@@ -1,5 +1,5 @@
 import pytest
-from app.db.session import SessionLocal
+from app.core.deps import FirestoreSession as SessionLocal
 from app.core.auth import AuthenticatedStaff
 from app.services.guardrails import (
     AIIntentClassifier, AIIntentClassificationResult,
@@ -187,32 +187,34 @@ def test_lead_pdf_report_generation():
     from unittest.mock import MagicMock
     import uuid
 
-    mock_lead = MagicMock()
-    mock_lead.id = uuid.uuid4()
-    mock_lead.contact_name = "Alexander Smith"
-    mock_lead.contact_email = "alexander.smith@varsoviaestate.com"
-    mock_lead.contact_phone = "+48 501 234 567"
-    mock_lead.preferred_location = "Bang Tao, Phuket"
-    mock_lead.budget_max = 25000000
-    mock_lead.budget_min = None
-    mock_lead.lead_score = 92.0
-    mock_lead.status = "qualified"
-    mock_lead.buying_signals = ["Requested floor plan"]
-    mock_lead.created_at = None
+    from app.services.firestore_service import get_firestore_client
 
-    mock_db = MagicMock()
-    # filter(...).order_by(...).all()
-    mock_db.query.return_value.filter.return_value.order_by.return_value.all.return_value = [mock_lead]
+    get_firestore_client("user").collection("leads").document("lead-alex").set({
+        "contact_name": "Alexander Smith",
+        "contact_email": "alexander.smith@varsoviaestate.com",
+        "contact_phone": "+48 501 234 567",
+        "preferred_location": "Bang Tao, Phuket",
+        "budget_max": 25000000,
+        "lead_score": 92.0,
+        "status": "qualified",
+        "buying_signals": ["Requested floor plan"],
+        "created_at": "2026-10-01T10:00:00+00:00",
+    })
+    import app.services.report_service as _rs
+    _old_s3 = _rs.is_s3_configured
+    _rs.is_s3_configured = lambda: False  # independent of AWS env vars
 
-    res = generate_report(
-        db=mock_db,
-        format_type="pdf",
-        lead_ids=["Alexander Smith"],
-        report_type="leads",
-        title="Buyer Lead Intelligence Dossier - Alexander Smith",
-        storage=InMemoryStorageProvider(),
-    )
-
+    try:
+        res = generate_report(
+            db=MagicMock(),
+            format_type="pdf",
+            lead_ids=["Alexander Smith"],
+            report_type="leads",
+            title="Buyer Lead Intelligence Dossier - Alexander Smith",
+            storage=InMemoryStorageProvider(),
+        )
+    finally:
+        _rs.is_s3_configured = _old_s3
     assert res["format"] == "pdf"
     assert res["total_leads"] == 1
     assert "tajlandia_lead_report_" in res["filename"]

@@ -124,7 +124,7 @@ def resolve_display_name(
     non-marketing fallback — never dump long Polish marketing sentences in EN.
     """
     lang = (language or "en").lower()
-    raw = data.get("name") or data.get("title") or data.get("projectName") or ""
+    raw = data.get("name") or data.get("propertyName") or data.get("projectName") or data.get("title") or ""
     en = pl = th = ""
     if isinstance(raw, dict):
         en = str(raw.get("en") or "").strip()
@@ -142,9 +142,18 @@ def resolve_display_name(
         slug_str = str(slug_val).strip()
     slug_title = slug_to_title(slug_str or doc_id)
 
+    plain = ""
+    for key in ("name", "propertyName", "projectName", "title"):
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            plain = value.strip()
+            break
+
     if lang == "en":
         if en and not _looks_like_long_polish_marketing(en):
             return sanitize_marketing_claims(en, mode="title")
+        if plain and not _looks_like_long_polish_marketing(plain) and len(plain) <= 80:
+            return sanitize_marketing_claims(plain, mode="title")
         # Prefer readable slug over long PL marketing title
         if slug_title and (not pl or _looks_like_long_polish_marketing(pl) or len(pl) > 60):
             return sanitize_marketing_claims(slug_title, mode="title")

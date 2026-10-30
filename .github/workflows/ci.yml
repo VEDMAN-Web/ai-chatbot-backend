@@ -6,18 +6,7 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: pgvector/pgvector:pg15
-        env:
-          POSTGRES_USER: ci
-          POSTGRES_PASSWORD: ci
-          POSTGRES_DB: ci
-        ports: ["5432:5432"]
-        options: >-
-          --health-cmd "pg_isready -U ci" --health-interval 5s --health-timeout 5s --health-retries 10
     env:
-      DATABASE_URL: postgresql://ci:ci@localhost:5432/ci
       ENABLE_FIRESTORE_SYNC: "false"
       OPENAI_API_KEY: ci-dummy
       ANTHROPIC_API_KEY: ci-dummy
@@ -28,16 +17,6 @@ jobs:
           python-version: "3.11"
           cache: pip
       - run: pip install -r requirements.txt pytest
-      - name: Create database schema (same as run.py)
-        run: |
-          python - <<'PY'
-          import sqlalchemy as sa
-          from app.db.session import engine, Base
-          import app.db.models
-          with engine.begin() as c:
-              c.execute(sa.text("CREATE EXTENSION IF NOT EXISTS vector"))
-          Base.metadata.create_all(bind=engine)
-          PY
       # Tests that need LIVE Firestore credentials (or pandas, missing from requirements.txt) fail
       # identically on main, so they are skipped here. They run on the real staging backend instead.
       - run: >-

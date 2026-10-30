@@ -1,7 +1,7 @@
 """
 Property create / read / update / delete by role and by the website(s) selected in the Admin Panel.
 
-Two entry points are exercised with real accounts and real tokens (PostgreSQL only, Firestore off):
+Two entry points are exercised with real accounts and real tokens (in-memory Firestore fake):
   * REST  /api/v1/admin/properties        (the panel's forms)
   * CHAT  propose with the admin-chat tool, confirm with POST /api/v1/admin/actions/{id}/confirm
           (what happens when the admin asks the bot to add or change a listing)
@@ -17,10 +17,10 @@ from fastapi.testclient import TestClient
 
 from app.core.auth import AuthenticatedStaff
 from app.core.config import settings
-from app.core.security import hash_password
-from app.db.models import PendingAction, Property, User
-from app.db.session import SessionLocal
+from app.core.deps import FirestoreSession
+from app.repositories import users_repo
 from app.main import app
+from tests import fs_users
 from app.services.admin_agent import _execute_admin_tool
 
 client = TestClient(app)
@@ -31,26 +31,16 @@ URL = "/api/v1/admin/properties"
 
 
 @pytest.fixture(autouse=True)
-def no_firestore(monkeypatch):
+def no_sync(monkeypatch):
     monkeypatch.setattr(settings, "ENABLE_FIRESTORE_SYNC", False)
-    for target in (
-        "app.services.firestore_auth_service.get_firestore_client",
-        "app.services.firestore_service.get_firestore_client",
-        "app.services.admin_batch_service.get_firestore_client",
-    ):
-        monkeypatch.setattr(target, lambda *a, **kw: None)
 
 
 def _make_user(role, sites):
     email = f"crud_{RUN}_{role}_{uuid.uuid4().hex[:4]}@tajlandia.com"
-    with SessionLocal() as db:
-        row = User(email=email, name=role, role=role, password_hash=hash_password(PASSWORD), is_active=True,
-                   allowed_websites=list(sites), domain=TAJ)
-        db.add(row)
-        db.commit()
-        uid = str(row.id)
-    token = client.post("/api/v1/auth/login", json={"email": email, "password": PASSWORD}).json()["access_token"]
-    return SimpleNamespace(id=uid, email=email, role=role, sites=list(sites), token=token)
+    made = fs_users.make_user(client, role, email=email, password=PASSWORD, allowed_websites=list(sites))
+    uid = str(users_repo.get_by_email(None, email).id)
+    return SimpleNamespace(id=uid, email=email, role=role, sites=list(sites),
+                           token=made["headers"]["Authorization"].split(" ", 1)[1])
 
 
 def _h(who, *selected):
@@ -60,20 +50,14 @@ def _h(who, *selected):
     return headers
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def people():
-    ppl = SimpleNamespace(
+    return SimpleNamespace(
         boss=_make_user("super_admin", [TAJ, VAR, THAI]),
         taj=_make_user("admin", [TAJ]),
         dual=_make_user("admin", [TAJ, VAR]),
         worker=_make_user("worker", [TAJ]),
     )
-    yield ppl
-    with SessionLocal() as db:
-        db.query(PendingAction).filter(PendingAction.staff_user_id.like(f"crud_{RUN}_%")).delete(synchronize_session=False)
-        db.query(Property).filter(Property.property_id.like(f"crud-{RUN}-%")).delete(synchronize_session=False)
-        db.query(User).filter(User.email.like(f"crud_{RUN}_%")).delete(synchronize_session=False)
-        db.commit()
 
 
 def _pid(tag):
@@ -91,17 +75,32 @@ def _create(who, *selected, **body):
     return client.post(f"{URL}?allow_without_undo=true", headers=_h(who, *selected), json=body)
 
 
+def _raw(pid):
+    from app.services import firestore_service as fsvc
+    snap = fsvc.get_admin_firestore_client().collection("projects").document(pid).get()
+    return snap.to_dict() if snap.exists else None
+
+
 def _row(pid):
-    with SessionLocal() as db:
-        row = db.query(Property).filter(Property.property_id == pid).first()
-        return None if row is None else SimpleNamespace(websites=list(row.websites or []), status=row.status,
-                                                        is_public=row.is_public, name=row.property_name,
-                                                        price=row.price_numeric_min)
+    raw = _raw(pid)
+    if raw is None:
+        return None
+    status = raw.get("status")
+    public = raw.get("isActive") is not False and str(status).lower() != "archived"
+    return SimpleNamespace(
+        websites=list(raw.get("websites") or []), status=status, is_public=public,
+        name=raw.get("name") or raw.get("property_name"),
+        price=raw.get("priceFrom") if raw.get("priceFrom") is not None else raw.get("price_numeric_min"),
+    )
 
 
 def _count(name_like):
-    with SessionLocal() as db:
-        return db.query(Property).filter(Property.property_name.ilike(name_like)).count()
+    from app.services import firestore_service as fsvc
+    wanted = name_like.strip().lower()
+    return sum(
+        1 for d in fsvc.get_admin_firestore_client().collection("projects").stream()
+        if str((d.to_dict() or {}).get("name") or (d.to_dict() or {}).get("property_name") or "").strip().lower() == wanted
+    )
 
 
 # ======================================================================================================
@@ -362,14 +361,8 @@ def _staff(who, *selected):
 
 def _propose(who, selected, fields, pid, mode="create"):
     args = {"property_id": pid, "mode": mode, "fields_to_update": fields}
-    return _execute_admin_tool(db=_DB(), tool_name="create_or_update_listing", tool_args=args,
+    return _execute_admin_tool(db=FirestoreSession(), tool_name="create_or_update_listing", tool_args=args,
                                staff_user=_staff(who, *selected), conversation_id=str(uuid.uuid4()))
-
-
-class _DB:
-    """A short-lived session per call, so each step sees what the previous one committed."""
-    def __new__(cls):
-        return SessionLocal()
 
 
 def _fields(name=None, **extra):
@@ -380,12 +373,12 @@ def _fields(name=None, **extra):
 
 
 def _confirm(who, action_id, *selected):
-    return client.post(f"/api/v1/admin/actions/{action_id}/confirm", headers=_h(who, *selected), json={})
+    return client.post(f"/api/v1/admin/actions/{action_id}/confirm", headers=_h(who, *selected),
+                       json={"confirmation_token": fs_users.pending_token(action_id)})
 
 
 def _pending_count(who):
-    with SessionLocal() as db:
-        return db.query(PendingAction).filter(PendingAction.staff_user_id == who.email).count()
+    return len(fs_users.pending_for(who.email))
 
 
 def test_chat_create_waits_for_a_yes_and_lands_on_the_selected_website(people):
@@ -451,8 +444,6 @@ def test_chat_create_with_an_existing_id_updates_instead_of_duplicating(people):
     assert _create(people.taj, TAJ, **_body(pid)).status_code == 201
     _r, staged, action_id = _propose(people.taj, [TAJ], {"price_numeric_min": 9_000_000}, pid)
     assert staged and _confirm(people.taj, action_id).status_code == 200
-    with SessionLocal() as db:
-        assert db.query(Property).filter(Property.property_id == pid).count() == 1
     assert _row(pid).price == 9_000_000 and _row(pid).websites == [TAJ]
 
 
@@ -471,28 +462,24 @@ def test_chat_confirm_cannot_be_used_to_write_to_a_website_the_account_lost(peop
     pid = _pid("k8")
     _r, staged, action_id = _propose(people.dual, [VAR], _fields(), pid)
     assert staged
-    with SessionLocal() as db:
-        user = db.query(User).filter(User.email == people.dual.email).first()
-        user.allowed_websites = [TAJ]
-        db.commit()
+    from app.services.firestore_auth_service import update_admin_in_firestore
+    update_admin_in_firestore(email=people.dual.email, allowed_websites=[TAJ])
     try:
         res = client.post(f"/api/v1/admin/actions/{action_id}/confirm",
-                          headers={"Authorization": f"Bearer {people.dual.token}"}, json={})
+                          headers={"Authorization": f"Bearer {people.dual.token}"},
+                          json={"confirmation_token": fs_users.pending_token(action_id)})
         assert res.status_code >= 400 or (_row(pid) is None or VAR not in _row(pid).websites)
     finally:
-        with SessionLocal() as db:
-            user = db.query(User).filter(User.email == people.dual.email).first()
-            user.allowed_websites = [TAJ, VAR]
-            db.commit()
+        update_admin_in_firestore(email=people.dual.email, allowed_websites=[TAJ, VAR])
 
 
 def test_chat_confirm_twice_writes_once(people):
     pid = _pid("k9")
     _r, staged, action_id = _propose(people.taj, [TAJ], _fields(), pid)
     assert staged and _confirm(people.taj, action_id).status_code == 200
-    assert _confirm(people.taj, action_id).status_code >= 400
-    with SessionLocal() as db:
-        assert db.query(Property).filter(Property.property_id == pid).count() == 1
+    again = _confirm(people.taj, action_id)
+    assert again.status_code >= 400 or again.json().get("idempotent") is True   # the second yes does not write again
+    assert _count(_row(pid).name) == 1
 
 
 def test_chat_proposal_can_only_be_confirmed_by_who_proposed_it(people):

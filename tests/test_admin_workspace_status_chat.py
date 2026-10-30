@@ -8,9 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.core.config import settings
-from app.core.security import hash_password
-from app.db.models import AuditLog, Conversation, User
-from app.db.session import SessionLocal
+from tests import fs_users
 from app.main import app
 from app.services.admin_agent import _granted_google_services, _is_workspace_status_question
 from app.services.google_services import SCOPES
@@ -25,8 +23,6 @@ QUESTIONS = ["my drive is connected ?", "is my google drive connected", "Is my G
 @pytest.fixture(autouse=True)
 def quiet(monkeypatch):
     monkeypatch.setattr(settings, "ENABLE_FIRESTORE_SYNC", False)
-    for target in ("app.services.firestore_auth_service.get_firestore_client", "app.services.firestore_service.get_firestore_client"):
-        monkeypatch.setattr(target, lambda *a, **kw: None)
 
 
 def _account(role, connected):
@@ -35,23 +31,10 @@ def _account(role, connected):
     if connected:
         prefs["google_workspace"] = {"connected": True, "google_email": f"{role}.drive@gmail.example", "refresh_token": "r",
                                      "access_token": "a", "scopes": SCOPES}
-    with SessionLocal() as db:
-        db.add(User(email=email, name=role, role=role, password_hash=hash_password(PASSWORD), is_active=True,
-                    allowed_websites=["tajlandia.com", "varsoviaestate.com"], preferences=prefs))
-        db.commit()
-    token = client.post("/api/v1/auth/login", json={"email": email, "password": PASSWORD}).json()["access_token"]
-    return {"Authorization": f"Bearer {token}"}
-
-
-@pytest.fixture(scope="module", autouse=True)
-def cleanup():
-    yield
-    with SessionLocal() as db:
-        ids = [str(c.id) for c in db.query(Conversation).filter(Conversation.session_id.like(f"ws-{RUN}-%")).all()]
-        db.query(Conversation).filter(Conversation.session_id.like(f"ws-{RUN}-%")).delete(synchronize_session=False)
-        db.query(AuditLog).filter(AuditLog.staff_user_id.like(f"ws_{RUN}_%")).delete(synchronize_session=False)
-        db.query(User).filter(User.email.like(f"ws_{RUN}_%")).delete(synchronize_session=False)
-        db.commit()
+    return fs_users.make_user(
+        client, role, email=email, password=PASSWORD, preferences=prefs,
+        allowed_websites=["tajlandia.com", "varsoviaestate.com"],
+    )["headers"]
 
 
 def _ask(headers, text):
