@@ -342,7 +342,7 @@ def test_the_search_tool_can_look_a_listing_up_by_name(people, listing):
     db = FirestoreSession()
     found, _, _ = _execute_admin_tool(db, "search_properties_full", {"query": "3 Villas - Lamai"}, staff, "c1")
     assert found["count"] == 1 and found["properties"][0]["property_id"] == listing
-    none, _, _ = _execute_admin_tool(db, "search_properties_full", {"query": f"No Such Place {RUN}"}, staff, "c1")
+    none, _, _ = _execute_admin_tool(db, "search_properties_full", {"query": "Qzxv Nowhere Plugh"}, staff, "c1")
     assert none["count"] == 0 and "No listing named" in none["message"]
     other = AuthenticatedStaff(user_id=str(uuid.uuid4()), email=people.taj.email, role="admin", allowed_websites=[VAR], selected_websites=[VAR])
     hidden, _, _ = _execute_admin_tool(db, "search_properties_full", {"query": "3 Villas - Lamai"}, other, "c1")
