@@ -81,7 +81,7 @@ class PropertyFilterParams(BaseModel):
         v_low = v.strip().lower()
         if "villa" in v_low:
             return "Villa"
-        elif "condo" in v_low or "apartment" in v_low:
+        elif "condo" in v_low or "apartment" in v_low or "flat" in v_low:
             return "Condominium"
         return v.strip()
 
@@ -123,7 +123,10 @@ def property_belongs_to_websites(prop: Optional[Any], target_websites: List[str]
             for s in prop_sites
         )
 
-    # Fallback for unassigned legacy properties: default to tajlandia.com
+    # Fallback for unassigned legacy properties: default to tajlandia.com only.
+    # (Not "accessible to all sites" — this function also gates RBAC on PUT/DELETE,
+    # so treating every unassigned property as visible on every tenant site would
+    # leak one customer's listings onto another customer's website.)
     if any("tajlandia" in t for t in normalized_targets):
         return True
 
@@ -142,6 +145,7 @@ class FirestorePropertyAdapter:
     def __init__(self, data: Dict[str, Any]):
         self._data = dict(data)
         self.property_id = str(data.get("property_id") or data.get("id") or "").strip()
+        self.id = self.property_id
         self.property_name = str(data.get("name") or data.get("property_name") or self.property_id)
         self.project_name = data.get("project_name") or self.property_name
         self.property_type = data.get("property_type") or "Villa / Condo"
@@ -160,6 +164,11 @@ class FirestorePropertyAdapter:
         self.price_note = data.get("price_note")
 
         self.bedrooms_display = str(data.get("bedrooms") or "")
+        if not self.bedrooms_display:
+            full_t = f"{data.get('title', '')} {data.get('name', '')} {data.get('property_name', '')}"
+            m = re.search(r"\b(\d+)\s*(?:bhk|bedroom|bed|br)\b", full_t, re.IGNORECASE)
+            if m:
+                self.bedrooms_display = f"{m.group(1)} Beds"
         self.bedrooms_min = None
         self.bedrooms_max = None
         if self.bedrooms_display:

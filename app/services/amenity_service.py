@@ -77,6 +77,18 @@ CANONICAL_AMENITY_ALIASES: Dict[str, Tuple[str, ...]] = {
         "sea-view", "sea view", "seaview", "ocean-view", "ocean view",
         "widok na morze", "вид на море", "vid-na-more", "วิวทะเล",
     ),
+    "furnished": (
+        "furnished", "fully furnished", "fully-furnished", "semi furnished", "semi-furnished",
+        "umeblowane", "meble", "meblowany", "พร้อมเฟอร์นิเจอร์", "เฟอร์นิเจอร์",
+    ),
+    "near_school": (
+        "near school", "near schools", "school", "schools", "szkoła", "szkola",
+        "blisko szkoły", "blisko szkoly", "ใกล้โรงเรียน", "โรงเรียน",
+    ),
+    "family_friendly": (
+        "family friendly", "family-friendly", "family", "for families",
+        "dla rodzin", "rodzinny", "ครอบครัว", "เหมาะสำหรับครอบครัว",
+    ),
 }
 
 # Display labels (EN default; used on cards)
@@ -94,15 +106,18 @@ AMENITY_LABELS_EN: Dict[str, str] = {
     "security": "Security",
     "beach_access": "Beach access",
     "sea_view": "Sea view",
+    "furnished": "Furnished",
+    "near_school": "Near schools",
+    "family_friendly": "Family-friendly",
 }
 
 # User-message request phrases -> canonical
 _REQUEST_PHRASES: List[Tuple[str, str]] = [
     (r"\b(?:personal\s+)?gym\b|\bfitness(?:\s+center|\s+centre)?\b|\bsiłowni[ae]?\b|\bฟิตเนส\b|\bยิม\b", "gym"),
-    (r"\b(?:private\s+)?pool\b|\bswimming(?:\s+pool)?\b|\bbasen\b|\bสระ(?:ว่ายน้ำ)?\b", "pool"),
+    (r"\b(?:private\s+)?pool\b|\bswimming(?:\s+pool)?\b|\bswiming(?:\s+pool)?\b|\bbasen\b|\bสระ(?:ว่ายน้ำ)?\b", "pool"),
     (r"\bprivate\s+pool\b|\bprywatn\w*\s+basen\b|\bสระส่วนตัว\b", "pool_private"),
     (r"\bspa\b|\bsauna\b|\bwellness\b|\bสปา\b", "spa"),
-    (r"\bparking\b|\bgarage\b|\bgaraż\b|\bgaraz\b|\bที่จอด\b", "parking"),
+    (r"\bparking\b|\bparkin\b|\bgarage\b|\bgaraż\b|\bgaraz\b|\bที่จอด\b", "parking"),
     (r"\brestaurant\b|\bcafe\b|\bcafé\b|\brestauracj\w*\b|\bร้านอาหาร\b", "restaurant"),
     (r"\bkids(?:\s+zone|\s+club)?\b|\bplayground\b|\bplac\s+zabaw\b|\bโซนเด็ก\b", "kids_zone"),
     (r"\blounge\b|\bcoworking\b|\bco-working\b|\bเลานจ์\b", "lounge"),
@@ -111,6 +126,9 @@ _REQUEST_PHRASES: List[Tuple[str, str]] = [
     (r"\bsecurity\b|\bcctv\b|\bconcierge\b|\bochrona\b|\bรปภ\b", "security"),
     (r"\bbeach(?:\s*access|\s*front)?\b|\bbeachfront\b|\bpla[zż][ay]?\b|\bชายหาด\b|\bติดทะเล\b", "beach_access"),
     (r"\bsea\s*view\b|\bocean\s*view\b|\bwidok\s+na\s+morze\b|\bวิวทะเล\b", "sea_view"),
+    (r"\b(?:fully\s+|semi\s+)?furnished\b|\bumeblowan\w*\b|\bmeble\b|\bพร้อมเฟอร์นิเจอร์\b", "furnished"),
+    (r"\b(?:near\s+)?schools?\b|\bblisko\s+szko[łl]\w*\b|\bใกล้โรงเรียน\b", "near_school"),
+    (r"\bfamily(?:\s*[- ]friendly)?\b|\bfor\s+families\b|\bdla\s+rodzin\b|\bครอบครัว\b", "family_friendly"),
 ]
 
 
@@ -280,6 +298,23 @@ def collect_property_amenities(prop: Optional[Dict[str, Any]]) -> Dict[str, Amen
         facts["pool"].present = True
         facts["pool"].sources.extend(
             s for s in facts["pool_private"].sources if s not in facts["pool"].sources
+        )
+
+    # Landmarks check for near_school
+    landmarks = prop.get("nearby_landmarks") or raw.get("nearby_landmarks") or []
+    if isinstance(landmarks, list):
+        for lm in landmarks:
+            if isinstance(lm, dict):
+                cat = str(lm.get("category") or "").lower()
+                lm_name = str(lm.get("name") or "").lower()
+                if "education" in cat or "school" in lm_name or "szkoł" in lm_name:
+                    _mark("near_school", "nearby_landmarks", lm.get("name") or "school")
+
+    # Kids zone implies family_friendly
+    if facts.get("kids_zone") and facts["kids_zone"].present and not facts["family_friendly"].present:
+        facts["family_friendly"].present = True
+        facts["family_friendly"].sources.extend(
+            s for s in facts["kids_zone"].sources if s not in facts["family_friendly"].sources
         )
 
     return facts

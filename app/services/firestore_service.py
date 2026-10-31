@@ -15,6 +15,8 @@ logger = logging.getLogger(__name__)
 # Singleton Firestore clients
 _admin_firestore_client = None
 _user_firestore_client = None
+_admin_init_attempted = False
+_user_init_attempted = False
 
 # In-memory catalog cache with single-flight + stale-while-revalidate
 _CATALOG_LOCK = threading.RLock()
@@ -30,7 +32,7 @@ def to_thb(amount: Optional[float], currency: Optional[str]) -> Optional[float]:
     if amount is None:
         return None
     cur = (currency or "THB").strip().upper()
-    if cur in ("THB", "BAHT", "฿"):
+    if cur in ("THB", "BAHT", "฿", "INR", "RS", "RS.", "RUPEES", "₹"):
         return float(amount)
     rate = {"USD": settings.FX_USD_THB, "EUR": settings.FX_EUR_THB}.get(cur)
     return float(amount) * float(rate) if rate else None
@@ -51,6 +53,16 @@ class FirestoreDatabaseError(Exception):
 
 
 def _create_single_firestore_client(project_id: str, database: str, env_key: Optional[str], cred_path: Optional[str], label: str):
+    # Check if Firestore sync is enabled in configuration
+    sync_enabled = (
+        settings.get_admin_enable_firestore_sync()
+        if label == "admin"
+        else settings.get_user_enable_firestore_sync()
+    )
+    if not sync_enabled:
+        logger.info(f"[{label.upper()}] Firestore sync is disabled by configuration.")
+        return None
+
     try:
         from google.cloud import firestore
         from google.oauth2 import service_account
@@ -85,7 +97,11 @@ def _create_single_firestore_client(project_id: str, database: str, env_key: Opt
                 logger.info(f"[{label.upper()}] Firestore client initialized from key file: {p} (project: {target_project}, db: {database}).")
                 return cl
 
-        # 3. Fallback to Application Default Credentials (ADC)
+        # 3. Fallback to Application Default Credentials (ADC) ONLY if GOOGLE_APPLICATION_CREDENTIALS or Cloud environment
+        if not os.environ.get("GOOGLE_APPLICATION_CREDENTIALS") and not os.environ.get("K_SERVICE") and not os.environ.get("GAE_APPLICATION"):
+            logger.info(f"[{label.upper()}] No Firebase service account configured and no GOOGLE_APPLICATION_CREDENTIALS set; skipping Firestore ADC probe.")
+            return None
+
         cl = firestore.Client(project=project_id, database=database)
         logger.info(f"[{label.upper()}] Firestore client initialized via Application Default Credentials (project: {project_id}, db: {database}).")
         return cl
@@ -96,9 +112,10 @@ def _create_single_firestore_client(project_id: str, database: str, env_key: Opt
 
 def get_admin_firestore_client():
     """Returns the dedicated Admin Firestore client (for admin_authentication, staff audits & admin ops)."""
-    global _admin_firestore_client
-    if _admin_firestore_client is not None:
+    global _admin_firestore_client, _admin_init_attempted
+    if _admin_init_attempted:
         return _admin_firestore_client
+    _admin_init_attempted = True
     _admin_firestore_client = _create_single_firestore_client(
         project_id=settings.get_admin_firestore_project_id(),
         database=settings.get_admin_firestore_database(),
@@ -111,9 +128,10 @@ def get_admin_firestore_client():
 
 def get_user_firestore_client():
     """Returns the dedicated User/Public Firestore client (for public chatbot conversations, leads & property catalog)."""
-    global _user_firestore_client
-    if _user_firestore_client is not None:
+    global _user_firestore_client, _user_init_attempted
+    if _user_init_attempted:
         return _user_firestore_client
+    _user_init_attempted = True
     _user_firestore_client = _create_single_firestore_client(
         project_id=settings.get_user_firestore_project_id(),
         database=settings.get_user_firestore_database(),
@@ -285,6 +303,8 @@ def normalize_firestore_project(doc_id: str, data: Dict[str, Any]) -> Dict[str, 
     cover_image = data.get("coverImage")
     if cover_image and cover_image not in images:
         images.insert(0, cover_image)
+    if not images:
+        images = ["https://images.unsplash.com/photo-1580587771525-78b9dba3b914?auto=format&fit=crop&w=1200&q=80"]
 
     # Bedrooms & Area. Never invent a 1-4 range when the document has no bedroom values.
     from app.services.admin_property_fields import format_bedrooms_label
@@ -403,6 +423,7 @@ def normalize_firestore_project(doc_id: str, data: Dict[str, Any]) -> Dict[str, 
     card = {
         "property_id": doc_id,
         "name": name_str,
+        "title": name_str,
         "property_type": data.get("propertyType") or "Villa / Condo",
         "price": price_display,
         "price_numeric_min": price_num_min,
@@ -424,7 +445,7 @@ def normalize_firestore_project(doc_id: str, data: Dict[str, Any]) -> Dict[str, 
         "has_pool": False,
         "beach_access": False,
         "images": images,
-        "detail_page_url": settings.get_property_detail_url(slug_target, country=country_id, city=city_id),
+        "detail_page_url": settings.get_property_detail_url(slug_target, country=country_id, city=city_id, websites=websites_list),
         "highlights": (data.get("highlights") or amenities or tags)[:5],
         "amenities": amenities,
         "tags": tags,
@@ -1151,6 +1172,10 @@ def search_properties_firestore(
         "cambodia", "kambodza", "kambodża", "phnom penh", "phnom-penh", "sihanoukville", "siem reap",
         "kampot", "kep", "vietnam", "wietnam", "ho chi minh", "da nang", "danang", "nha trang",
         "maldives", "malediwy", "tajlandia", "tajska", "thai",
+        # Indian cities and localities
+        "ahmedabad", "amdavad", "thaltej", "sg highway", "s.g. highway", "vastrapur",
+        "bodakdev", "prahlad nagar", "bopal", "dholera", "vasna", "sanand", "gandhinagar",
+        "mumbai", "delhi", "bangalore", "goa", "india"
     ]
     # Normalised comparison (hyphen/space and case-insensitive)
     loc_clean = loc_clean.replace("-", " ") if loc_clean.replace("-", " ") in [r.replace("-", " ") for r in known_regions] else loc_clean

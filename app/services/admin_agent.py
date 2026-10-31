@@ -484,6 +484,8 @@ CLAUDE_ADMIN_TOOLS = [
                 "bedrooms": {"type": "integer", "description": "Bedrooms"},
                 "bathrooms": {"type": "integer", "description": "Bathrooms"},
                 "has_pool": {"type": "boolean", "description": "Whether private pool is present"},
+                "has_parking": {"type": "boolean", "description": "Whether parking space or garage is present"},
+                "required_amenities": {"type": "array", "items": {"type": "string"}, "description": "Specific amenities required (e.g. ['swimming pool', 'parking', 'gym'])"},
                 "status": {"type": "string", "description": "Construction or sale status"},
                 "limit": {"type": "integer", "description": "Max results (default 10)"}
             }
@@ -1276,14 +1278,19 @@ def try_admin_fast_path(
         from app.services.admin_chat_quality import format_inventory_reply
         total_sentence = format_inventory_reply(stats, language)
         by_loc = stats.get("location_breakdown") or {}
-        # Location-specific ask
+        # Location-specific ask (checks all locations dynamically with Thai city fallback)
         loc_hit = None
-        for key in ("phuket", "samui", "bangkok", "pattaya", "hua hin"):
-            if key in msg_l:
-                loc_hit = next((k for k in by_loc if key in str(k).lower()), None)
-                if loc_hit is None and key == "samui":
-                    loc_hit = next((k for k in by_loc if "samui" in str(k).lower()), None)
+        for loc_name in by_loc.keys():
+            if str(loc_name).lower() in msg_l:
+                loc_hit = loc_name
                 break
+        if loc_hit is None:
+            for key in ("phuket", "samui", "bangkok", "pattaya", "hua hin"):
+                if key in msg_l:
+                    loc_hit = next((k for k in by_loc if key in str(k).lower()), None)
+                    if loc_hit is None and key == "samui":
+                        loc_hit = next((k for k in by_loc if "samui" in str(k).lower()), None)
+                    break
         if loc_hit is not None:
             n = by_loc.get(loc_hit, 0)
             place = loc_hit[:1].upper() + loc_hit[1:] if loc_hit else loc_hit
@@ -2214,6 +2221,24 @@ def _process_admin_chat_inner(
     if _drive_search is not None and staff_user is not None:
         return _attach_timing_debug(_handle_drive_search(db, conv, clean_message, _drive_search, staff_user, active_lang), timer)
 
+    if clean_message and _is_workspace_status_question(clean_message) and staff_user is not None:
+        status_res, _needs_confirmation, _pending = _execute_admin_tool(
+            db, 'check_google_workspace_status', {}, staff_user, str(conv.id)
+        )
+        reply = _workspace_status_reply(status_res if isinstance(status_res, dict) else {}, active_lang)
+        append_conversation_turn(db, conv, clean_message, reply)
+        return _attach_timing_debug({
+            'type': 'text',
+            'text': reply,
+            'session_id': conv.session_id,
+            'conversation_id': str(conv.id),
+            'requires_confirmation': False,
+            'pending_action_id': None,
+            'action_status': None,
+            'tools_used': [{'name': 'check_google_workspace_status', 'args': {}}],
+            'download_link': None,
+            'language': active_lang,
+        }, timer)
 
     # Small talk must not keep the dossier prompt looping — only name/budget /
     # "assume the rest" / "cancel" continue or end that flow.
@@ -5340,6 +5365,10 @@ def _execute_admin_tool_uncached(
         if _name_query:
             return _search_listing_by_name(db, _name_query, selected_websites), False, None
         res = []
+        _has_parking = tool_args.get("has_parking")
+        _amenities = list(tool_args.get("required_amenities") or [])
+        if _has_parking and "parking" not in [a.lower() for a in _amenities]:
+            _amenities.append("parking")
         try:
             from app.services.firestore_service import search_properties_firestore
             fs_props = search_properties_firestore(
@@ -5349,6 +5378,7 @@ def _execute_admin_tool_uncached(
                 max_price=float(tool_args["max_price"]) if tool_args.get("max_price") else None,
                 bedrooms=tool_args.get("bedrooms"),
                 has_pool=tool_args.get("has_pool"),
+                required_amenities=_amenities if _amenities else None,
                 websites=selected_websites,
                 target="admin",
                 limit=tool_args.get("limit", 10)

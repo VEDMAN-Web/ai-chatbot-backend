@@ -4,6 +4,7 @@ import logging
 import time
 import uuid
 from decimal import Decimal
+from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse, FileResponse
 from pydantic import BaseModel, Field, EmailStr, field_validator
@@ -104,6 +105,7 @@ class PropertyCard(BaseModel):
     longitude: Optional[float] = Field(None, example=98.3381)
     maps_url: Optional[str] = Field(None, example="https://www.google.com/maps/search/?api=1&query=7.9519,98.3381")
     maps_embed_url: Optional[str] = Field(None)
+    calendar_url: Optional[str] = Field(None, example="https://calendar.google.com/calendar/render?...")
 
 class PublicChatResponse(BaseModel):
     type: str = Field(
@@ -150,6 +152,10 @@ class LeadSubmitRequest(BaseModel):
     contact_name: Optional[str] = Field(None, max_length=100)
     contact_email: Optional[str] = Field(None, max_length=100)
     contact_phone: Optional[str] = Field(None, max_length=50)
+    name: Optional[str] = Field(None, max_length=100)
+    email: Optional[str] = Field(None, max_length=100)
+    phone: Optional[str] = Field(None, max_length=50)
+    property_id: Optional[str] = Field(None, max_length=64)
     preferred_location: Optional[str] = Field(None, max_length=100)
     budget: Optional[float] = Field(None, ge=0)
     notes: Optional[str] = Field(None, max_length=1000)
@@ -485,16 +491,26 @@ def submit_direct_lead(
     recorded_lead_id = f"lead_session_{uuid.uuid4().hex[:8]}"
     lead_score = 0.8
     lead_saved = False
+    from app.services.lead_service import validate_email, validate_phone, validate_name
+    c_name = validate_name(req.contact_name or req.name)
+    c_email = validate_email(req.contact_email or req.email)
+    c_phone = validate_phone(req.contact_phone or req.phone)
+    c_loc = req.preferred_location or req.property_id
+    if not c_email and not c_phone:
+        raise HTTPException(
+            status_code=400,
+            detail="A valid email address or phone number is required to submit contact information."
+        )
     if getattr(settings, "ENABLE_LEAD_SAVING", False):
         try:
             from app.services.lead_service import enqueue_lead_save
             lead = record_or_update_lead(
                 db=None,
                 conversation=conversation,
-                contact_name=req.contact_name,
-                contact_email=req.contact_email,
-                contact_phone=req.contact_phone,
-                preferred_location=req.preferred_location,
+                contact_name=c_name,
+                contact_email=c_email,
+                contact_phone=c_phone,
+                preferred_location=c_loc,
                 notes=req.notes,
                 buying_signal="Direct frontend lead submission",
             )
@@ -503,10 +519,10 @@ def submit_direct_lead(
             enqueue_lead_save(
                 db=db,
                 conversation=conversation,
-                contact_name=req.contact_name,
-                contact_email=req.contact_email,
-                contact_phone=req.contact_phone,
-                preferred_location=req.preferred_location,
+                contact_name=c_name,
+                contact_email=c_email,
+                contact_phone=c_phone,
+                preferred_location=c_loc,
                 notes=req.notes,
                 buying_signal="Direct frontend lead submission",
             )
@@ -518,10 +534,10 @@ def submit_direct_lead(
             try:
                 from app.services.firestore_service import create_lead_in_firestore
                 create_lead_in_firestore({
-                    "name": req.contact_name,
-                    "email": req.contact_email,
-                    "phone": req.contact_phone,
-                    "property_id": req.preferred_location or "",
+                    "name": c_name,
+                    "email": c_email,
+                    "phone": c_phone,
+                    "property_id": c_loc or "",
                     "message": req.notes or "Direct frontend lead submission",
                     "brand": conversation.site_origin or "tajlandia"
                 })
@@ -557,6 +573,44 @@ def get_contact_info(
     from app.core.tenant import resolve_tenant
     from app.services.contact_info import build_contact_info
     return build_contact_info(resolve_tenant(site_origin), language)
+
+
+@router.get(
+    "/brochure/shortlist",
+    summary="Download Property Shortlist PDF",
+    description="Generates and downloads a professional PDF comparing and shortlisting selected properties.",
+)
+def download_property_shortlist(
+    property_ids: str = Query(..., description="Comma-separated property IDs (e.g. PROP-PHK-001,PROP-PHK-002)"),
+    lang: Optional[str] = Query("en", description="Brochure language: en, pl, or th"),
+    site_origin: Optional[str] = Query(None, description="Site origin (e.g. tajlandia.com, varsoviaestate.com)"),
+    client_name: Optional[str] = Query(None, description="Client name"),
+    db: Any = Depends(get_db),
+):
+    from app.services.brochure_service import generate_property_shortlist_pdf
+    pids = [pid.strip().upper() for pid in property_ids.split(",") if pid.strip()]
+    if not pids:
+        raise HTTPException(status_code=400, detail="At least one property ID is required.")
+    try:
+        pdf_bytes = generate_property_shortlist_pdf(
+            db=db,
+            property_ids=pids,
+            site_origin=site_origin,
+            language=lang or "en",
+            client_name=client_name or "Valued Client",
+        )
+        filename = f"Property_Shortlist_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+        return StreamingResponse(
+            io.BytesIO(pdf_bytes),
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "Content-Length": str(len(pdf_bytes)),
+            },
+        )
+    except Exception as e:
+        logger.error(f"Failed to generate property shortlist PDF: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to generate shortlist PDF.")
 
 
 @router.get(
@@ -661,3 +715,5 @@ def get_brochure_file(filename: str):
     if not os.path.isfile(file_path):
         raise HTTPException(status_code=404, detail="Brochure file not found")
     return FileResponse(file_path, media_type="application/pdf", filename=filename)
+
+

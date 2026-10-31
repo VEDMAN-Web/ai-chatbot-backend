@@ -289,17 +289,41 @@ def classify_obvious_intent(message: Optional[str]) -> Optional[Dict[str, Any]]:
             "skipped_llm": True,
             "fast_path": "leads",
         }
-    # Inventory / how many
-    if any(
+    # Inventory / how many (guarded against search/listing queries)
+    is_search_listing = any(
+        s in msg
+        for s in (
+            "show",
+            "find",
+            "search",
+            "list",
+            "available",
+            "pokaz",
+            "pokaż",
+            "znajdz",
+            "znajdź",
+            "specifications",
+            "missing",
+            "pool",
+            "swimming",
+            "parking",
+            "price of",
+            "summarize",
+        )
+    )
+    if not is_search_listing and any(
         w in msg
         for w in (
             "how many",
             "ile nieruchomości",
             "ile w bazie",
-            "inventory",
+            "inventory stats",
+            "inventory count",
+            "inventory breakdown",
             "total properties",
             "properties do we have",
-            "properties in",
+            "count of properties",
+            "number of properties",
         )
     ):
         return {

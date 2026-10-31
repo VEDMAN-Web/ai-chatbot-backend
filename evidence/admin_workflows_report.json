@@ -1,0 +1,132 @@
+{
+  "B1": {
+    "status": 200,
+    "passed": true,
+    "text": "Hi Test, it's still **6**. I just checked the live database again and got the same 6 Pattaya condo projects with 2-bedroom units:\n\n- **Embassy Central:** under construction, 1\u20132 beds, from 3.19M THB\n- **Seven Seas Le Carnival (SS3):** planned, 1\u20132 beds, from 2.40M THB\n- **Zensiri Residences Jomtien:** under construction, 2\u20133 beds, from 9.10M THB\n- **Seven Seas Condo Resort (SS1):** ready, 1\u20133 beds, from 2.85M THB\n- **Seven Seas C\u00f4te d'Azur (SS2):** planned, 1\u20133 beds, from 2.00M THB\n- **Copacabana Coral Reef:** pre-sale, 1\u20133 beds, from 3.44M THB\n\nThe \"from\" price is the cheapest unit in each project, which may not be a 2-bed. Our records don't show 2-bed prices or how many 2-bed units are left.\n\nIf you're testing whether the answer stays the same, it does. If you need a narrower number, tell me the filter, such as status, price cap or beach access.\n\n**Suggestions (do not run an action by themselves):**\n1) Update price on one listing\n2) Export these to Excel\n3) Generate a PDF report"
+  },
+  "B3": {
+    "passed": true,
+    "pdf": "tajlandia_report_20261030_155703.pdf",
+    "xlsx": "tajlandia_report_20261030_155710.xlsx",
+    "docx": "tajlandia_report_20261030_155712.docx"
+  },
+  "B4": {
+    "staged_id": "19ff5975-723b-4f30-8512-9a2b085d98e5",
+    "initial_status": "PENDING",
+    "confirm_status": 200,
+    "passed": true
+  },
+  "B5": {
+    "status": 200,
+    "passed": true
+  },
+  "N1_N2": {
+    "passed": true,
+    "extracted_name": "Layan Palm Villa",
+    "price": "18500000"
+  },
+  "N3": {
+    "status": 200,
+    "passed": true
+  },
+  "N4_N5": {
+    "correction_id": "COR-0C8F244B0D93",
+    "status": "approved",
+    "passed": true
+  },
+  "N7": {
+    "passed": true,
+    "entry_id": "b31be9a5-5049-4c43-b4a1-4a42e1cb3460"
+  },
+  "N6": {
+    "status": 200,
+    "refused_off_topic": true,
+    "passed": true
+  },
+  "C3": {
+    "sample_count": 10,
+    "sample": [
+      {
+        "id": "52d431df-6537-455f-8d5f-ec358b6c7e44",
+        "staff_user_id": "super_admin_test@tajlandia.com",
+        "tool_name": "get_property_knowledge",
+        "confirmed_by_staff": false,
+        "status": "SUCCESS",
+        "created_at": "2026-10-30T15:57:58.026716"
+      },
+      {
+        "id": "76c35536-f5fe-4676-8a67-fc8d6cfa8cf4",
+        "staff_user_id": "ai_system",
+        "tool_name": "llm_token_observability",
+        "confirmed_by_staff": false,
+        "status": "SUCCESS",
+        "created_at": "2026-10-30T15:57:56.404676"
+      },
+      {
+        "id": "00699b40-a3af-4944-a0c8-9f6b2a6f1f35",
+        "staff_user_id": "worker05@tajlandia.com",
+        "tool_name": "get_database_inventory_stats",
+        "confirmed_by_staff": false,
+        "status": "SUCCESS",
+        "created_at": "2026-10-30T15:57:49.846040"
+      },
+      {
+        "id": "32e299a7-1f1b-4174-a1df-71ac5ae08c61",
+        "staff_user_id": "super_admin_test@tajlandia.com",
+        "tool_name": "correction_direct:approve",
+        "confirmed_by_staff": true,
+        "status": "SUCCESS",
+        "created_at": "2026-10-30T15:57:46.690645"
+      },
+      {
+        "id": "79f0173f-ff2c-453d-bffe-e9d13d61756b",
+        "staff_user_id": "super_admin_test@tajlandia.com",
+        "tool_name": "correction_direct:approve",
+        "confirmed_by_staff": true,
+        "status": "PENDING",
+        "created_at": "2026-10-30T15:57:40.761718"
+      },
+      {
+        "id": "01a800d9-1658-4bb2-afc7-2459860206fa",
+        "staff_user_id": "super_admin_test@tajlandia.com",
+        "tool_name": "search_properties_full",
+        "confirmed_by_staff": false,
+        "status": "SUCCESS",
+        "created_at": "2026-10-30T15:57:40.744496"
+      },
+      {
+        "id": "5330c281-c1c8-45cf-8449-6e6d6f6cd379",
+        "staff_user_id": "worker05@tajlandia.com",
+        "tool_name": "search_properties_full",
+        "confirmed_by_staff": false,
+        "status": "SUCCESS",
+        "created_at": "2026-10-30T15:57:37.684072"
+      },
+      {
+        "id": "644da7e2-97a2-4049-9561-f37599dcadd3",
+        "staff_user_id": "super_admin_test@tajlandia.com",
+        "tool_name": "send_email",
+        "confirmed_by_staff": true,
+        "status": "SUCCESS",
+        "created_at": "2026-10-30T15:57:28.228982"
+      },
+      {
+        "id": "5f11e22c-efd8-46ec-8a22-d93ace8a0be5",
+        "staff_user_id": "super_admin_test@tajlandia.com",
+        "tool_name": "get_property_knowledge",
+        "confirmed_by_staff": false,
+        "status": "SUCCESS",
+        "created_at": "2026-10-30T15:57:27.427292"
+      },
+      {
+        "id": "d7c8efa3-1089-435c-9471-2340b00a93be",
+        "staff_user_id": "super_admin_test@tajlandia.com",
+        "tool_name": "send_email",
+        "confirmed_by_staff": false,
+        "status": "PENDING",
+        "created_at": "2026-10-30T15:57:17.423889"
+      }
+    ],
+    "passed": true
+  }
+}

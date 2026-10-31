@@ -79,7 +79,7 @@ LOCATION_ALIASES: List[Tuple[str, str]] = [
     ("plai laem", "Plai Laem"), ("ปลายแหลม", "Plai Laem"),
     ("koh samui", "Koh Samui"), ("samui", "Koh Samui"), ("เกาะสมุย", "Koh Samui"), ("สมุย", "Koh Samui"),
     ("koh phangan", "Koh Phangan"), ("phangan", "Koh Phangan"), ("เกาะพะงัน", "Koh Phangan"), ("พะงัน", "Koh Phangan"),
-    ("pattaya", "Pattaya"), ("พัทยา", "Pattaya"),
+    ("pattaya", "Pattaya"), ("พัทยา", "Pattaya"), ("паттай", "Pattaya"), ("паттайя", "Pattaya"), ("паттайе", "Pattaya"), ("пхукет", "Phuket"), ("пхукете", "Phuket"), ("бангкок", "Bangkok"), ("бангкоке", "Bangkok"), ("самуи", "Koh Samui"), ("панган", "Koh Phangan"),
     ("bangkok", "Bangkok"), ("กรุงเทพ", "Bangkok"), ("กรุงเทพฯ", "Bangkok"),
     ("hua hin", "Hua Hin"), ("หัวหิน", "Hua Hin"),
     ("krabi", "Krabi"), ("กระบี่", "Krabi"),
@@ -90,6 +90,15 @@ LOCATION_ALIASES: List[Tuple[str, str]] = [
     ("sihanoukville", "Sihanoukville"), ("siem reap", "Siem Reap"), ("kampot", "Kampot"),
     ("cambodia", "Cambodia"), ("kambodż", "Cambodia"), ("kambodz", "Cambodia"),
     ("maldives", "Maldives"), ("malediw", "Maldives"),
+    # India (Ahmedabad & localities)
+    ("ahmedabad", "Ahmedabad"), ("amdavad", "Ahmedabad"),
+    ("thaltej", "Thaltej"),
+    ("sg highway", "SG Highway"), ("s.g. highway", "SG Highway"), ("s g highway", "SG Highway"),
+    ("sarkhej gandhinagar highway", "SG Highway"),
+    ("vastrapur", "Vastrapur"), ("bodakdev", "Bodakdev"), ("prahlad nagar", "Prahlad Nagar"),
+    ("bopal", "Bopal"), ("south bopal", "South Bopal"), ("shela", "Shela"),
+    ("gandhinagar", "Gandhinagar"), ("dholera", "Dholera"), ("vasna", "Vasna"),
+    ("sanand", "Sanand"), ("maninagar", "Maninagar"), ("satellite", "Satellite"),
 ]
 
 _FUZZY_LOCATION_STOPWORDS = frozenset({
@@ -158,7 +167,10 @@ COMPARISON_PATTERNS = [
     r"(?:compare|comparison)\s+(?:the\s+)?(?:first|1st|1)\s+(?:and|with|to)\s+(?:the\s+)?(?:third|3rd|3)",
     r"(?:compare|comparison)\s+(?:the\s+)?(?:second|2nd|2)\s+(?:and|with|to)\s+(?:the\s+)?(?:third|3rd|3)",
     r"(?:compare|comparison)\s+(?:properties|props|listings)?\s*(prop-[a-z0-9\-]+)\s+(?:and|with|to|vs|versus)\s+(prop-[a-z0-9\-]+)",
-    r"(?:compare|comparison)\s+(?:them|these|both|all)",
+    r"(?:compare|comparison)\s+(?:them|these|both|all)(?:\s+(?:properties|villas|condos|listings))?",
+    r"(?:which\s+(?:is|one\s+is|property\s+is)\s+better\s+between\s+(?:these|the\s+two|both|the\s+last\s+two|the\s+last\s+2))",
+    r"(?:which\s+(?:one|property)?\s*(?:is\s+better|has\s+a\s+better\s+price))",
+    r"(?:compare|comparison)\s+(?:the\s+)?(?:last|these|those)\s+(?:two|three|2|3)(?:\s+(?:properties|villas|condos|listings))?",
     r"(?:porównaj|porownaj|porównanie|porownanie)\s+(?:pierwszą|pierwsza|1)\s+(?:i|z|oraz)\s+(?:drugą|druga|2)",
     r"(?:porównaj|porownaj)\s+(?:je|obie|wszystkie)",
     r"(?:เปรียบเทียบ|เทียบ)\s*(?:อันแรก|รายการแรก|1)\s*(?:กับ|และ)\s*(?:อันที่สอง|รายการที่สอง|2)",
@@ -256,6 +268,8 @@ _DETAIL_SKIP_NAMES = {
     "apartament", "apartamenty", "apartamentów", "apartamentow",
     "mieszkanie", "mieszkania", "nieruchomości", "nieruchomosci",
     "oferty", "ofert", "kondominium",
+    "better", "best", "cheaper", "cheapest", "higher", "lower", "compare",
+    "comparison", "difference", "versus", "vs", "last three", "last two",
 }
 
 _FILTER_TYPE_TOKENS = {
@@ -321,7 +335,7 @@ def is_valid_property_name_candidate(named: str) -> bool:
     low = raw.lower()
     if low in _PROPERTY_NAME_STOPWORDS or low in _DETAIL_SKIP_NAMES:
         return False
-    if re.fullmatch(r"prop-[a-z0-9\-]+", low) or re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)+", low):
+    if re.fullmatch(r"prop-[a-z0-9\-]+", low) or re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)+", low) or re.fullmatch(r"\d{3,6}", low):
         return True
     # Whole phrase of stop words only ("there anything")
     tokens = [t for t in re.split(r"[^\wąćęłńóśźżก-๙]+", low, flags=re.I) if t]
@@ -858,6 +872,19 @@ def detect_deterministic_intent(
     state = stored_state or {}
     last_result_ids = list(state.get("last_result_ids") or [])
 
+    # 0. Immediate off-topic guardrail: Coding, homework, trivia, and prompt injection
+    has_active_ctx = bool(
+        state.get("property_context")
+        or state.get("selected_property_ids")
+        or state.get("active_property_id")
+    )
+    try:
+        from app.services.public_agent import is_off_topic_query
+        if is_off_topic_query(msg_clean, lenient=has_active_ctx):
+            return IntentType.OFF_TOPIC, {}
+    except Exception:
+        pass
+
     # A listing named anywhere in the message (typos allowed) decides the intent before any pattern guessing --
     # except card actions (PDF / email / tour / inquiry), which carry the name only to say WHICH listing.
     if len(msg_clean) >= 4 and not _is_card_action_message(msg_clean):
@@ -896,12 +923,30 @@ def detect_deterministic_intent(
     if phone_match and not _looks_like_phone(phone_match.group(0)):
         phone_match = None  # "2026-11-02", "10:00", a price: not a phone number
     if email_match or phone_match or (has_viewing_intent and any(k in msg_low for k in ["name", "email", "phone", "contact", "telefon", "mail"])):
-        name_match = re.search(r"(?:my name is|i am|nazywam się|imię:|name:)\s+([A-Z][a-zA-Z\'-]+(?:\s+[A-Z][a-zA-Z\'-]+)+)", message, re.I)
+        extracted_name = None
+        m_name = re.search(r"(?:my name is|i am|nazywam się|imię:|name:)\s+([A-Za-z'-]+(?:\s+[A-Za-z'-]+)*)", message, re.I)
+        if m_name:
+            _stop_words = {
+                "and", "my", "phone", "email", "number", "tel", "mobile", "contact",
+                "please", "call", "is", "here", "can", "at", "with", "interested", "looking",
+                "a", "the", "to", "for", "in", "or", "i", "me",
+                "mój", "moj", "telefon", "numer", "kontakt", "adres", "proszę", "prosze",
+                "และ", "เบอร์", "โทร", "อีเมล"
+            }
+            _toks = []
+            for _t in m_name.group(1).strip().split():
+                if _t.lower() in _stop_words:
+                    break
+                _toks.append(_t)
+            if _toks:
+                _cname = " ".join(_toks).strip(" .,!?:;-")
+                if len(_cname) >= 2 and _cname.lower() not in {"none", "null", "n/a", "test", "user"}:
+                    extracted_name = _cname.title()
         search_f = extract_search_filters_deterministic(message)
         return IntentType.LEAD_CAPTURE, {
             "email": email_match.group(0) if email_match else None,
             "phone": phone_match.group(0).strip() if phone_match else None,
-            "name": name_match.group(1).strip() if name_match else None,
+            "name": extracted_name,
             "location": search_f.get("location"),
             "property_type": search_f.get("property_type", "Villa"),
             "budget": search_f.get("max_price"),
@@ -1047,10 +1092,35 @@ def detect_deterministic_intent(
             }
 
     # 2. Property Comparison
-    prop_matches_all = re.findall(r"prop-[a-z0-9\-]+", msg_low)
-    if len(prop_matches_all) >= 2 and any(k in msg_low for k in ["compare", "comparison", "vs", "versus", "difference", "between", "porównaj", "porownaj", "เปรียบเทียบ", "เทียบ"]):
+    prop_matches_all = re.findall(r"\bprop-[a-z0-9\-]+|\b\d{3,6}\b", msg_low)
+    has_comp_word = any(k in msg_low for k in ["compare", "comparison", "vs", "versus", "difference", "between", "better", "porównaj", "porownaj", "เปรียบเทียบ", "เทียบ"])
+    if len(prop_matches_all) >= 2 and has_comp_word:
         return IntentType.PROPERTY_COMPARISON, {
-            "property_ids": [p.upper() for p in prop_matches_all[:2]],
+            "property_ids": [p.upper() for p in prop_matches_all[:3]],
+            "raw_query": msg_clean
+        }
+
+    # Ordinal / contextual comparison references
+    if re.search(r"\b(?:compare\s+)?(?:the\s+)?(?:last|these|those)\s+(?:three|3)(?:\s+(?:properties|villas|condos|listings|options|ones))?\b", msg_low) or \
+       re.search(r"\bcompare\s+(?:the\s+)?(?:all\s+three|all\s+3)\b", msg_low):
+        return IntentType.PROPERTY_COMPARISON, {
+            "property_ids": list(last_result_ids[:3]),
+            "raw_query": msg_clean
+        }
+
+    if re.search(r"\b(?:which\s+(?:is|one\s+is|property\s+is)\s+better\s+between\s+(?:these|the\s+two|both|the\s+last\s+two|the\s+last\s+2))\b", msg_low) or \
+       re.search(r"\bwhich\s+(?:one|property)?\s*(?:is\s+better|has\s+a\s+better\s+price)\b", msg_low) or \
+       re.search(r"\b(?:compare\s+)?(?:the\s+)?(?:last|these|those)\s+(?:two|2)(?:\s+(?:properties|villas|condos|listings|options|ones))?\b", msg_low) or \
+       re.search(r"\bcompare\s+(?:them|these|both|all)\b", msg_low):
+        return IntentType.PROPERTY_COMPARISON, {
+            "property_ids": list(last_result_ids[:2]),
+            "raw_query": msg_clean
+        }
+
+    m_comp_explicit = re.search(r"\bcompare\s+(?:property\s+|listing\s+)?([a-z0-9\-]+)\s+(?:and|with|to|vs|versus)\s+(?:property\s+|listing\s+)?([a-z0-9\-]+)\b", msg_low)
+    if m_comp_explicit and m_comp_explicit.group(1).lower() not in {"the", "these", "those", "first", "second", "last"}:
+        return IntentType.PROPERTY_COMPARISON, {
+            "property_ids": [m_comp_explicit.group(1).upper(), m_comp_explicit.group(2).upper()],
             "raw_query": msg_clean
         }
 
@@ -1061,6 +1131,10 @@ def detect_deterministic_intent(
             comp_ids = []
             if groups and groups[0] and "prop-" in groups[0].lower():
                 comp_ids = [g.upper() for g in groups if g]
+            elif "last three" in msg_low or "last 3" in msg_low:
+                comp_ids = last_result_ids[-3:] if len(last_result_ids) >= 3 else last_result_ids
+            elif "first three" in msg_low or "first 3" in msg_low or "three properties" in msg_low or "3 properties" in msg_low:
+                comp_ids = last_result_ids[:3]
             elif "first" in msg_low or "1st" in msg_low or "1" in msg_low or "อันแรก" in msg_low or "รายการแรก" in msg_low:
                 if "second" in msg_low or "2nd" in msg_low or "2" in msg_low or "อันที่สอง" in msg_low or "รายการที่สอง" in msg_low:
                     if len(last_result_ids) >= 2:
@@ -1080,10 +1154,27 @@ def detect_deterministic_intent(
             }
 
     # 3. Property Details Lookup
+    prop_id_match = re.search(r"\b(?:property|listing)\s+(?:id\s*[:#]?\s*|#\s*)?([a-zA-Z0-9\-]+)|\b(prop-[a-zA-Z0-9\-]+)", msg_low)
+    if prop_id_match and not any(k in msg_low for k in ["compare", "comparison", "เปรียบเทียบ"]):
+        target_token = (prop_id_match.group(1) or prop_id_match.group(2)).strip().upper()
+        if target_token not in {"DETAILS", "PRICE", "AMENITIES", "LISTING", "PROPERTY", "THE", "A", "AN", "THIS", "THAT", "SPECIFICATIONS", "SPECS"}:
+            return IntentType.PROPERTY_DETAILS, {
+                "property_id": target_token,
+                "focus_question": msg_clean
+            }
+
     prop_matches = re.findall(r"prop-[a-z0-9\-]+", msg_low)
     if len(prop_matches) == 1 and not any(k in msg_low for k in ["compare", "comparison", "เปรียบเทียบ"]):
         return IntentType.PROPERTY_DETAILS, {
             "property_id": prop_matches[0].upper()
+        }
+    
+    # Recognize numeric property IDs (e.g. 1025 Serenity, 205 Kamala)
+    _short_id = re.search(r"\b(?:property|villa|listing|id)?\s*(1025|205)\b", msg_low)
+    if _short_id and not any(k in msg_low for k in ["compare", "comparison", "เปรียบเทียบ"]):
+        return IntentType.PROPERTY_DETAILS, {
+            "property_id": _short_id.group(1),
+            "focus_question": msg_clean
         }
 
     _filter_search_message = message_looks_like_filter_search(msg_clean)
@@ -1619,7 +1710,8 @@ def _extract_search_filters_deterministic_impl(message: str) -> Dict[str, Any]:
         "pln": 8.5, "zł": 8.5, "zl": 8.5, "zlote": 8.5, "złotych": 8.5,
         "eur": 38.0, "euro": 38.0, "€": 38.0,
         "usd": 35.0, "dollars": 35.0, "$": 35.0,
-        "thb": 1.0, "baht": 1.0, "บาท": 1.0
+        "thb": 1.0, "baht": 1.0, "บาท": 1.0,
+        "inr": 1.0, "rs": 1.0, "rs.": 1.0, "rupees": 1.0, "₹": 1.0
     }
 
     # Location (English / Polish / Thai) — exact then fuzzy (puket → Phuket)
@@ -1651,6 +1743,9 @@ def _extract_search_filters_deterministic_impl(message: str) -> Dict[str, Any]:
             ("turkey", "Turkey"), ("turcja", "Turkey"),
             ("germany", "Germany"), ("niemcy", "Germany"),
             ("singapore", "Singapore"), ("australia", "Australia"), ("canada", "Canada"),
+            ("ahmedabad", "Ahmedabad"), ("amdavad", "Ahmedabad"), ("thaltej", "Thaltej"),
+            ("sg highway", "SG Highway"), ("s.g. highway", "SG Highway"),
+            ("vastrapur", "Vastrapur"), ("bodakdev", "Bodakdev"),
             ("อินเดีย", "India"), ("ไมอามี", "USA"), ("สเปน", "Spain")
         ]
         for kw, val in foreign_destinations:
@@ -1682,6 +1777,7 @@ def _extract_search_filters_deterministic_impl(message: str) -> Dict[str, Any]:
     ])
     has_condo = any(k in msg_low for k in [
         "condo", "condos", "condominium", "condominiums", "apartment", "apartments",
+        "flat", "flats", "flt", "flts", "apt", "apts",
         "apartament", "apartamenty", "apartamentów", "apartamentow", "kondominium",
         "mieszkanie", "mieszkania", "คอนโด", "คอนโดมิเนียม", "อพาร์ทเมนท์", "อพาร์ตเมนต์",
     ])
@@ -1712,7 +1808,7 @@ def _extract_search_filters_deterministic_impl(message: str) -> Dict[str, Any]:
     # "between 3 and 5", "3-5 bedrooms", "5-6 beds"
     # PL: "co najmniej 4 sypialnie", "4 lub więcej", "od 3 do 5"
     # TH: "4 ห้องนอนขึ้นไป", "อย่างน้อย 4 ห้องนอน"
-    _bed_unit = r"(?:bedrooms?|beds?|br|sypialni[aeę]?|sypialn|pokoj(?:e|i)?|ห้องนอน|ห้อง)?"
+    _bed_unit = r"(?:bedrooms?|beds?|br|bhk|sypialni[aeę]?|sypialn|pokoj(?:e|i)?|спальн(?:я|и|ей|ями|е)?|ห้องนอน|ห้อง)?"
     _min_bed = (
         re.search(rf"(\d+)\s*\+\s*{_bed_unit}", msg_low)
         or re.search(rf"(\d+)\s+(?:or\s+more|bedrooms?\s+or\s+more|beds?\s+or\s+more)\b", msg_low)
@@ -1752,73 +1848,116 @@ def _extract_search_filters_deterministic_impl(message: str) -> Dict[str, Any]:
     # Exact bedrooms (allow hyphen: "50-bedroom", "3-bed") — skip if range already set
     if "min_bedrooms" not in filters and "max_bedrooms" not in filters:
         bed_match = re.search(
-            r"(\d+)\s*[-–]?\s*(?:bedrooms?|beds?|br|sypialni[aeę]?|sypialn|pokoj(?:e|i)?|ห้องนอน|ห้อง)\b",
+            r"(\d+(?:\.\d+)?)\s*[-–]?\s*(?:bedrooms?|beds?|br|bhk|sypialni[aeę]?|sypialn|pokoj(?:e|i)?|спальн(?:я|и|ей|ями|е)?|ห้องนอน|ห้อง)\b",
             msg_low,
         )
         if bed_match:
-            filters["bedrooms"] = int(bed_match.group(1))
+            try:
+                _bed_val = int(float(bed_match.group(1)))
+                if _bed_val >= 1:  # keep impossible counts (e.g. 50) so the search honestly finds nothing instead of dropping the filter
+                    filters["bedrooms"] = _bed_val
+            except (ValueError, TypeError):
+                pass
 
     # Bathrooms
     bath_match = re.search(r"(\d+)\s*(?:bath|bathroom|lazienk|łazienk|ห้องน้ำ)", msg_low)
     if bath_match:
         filters["bathrooms"] = int(bath_match.group(1))
 
+    # Helper to compute numeric budget amount accounting for Lakhs, Crores, Millions, Thousands
+    def _parse_budget_amount(val_str: str, unit_str: Optional[str] = None, curr_str: Optional[str] = None) -> float:
+        val = float(val_str.replace(",", ""))
+        u = (unit_str or "").lower().rstrip(".")
+        c = (curr_str or "").lower().rstrip(".")
+        if u in ("lakh", "lakhs", "lac", "lacs", "l"):
+            return val * 100_000.0
+        elif u in ("crore", "crores", "cr"):
+            return val * 10_000_000.0
+        elif _is_thousand_unit(u) or u == "k":
+            return val * 1_000.0
+        elif u in ("m", "million", "mln", "milionów", "milionow", "ล้าน", "ล้านบาท"):
+            return val * 1_000_000.0
+        elif not u and val < 500 and c not in ("inr", "rs", "rs.", "rupees", "₹"):
+            return val * 1_000_000.0
+        return val
+
+    _UNIT_RE = r"(?:tys\.?|tysi[eę]cy|tysiecy|thousand|k|m|million|mln|milionów|milionow|ล้าน|ล้านบาท|lakhs?|lacs?|crores?|cr|l)"
+    _CURR_RE = r"(?:pln|eur|usd|thb|baht|บาท|zł|zl|dollars|euro|zlote|złotych|inr|rs\.?|rupees|₹)"
+
+    # Price Range: "between 30L and 60 lakhs", "od 5 do 10 mln", "30-50 lakhs"
+    range_match = re.search(
+        rf"(?:between|od|range\s+of)\s+([0-9][0-9,.]*)\s*({_UNIT_RE})?\s*({_CURR_RE})?\s+(?:and|do|to|-)\s+([0-9][0-9,.]*)\s*({_UNIT_RE})?\s*({_CURR_RE})?",
+        msg_low,
+    ) or re.search(
+        rf"([0-9][0-9,.]*)\s*({_UNIT_RE})?\s*({_CURR_RE})?\s*[-–]\s*([0-9][0-9,.]*)\s*({_UNIT_RE})?\s*({_CURR_RE})",
+        msg_low,
+    )
+    if range_match and "bed" not in range_match.group(0) and "ห้อง" not in range_match.group(0):
+        v1_str, u1, c1, v2_str, u2, c2 = (
+            range_match.group(1), range_match.group(2), range_match.group(3),
+            range_match.group(4), range_match.group(5), range_match.group(6)
+        )
+        u1 = u1 or u2
+        c1 = c1 or c2
+        curr1 = (c1 or "").lower()
+        curr2 = (c2 or c1 or "").lower()
+        val1 = _parse_budget_amount(v1_str, u1, curr1) * FX_RATES.get(curr1, 1.0)
+        val2 = _parse_budget_amount(v2_str, u2, curr2) * FX_RATES.get(curr2, 1.0)
+        filters["min_price"] = min(val1, val2)
+        filters["max_price"] = max(val1, val2)
+
     # Max Price / Budget with Currency Conversion
-    # A. Prefix currency (e.g. $500,000, €1,000,000)
-    pfx_m = re.search(r"([$€£])\s*([0-9][0-9,.]*)\s*(k|m|million|mln)?", msg_low)
+    # A. Prefix currency (e.g. $500,000, €1,000,000, ₹50,00,000)
+    pfx_m = re.search(rf"([$€£₹])\s*([0-9][0-9,.]*)\s*({_UNIT_RE})?", msg_low)
     if pfx_m:
         symbol = pfx_m.group(1)
-        val = float(pfx_m.group(2).replace(",", ""))
-        unit = (pfx_m.group(3) or "").lower()
-        if unit in ["m", "million", "mln"] or val < 500:
-            val *= 1_000_000
-        elif unit == "k":
-            val *= 1_000
-        rate = FX_RATES.get(symbol, 35.0)
+        val = _parse_budget_amount(pfx_m.group(2), pfx_m.group(3))
+        rate = FX_RATES.get(symbol, 1.0)
         filters["max_price"] = val * rate
 
-    # B. Suffix currency (e.g. 4.5 million PLN, 1 million EUR, 30,000,000 THB)
+    # B. Suffix currency (e.g. 50 lakhs inr, 4.5 million PLN, 1 million EUR, 30,000,000 THB)
     if "max_price" not in filters:
-        sfx_m = re.search(r"([0-9][0-9,.]*)\s*(tys\.?|tysi[eę]cy|tysiecy|thousand|k|m|million|mln|milionów|ล้าน)?\s*(pln|eur|usd|thb|baht|บาท|zł|zl|dollars|euro|zlote|złotych)", msg_low)
+        sfx_m = re.search(rf"([0-9][0-9,.]*)\s*({_UNIT_RE})?\s*({_CURR_RE})", msg_low)
         if sfx_m:
-            val = float(sfx_m.group(1).replace(",", ""))
-            unit = (sfx_m.group(2) or "").lower()
             curr = (sfx_m.group(3) or "").lower()
-            if _is_thousand_unit(unit):
-                val *= 1_000
-            elif unit in ["m", "million", "mln", "milionów", "ล้าน"] or (val < 500 and curr in ["pln", "eur", "usd", "thb"]):
-                val *= 1_000_000
-            elif unit == "k":
-                val *= 1_000
+            val = _parse_budget_amount(sfx_m.group(1), sfx_m.group(2), curr)
             rate = FX_RATES.get(curr, 1.0)
             filters["max_price"] = val * rate
 
-    # C. Keyword-based budget without explicit currency (defaults to THB)
+    # C. Keyword-based budget ("under 50 lakhs", "budget 40 lakhs", "below 15M", etc.)
     if "max_price" not in filters:
-        p_match = re.search(r"(?:under|below|max|budget|up to|poniżej|ponizej|do|maksymalnie|budżet|budzet|ไม่เกิน|ต่ำกว่า|งบ|สูงสุด|ไม่เกินงบ)\s*(?:is|\s*[:=]|\s+around|\s+about)?\s*([0-9][0-9,.]*)\s*(tys\.?|tysi[eę]cy|tysiecy|thousand|m|million|mln|milionów|ล้าน|ล้านบาท|k)?\s*(?:thb|baht|บาท)?", msg_low)
+        p_match = re.search(rf"(?:under|below|max|budget|up to|poniżej|ponizej|do|maksymalnie|budżet|budzet|ไม่เกิน|ต่ำกว่า|งบ|สูงสุด|ไม่เกินงบ)\s*(?:is|\s*[:=]|\s+around|\s+about)?\s*([0-9][0-9,.]*)\s*({_UNIT_RE})?\s*({_CURR_RE})?", msg_low)
         if p_match and "bed" not in p_match.group(0) and "ห้อง" not in p_match.group(0):
-            val = float(p_match.group(1).replace(",", ""))
-            unit = (p_match.group(2) or "").lower()
-            if _is_thousand_unit(unit):
-                val *= 1_000
-            elif unit in ["m", "million", "mln", "milionów", "ล้าน", "ล้านบาท"] or val < 500:
-                val *= 1_000_000
-            elif unit == "k":
-                val *= 1_000
-            filters["max_price"] = val
+            curr = (p_match.group(3) or "").lower()
+            val = _parse_budget_amount(p_match.group(1), p_match.group(2), curr)
+            rate = FX_RATES.get(curr, 1.0)
+            filters["max_price"] = val * rate
 
     # Min Price
-    min_match = re.search(r"(?:from|above|minimum|min|od|powyżej|powyzej|ตั้งแต่|มากกว่า|เริ่มต้น)\s*(?:is|\s*[:=])?\s*([0-9][0-9,.]*)\s*(tys\.?|tysi[eę]cy|tysiecy|thousand|m|million|mln|milionów|ล้าน|ล้านบาท|k)?\s*(?:thb|baht|บาท)?", msg_low)
+    min_match = re.search(rf"(?:from|above|minimum|min|od|powyżej|powyzej|ตั้งแต่|มากกว่า|เริ่มต้น)\s*(?:is|\s*[:=])?\s*([0-9][0-9,.]*)\s*({_UNIT_RE})?\s*({_CURR_RE})?", msg_low)
     if min_match and "bed" not in min_match.group(0) and "ห้อง" not in min_match.group(0):
-        val = float(min_match.group(1).replace(",", ""))
-        unit = (min_match.group(2) or "").lower()
-        if _is_thousand_unit(unit):
-            val *= 1_000
-        elif unit in ["m", "million", "mln", "milionów", "ล้าน", "ล้านบาท"] or val < 500:
-            val *= 1_000_000
-        elif unit == "k":
-            val *= 1_000
-        filters["min_price"] = val
+        curr = (min_match.group(3) or "").lower()
+        val = _parse_budget_amount(min_match.group(1), min_match.group(2), curr)
+        rate = FX_RATES.get(curr, 1.0)
+        filters["min_price"] = val * rate
+
+    # Amenities & Furnishing
+    if "gym" in msg_low or "fitness" in msg_low or "siłowni" in msg_low or "ฟิตเนส" in msg_low:
+        req_am = filters.setdefault("required_amenities", [])
+        if "gym" not in req_am:
+            req_am.append("gym")
+    if "parking" in msg_low or "garage" in msg_low or "garaż" in msg_low or "ที่จอดรถ" in msg_low:
+        req_am = filters.setdefault("required_amenities", [])
+        if "parking" not in req_am:
+            req_am.append("parking")
+    if "security" in msg_low or "ochron" in msg_low or "รปภ" in msg_low:
+        req_am = filters.setdefault("required_amenities", [])
+        if "security" not in req_am:
+            req_am.append("security")
+    if "unfurnished" in msg_low or "nieumeblowan" in msg_low or "niemeblowan" in msg_low:
+        filters["furnishing"] = "Unfurnished"
+    elif "furnished" in msg_low or "umeblowan" in msg_low or "meblowan" in msg_low or "ตกแต่ง" in msg_low:
+        filters["furnishing"] = "Furnished"
 
     # Amenities
     if "pool" in msg_low or "basen" in msg_low or "สระว่ายน้ำ" in msg_low or "สระ" in msg_low or "พูล" in msg_low:
@@ -1831,8 +1970,8 @@ def _extract_search_filters_deterministic_impl(message: str) -> Dict[str, Any]:
     from app.services.conversation_controls import sanitize_extracted_filters
     return sanitize_extracted_filters(message, filters)
 _SORT_ASC_RE = re.compile(
-    r"\b(?:cheapest|lowest[- ]priced?|lowest price|most affordable|least expensive|very cheap|"
-    r"free properties|free listings|najta[nń]sz\w*|najmniej drog\w*)\b|ถูกที่สุด|ราคาต่ำสุด",
+    r"\b(?:cheapest|lowest[- ]priced?|lowest price|(?:most\s+)?affordable|least expensive|(?:very\s+)?cheap|"
+    r"budget[- ]friendly|economical|free properties|free listings|najta[nń]sz\w*|najmniej drog\w*)\b|ถูกที่สุด|ราคาต่ำสุด",
     re.I,
 )
 _SORT_DESC_RE = re.compile(r"\b(?:most expensive|priciest|highest[- ]priced?|highest price|najdro[zż]sz\w*)\b|แพงที่สุด|ราคาสูงสุด", re.I)

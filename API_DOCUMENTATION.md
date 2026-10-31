@@ -1,590 +1,2161 @@
-# Frontend Developer API Guide (Client-Facing Only)
-
-This guide contains **only the 7 client-facing APIs** needed to build the website, property catalog, and chatbot UI. No backend or admin endpoints.
-
----
-
-## Quick Reference Table
-
-| # | Feature | Route | Method | What It Does |
-|---|---|---|---|---|
-| 1 | **Website Branding** | `/api/v1/branding` | `GET` | Get bot name, brand title, and advisor email for active site |
-| 2 | **Unified Chat & Contact API** | `/api/v1/chat/public` | `POST` | **Single endpoint** for both user chat and contact/lead form submission |
-| 3 | **Chat History** | `/api/v1/chat/history/{session_id}` | `GET` | Load previous chat messages if user refreshes page |
-| 4 | **Brochure Download** | `/api/v1/chat/brochure/{property_id}` | `GET` | Download A4 luxury property PDF brochure |
-| 5 | **Property Catalog** | `/api/v1/properties` | `GET` | Filter listings by location, price, bedrooms, pool, etc. |
-| 6 | **Single Property** | `/api/v1/properties/{property_id}` | `GET` | Get full specifications, photos, and GPS coordinates |
-| 7 | *(Optional)* Dedicated Lead API | `/api/v1/chat/lead` | `POST` | Standalone contact submission endpoint (or use `/chat/public`) |
+# SPARK BETA TECH AI CHATBOT PLATFORM - COMPLETE API REFERENCE
+**Version:** 1.0.0 | **Framework:** FastAPI / Python 3.10 | **Target:** Production & Staging
+**Websites Powered:** `Tajlandia.com` | `VarsoviaEstate.com` | `Thai.estate` | Admin Control Panel
 
 ---
 
-## 1. Website Branding & Bot Identity
+## TABLE OF CONTENTS
+
+1. [Architecture & Protocol Standards](#1-architecture--protocol-standards)
+2. [Global Authentication & Role-Based Access Control](#2-global-authentication--role-based-access-control)
+3. [Multi-Tenant Tenant Domain Scoping](#3-multi-tenant-domain-scoping)
+4. [Master Endpoints Inventory (93 Operations)](#4-master-endpoints-inventory)
+5. [Public Customer Chatbot & Leads](#5-public-customer-chatbot-and-leads)
+6. [Property Catalog & Public Search](#6-property-catalog-and-public-search)
+7. [Authentication & Identity Management](#7-authentication-and-identity-management)
+8. [Admin Staff & User Directory](#8-admin-staff-and-user-directory)
+9. [Internal Staff Chatbot Agent](#9-internal-staff-chatbot-agent)
+10. [Two-Step Staged Action Gate (HITL Governance)](#10-two-step-staged-action-gate-hitl-governance)
+11. [Document & Report Generation (PDF, XLSX, DOCX)](#11-document-and-report-generation-pdf-xlsx-docx)
+12. [Query Logs, Analytics & Answer Corrections (N3, N4, N5)](#12-query-logs-analytics-and-answer-corrections-n3-n4-n5)
+13. [Superadmin Business Instructions & Knowledge Teaching (N7)](#13-superadmin-business-instructions-and-knowledge-teaching-n7)
+14. [Property Inventory Management & Batch Undo (C1, C2)](#14-property-inventory-management-and-batch-undo-c1-c2)
+15. [System Diagnostics, Audit Logs & Maintenance (C3, C4)](#15-system-diagnostics-audit-logs-and-maintenance-c3-c4)
+16. [Standard Error Responses & Status Codes](#16-standard-error-responses--status-codes)
+
+---
+
+## 1. ARCHITECTURE & PROTOCOL STANDARDS
+
+All endpoints conform to standard REST architectural patterns over HTTP/HTTPS with JSON message bodies, with streaming responses supported for document binaries (PDF, XLSX, DOCX).
+
+### Base URLs
+- **Staging Environment (Local):** `http://127.0.0.1:8000`
+- **Staging Cloud (Railway):** `https://crossover.proxy.rlwy.net:55955`
+- **Production Cloud (Cloud Run):** Configured via domain ingress `https://api.tajlandia.com`
+
+### Standard Headers
+```http
+Content-Type: application/json
+Authorization: Bearer <jwt_access_token>   # Required for all staff/admin endpoints
+x-site-origin: tajlandia.com              # Optional tenant routing override
+x-selected-websites: tajlandia.com         # Multi-site catalog scoping
+```
+
+---
+
+## 2. GLOBAL AUTHENTICATION & ROLE-BASED ACCESS CONTROL
+
+Authentication is enforced via stateless JSON Web Tokens (JWT) signed with HMAC-SHA256 (`HS256`). Tokens carry user identity, assigned role, and allowed website domains.
+
+| Role Level | Hierarchy | Permissions & Scope |
+|:---|:---:|:---|
+| **Public Visitor** (`anonymous`) | Level 0 | Unauthenticated access to public chat (`/api/v1/chat/public`), property listings (`/api/v1/properties`), branding, and PDF brochure downloads. |
+| **Staff Worker** (`worker`) | Level 1 | Access to internal staff chatbot (`/api/v1/admin/chat`), read-only property history, document generation, and proposing changes. Blocked from administrative deletions or purge maintenance. |
+| **Super Admin** (`super_admin`) | Level 2 | Complete operational access: approving staged write actions, executing rollback/undo, modifying staff users, instruction teaching, and system maintenance. |
+
+---
+
+## 3. MULTI-TENANT DOMAIN SCOPING
+
+The platform operates as a unified multi-tenant engine serving three core real estate brands from a shared codebase:
+1. **`tajlandia.com`** (and `tajlandia.pl`): Primary Thailand investment portal for European / Polish / International buyers.
+2. **`thai.estate`**: English-first luxury villa and condominium brokerage targeting global expatriates and investors.
+3. **`varsoviaestate.com`**: European / Warsaw residential and commercial properties.
+
+Tenant identification resolves dynamically via `site_origin` in request bodies, query parameters, or `x-site-origin` HTTP headers.
+
+---
+
+## 4. MASTER ENDPOINTS INVENTORY (93 OPERATIONS)
+
+| Method | Endpoint Path | Category | Auth | Roles | Description |
+|:---:|:---|:---|:---:|:---:|:---|
+| `GET` | `/api/v1/chat/brochure/file/{filename}` | Public | No | `public` | Get Local Stored Brochure File |
+| `GET` | `/api/v1/chat/brochure/shortlist` | Public | No | `public` | Generates and downloads a professional PDF comparing and sho |
+| `GET` | `/api/v1/chat/brochure/{property_id}` | Public | No | `public` | Generates and downloads a professional property brochure PDF |
+| `GET` | `/api/v1/chat/contact-info` | Public | No | `public` | Returns the public phone / WhatsApp numbers of the site and  |
+| `GET` | `/api/v1/chat/history/{session_id}` | Public | No | `public` | Restores conversation history and saved preferences for a se |
+| `POST` | `/api/v1/chat/lead` | Public | No | `public` | Captures customer contact details directly from modal or cal |
+| `POST` | `/api/v1/chat/public` | Public | No | `public` | Unified conversational & lead capture endpoint for visitors  |
+| `GET` | `/api/v1/branding` | Property | No | `public` | Returns active tenant branding, bot name, and contact detail |
+| `GET` | `/api/v1/properties` | Property | No | `public` | Direct property filtering endpoint using safe SQLAlchemy que |
+| `GET` | `/api/v1/properties/{property_id}` | Property | No | `public` | Lookup property by exact Property ID with optional website s |
+| `GET` | `/health` | Property | No | `public` | System health check, PostgreSQL (admin and user instances),  |
+| `POST` | `/api/admin/auth/login` | Authentication | No | `public` | Authenticates an administrative / staff user with email and  |
+| `POST` | `/api/admin/auth/register` | Authentication | No | `public` | Multi-user registration endpoint. |
+| `POST` | `/api/v1/auth/change-password` | Authentication | Yes | `worker, super_admin` | Changes the authenticated administrator's password. |
+| `POST` | `/api/v1/auth/forgot-password` | Authentication | No | `public` | Generates a secure password reset token for an administrator |
+| `GET` | `/api/v1/auth/google/callback` | Authentication | No | `public` | Receives authorization code from Google, exchanges it for ac |
+| `POST` | `/api/v1/auth/google/disconnect` | Authentication | No | `public` | Revokes and unlinks the connected Google account for the aut |
+| `GET` | `/api/v1/auth/google/login` | Authentication | No | `public` | Generates the Google OAuth2 authorization URL for the authen |
+| `GET` | `/api/v1/auth/google/status` | Authentication | No | `public` | Returns the Google Workspace connection status for the authe |
+| `POST` | `/api/v1/auth/login` | Authentication | No | `public` | Authenticates an administrative / staff user with email and  |
+| `POST` | `/api/v1/auth/logout` | Authentication | No | `public` | Terminates the active user session and revokes the token. |
+| `GET` | `/api/v1/auth/me` | Authentication | Yes | `worker, super_admin` | Returns the authenticated user's profile based on the active |
+| `POST` | `/api/v1/auth/register` | Authentication | No | `public` | Multi-user registration endpoint. |
+| `POST` | `/api/v1/auth/reset-password` | Authentication | No | `public` | Resets the administrator password using a valid cryptographi |
+| `GET` | `/api/v1/admin/users` | Admin | Yes | `worker, super_admin` | Directory endpoint for admins and super admins to inspect st |
+| `POST` | `/api/v1/admin/users` | Admin | Yes | `worker, super_admin` | Creates a new administrator or worker user account. |
+| `DELETE` | `/api/v1/admin/users/{user_id}` | Admin | Yes | `worker, super_admin` | Deletes a user account and cascades active sessions. |
+| `GET` | `/api/v1/admin/users/{user_id}` | Admin | Yes | `worker, super_admin` | Retrieves details and status for a specific user account. |
+| `PATCH` | `/api/v1/admin/users/{user_id}` | Admin | Yes | `worker, super_admin` | Updates user details (name, password reset, role, active sta |
+| `PUT` | `/api/v1/admin/users/{user_id}` | Admin | Yes | `worker, super_admin` | Updates user details (name, password reset, role, active sta |
+| `GET` | `/api/v1/auth/admin/users` | Admin | Yes | `worker, super_admin` | Directory endpoint for admins and super admins to inspect st |
+| `POST` | `/api/v1/auth/admin/users` | Admin | Yes | `worker, super_admin` | Creates a new administrator or worker user account. |
+| `DELETE` | `/api/v1/auth/admin/users/{user_id}` | Admin | Yes | `worker, super_admin` | Deletes a user account and cascades active sessions. |
+| `GET` | `/api/v1/auth/admin/users/{user_id}` | Admin | Yes | `worker, super_admin` | Retrieves details and status for a specific user account. |
+| `PATCH` | `/api/v1/auth/admin/users/{user_id}` | Admin | Yes | `worker, super_admin` | Updates user details (name, password reset, role, active sta |
+| `PUT` | `/api/v1/auth/admin/users/{user_id}` | Admin | Yes | `worker, super_admin` | Updates user details (name, password reset, role, active sta |
+| `POST` | `/api/v1/auth/admin/users/{user_id}/block` | Admin | Yes | `worker, super_admin` | Super Admin API to block or unblock any administrator or wor |
+| `POST` | `/api/v1/admin/chat` | Internal | Yes | `worker, super_admin` | Authenticated Admin / Internal Team AI Agent unified endpoin |
+| `GET` | `/api/v1/admin/chat/history/{session_id}` | Internal | Yes | `worker, super_admin` | Retrieves full admin multi-turn conversation history from Fi |
+| `GET` | `/api/v1/admin/actions/{pending_action_id}` | Two-Step | Yes | `worker, super_admin` | Retrieves current status and payload details of a staged pen |
+| `POST` | `/api/v1/admin/actions/{pending_action_id}/confirm` | Two-Step | Yes | `worker, super_admin` | Explicit Two-Step Confirmation endpoint for write actions. |
+| `POST` | `/api/v1/admin/actions/{pending_action_id}/reject` | Two-Step | Yes | `worker, super_admin` | Rejects a staged pending action and logs the rejection in au |
+| `GET` | `/api/v1/admin/brochure/preview` | Document | Yes | `worker, super_admin` | Admin-only design preview: return a single-property brochure |
+| `GET` | `/api/v1/admin/reports/download/{token}` | Document | Yes | `worker, super_admin` | Public (token-gated) download — no Bearer header required. |
+| `GET` | `/api/v1/admin/reports/{filename}` | Document | Yes | `worker, super_admin` | Downloads a generated PDF/XLSX/DOCX/CSV property intelligenc |
+| `POST` | `/api/v1/admin/reports/{filename}/link` | Document | Yes | `worker, super_admin` | Return a short-lived HMAC signed download URL (valid ~10 min |
+| `GET` | `/api/v1/admin/chat-logs/conversations` | Query | Yes | `worker, super_admin` | Conversations the caller may see, filtered, searched, sorted |
+| `GET` | `/api/v1/admin/chat-logs/conversations/{conversation_id}` | Query | Yes | `worker, super_admin` | One conversation with its messages in chronological order. |
+| `POST` | `/api/v1/admin/chat-logs/conversations/{conversation_id}/messages/{message_id}/remarks` | Query | Yes | `worker, super_admin` | An internal remark on one bot response. It never changes wha |
+| `PATCH` | `/api/v1/admin/chat-logs/conversations/{conversation_id}/messages/{message_seq}/feedback` | Query | Yes | `worker, super_admin` | Adds user feedback (thumbs_up/thumbs_down) to a logged assis |
+| `GET` | `/api/v1/admin/chat-logs/corrections` | Query | Yes | `worker, super_admin` | List Corrections |
+| `GET` | `/api/v1/admin/chat-logs/corrections/{correction_id}` | Query | Yes | `worker, super_admin` | Get Correction |
+| `PATCH` | `/api/v1/admin/chat-logs/corrections/{correction_id}` | Query | Yes | `worker, super_admin` | Editing returns the correction to 'proposed': an edited answ |
+| `POST` | `/api/v1/admin/chat-logs/corrections/{correction_id}/approve` | Query | Yes | `worker, super_admin` | Approve Correction |
+| `POST` | `/api/v1/admin/chat-logs/corrections/{correction_id}/deactivate` | Query | Yes | `worker, super_admin` | Deactivate Correction |
+| `POST` | `/api/v1/admin/chat-logs/corrections/{correction_id}/reject` | Query | Yes | `worker, super_admin` | Reject Correction |
+| `GET` | `/api/v1/admin/chat-logs/corrections/{correction_id}/revisions` | Query | Yes | `worker, super_admin` | Correction Revisions |
+| `GET` | `/api/v1/admin/chat-logs/remarks` | Query | Yes | `worker, super_admin` | List Remarks |
+| `GET` | `/api/v1/admin/chat-logs/remarks/{remark_id}` | Query | Yes | `worker, super_admin` | Get Remark |
+| `PATCH` | `/api/v1/admin/chat-logs/remarks/{remark_id}` | Query | Yes | `worker, super_admin` | The author (or a reviewer) edits the text; only a reviewer c |
+| `POST` | `/api/v1/admin/chat-logs/remarks/{remark_id}/correction` | Query | Yes | `worker, super_admin` | Propose a corrected answer. It is only a proposal until a su |
+| `GET` | `/api/v1/admin/chat-logs/remarks/{remark_id}/revisions` | Query | Yes | `worker, super_admin` | Remark Revisions |
+| `POST` | `/api/v1/admin/corrections` | Query | Yes | `worker, super_admin` | Create a new answer correction directly (without going throu |
+| `GET` | `/api/v1/admin/superadmin/conversations` | Superadmin | Yes | `super_admin` | The list the Admin Panel's chat-log page loads. It reads the |
+| `GET` | `/api/v1/admin/superadmin/conversations/{conversation_id}` | Superadmin | Yes | `super_admin` | Read-only chat, pending actions and audit rows. Nothing is w |
+| `GET` | `/api/v1/admin/superadmin/conversations/{conversation_id}/review` | Superadmin | Yes | `super_admin` | What the 'Review AI Response' dialog shows: the full questio |
+| `POST` | `/api/v1/admin/superadmin/conversations/{conversation_id}/review` | Superadmin | Yes | `super_admin` | Save Review. Either tick 'satisfactory', or give instruction |
+| `GET` | `/api/v1/admin/superadmin/instructions` | Superadmin | Yes | `super_admin` | List Instructions |
+| `POST` | `/api/v1/admin/superadmin/instructions` | Superadmin | Yes | `super_admin` | Create Instruction |
+| `GET` | `/api/v1/admin/superadmin/instructions/export` | Superadmin | Yes | `super_admin` | Export Instructions |
+| `POST` | `/api/v1/admin/superadmin/instructions/import` | Superadmin | Yes | `super_admin` | Import Instructions |
+| `GET` | `/api/v1/admin/superadmin/instructions/{instruction_id}` | Superadmin | Yes | `super_admin` | Get Instruction |
+| `PATCH` | `/api/v1/admin/superadmin/instructions/{instruction_id}` | Superadmin | Yes | `super_admin` | Update Instruction |
+| `POST` | `/api/v1/admin/superadmin/instructions/{instruction_id}/activate` | Superadmin | Yes | `super_admin` | Activate Instruction |
+| `POST` | `/api/v1/admin/superadmin/instructions/{instruction_id}/archive` | Superadmin | Yes | `super_admin` | Archive Instruction |
+| `POST` | `/api/v1/admin/superadmin/instructions/{instruction_id}/rollback` | Superadmin | Yes | `super_admin` | Rollback Instruction |
+| `GET` | `/api/v1/admin/superadmin/remarks` | Superadmin | Yes | `super_admin` | List Remarks |
+| `POST` | `/api/v1/admin/superadmin/remarks` | Superadmin | Yes | `super_admin` | Create Remark |
+| `POST` | `/api/v1/admin/superadmin/remarks/{remark_id}/convert` | Superadmin | Yes | `super_admin` | Convert Remark |
+| `POST` | `/api/v1/admin/superadmin/remarks/{remark_id}/dismiss` | Superadmin | Yes | `super_admin` | Dismiss Remark |
+| `GET` | `/api/v1/admin/data-history` | Property | Yes | `worker, super_admin` | Returns chronological history of who updated which data acro |
+| `GET` | `/api/v1/admin/operations/history` | Property | Yes | `worker, super_admin` | Returns full history of all past batch operations, showing a |
+| `POST` | `/api/v1/admin/operations/{operation_id}/undo` | Property | Yes | `worker, super_admin` | Instantly rolls back a previous batch operation within its 6 |
+| `GET` | `/api/v1/admin/properties` | Property | Yes | `worker, super_admin` | Fetches property listings strictly scoped to the staff membe |
+| `POST` | `/api/v1/admin/properties` | Property | Yes | `worker, super_admin` | Create a property in Postgres and Firestore after validation |
+| `POST` | `/api/v1/admin/properties/batch-file` | Property | Yes | `worker, super_admin` | Parses the uploaded file and STAGES the bulk change as a pen |
+| `DELETE` | `/api/v1/admin/properties/{property_id}` | Property | Yes | `worker, super_admin` | Soft-delete (archive) a property, or permanently delete it w |
+| `GET` | `/api/v1/admin/properties/{property_id}` | Property | Yes | `worker, super_admin` | Retrieves a single property listing from Cloud Firestore (pr |
+| `PUT` | `/api/v1/admin/properties/{property_id}` | Property | Yes | `worker, super_admin` | Update a property that already exists in Firestore, Postgres |
+| `GET` | `/api/v1/admin/properties/{property_id}/consistency` | Property | Yes | `worker, super_admin` | Admin-only comparison of the Firestore document and the Post |
+| `GET` | `/api/v1/admin/activity-logs` | System | Yes | `worker, super_admin` | Returns full administrative activity logs. |
+| `POST` | `/api/v1/admin/maintenance/purge-expired` | System | Yes | `super_admin` | Admin-only: delete expired undo snapshots from Firestore adm |
+| `GET` | `/api/v1/admin/system/config-status` | System | Yes | `worker, super_admin` | Admin-only: feature-flag / wiring status as labels and boole |
+
+---
+
+## 5. PUBLIC CUSTOMER CHATBOT & LEADS
+
+### `GET /api/v1/chat/brochure/file/{filename}`
+**Summary:** Get Local Stored Brochure File  
+**Authentication:** No | **Authorized Roles:** `public`  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `filename` | `path` | `string` | Yes | Query/path parameter |
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X GET "http://127.0.0.1:8000/api/v1/chat/brochure/file/{filename}" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `GET /api/v1/chat/brochure/shortlist`
+**Summary:** Download Property Shortlist PDF  
+**Authentication:** No | **Authorized Roles:** `public`  
+**Description:** Generates and downloads a professional PDF comparing and shortlisting selected properties.  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `property_ids` | `query` | `string` | Yes | Query/path parameter |
+| `lang` | `query` | `string` | No | Query/path parameter |
+| `site_origin` | `query` | `string` | No | Query/path parameter |
+| `client_name` | `query` | `string` | No | Query/path parameter |
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X GET "http://127.0.0.1:8000/api/v1/chat/brochure/shortlist" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `GET /api/v1/chat/brochure/{property_id}`
+**Summary:** Download Property Brochure PDF  
+**Authentication:** No | **Authorized Roles:** `public`  
+**Description:** Generates and downloads a professional property brochure PDF with images, specs, highlights, and amenities.  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `property_id` | `path` | `string` | Yes | Query/path parameter |
+| `site_origin` | `query` | `string` | No | Query/path parameter |
+| `session_id` | `query` | `string` | No | Query/path parameter |
+| `format` | `query` | `string` | No | Query/path parameter |
+| `template` | `query` | `string` | No | Query/path parameter |
+| `lang` | `query` | `string` | No | Query/path parameter |
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X GET "http://127.0.0.1:8000/api/v1/chat/brochure/{property_id}" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `GET /api/v1/chat/contact-info`
+**Summary:** Contact numbers and localized copy for the Inquire form  
+**Authentication:** No | **Authorized Roles:** `public`  
+**Description:** Returns the public phone / WhatsApp numbers of the site and the localized texts of the Inquire pop-up form.  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `site_origin` | `query` | `string` | No | Query/path parameter |
+| `language` | `query` | `string` | No | Query/path parameter |
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X GET "http://127.0.0.1:8000/api/v1/chat/contact-info" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `GET /api/v1/chat/history/{session_id}`
+**Summary:** Get Chat History  
+**Authentication:** No | **Authorized Roles:** `public`  
+**Description:** Restores conversation history and saved preferences for a session.  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `session_id` | `path` | `string` | Yes | Query/path parameter |
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X GET "http://127.0.0.1:8000/api/v1/chat/history/{session_id}" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `POST /api/v1/chat/lead`
+**Summary:** Submit Direct Lead  
+**Authentication:** No | **Authorized Roles:** `public`  
+**Description:** Captures customer contact details directly from modal or callback forms.  
+
+**Request Body:** `application/json` (Required)
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X POST "http://127.0.0.1:8000/api/v1/chat/lead" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `POST /api/v1/chat/public`
+**Summary:** Public Chat & Lead Capture  
+**Authentication:** No | **Authorized Roles:** `public`  
+**Description:** Unified conversational & lead capture endpoint for visitors on tajlandia.com, thai.estate, and varsoviaestate.com.  
+
+**Request Body:** `application/json` (Required)
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X POST "http://127.0.0.1:8000/api/v1/chat/public" \
+  -H "Content-Type: application/json"
+```
+
+---
+
+## 6. PROPERTY CATALOG & PUBLIC SEARCH
 
 ### `GET /api/v1/branding`
-Call this when the page loads to show the correct Bot Name, Website Title, and Contact Email (e.g. for `tajlandia.com`, `thai.estate`, or `varsoviaestate.com`).
+**Summary:** Get Branding  
+**Authentication:** No | **Authorized Roles:** `public`  
+**Description:** Returns active tenant branding, bot name, and contact details.  
 
-#### What to Send:
-- **Query Parameter (optional):**
-  - `site_origin`: e.g. `thai.estate` or `varsoviaestate.com` (if omitted, server defaults to `tajlandia.com`)
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `site_origin` | `query` | `string` | No | Query/path parameter |
 
-#### Success Response (`200 OK`):
-```json
-{
-  "site_origin": "thai.estate",
-  "brand_name": "Thai Estate",
-  "bot_name": "Thai Estate Advisor",
-  "brand_title": "Thai Estate — Luxury Thailand Real Estate",
-  "brand_subtitle": "Luxury Real Estate",
-  "domain": "thai.estate",
-  "advisor_email": "advisor@thai.estate",
-  "website_url": "https://thai.estate"
-}
-```
+**Response Status Codes:** `200`, `422`
 
-#### Where It Fails:
-* **Never fails with 400/404**: If an unknown domain is passed, it automatically falls back to `tajlandia.com` default.
-* If the server is offline: Network Error.
-
----
-
-## 2. Unified Customer Chatbot & Contact Submission
-
-### `POST /api/v1/chat/public`
-**Use this ONE API for everything:**
-1. Chatting with the AI advisor (asking for villas, prices, locations).
-2. Submitting contact forms (callback request, private tour booking, inquiry).
-3. Both at the same time (user asking a question while providing their phone/email).
-
----
-
-### Scenario A: Normal Chat Question
-
-#### What to Send (`POST JSON`):
-```json
-{
-  "session_id": "client_sess_101",
-  "message": "Show me 3-bedroom pool villas in Bang Tao under 25M THB",
-  "site_origin": "tajlandia.com",
-  "language": "en"
-}
+```bash
+curl -X GET "http://127.0.0.1:8000/api/v1/branding" \
+  -H "Content-Type: application/json"
 ```
 
 ---
-
-### Scenario B: Contact Form Submission (Lead Capture)
-When the user submits a modal form, viewing request, or callback request, send to the **same** endpoint:
-
-#### What to Send (`POST JSON`):
-```json
-{
-  "session_id": "client_sess_101",
-  "contact_name": "Alexander Smith",
-  "contact_email": "alexander.smith@example.com",
-  "contact_phone": "+48 501 234 567",
-  "preferred_location": "Bang Tao, Phuket",
-  "budget": 25000000,
-  "notes": "Interested in viewing next week",
-  "site_origin": "tajlandia.com",
-  "language": "en"
-}
-```
-*(Notice: `message` is optional when contact fields are present!)*
-
-#### Field Details:
-* `session_id` (string, **required**): Unique ID for the visitor session.
-* `message` (string, optional*): Visitor query text.
-* `contact_name` (string, optional*): Visitor's full name.
-* `contact_email` (string, optional*): Visitor's email address.
-* `contact_phone` (string, optional*): Visitor's phone or WhatsApp number.
-  *(**Rule:** Either `message` OR at least one contact field — name, email, or phone — must be provided).*
-* `preferred_location` (string, optional): Target area (e.g. `"Bang Tao, Phuket"`).
-* `budget` (number, optional): Numeric budget in THB (e.g. `25000000`).
-* `notes` (string, optional): Freeform inquiry notes.
-* `site_origin` (string, optional): Origin domain (`tajlandia.com`, `thai.estate`, or `varsoviaestate.com`).
-* `language` (string, optional): `"en"`, `"pl"`, or `"th"`. Default is `"en"`.
-
----
-
-#### Success Response 1 — Contact Form Submission (`200 OK`):
-```json
-{
-  "type": "text",
-  "text": "Thank you, Alexander Smith! Your inquiry has been registered. An advisor from Tajlandia AI (advisor@tajlandia.com) will contact you shortly.",
-  "properties": [],
-  "quick_replies": [
-    "Show me properties in Phuket",
-    "Search villas under 15M THB"
-  ],
-  "lead_captured": true,
-  "lead_id": "b182cb82-5813-4dc9-8fa9-93e18a99478e",
-  "preferences": {},
-  "session_id": "client_sess_101",
-  "conversation_id": "940adccc-4baf-42e7-adcf-8ccb58af809c",
-  "language": "en",
-  "brochure_property_id": null
-}
-```
-* `lead_captured` is `true`.
-* `lead_id` contains the unique database ID of the registered lead.
-* `text` contains the branded confirmation in the requested language (EN, PL, or TH).
-
----
-
-#### Success Response 2 — Property Search Cards (`200 OK`):
-```json
-{
-  "type": "property_cards",
-  "text": "Here are verified luxury pool villas in Bang Tao matching your criteria:",
-  "properties": [
-    {
-      "property_id": "PROP-PHK-001",
-      "name": "Aileen Residence Bangtao",
-      "property_type": "Villa",
-      "price": "from 8.xx million THB",
-      "bedrooms": "2–3",
-      "area": "167–242 sqm",
-      "location": "Bang Tao, Phuket",
-      "status": "Under construction",
-      "has_pool": true,
-      "beach_access": false,
-      "images": [
-        "https://images.unsplash.com/photo-1613977257363-707ba9348227?auto=format&fit=crop&w=1200&q=80"
-      ],
-      "detail_page_url": "https://tajlandia.com/oferty/phuket/aileen-residence-villas",
-      "highlights": [
-        "Private swimming pool with sun terrace",
-        "5 minutes drive to Bang Tao Beach"
-      ]
-    }
-  ],
-  "quick_replies": ["Villas under 15M THB", "With Private Pool", "Show more in Phuket"],
-  "lead_captured": false,
-  "lead_id": null,
-  "preferences": {
-    "location": "Bang Tao",
-    "property_type": "Villa",
-    "bedrooms": 3,
-    "max_price": 25000000
-  },
-  "session_id": "client_sess_101",
-  "conversation_id": "940adccc-4baf-42e7-adcf-8ccb58af809c",
-  "language": "en",
-  "brochure_property_id": null
-}
-```
-
----
-
-#### Success Response 3 — When User Asks for Brochure (`200 OK`):
-```json
-{
-  "type": "brochure",
-  "text": "📄 Generating official brochure for Aileen Residence Bangtao — your download will start automatically.",
-  "properties": [],
-  "quick_replies": [],
-  "lead_captured": true,
-  "lead_id": null,
-  "preferences": {},
-  "session_id": "client_sess_101",
-  "conversation_id": "940adccc-4baf-42e7-adcf-8ccb58af809c",
-  "language": "en",
-  "brochure_property_id": "PROP-PHK-001"
-}
-```
-> **Frontend Action:** If `brochure_property_id` is present, automatically trigger:  
-> `GET /api/v1/chat/brochure/PROP-PHK-001` to start the download.
-
----
-
-#### Success Response 4 — Session Message Limit Reached (`200 OK`):
-When the visitor has already sent `MAX_USER_MESSAGES_PER_SESSION` chat messages in this `session_id` (default **50**; set to `0` to disable), further chat messages are blocked. The LLM is not called. Contact-form-only submissions (no `message` text) are not counted and are not blocked.
-
-```json
-{
-  "type": "session_limit",
-  "text": "This chat has reached its message limit. Please start a new chat to continue.\n\nOur advisory team (advisor@tajlandia.com) is happy to help if you need further assistance.",
-  "properties": [],
-  "quick_replies": [],
-  "lead_captured": false,
-  "lead_id": null,
-  "preferences": {
-    "session_message_count": 50
-  },
-  "session_id": "client_sess_101",
-  "conversation_id": "940adccc-4baf-42e7-adcf-8ccb58af809c",
-  "language": "en",
-  "brochure_property_id": null,
-  "session_limit_reached": true,
-  "message_limit": 50,
-  "session_limit_warning": false
-}
-```
-
-* `type` is `"session_limit"`.
-* `session_limit_reached` is `true`.
-* `message_limit` is the configured cap.
-* `quick_replies` is empty (frontend should show its own "Start new chat" control).
-* `text` is localized (`en` / `pl` / `th`) and includes the tenant advisor email for `site_origin`.
-* Normal chat replies may also include `session_limit_warning: true` when 5 or fewer messages remain before the limit.
-
----
-
-#### Where It Fails:
-1. **Empty Message & No Contact Information (`400 Bad Request`):**
-   * **Why:** Both `message` and all contact fields (`contact_name`, `contact_email`, `contact_phone`) were empty or missing.
-   * **Response:**
-     ```json
-     { "detail": "Please provide a message or contact details." }
-     ```
-   * **Frontend Handling:** Validate that either the chat text box is not empty or at least one contact input has a value.
-
-2. **Missing `session_id` (`422 Unprocessable Entity`):**
-   * **Why:** The JSON payload omitted `session_id`.
-   * **Response:**
-     ```json
-     {
-       "detail": [
-         { "loc": ["body", "session_id"], "msg": "Field required", "type": "missing" }
-       ]
-     }
-     ```
-
-3. **Invalid Budget Format (`422 Unprocessable Entity`):**
-   * **Why:** Sent string instead of a valid number in `budget` (e.g. `"twenty million"`).
-   * **Response:**
-     ```json
-     {
-       "detail": [
-         { "loc": ["body", "budget"], "msg": "Input should be a valid number", "type": "float_type" }
-       ]
-     }
-     ```
-
-4. **Server Error (`500 Internal Server Error`):**
-   * **Why:** Temporary database or service issue.
-   * **Response:**
-     ```json
-     { "detail": "An error occurred while processing your property search request: ..." }
-     ```
-   * **Frontend Handling:** Display a toast message: *"Service temporarily unavailable. Please try again in a moment."*
-
----
-
-## 3. Restore Chat History
-
-### `GET /api/v1/chat/history/{session_id}`
-Call this when the page loads to restore previous chat messages if the visitor refreshed their browser.
-
-#### What to Send:
-- **Path Parameter:** `session_id` (e.g. `/api/v1/chat/history/client_sess_101`)
-
-#### Success Response (`200 OK`):
-```json
-{
-  "session_id": "client_sess_101",
-  "conversation_id": "940adccc-4baf-42e7-adcf-8ccb58af809c",
-  "site_origin": "tajlandia.com",
-  "lead_score": 45.0,
-  "preferences": {
-    "location": "Phuket",
-    "property_type": "Villa"
-  },
-  "messages": [
-    { "role": "user", "content": "Show me villas in Phuket" },
-    { "role": "assistant", "content": "Here are available villas...", "properties": [...] }
-  ]
-}
-```
-
-#### Where It Fails:
-* **Session has no history (`200 OK`):** Does NOT error. Returns `{ "session_id": "...", "turns_count": 0, "messages": [] }` so the frontend can safely show a clean welcome screen.
-
----
-
-## 4. (Optional) Dedicated Contact / Lead Submission Form
-
-### `POST /api/v1/chat/lead`
-> 💡 **Tip:** You do **not** need this if you use `POST /api/v1/chat/public` (Section 2 Scenario B)! `POST /api/v1/chat/public` now handles both chat messages and contact submissions through one single API.  
-> Keep this endpoint only if you prefer a separate dedicated URL for modal contact forms.
-
-Call this when a user submits their contact information via a modal, callback button, or viewing request form.
-
-#### What to Send (`POST JSON`):
-```json
-{
-  "session_id": "client_sess_101",
-  "contact_name": "Alexander Smith",
-  "contact_email": "alexander.smith@example.com",
-  "contact_phone": "+48 501 234 567",
-  "preferred_location": "Bang Tao, Phuket",
-  "budget": 25000000,
-  "notes": "Interested in viewing next week"
-}
-```
-* `session_id` (string, **required**): Connects this lead to their active chat session.
-* `contact_name` (string, optional*): Name.
-* `contact_email` (string, optional*): Email.
-* `contact_phone` (string, optional*): Phone / WhatsApp.
-  *(**Must provide at least one**: name, email, or phone).*
-* `preferred_location` (string, optional): Target area.
-* `budget` (number, optional): Numeric budget in THB.
-* `notes` (string, optional): Message or inquiry.
-
-#### Success Response (`200 OK`):
-```json
-{
-  "status": "success",
-  "lead_id": "b182cb82-...",
-  "lead_score": 75.0,
-  "message": "Thank you! Your inquiry has been registered. An advisor will contact you shortly."
-}
-```
-
-#### Where It Fails:
-1. **No Contact Information Provided (`400 Bad Request`):**
-   * **Why:** Name, email, and phone were all blank.
-   * **Response:**
-     ```json
-     { "detail": "Please provide at least a name, email, or phone number." }
-     ```
-   * **Frontend Handling:** Highlight contact fields in red.
-
-2. **Budget is not a number (`422 Unprocessable Entity`):**
-   * **Why:** Sent text instead of a number in `budget` (e.g. `"20 million"`).
-   * **Response:**
-     ```json
-     {
-       "detail": [
-         { "loc": ["body", "budget"], "msg": "value is not a valid float", "type": "type_error.float" }
-       ]
-     }
-     ```
-
----
-
-## 5. Download Property PDF Brochure
-
-### `GET /api/v1/chat/brochure/{property_id}`
-Generates and downloads a branded luxury A4 PDF brochure. Automatically records a high-intent buying signal for agency staff.
-
-#### What to Send:
-- **Path Parameter:** `property_id` (required, e.g. `PROP-PHK-001`)
-- **Query Parameters (optional):**
-  - `site_origin`: `thai.estate`, `varsoviaestate.com`, or `tajlandia.com` (brands the PDF)
-  - `session_id`: Active session ID (links download to user's chat)
-
-#### Success Response (`200 OK`):
-- **Headers:**
-  - `Content-Type: application/pdf`
-  - `Content-Disposition: attachment; filename="Tajlandia_AI_Property_PROP-PHK-001.pdf"`
-- **Body:** Binary PDF byte stream.
-
-#### Where It Fails:
-1. **Property Not Found (`404 Not Found`):**
-   * **Why:** The requested property ID does not exist in the database.
-   * **Response:**
-     ```json
-     { "detail": "Property 'PROP-INVALID' not found." }
-     ```
-   * **Frontend Handling:** Show toast: *"Brochure not found for this property."*
-
-2. **PDF Generation Error (`500 Internal Server Error`):**
-   * **Response:**
-     ```json
-     { "detail": "Failed to generate property brochure. Please try again." }
-     ```
-   * **Frontend Handling:** Reset button from "⏳ Generating..." to "❌ Try again".
-
----
-
-## 6. Property Catalog Search & Filter
-
 ### `GET /api/v1/properties`
-Filters properties from the database without AI. Use this for property grid pages, search filters, and catalog lists.
+**Summary:** List Properties  
+**Authentication:** No | **Authorized Roles:** `public`  
+**Description:** Direct property filtering endpoint using safe SQLAlchemy query builder with website scoping.  
 
-#### What to Send (All Query Parameters Optional):
-| Parameter | Type | Example | Description |
-|---|---|---|---|
-| `location` | string | `Phuket` or `Bang Tao` | Island or district |
-| `property_type` | string | `Villa` or `Condominium` | Category |
-| `min_price` | number | `5000000` | Minimum price (THB) |
-| `max_price` | number | `20000000` | Maximum price (THB) |
-| `bedrooms` | integer | `3` | Exact bedroom count |
-| `has_pool` | boolean | `true` | Must have swimming pool |
-| `beach_access` | boolean | `true` | Walk to beach |
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `location` | `query` | `string` | No | Query/path parameter |
+| `property_type` | `query` | `string` | No | Query/path parameter |
+| `min_price` | `query` | `string` | No | Query/path parameter |
+| `max_price` | `query` | `string` | No | Query/path parameter |
+| `bedrooms` | `query` | `string` | No | Query/path parameter |
+| `has_pool` | `query` | `string` | No | Query/path parameter |
+| `beach_access` | `query` | `string` | No | Query/path parameter |
+| `status` | `query` | `string` | No | Query/path parameter |
+| `websites` | `query` | `string` | No | Query/path parameter |
+| `site_origin` | `query` | `string` | No | Query/path parameter |
+| `limit` | `query` | `string` | No | Query/path parameter |
+| `offset` | `query` | `string` | No | Query/path parameter |
 
-#### Success Response (`200 OK`):
-```json
-{
-  "count": 1,
-  "properties": [
-    {
-      "property_id": "PROP-PHK-001",
-      "property_name": "Aileen Residence Bangtao",
-      "property_type": "Villa",
-      "status": "Under construction",
-      "area": "Bang Tao",
-      "district": "Choeng Thale",
-      "price_display": "from 8.xx million THB",
-      "bedrooms": "2–3",
-      "area_sqm": "167–242 sqm",
-      "has_pool": true,
-      "beach_access": false,
-      "images": ["https://images.unsplash.com/..."],
-      "detail_page_url": "https://tajlandia.com/oferty/phuket/aileen-residence-villas"
-    }
-  ]
-}
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X GET "http://127.0.0.1:8000/api/v1/properties" \
+  -H "Content-Type: application/json"
 ```
 
-#### Where It Fails:
-* **Invalid Filter Format (`422 Unprocessable Entity`):**
-  * **Why:** Sending letters in numeric filters (e.g. `min_price=cheap`).
-  * **Response:**
-    ```json
-    {
-      "detail": [
-        { "loc": ["query", "min_price"], "msg": "value is not a valid float", "type": "type_error.float" }
-      ]
-    }
-    ```
-
 ---
-
-## 7. Single Property Full Details
-
 ### `GET /api/v1/properties/{property_id}`
-Returns full record, developer info, GPS coordinates, specs, and gallery for a single property detail page or modal.
+**Summary:** Get Property  
+**Authentication:** No | **Authorized Roles:** `public`  
+**Description:** Lookup property by exact Property ID with optional website scope check.  
 
-#### What to Send:
-- **Path Parameter:** `property_id` (required, e.g. `PROP-PHK-001`)
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `property_id` | `path` | `string` | Yes | Query/path parameter |
+| `websites` | `query` | `string` | No | Query/path parameter |
+| `site_origin` | `query` | `string` | No | Query/path parameter |
 
-#### Success Response (`200 OK`):
-```json
-{
-  "found": true,
-  "property_id": "PROP-PHK-001",
-  "property_name": "Aileen Residence Bangtao",
-  "project_name": "Aileen Residence",
-  "property_type": "Villa",
-  "status": "Under construction",
-  "location": {
-    "country": "Thailand",
-    "province": "Phuket",
-    "district": "Bang Tao",
-    "area": "Bang Tao",
-    "address": "Choeng Thale, Thalang District, Phuket 83110",
-    "latitude": 7.9942,
-    "longitude": 98.3051
-  },
-  "developer": {
-    "name": "Aileen Development Group",
-    "description": "Leading luxury residential developer in Phuket."
-  },
-  "pricing": {
-    "display": "from 8.xx million THB",
-    "numeric_min": 8500000.0,
-    "currency": "THB",
-    "note": "Excludes sinking fund"
-  },
-  "details": {
-    "bedrooms": "2–3",
-    "bathrooms": "2–3",
-    "area": "167–242 sqm",
-    "units": 54
-  },
-  "description": "Exclusive contemporary tropical pool villas located in Bang Tao...",
-  "amenities": ["Private Pool", "24/7 Security", "Clubhouse", "Fitness Center"],
-  "highlights": ["54 Exclusive villas", "Foreign ownership available"],
-  "images": [
-    "https://images.unsplash.com/photo-1613977257363-707ba9348227?auto=format&fit=crop&w=1200&q=80"
-  ],
-  "detail_page_url": "https://tajlandia.com/oferty/phuket/aileen-residence-villas"
-}
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X GET "http://127.0.0.1:8000/api/v1/properties/{property_id}" \
+  -H "Content-Type: application/json"
 ```
 
-#### Where It Fails:
-* **Property Does Not Exist (`404 Not Found`):**
-  * **Why:** The requested ID does not exist.
-  * **Response:**
-    ```json
-    { "detail": "Property with ID 'PROP-NONEXISTENT' not found." }
-    ```
-  * **Frontend Handling:** Redirect to 404 screen or show "Listing not found".
+---
+### `GET /health`
+**Summary:** Health Check  
+**Authentication:** No | **Authorized Roles:** `public`  
+**Description:** System health check, PostgreSQL (admin and user instances), and Firestore connection test.  
+
+**Response Status Codes:** `200`
+
+```bash
+curl -X GET "http://127.0.0.1:8000/health" \
+  -H "Content-Type: application/json"
+```
 
 ---
 
-## Super-admin instructions (backend)
+## 7. AUTHENTICATION & IDENTITY MANAGEMENT
 
-Instructions and reviewer remarks are stored in Firestore, not in SQL, S3, Drive, or markdown files. Chat history stays in the existing `Conversation`, `PendingAction` and `AuditLog` tables and is only read when a remark is displayed.
+### `POST /api/admin/auth/login`
+**Summary:** User Login  
+**Authentication:** No | **Authorized Roles:** `public`  
+**Description:** Authenticates an administrative / staff user with email and password,  
 
-Collections, separate from property data:
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `target` | `query` | `string` | No | Query/path parameter |
 
-- `superadmin_instructions/{INS-0001}` and `superadmin_instructions/{INS-0001}/versions/{v1}`
-- `superadmin_remarks/{RMK-0001}`
-- `superadmin_meta/counters`
+**Request Body:** `application/json` (Required)
 
-`firestore.rules` denies client SDK reads and writes on those three collections. Only the backend service account may read or write them. Set `INSTRUCTIONS_FIRESTORE_TARGET` (default `user`, the same project the public bot uses) so the public bot can read active instructions.
+**Response Status Codes:** `200`, `422`
 
-Active instructions are cached in memory for 60 seconds. A save or activation clears the cache on that instance; other instances refresh within 60 seconds. If Firestore fails, the last good block is used, otherwise the block is empty, and chat, PDFs, dossiers and reports still run.
-
-Only `super_admin` can call:
-
-- `GET/POST /api/v1/admin/superadmin/instructions`
-- `POST /api/v1/admin/superadmin/instructions/{id}/activate|archive|rollback`
-- `GET /api/v1/admin/superadmin/instructions/export` (JSON plus one Markdown file per instruction, in a zip)
-- `POST /api/v1/admin/superadmin/instructions/import`
-- `GET/POST /api/v1/admin/superadmin/remarks` and convert/dismiss
-- `GET /api/v1/admin/superadmin/conversations/{conversation_id}` (read-only)
-
-`GET /api/v1/admin/system/config-status` includes `instruction_store` (`firestore`), `firestore_target`, `cache_ttl_seconds`, `active_count` and `last_error`.
-
-## Password reset, CORS, docs, and confirm rules
-
-`POST /api/v1/auth/forgot-password` always returns HTTP 200 and the same JSON body, whether or not the email exists:
-
-```json
-{"success": true, "message": "If an account exists for this email, a reset link has been sent."}
+```bash
+curl -X POST "http://127.0.0.1:8000/api/admin/auth/login" \
+  -H "Content-Type: application/json"
 ```
 
-The reset token is not in that body. It is emailed when `SMTP_HOST` and `SMTP_USER` are set. In development or test, with no mailer, the token is logged at DEBUG only. `EXPOSE_RESET_TOKEN_IN_RESPONSE` (default `false`) may add `reset_token` to the JSON only when `ENV` is not `production`. Production ignores that flag.
+---
+### `POST /api/admin/auth/register`
+**Summary:** Register User  
+**Authentication:** No | **Authorized Roles:** `public`  
+**Description:** Multi-user registration endpoint.  
 
-`POST /api/v1/auth/reset-password` accepts the token once. Tokens expire in 30 minutes or less. A password change invalidates outstanding tokens. Expired, used, and tampered tokens all return the same 400 detail: `Invalid or expired password reset token.`
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `target` | `query` | `string` | No | Query/path parameter |
 
-Forgot-password and reset are limited to 5 requests per hour per email and per IP (`RATE_LIMIT_RESET_ATTEMPTS`, `RATE_LIMIT_RESET_WINDOW_SEC`). A blocked call is HTTP 429 with a `Retry-After` header and `{"detail": {"message": "..."}}`.
+**Request Body:** `application/json` (Required)
 
-Other limits, all configurable:
+**Response Status Codes:** `201`, `422`
 
-| Setting | Default |
-| --- | --- |
-| `RATE_LIMIT_LOGIN_ATTEMPTS` / `RATE_LIMIT_LOGIN_WINDOW_SEC` | 10 attempts / 900 seconds, per IP and per email. The lockout text does not say whether the email exists. |
-| `RATE_LIMIT_PUBLIC_CHAT` / `RATE_LIMIT_PUBLIC_CHAT_WINDOW_SEC` | 60 / 60 seconds, per IP and per session |
-| `RATE_LIMIT_ADMIN_CHAT` / `RATE_LIMIT_ADMIN_CHAT_WINDOW_SEC` | 30 / 60 seconds, per user |
-| `RATE_LIMIT_ADMIN_WRITE` / `RATE_LIMIT_ADMIN_WRITE_WINDOW_SEC` | 30 / 60 seconds, per user, on create, update, delete, confirm, and undo |
-| `RATE_LIMIT_IMPORT_AND_SUPERADMIN` / `RATE_LIMIT_IMPORT_WINDOW_SEC` | 20 / 60 seconds, per user, on URL import and super-admin writes |
+```bash
+curl -X POST "http://127.0.0.1:8000/api/admin/auth/register" \
+  -H "Content-Type: application/json"
+```
 
-`TRUST_PROXY_HEADERS` (default `false`) controls the client IP. When it is `true`, the first `X-Forwarded-For` address is used. Otherwise the socket address is used. Set it `true` on Railway.
+---
+### `POST /api/v1/auth/change-password`
+**Summary:** Change Password Endpoint  
+**Authentication:** Yes | **Authorized Roles:** `worker, super_admin`  
+**Description:** Changes the authenticated administrator's password.  
 
-`CORS_ALLOWED_ORIGINS` is a comma-separated allow-list (default empty). An empty list allows localhost origins only when `ENV` is development or test. Production with an empty list allows no browser origin. `Access-Control-Allow-Credentials` is sent only for an explicit list, never with a wildcard.
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `target` | `query` | `string` | No | Query/path parameter |
 
-`/docs`, `/redoc`, and `/openapi.json` stay available in development and test. In production they return 404 unless `ENABLE_API_DOCS` is `true`.
+**Request Body:** `application/json` (Required)
 
-Confirming a pending action requires `confirmation_token` on `POST /api/v1/admin/actions/{id}/confirm` and on admin chat (`confirmation_token`, or the `act_...` token in the message). A missing or wrong token is rejected and nothing runs. Only the staff member who proposed the action, or a `super_admin`, may confirm it. An action aimed at a website outside that person's access is rejected. Confirming the same action again does not run it a second time; the first result is returned.
+**Response Status Codes:** `200`, `422`
 
-## Admin chat replies
+```bash
+curl -X POST "http://127.0.0.1:8000/api/v1/auth/change-password" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json"
+```
 
-An open URL draft or pending action is read before search. A message that edits it (for example `use price 25000000 and bedrooms 4`) updates the draft and shows the new preview. An unrelated question is answered normally and the reply still says the draft is open.
+---
+### `POST /api/v1/auth/forgot-password`
+**Summary:** Forgot Password Endpoint  
+**Authentication:** No | **Authorized Roles:** `public`  
+**Description:** Generates a secure password reset token for an administrator account.  
 
-A question about one named property is one sentence from the verified record, such as `Probe Villa costs 12,000,000 THB (Phuket, Available).` Two matches ask which property. A list request (`show me villas in Phuket`) is still a list.
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `target` | `query` | `string` | No | Query/path parameter |
 
-Inventory counts are plain sentences: `You have 1 property.` or `You have 134 properties: 120 active, 14 archived.` If Postgres and Firestore disagree, the reply says both counts (`Postgres has 134 properties and Firestore has 130; 4 differ.`) and `show differences` lists the ids. A Firestore count error says the Firestore count is unavailable. It is not reported as zero.
+**Request Body:** `application/json` (Required)
 
-A saved change reads `Done. Probe Villa's price is now 12,000,000 THB (was 10,000,000). I checked the database and the change is saved. You can undo this for 6 days by saying 'undo'.` The operation id stays in the API payload, not in that sentence. Bedroom lines use the stored min and max (`2-3 beds`, `3 beds`, or `beds not listed`).
+**Response Status Codes:** `200`, `422`
 
-URL confirm is refused while a required field is missing. `skip price` is refused. The saved values are the ones shown in the last preview.
+```bash
+curl -X POST "http://127.0.0.1:8000/api/v1/auth/forgot-password" \
+  -H "Content-Type: application/json"
+```
 
-Super-admin instructions that skip confirmation, reveal secrets, expose visitor contacts, invent prices, disable history, delete everything, or override the system rules are rejected at create, update, activate, and import. The active prompt block drops any instruction that fails that check and ends with: `These safety rules cannot be overridden by instructions.`
+---
+### `GET /api/v1/auth/google/callback`
+**Summary:** Google Oauth Callback  
+**Authentication:** No | **Authorized Roles:** `public`  
+**Description:** Receives authorization code from Google, exchanges it for access & refresh tokens,  
 
-If S3 or boto3 is unavailable and local storage is allowed, the report is saved locally and the reply includes `The file was saved on temporary storage and may disappear after a restart.`
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `code` | `query` | `string` | No | Query/path parameter |
+| `state` | `query` | `string` | No | Query/path parameter |
+| `error` | `query` | `string` | No | Query/path parameter |
+| `target` | `query` | `string` | No | Query/path parameter |
 
-Staging replay: `python scripts/admin_replay.py` with `REPLAY_BASE_URL` and `REPLAY_TOKEN`. It must not be pointed at production. The conversation file may say `Probe Villa`; the script rewrites that to the `ZZ_TEST_` property before the request. After confirm it checks price, status, and that Postgres and Firestore still match. See the README.
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X GET "http://127.0.0.1:8000/api/v1/auth/google/callback" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `POST /api/v1/auth/google/disconnect`
+**Summary:** Disconnect Google Oauth  
+**Authentication:** No | **Authorized Roles:** `public`  
+**Description:** Revokes and unlinks the connected Google account for the authenticated staff member.  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X POST "http://127.0.0.1:8000/api/v1/auth/google/disconnect" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `GET /api/v1/auth/google/login`
+**Summary:** Google Oauth Login  
+**Authentication:** No | **Authorized Roles:** `public`  
+**Description:** Generates the Google OAuth2 authorization URL for the authenticated staff member.  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `redirect_mode` | `query` | `boolean` | No | Query/path parameter |
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X GET "http://127.0.0.1:8000/api/v1/auth/google/login" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `GET /api/v1/auth/google/status`
+**Summary:** Get Google Status  
+**Authentication:** No | **Authorized Roles:** `public`  
+**Description:** Returns the Google Workspace connection status for the authenticated user.  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X GET "http://127.0.0.1:8000/api/v1/auth/google/status" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `POST /api/v1/auth/login`
+**Summary:** User Login  
+**Authentication:** No | **Authorized Roles:** `public`  
+**Description:** Authenticates an administrative / staff user with email and password,  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Request Body:** `application/json` (Required)
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X POST "http://127.0.0.1:8000/api/v1/auth/login" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `POST /api/v1/auth/logout`
+**Summary:** User Logout  
+**Authentication:** No | **Authorized Roles:** `public`  
+**Description:** Terminates the active user session and revokes the token.  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Request Body:** `application/json` (Required)
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X POST "http://127.0.0.1:8000/api/v1/auth/logout" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `GET /api/v1/auth/me`
+**Summary:** Get Current User Profile  
+**Authentication:** Yes | **Authorized Roles:** `worker, super_admin`  
+**Description:** Returns the authenticated user's profile based on the active session token,  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X GET "http://127.0.0.1:8000/api/v1/auth/me" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `POST /api/v1/auth/register`
+**Summary:** Register User  
+**Authentication:** No | **Authorized Roles:** `public`  
+**Description:** Multi-user registration endpoint.  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Request Body:** `application/json` (Required)
+
+**Response Status Codes:** `201`, `422`
+
+```bash
+curl -X POST "http://127.0.0.1:8000/api/v1/auth/register" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `POST /api/v1/auth/reset-password`
+**Summary:** Reset Password Endpoint  
+**Authentication:** No | **Authorized Roles:** `public`  
+**Description:** Resets the administrator password using a valid cryptographic reset token.  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Request Body:** `application/json` (Required)
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X POST "http://127.0.0.1:8000/api/v1/auth/reset-password" \
+  -H "Content-Type: application/json"
+```
+
+---
+
+## 8. ADMIN STAFF & USER DIRECTORY
+
+### `GET /api/v1/admin/users`
+**Summary:** List Admin Users With Google Status  
+**Authentication:** Yes | **Authorized Roles:** `worker, super_admin`  
+**Description:** Directory endpoint for admins and super admins to inspect staff users.  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `role` | `query` | `string` | No | Query/path parameter |
+| `search` | `query` | `string` | No | Query/path parameter |
+| `is_active` | `query` | `string` | No | Query/path parameter |
+| `status` | `query` | `string` | No | Query/path parameter |
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X GET "http://127.0.0.1:8000/api/v1/admin/users" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `POST /api/v1/admin/users`
+**Summary:** Create Admin User  
+**Authentication:** Yes | **Authorized Roles:** `worker, super_admin`  
+**Description:** Creates a new administrator or worker user account.  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Request Body:** `application/json` (Required)
+
+**Response Status Codes:** `201`, `422`
+
+```bash
+curl -X POST "http://127.0.0.1:8000/api/v1/admin/users" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `DELETE /api/v1/admin/users/{user_id}`
+**Summary:** Delete Admin User  
+**Authentication:** Yes | **Authorized Roles:** `worker, super_admin`  
+**Description:** Deletes a user account and cascades active sessions.  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `user_id` | `path` | `string` | Yes | Query/path parameter |
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X DELETE "http://127.0.0.1:8000/api/v1/admin/users/{user_id}" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `GET /api/v1/admin/users/{user_id}`
+**Summary:** Get Admin User Details  
+**Authentication:** Yes | **Authorized Roles:** `worker, super_admin`  
+**Description:** Retrieves details and status for a specific user account.  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `user_id` | `path` | `string` | Yes | Query/path parameter |
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X GET "http://127.0.0.1:8000/api/v1/admin/users/{user_id}" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `PATCH /api/v1/admin/users/{user_id}`
+**Summary:** Update Admin User  
+**Authentication:** Yes | **Authorized Roles:** `worker, super_admin`  
+**Description:** Updates user details (name, password reset, role, active status, domain, allowed_websites).  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `user_id` | `path` | `string` | Yes | Query/path parameter |
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Request Body:** `application/json` (Required)
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X PATCH "http://127.0.0.1:8000/api/v1/admin/users/{user_id}" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `PUT /api/v1/admin/users/{user_id}`
+**Summary:** Update Admin User  
+**Authentication:** Yes | **Authorized Roles:** `worker, super_admin`  
+**Description:** Updates user details (name, password reset, role, active status, domain, allowed_websites).  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `user_id` | `path` | `string` | Yes | Query/path parameter |
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Request Body:** `application/json` (Required)
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X PUT "http://127.0.0.1:8000/api/v1/admin/users/{user_id}" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `GET /api/v1/auth/admin/users`
+**Summary:** List Admin Users With Google Status  
+**Authentication:** Yes | **Authorized Roles:** `worker, super_admin`  
+**Description:** Directory endpoint for admins and super admins to inspect staff users.  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `role` | `query` | `string` | No | Query/path parameter |
+| `search` | `query` | `string` | No | Query/path parameter |
+| `is_active` | `query` | `string` | No | Query/path parameter |
+| `status` | `query` | `string` | No | Query/path parameter |
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X GET "http://127.0.0.1:8000/api/v1/auth/admin/users" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `POST /api/v1/auth/admin/users`
+**Summary:** Create Admin User  
+**Authentication:** Yes | **Authorized Roles:** `worker, super_admin`  
+**Description:** Creates a new administrator or worker user account.  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Request Body:** `application/json` (Required)
+
+**Response Status Codes:** `201`, `422`
+
+```bash
+curl -X POST "http://127.0.0.1:8000/api/v1/auth/admin/users" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `DELETE /api/v1/auth/admin/users/{user_id}`
+**Summary:** Delete Admin User  
+**Authentication:** Yes | **Authorized Roles:** `worker, super_admin`  
+**Description:** Deletes a user account and cascades active sessions.  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `user_id` | `path` | `string` | Yes | Query/path parameter |
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X DELETE "http://127.0.0.1:8000/api/v1/auth/admin/users/{user_id}" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `GET /api/v1/auth/admin/users/{user_id}`
+**Summary:** Get Admin User Details  
+**Authentication:** Yes | **Authorized Roles:** `worker, super_admin`  
+**Description:** Retrieves details and status for a specific user account.  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `user_id` | `path` | `string` | Yes | Query/path parameter |
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X GET "http://127.0.0.1:8000/api/v1/auth/admin/users/{user_id}" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `PATCH /api/v1/auth/admin/users/{user_id}`
+**Summary:** Update Admin User  
+**Authentication:** Yes | **Authorized Roles:** `worker, super_admin`  
+**Description:** Updates user details (name, password reset, role, active status, domain, allowed_websites).  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `user_id` | `path` | `string` | Yes | Query/path parameter |
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Request Body:** `application/json` (Required)
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X PATCH "http://127.0.0.1:8000/api/v1/auth/admin/users/{user_id}" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `PUT /api/v1/auth/admin/users/{user_id}`
+**Summary:** Update Admin User  
+**Authentication:** Yes | **Authorized Roles:** `worker, super_admin`  
+**Description:** Updates user details (name, password reset, role, active status, domain, allowed_websites).  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `user_id` | `path` | `string` | Yes | Query/path parameter |
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Request Body:** `application/json` (Required)
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X PUT "http://127.0.0.1:8000/api/v1/auth/admin/users/{user_id}" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `POST /api/v1/auth/admin/users/{user_id}/block`
+**Summary:** Block Admin User  
+**Authentication:** Yes | **Authorized Roles:** `worker, super_admin`  
+**Description:** Super Admin API to block or unblock any administrator or worker user.  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `user_id` | `path` | `string` | Yes | Query/path parameter |
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Request Body:** `application/json` (Required)
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X POST "http://127.0.0.1:8000/api/v1/auth/admin/users/{user_id}/block" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json"
+```
+
+---
+
+## 9. INTERNAL STAFF CHATBOT AGENT
+
+### `POST /api/v1/admin/chat`
+**Summary:** Admin Chat Endpoint  
+**Authentication:** Yes | **Authorized Roles:** `worker, super_admin`  
+**Description:** Authenticated Admin / Internal Team AI Agent unified endpoint.  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `stream` | `query` | `boolean` | No | Query/path parameter |
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Request Body:** `application/json` (Required)
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X POST "http://127.0.0.1:8000/api/v1/admin/chat" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `GET /api/v1/admin/chat/history/{session_id}`
+**Summary:** Get Admin History Endpoint  
+**Authentication:** Yes | **Authorized Roles:** `worker, super_admin`  
+**Description:** Retrieves full admin multi-turn conversation history from Firestore.  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `session_id` | `path` | `string` | Yes | Query/path parameter |
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X GET "http://127.0.0.1:8000/api/v1/admin/chat/history/{session_id}" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json"
+```
+
+---
+
+## 10. TWO-STEP STAGED ACTION GATE (HITL GOVERNANCE)
+
+### `GET /api/v1/admin/actions/{pending_action_id}`
+**Summary:** Inspect Pending Action Endpoint  
+**Authentication:** Yes | **Authorized Roles:** `worker, super_admin`  
+**Description:** Retrieves current status and payload details of a staged pending action.  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `pending_action_id` | `path` | `string` | Yes | Query/path parameter |
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X GET "http://127.0.0.1:8000/api/v1/admin/actions/{pending_action_id}" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `POST /api/v1/admin/actions/{pending_action_id}/confirm`
+**Summary:** Confirm Pending Action Endpoint  
+**Authentication:** Yes | **Authorized Roles:** `worker, super_admin`  
+**Description:** Explicit Two-Step Confirmation endpoint for write actions.  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `pending_action_id` | `path` | `string` | Yes | Query/path parameter |
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Request Body:** `application/json` (Required)
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X POST "http://127.0.0.1:8000/api/v1/admin/actions/{pending_action_id}/confirm" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `POST /api/v1/admin/actions/{pending_action_id}/reject`
+**Summary:** Reject Pending Action Endpoint  
+**Authentication:** Yes | **Authorized Roles:** `worker, super_admin`  
+**Description:** Rejects a staged pending action and logs the rejection in audit logs.  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `pending_action_id` | `path` | `string` | Yes | Query/path parameter |
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Request Body:** `application/json` (Required)
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X POST "http://127.0.0.1:8000/api/v1/admin/actions/{pending_action_id}/reject" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json"
+```
+
+---
+
+## 11. DOCUMENT & REPORT GENERATION (PDF, XLSX, DOCX)
+
+### `GET /api/v1/admin/brochure/preview`
+**Summary:** Admin Brochure Preview  
+**Authentication:** Yes | **Authorized Roles:** `worker, super_admin`  
+**Description:** Admin-only design preview: return a single-property brochure PDF for a chosen theme.  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `property_id` | `query` | `string` | Yes | Query/path parameter |
+| `template` | `query` | `integer` | No | Query/path parameter |
+| `lang` | `query` | `string` | No | Query/path parameter |
+| `site_origin` | `query` | `string` | No | Query/path parameter |
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X GET "http://127.0.0.1:8000/api/v1/admin/brochure/preview" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `GET /api/v1/admin/reports/download/{token}`
+**Summary:** Download Report Signed Endpoint  
+**Authentication:** Yes | **Authorized Roles:** `worker, super_admin`  
+**Description:** Public (token-gated) download — no Bearer header required.  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `token` | `path` | `string` | Yes | Query/path parameter |
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X GET "http://127.0.0.1:8000/api/v1/admin/reports/download/{token}" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `GET /api/v1/admin/reports/{filename}`
+**Summary:** Download Report Endpoint  
+**Authentication:** Yes | **Authorized Roles:** `worker, super_admin`  
+**Description:** Downloads a generated PDF/XLSX/DOCX/CSV property intelligence report (auth required).  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `filename` | `path` | `string` | Yes | Query/path parameter |
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X GET "http://127.0.0.1:8000/api/v1/admin/reports/{filename}" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `POST /api/v1/admin/reports/{filename}/link`
+**Summary:** Create Report Signed Link Endpoint  
+**Authentication:** Yes | **Authorized Roles:** `worker, super_admin`  
+**Description:** Return a short-lived HMAC signed download URL (valid ~10 minutes).  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `filename` | `path` | `string` | Yes | Query/path parameter |
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X POST "http://127.0.0.1:8000/api/v1/admin/reports/{filename}/link" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json"
+```
+
+---
+
+## 12. QUERY LOGS, ANALYTICS & ANSWER CORRECTIONS (N3, N4, N5)
+
+### `GET /api/v1/admin/chat-logs/conversations`
+**Summary:** List Logged Conversations  
+**Authentication:** Yes | **Authorized Roles:** `worker, super_admin`  
+**Description:** Conversations the caller may see, filtered, searched, sorted and paged on the server.  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `agent_type` | `query` | `string` | No | Query/path parameter |
+| `role` | `query` | `string` | No | Query/path parameter |
+| `user` | `query` | `string` | No | Query/path parameter |
+| `website` | `query` | `string` | No | Query/path parameter |
+| `conversation_id` | `query` | `string` | No | Query/path parameter |
+| `property_id` | `query` | `string` | No | Query/path parameter |
+| `remark_status` | `query` | `string` | No | Query/path parameter |
+| `q` | `query` | `string` | No | Query/path parameter |
+| `date_from` | `query` | `string` | No | Query/path parameter |
+| `date_to` | `query` | `string` | No | Query/path parameter |
+| `sort` | `query` | `string` | No | Query/path parameter |
+| `order` | `query` | `string` | No | Query/path parameter |
+| `page` | `query` | `integer` | No | Query/path parameter |
+| `page_size` | `query` | `integer` | No | Query/path parameter |
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X GET "http://127.0.0.1:8000/api/v1/admin/chat-logs/conversations" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `GET /api/v1/admin/chat-logs/conversations/{conversation_id}`
+**Summary:** Open Logged Conversation  
+**Authentication:** Yes | **Authorized Roles:** `worker, super_admin`  
+**Description:** One conversation with its messages in chronological order.  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `conversation_id` | `path` | `string` | Yes | Query/path parameter |
+| `page` | `query` | `integer` | No | Query/path parameter |
+| `page_size` | `query` | `integer` | No | Query/path parameter |
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X GET "http://127.0.0.1:8000/api/v1/admin/chat-logs/conversations/{conversation_id}" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `POST /api/v1/admin/chat-logs/conversations/{conversation_id}/messages/{message_id}/remarks`
+**Summary:** Add Remark  
+**Authentication:** Yes | **Authorized Roles:** `worker, super_admin`  
+**Description:** An internal remark on one bot response. It never changes what the bot says.  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `conversation_id` | `path` | `string` | Yes | Query/path parameter |
+| `message_id` | `path` | `string` | Yes | Query/path parameter |
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Request Body:** `application/json` (Required)
+
+**Response Status Codes:** `201`, `422`
+
+```bash
+curl -X POST "http://127.0.0.1:8000/api/v1/admin/chat-logs/conversations/{conversation_id}/messages/{message_id}/remarks" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `PATCH /api/v1/admin/chat-logs/conversations/{conversation_id}/messages/{message_seq}/feedback`
+**Summary:** Submit User Feedback  
+**Authentication:** Yes | **Authorized Roles:** `worker, super_admin`  
+**Description:** Adds user feedback (thumbs_up/thumbs_down) to a logged assistant message.  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `conversation_id` | `path` | `string` | Yes | Query/path parameter |
+| `message_seq` | `path` | `string` | Yes | Query/path parameter |
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Request Body:** `application/json` (Required)
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X PATCH "http://127.0.0.1:8000/api/v1/admin/chat-logs/conversations/{conversation_id}/messages/{message_seq}/feedback" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `GET /api/v1/admin/chat-logs/corrections`
+**Summary:** List Corrections  
+**Authentication:** Yes | **Authorized Roles:** `worker, super_admin`  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `status` | `query` | `string` | No | Query/path parameter |
+| `conversation_id` | `query` | `string` | No | Query/path parameter |
+| `page` | `query` | `integer` | No | Query/path parameter |
+| `page_size` | `query` | `integer` | No | Query/path parameter |
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X GET "http://127.0.0.1:8000/api/v1/admin/chat-logs/corrections" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `GET /api/v1/admin/chat-logs/corrections/{correction_id}`
+**Summary:** Get Correction  
+**Authentication:** Yes | **Authorized Roles:** `worker, super_admin`  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `correction_id` | `path` | `string` | Yes | Query/path parameter |
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X GET "http://127.0.0.1:8000/api/v1/admin/chat-logs/corrections/{correction_id}" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `PATCH /api/v1/admin/chat-logs/corrections/{correction_id}`
+**Summary:** Edit Correction  
+**Authentication:** Yes | **Authorized Roles:** `worker, super_admin`  
+**Description:** Editing returns the correction to 'proposed': an edited answer has to be approved again.  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `correction_id` | `path` | `string` | Yes | Query/path parameter |
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Request Body:** `application/json` (Required)
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X PATCH "http://127.0.0.1:8000/api/v1/admin/chat-logs/corrections/{correction_id}" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `POST /api/v1/admin/chat-logs/corrections/{correction_id}/approve`
+**Summary:** Approve Correction  
+**Authentication:** Yes | **Authorized Roles:** `worker, super_admin`  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `correction_id` | `path` | `string` | Yes | Query/path parameter |
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Request Body:** `application/json` (Required)
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X POST "http://127.0.0.1:8000/api/v1/admin/chat-logs/corrections/{correction_id}/approve" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `POST /api/v1/admin/chat-logs/corrections/{correction_id}/deactivate`
+**Summary:** Deactivate Correction  
+**Authentication:** Yes | **Authorized Roles:** `worker, super_admin`  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `correction_id` | `path` | `string` | Yes | Query/path parameter |
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Request Body:** `application/json` (Required)
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X POST "http://127.0.0.1:8000/api/v1/admin/chat-logs/corrections/{correction_id}/deactivate" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `POST /api/v1/admin/chat-logs/corrections/{correction_id}/reject`
+**Summary:** Reject Correction  
+**Authentication:** Yes | **Authorized Roles:** `worker, super_admin`  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `correction_id` | `path` | `string` | Yes | Query/path parameter |
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Request Body:** `application/json` (Required)
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X POST "http://127.0.0.1:8000/api/v1/admin/chat-logs/corrections/{correction_id}/reject" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `GET /api/v1/admin/chat-logs/corrections/{correction_id}/revisions`
+**Summary:** Correction Revisions  
+**Authentication:** Yes | **Authorized Roles:** `worker, super_admin`  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `correction_id` | `path` | `string` | Yes | Query/path parameter |
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X GET "http://127.0.0.1:8000/api/v1/admin/chat-logs/corrections/{correction_id}/revisions" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `GET /api/v1/admin/chat-logs/remarks`
+**Summary:** List Remarks  
+**Authentication:** Yes | **Authorized Roles:** `worker, super_admin`  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `conversation_id` | `query` | `string` | No | Query/path parameter |
+| `message_id` | `query` | `string` | No | Query/path parameter |
+| `status` | `query` | `string` | No | Query/path parameter |
+| `author` | `query` | `string` | No | Query/path parameter |
+| `page` | `query` | `integer` | No | Query/path parameter |
+| `page_size` | `query` | `integer` | No | Query/path parameter |
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X GET "http://127.0.0.1:8000/api/v1/admin/chat-logs/remarks" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `GET /api/v1/admin/chat-logs/remarks/{remark_id}`
+**Summary:** Get Remark  
+**Authentication:** Yes | **Authorized Roles:** `worker, super_admin`  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `remark_id` | `path` | `string` | Yes | Query/path parameter |
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X GET "http://127.0.0.1:8000/api/v1/admin/chat-logs/remarks/{remark_id}" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `PATCH /api/v1/admin/chat-logs/remarks/{remark_id}`
+**Summary:** Edit Remark  
+**Authentication:** Yes | **Authorized Roles:** `worker, super_admin`  
+**Description:** The author (or a reviewer) edits the text; only a reviewer changes the status. Every change is a revision.  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `remark_id` | `path` | `string` | Yes | Query/path parameter |
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Request Body:** `application/json` (Required)
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X PATCH "http://127.0.0.1:8000/api/v1/admin/chat-logs/remarks/{remark_id}" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `POST /api/v1/admin/chat-logs/remarks/{remark_id}/correction`
+**Summary:** Propose Correction  
+**Authentication:** Yes | **Authorized Roles:** `worker, super_admin`  
+**Description:** Propose a corrected answer. It is only a proposal until a super admin approves it.  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `remark_id` | `path` | `string` | Yes | Query/path parameter |
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Request Body:** `application/json` (Required)
+
+**Response Status Codes:** `201`, `422`
+
+```bash
+curl -X POST "http://127.0.0.1:8000/api/v1/admin/chat-logs/remarks/{remark_id}/correction" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `GET /api/v1/admin/chat-logs/remarks/{remark_id}/revisions`
+**Summary:** Remark Revisions  
+**Authentication:** Yes | **Authorized Roles:** `worker, super_admin`  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `remark_id` | `path` | `string` | Yes | Query/path parameter |
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X GET "http://127.0.0.1:8000/api/v1/admin/chat-logs/remarks/{remark_id}/revisions" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `POST /api/v1/admin/corrections`
+**Summary:** Create Admin Correction  
+**Authentication:** Yes | **Authorized Roles:** `worker, super_admin`  
+**Description:** Create a new answer correction directly (without going through a chat log remark).  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Request Body:** `application/json` (Required)
+
+**Response Status Codes:** `201`, `422`
+
+```bash
+curl -X POST "http://127.0.0.1:8000/api/v1/admin/corrections" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json"
+```
+
+---
+
+## 13. SUPERADMIN BUSINESS INSTRUCTIONS & KNOWLEDGE TEACHING (N7)
+
+### `GET /api/v1/admin/superadmin/conversations`
+**Summary:** List Conversation Logs  
+**Authentication:** Yes | **Authorized Roles:** `super_admin`  
+**Description:** The list the Admin Panel's chat-log page loads. It reads the same chat log as /admin/chat-logs/conversations.  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `search` | `query` | `string` | No | Query/path parameter |
+| `role` | `query` | `string` | No | Query/path parameter |
+| `model` | `query` | `string` | No | Query/path parameter |
+| `review_status` | `query` | `string` | No | Query/path parameter |
+| `website` | `query` | `string` | No | Query/path parameter |
+| `start_date` | `query` | `string` | No | Query/path parameter |
+| `end_date` | `query` | `string` | No | Query/path parameter |
+| `limit` | `query` | `integer` | No | Query/path parameter |
+| `offset` | `query` | `integer` | No | Query/path parameter |
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X GET "http://127.0.0.1:8000/api/v1/admin/superadmin/conversations" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `GET /api/v1/admin/superadmin/conversations/{conversation_id}`
+**Summary:** Read Conversation Review  
+**Authentication:** Yes | **Authorized Roles:** `super_admin`  
+**Description:** Read-only chat, pending actions and audit rows. Nothing is written.  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `conversation_id` | `path` | `string` | Yes | Query/path parameter |
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X GET "http://127.0.0.1:8000/api/v1/admin/superadmin/conversations/{conversation_id}" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `GET /api/v1/admin/superadmin/conversations/{conversation_id}/review`
+**Summary:** Get Conversation Review State  
+**Authentication:** Yes | **Authorized Roles:** `super_admin`  
+**Description:** What the 'Review AI Response' dialog shows: the full question, the full AI response and whether it is reviewed.  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `conversation_id` | `path` | `string` | Yes | Query/path parameter |
+| `message_index` | `query` | `string` | No | Query/path parameter |
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X GET "http://127.0.0.1:8000/api/v1/admin/superadmin/conversations/{conversation_id}/review" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `POST /api/v1/admin/superadmin/conversations/{conversation_id}/review`
+**Summary:** Save Conversation Review  
+**Authentication:** Yes | **Authorized Roles:** `super_admin`  
+**Description:** Save Review. Either tick 'satisfactory', or give instructions, which become an active instruction for that bot and website.  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `conversation_id` | `path` | `string` | Yes | Query/path parameter |
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Request Body:** `application/json` (Required)
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X POST "http://127.0.0.1:8000/api/v1/admin/superadmin/conversations/{conversation_id}/review" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `GET /api/v1/admin/superadmin/instructions`
+**Summary:** List Instructions  
+**Authentication:** Yes | **Authorized Roles:** `super_admin`  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `status` | `query` | `string` | No | Query/path parameter |
+| `target` | `query` | `string` | No | Query/path parameter |
+| `website` | `query` | `string` | No | Query/path parameter |
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X GET "http://127.0.0.1:8000/api/v1/admin/superadmin/instructions" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `POST /api/v1/admin/superadmin/instructions`
+**Summary:** Create Instruction  
+**Authentication:** Yes | **Authorized Roles:** `super_admin`  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Request Body:** `application/json` (Required)
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X POST "http://127.0.0.1:8000/api/v1/admin/superadmin/instructions" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `GET /api/v1/admin/superadmin/instructions/export`
+**Summary:** Export Instructions  
+**Authentication:** Yes | **Authorized Roles:** `super_admin`  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X GET "http://127.0.0.1:8000/api/v1/admin/superadmin/instructions/export" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `POST /api/v1/admin/superadmin/instructions/import`
+**Summary:** Import Instructions  
+**Authentication:** Yes | **Authorized Roles:** `super_admin`  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Request Body:** `application/json` (Required)
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X POST "http://127.0.0.1:8000/api/v1/admin/superadmin/instructions/import" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `GET /api/v1/admin/superadmin/instructions/{instruction_id}`
+**Summary:** Get Instruction  
+**Authentication:** Yes | **Authorized Roles:** `super_admin`  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `instruction_id` | `path` | `string` | Yes | Query/path parameter |
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X GET "http://127.0.0.1:8000/api/v1/admin/superadmin/instructions/{instruction_id}" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `PATCH /api/v1/admin/superadmin/instructions/{instruction_id}`
+**Summary:** Update Instruction  
+**Authentication:** Yes | **Authorized Roles:** `super_admin`  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `instruction_id` | `path` | `string` | Yes | Query/path parameter |
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Request Body:** `application/json` (Required)
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X PATCH "http://127.0.0.1:8000/api/v1/admin/superadmin/instructions/{instruction_id}" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `POST /api/v1/admin/superadmin/instructions/{instruction_id}/activate`
+**Summary:** Activate Instruction  
+**Authentication:** Yes | **Authorized Roles:** `super_admin`  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `instruction_id` | `path` | `string` | Yes | Query/path parameter |
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X POST "http://127.0.0.1:8000/api/v1/admin/superadmin/instructions/{instruction_id}/activate" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `POST /api/v1/admin/superadmin/instructions/{instruction_id}/archive`
+**Summary:** Archive Instruction  
+**Authentication:** Yes | **Authorized Roles:** `super_admin`  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `instruction_id` | `path` | `string` | Yes | Query/path parameter |
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X POST "http://127.0.0.1:8000/api/v1/admin/superadmin/instructions/{instruction_id}/archive" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `POST /api/v1/admin/superadmin/instructions/{instruction_id}/rollback`
+**Summary:** Rollback Instruction  
+**Authentication:** Yes | **Authorized Roles:** `super_admin`  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `instruction_id` | `path` | `string` | Yes | Query/path parameter |
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Request Body:** `application/json` (Required)
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X POST "http://127.0.0.1:8000/api/v1/admin/superadmin/instructions/{instruction_id}/rollback" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `GET /api/v1/admin/superadmin/remarks`
+**Summary:** List Remarks  
+**Authentication:** Yes | **Authorized Roles:** `super_admin`  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `status` | `query` | `string` | No | Query/path parameter |
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X GET "http://127.0.0.1:8000/api/v1/admin/superadmin/remarks" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `POST /api/v1/admin/superadmin/remarks`
+**Summary:** Create Remark  
+**Authentication:** Yes | **Authorized Roles:** `super_admin`  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Request Body:** `application/json` (Required)
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X POST "http://127.0.0.1:8000/api/v1/admin/superadmin/remarks" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `POST /api/v1/admin/superadmin/remarks/{remark_id}/convert`
+**Summary:** Convert Remark  
+**Authentication:** Yes | **Authorized Roles:** `super_admin`  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `remark_id` | `path` | `string` | Yes | Query/path parameter |
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Request Body:** `application/json` (Required)
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X POST "http://127.0.0.1:8000/api/v1/admin/superadmin/remarks/{remark_id}/convert" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `POST /api/v1/admin/superadmin/remarks/{remark_id}/dismiss`
+**Summary:** Dismiss Remark  
+**Authentication:** Yes | **Authorized Roles:** `super_admin`  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `remark_id` | `path` | `string` | Yes | Query/path parameter |
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X POST "http://127.0.0.1:8000/api/v1/admin/superadmin/remarks/{remark_id}/dismiss" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json"
+```
+
+---
+
+## 14. PROPERTY INVENTORY MANAGEMENT & BATCH UNDO (C1, C2)
+
+### `GET /api/v1/admin/data-history`
+**Summary:** Get Data Change History Endpoint  
+**Authentication:** Yes | **Authorized Roles:** `worker, super_admin`  
+**Description:** Returns chronological history of who updated which data across the platform.  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `target_type` | `query` | `string` | No | Query/path parameter |
+| `target_id` | `query` | `string` | No | Query/path parameter |
+| `updated_by` | `query` | `string` | No | Query/path parameter |
+| `limit` | `query` | `integer` | No | Query/path parameter |
+| `offset` | `query` | `integer` | No | Query/path parameter |
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X GET "http://127.0.0.1:8000/api/v1/admin/data-history" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `GET /api/v1/admin/operations/history`
+**Summary:** Get Batch Operations History Endpoint  
+**Authentication:** Yes | **Authorized Roles:** `worker, super_admin`  
+**Description:** Returns full history of all past batch operations, showing affected property counts,  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `limit` | `query` | `integer` | No | Query/path parameter |
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X GET "http://127.0.0.1:8000/api/v1/admin/operations/history" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `POST /api/v1/admin/operations/{operation_id}/undo`
+**Summary:** Undo Batch Operation Endpoint  
+**Authentication:** Yes | **Authorized Roles:** `worker, super_admin`  
+**Description:** Instantly rolls back a previous batch operation within its 6-day retention window.  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `operation_id` | `path` | `string` | Yes | Query/path parameter |
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X POST "http://127.0.0.1:8000/api/v1/admin/operations/{operation_id}/undo" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `GET /api/v1/admin/properties`
+**Summary:** List Admin Properties Endpoint  
+**Authentication:** Yes | **Authorized Roles:** `worker, super_admin`  
+**Description:** Fetches property listings strictly scoped to the staff member's currently selected websites.  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `location` | `query` | `string` | No | Query/path parameter |
+| `property_type` | `query` | `string` | No | Query/path parameter |
+| `min_price` | `query` | `string` | No | Query/path parameter |
+| `max_price` | `query` | `string` | No | Query/path parameter |
+| `bedrooms` | `query` | `string` | No | Query/path parameter |
+| `has_pool` | `query` | `string` | No | Query/path parameter |
+| `status` | `query` | `string` | No | Query/path parameter |
+| `limit` | `query` | `integer` | No | Query/path parameter |
+| `offset` | `query` | `integer` | No | Query/path parameter |
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X GET "http://127.0.0.1:8000/api/v1/admin/properties" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `POST /api/v1/admin/properties`
+**Summary:** Create Property Endpoint  
+**Authentication:** Yes | **Authorized Roles:** `worker, super_admin`  
+**Description:** Create a property in Postgres and Firestore after validation.  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `overwrite` | `query` | `string` | No | Query/path parameter |
+| `allow_without_undo` | `query` | `boolean` | No | Query/path parameter |
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Request Body:** `application/json` (Required)
+
+**Response Status Codes:** `201`, `422`
+
+```bash
+curl -X POST "http://127.0.0.1:8000/api/v1/admin/properties" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `POST /api/v1/admin/properties/batch-file`
+**Summary:** Propose Batch File Endpoint  
+**Authentication:** Yes | **Authorized Roles:** `worker, super_admin`  
+**Description:** Parses the uploaded file and STAGES the bulk change as a pending action with a preview of every row.  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Request Body:** `application/json` (Required)
+
+**Response Status Codes:** `202`, `422`
+
+```bash
+curl -X POST "http://127.0.0.1:8000/api/v1/admin/properties/batch-file" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `DELETE /api/v1/admin/properties/{property_id}`
+**Summary:** Delete Property Endpoint  
+**Authentication:** Yes | **Authorized Roles:** `worker, super_admin`  
+**Description:** Soft-delete (archive) a property, or permanently delete it when hard_delete=true  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `property_id` | `path` | `string` | Yes | Query/path parameter |
+| `hard_delete` | `query` | `boolean` | No | Query/path parameter |
+| `confirm_property_id` | `query` | `string` | No | Query/path parameter |
+| `allow_without_undo` | `query` | `boolean` | No | Query/path parameter |
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X DELETE "http://127.0.0.1:8000/api/v1/admin/properties/{property_id}" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `GET /api/v1/admin/properties/{property_id}`
+**Summary:** Get Admin Property Endpoint  
+**Authentication:** Yes | **Authorized Roles:** `worker, super_admin`  
+**Description:** Retrieves a single property listing from Cloud Firestore (primary) or local DB.  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `property_id` | `path` | `string` | Yes | Query/path parameter |
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X GET "http://127.0.0.1:8000/api/v1/admin/properties/{property_id}" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `PUT /api/v1/admin/properties/{property_id}`
+**Summary:** Update Property Endpoint  
+**Authentication:** Yes | **Authorized Roles:** `worker, super_admin`  
+**Description:** Update a property that already exists in Firestore, Postgres, or both.  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `property_id` | `path` | `string` | Yes | Query/path parameter |
+| `allow_without_undo` | `query` | `boolean` | No | Query/path parameter |
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Request Body:** `application/json` (Required)
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X PUT "http://127.0.0.1:8000/api/v1/admin/properties/{property_id}" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `GET /api/v1/admin/properties/{property_id}/consistency`
+**Summary:** Property Consistency Endpoint  
+**Authentication:** Yes | **Authorized Roles:** `worker, super_admin`  
+**Description:** Admin-only comparison of the Firestore document and the Postgres row.  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `property_id` | `path` | `string` | Yes | Query/path parameter |
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X GET "http://127.0.0.1:8000/api/v1/admin/properties/{property_id}/consistency" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json"
+```
+
+---
+
+## 15. SYSTEM DIAGNOSTICS, AUDIT LOGS & MAINTENANCE (C3, C4)
+
+### `GET /api/v1/admin/activity-logs`
+**Summary:** Get Admin Activity Logs Endpoint  
+**Authentication:** Yes | **Authorized Roles:** `worker, super_admin`  
+**Description:** Returns full administrative activity logs.  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `admin_email` | `query` | `string` | No | Query/path parameter |
+| `action` | `query` | `string` | No | Query/path parameter |
+| `status` | `query` | `string` | No | Query/path parameter |
+| `start_date` | `query` | `string` | No | Query/path parameter |
+| `end_date` | `query` | `string` | No | Query/path parameter |
+| `limit` | `query` | `integer` | No | Query/path parameter |
+| `offset` | `query` | `integer` | No | Query/path parameter |
+| `source` | `query` | `string` | No | Query/path parameter |
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X GET "http://127.0.0.1:8000/api/v1/admin/activity-logs" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `POST /api/v1/admin/maintenance/purge-expired`
+**Summary:** Purge Expired Snapshots Endpoint  
+**Authentication:** Yes | **Authorized Roles:** `super_admin`  
+**Description:** Admin-only: delete expired undo snapshots from Firestore admin_batch_operations  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X POST "http://127.0.0.1:8000/api/v1/admin/maintenance/purge-expired" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json"
+```
+
+---
+### `GET /api/v1/admin/system/config-status`
+**Summary:** Admin Config Status Endpoint  
+**Authentication:** Yes | **Authorized Roles:** `worker, super_admin`  
+**Description:** Admin-only: feature-flag / wiring status as labels and booleans only.  
+
+**Parameters:**
+| Parameter | In | Type | Required | Description |
+|:---|:---:|:---:|:---:|:---|
+| `target` | `query` | `string` | No | Query/path parameter |
+
+**Response Status Codes:** `200`, `422`
+
+```bash
+curl -X GET "http://127.0.0.1:8000/api/v1/admin/system/config-status" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json"
+```
+
+---
+
+## 16. STANDARD ERROR RESPONSES & STATUS CODES
+
+The API standardizes error outputs following RFC 7807 problem details:
+```json
+{
+  "detail": "Descriptive message identifying the cause of validation or permission error",
+  "error_code": "RESOURCE_NOT_FOUND",
+  "timestamp": "2026-10-30T16:20:00Z"
+}
+```
+
+| Status Code | HTTP Reason | Meaning in Platform |
+|:---|:---|:---|
+| **`200 OK`** | Success | Request succeeded and returned requested payload. |
+| **`201 Created`** | Created | Resource successfully created (e.g. staff user registration, lead saved). |
+| **`400 Bad Request`** | Client Error | Malformed JSON, failed Pydantic schema validation, or invalid confirmation token. |
+| **`401 Unauthorized`** | Auth Required | Missing, expired, or invalid JWT bearer token. |
+| **`403 Forbidden`** | Permission Denied | Authenticated role (`worker`) lacks privilege for target action (e.g., purge maintenance). |
+| **`404 Not Found`** | Not Found | Property ID, conversation session, or staged pending action does not exist. |
+| **`422 Unprocessable`** | Schema Violation | Request parameters failed type or constraint checks. |
+| **`500 Internal Error`** | Server Error | Unhandled backend exception (automatically audited to Firestore). |
+| **`503 Unavailable`** | Service Down | Staging PostgreSQL or Firestore unreachable. |

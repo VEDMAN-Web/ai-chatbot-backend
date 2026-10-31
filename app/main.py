@@ -255,6 +255,7 @@ app.add_middleware(OriginAllowlistMiddleware)
 
 # Register Public Chatbot & Admin Agent Routers
 app.include_router(chat_router, prefix="/api/v1")
+app.include_router(chat_router, prefix="", include_in_schema=False)
 app.include_router(admin_router, prefix="/api/v1")
 app.include_router(admin_logs_router, prefix="/api/v1")
 app.include_router(superadmin_instructions_router, prefix="/api/v1")
@@ -538,3 +539,9 @@ def get_property(
         "websites": p.websites or ["tajlandia.com"],
         "detail_page_url": p.detail_page_url
     }
+
+# Root route aliases for Section 13 public endpoints
+app.get("/branding", tags=["System"], include_in_schema=False)(get_branding)
+app.get("/properties", tags=["Properties"], include_in_schema=False)(list_properties)
+app.get("/properties/{property_id}", tags=["Properties"], include_in_schema=False)(get_property)
+app.get("/api/v1/health", tags=["System"], include_in_schema=False)(health_check)

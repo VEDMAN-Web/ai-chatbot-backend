@@ -92,13 +92,15 @@ frontend_example.html
 
 # 5. Generated Documents & File Storage
 data/reports/
+data/brochure_theme_qa/
+*.log
+evidence/logs_*.txt
 data/brochure_samples/
 data/brochure_samples/**
 data/*.db
 data/**/*.db
 *.db
-!data/drive_docs/
-data/drive_docs/private/
+data/drive_docs/
 *.pdf
 !Pdf_Templet/*.pdf
 *.xlsx

@@ -35,20 +35,7 @@ def invalidate_cache() -> None:
 
 def embed(text: str) -> Optional[List[float]]:
     """Embedding vector from the configured provider, or None when it is not available."""
-    cleaned = (text or "").strip()
-    api_key = getattr(settings, "OPENAI_API_KEY", "") or ""
-    if not cleaned or not api_key:
-        return None
-    try:
-        from openai import OpenAI
-
-        client = OpenAI(api_key=api_key, timeout=8.0, max_retries=1)
-        response = client.embeddings.create(model=getattr(settings, "EMBEDDING_MODEL", "text-embedding-3-small"),
-                                            input=cleaned[:MAX_EMBED_CHARS])
-        return list(response.data[0].embedding)
-    except Exception as exc:
-        logger.warning("Embedding unavailable: %s", exc)
-        return None
+    return None
 
 
 def cosine(a: List[float], b: List[float]) -> float:

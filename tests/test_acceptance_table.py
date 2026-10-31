@@ -4,6 +4,8 @@ Acceptance table checks (fake data / no live Firestore writes).
 
 from __future__ import annotations
 
+import pytest
+
 import concurrent.futures
 
 from app.api.v1.chat import PublicChatRequest
