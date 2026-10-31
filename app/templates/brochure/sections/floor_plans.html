@@ -1,0 +1,54 @@
+<section class="page floor-page" data-section="floor_plans">
+  <span class="section-marker">SECTION:floor_plans</span>
+  <div class="floor-hero">
+    {% set plans = prepared.floor_plans or data.floor_plans %}
+    {% if plans and plans[0] %}
+    <img class="img-cover" src="{{ plans[0] }}" alt=""/>
+    {% elif data.hero_image %}
+    <img class="img-cover" src="{{ data.hero_image }}" alt=""/>
+    {% else %}
+    <div class="floor-fallback"></div>
+    {% endif %}
+  </div>
+  <div class="floor-footer">
+    <h2>{{ labels.floor_plans_title }}</h2>
+    <hr class="thin-rule"/>
+    {% if plans and plans|length > 1 %}
+    <div class="floor-thumbs">
+      {% for src in plans[1:4] %}
+      <figure><img class="img-cover" src="{{ src }}" alt=""/></figure>
+      {% endfor %}
+    </div>
+    {% endif %}
+  </div>
+</section>
+<style>
+  .floor-page {
+    display: grid;
+    grid-template-rows: 68% 32%;
+    background: var(--paper);
+  }
+  .floor-hero { overflow: hidden; background: var(--cream); }
+  .floor-fallback {
+    width: 100%;
+    height: 100%;
+    background: linear-gradient(160deg, var(--cream), var(--sage));
+  }
+  .floor-footer {
+    padding: 8mm 16mm;
+    text-align: center;
+  }
+  .floor-footer h2 {
+    font-size: 18pt;
+    letter-spacing: 0.28em;
+    text-transform: uppercase;
+  }
+  .floor-thumbs {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 4mm;
+    margin-top: 4mm;
+    height: 28mm;
+  }
+  .floor-thumbs figure { overflow: hidden; background: #eee; }
+</style>

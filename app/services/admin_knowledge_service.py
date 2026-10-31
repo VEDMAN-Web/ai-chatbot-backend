@@ -1,69 +1,212 @@
 import json
 import os
+import logging
 from typing import Dict, Any, Optional
 from sqlalchemy.orm import Session
 from app.db.models import Property, PropertySpec
+from app.services.admin_property_fields import (
+    format_price_for_display,
+    localize_name,
+    parse_bedrooms,
+    parse_price_amount,
+    read_firestore_canonical,
+    read_pg_canonical,
+)
 
-SPECS_JSON_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data", "internal_knowledge_specs.json")
+logger = logging.getLogger(__name__)
 
 
-def get_property_knowledge(db: Session, property_id: str) -> Optional[Dict[str, Any]]:
+def get_property_knowledge(
+    db: Session,
+    property_id: str,
+    *,
+    include_internal_notes: bool = False,
+) -> Optional[Dict[str, Any]]:
     """
     Retrieves complete private/internal information for a property,
-    merging PostgreSQL 'property_specs' with internal_knowledge_specs.json.
-    Strictly restricted to internal staff / admin agents.
+    extracting specifications strictly from live Cloud Firestore (and verified DB specs).
+    NEVER uses hardcoded, static, or hallucinated architectural materials.
+    If a specification is not documented in the production record, it explicitly states
+    'Not documented in verified database'.
+
+    Always includes price_* and bedrooms/area display fields for admin.
+    internal_notes / developer_contact are omitted unless include_internal_notes=True.
     """
-    clean_id = property_id.strip().upper()
-    # Normalize ID variations (e.g. PROP-PHK-001 vs PROP-PHU-001)
-    id_aliases = {clean_id}
-    if "PHK" in clean_id:
-        id_aliases.add(clean_id.replace("PHK", "PHU"))
-    if "PHU" in clean_id:
-        id_aliases.add(clean_id.replace("PHU", "PHK"))
-
-    # 1. Query Property and PropertySpec from DB
-    prop = db.query(Property).filter(Property.property_id.in_(list(id_aliases))).first()
-    spec = None
-    if prop:
-        spec = db.query(PropertySpec).filter(PropertySpec.property_id == prop.property_id).first()
-
-    # 2. Query internal JSON specs
-    json_spec = {}
-    if os.path.exists(SPECS_JSON_PATH):
-        try:
-            with open(SPECS_JSON_PATH, "r", encoding="utf-8") as f:
-                all_specs = json.load(f)
-                for item in all_specs:
-                    item_id = item.get("property_id", "").strip().upper()
-                    if item_id in id_aliases:
-                        json_spec = item
-                        break
-        except Exception:
-            pass
-
-    if not prop and not json_spec:
+    if not property_id or not isinstance(property_id, str):
         return None
 
-    # Merge specs
-    merged_specs = json_spec.get("specifications", {})
-    construction = merged_specs.get("construction_details", {})
-    
-    # DB specs take precedence if populated
-    roof_material = (spec.roof_material if spec and spec.roof_material else merged_specs.get("roof_material")) or "N/A"
-    roof_colour = (spec.roof_colour if spec and spec.roof_colour else merged_specs.get("roof_colour")) or "N/A"
-    flooring = (spec.flooring if spec and spec.flooring else merged_specs.get("flooring")) or "N/A"
-    walls = (spec.walls if spec and spec.walls else merged_specs.get("walls")) or "N/A"
-    doors_windows = (spec.doors_windows if spec and spec.doors_windows else merged_specs.get("doors_and_windows")) or "N/A"
-    exterior_mat = (spec.exterior_materials if spec and spec.exterior_materials else merged_specs.get("exterior_materials")) or "N/A"
-    interior_mat = (spec.interior_materials if spec and spec.interior_materials else merged_specs.get("interior_materials")) or "N/A"
-    arch_style = (spec.architectural_style if spec and spec.architectural_style else merged_specs.get("architectural_style")) or "N/A"
-    internal_notes = (spec.internal_notes if spec and spec.internal_notes else json_spec.get("internal_notes")) or "No private notes available."
+    clean_id = property_id.strip()
+    id_aliases = {clean_id, clean_id.upper(), clean_id.lower()}
+    if "PHK" in clean_id.upper():
+        id_aliases.add(clean_id.upper().replace("PHK", "PHU"))
+    if "PHU" in clean_id.upper():
+        id_aliases.add(clean_id.upper().replace("PHU", "PHK"))
 
-    return {
-        "property_id": prop.property_id if prop else json_spec.get("property_id"),
-        "property_name": prop.property_name if prop else json_spec.get("property_name"),
-        "status": prop.status if prop else "Available",
-        "location": f"{prop.district or ''}, {prop.province or ''}".strip(", ") if prop else "Thailand",
+    # 1. Query property from live Cloud Firestore (primary authoritative store)
+    fs_prop = None
+    try:
+        from app.services.firestore_service import get_property_by_id_from_firestore
+        for alias in id_aliases:
+            fs_prop = get_property_by_id_from_firestore(alias, target="admin")
+            if fs_prop:
+                break
+    except Exception as e:
+        logger.warning(f"Firestore get_property_by_id_from_firestore error: {e}")
+        fs_prop = None
+
+    # 1.5 Query Property and PropertySpec from DB
+    prop = None
+    spec = None
+    if db is not None:
+        try:
+            prop = db.query(Property).filter(Property.property_id.in_(list(id_aliases))).first()
+            if prop:
+                spec = db.query(PropertySpec).filter(PropertySpec.property_id == prop.property_id).first()
+        except Exception as e:
+            logger.debug(f"DB lookup fallback: {e}")
+
+    if not fs_prop and not prop and not spec:
+        return None
+
+    price_keys = [
+        "property_name", "status", "province", "district", "area", "location",
+        "price_numeric_min", "price_numeric_max", "price_display", "currency",
+        "bedrooms_min", "bedrooms_max", "bedrooms_display", "bathrooms",
+        "area_display", "property_type", "has_pool",
+    ]
+    merged: Dict[str, Any] = {}
+    if prop:
+        merged.update(read_pg_canonical(prop, price_keys))
+    if fs_prop:
+        raw = fs_prop.get("raw_firestore_data") if isinstance(fs_prop.get("raw_firestore_data"), dict) else {}
+        # Prefer flat card + raw
+        doc = dict(raw or {})
+        doc.update({k: v for k, v in fs_prop.items() if k != "raw_firestore_data" and v is not None})
+        fs_vals = read_firestore_canonical(doc, price_keys)
+        for k, v in fs_vals.items():
+            if k not in merged or merged.get(k) is None or merged.get(k) == "":
+                merged[k] = v
+
+    # Specs
+    fs_raw = (fs_prop.get("raw_firestore_data") or {}) if fs_prop else {}
+    amenities = fs_prop.get("amenities") or fs_raw.get("amenities") or [] if fs_prop else []
+    tags = fs_raw.get("tags") or []
+    layouts = fs_raw.get("layouts") or []
+    completion_status = merged.get("status") or (fs_prop.get("status") if fs_prop else None) or fs_raw.get("completionStatus")
+    completion_date = fs_raw.get("completionDate")
+    dev_name = (
+        (fs_prop.get("developer_name") if fs_prop else None)
+        or fs_raw.get("developerId")
+        or (prop.developer_name if prop else None)
+    )
+
+    inv_highlights = fs_raw.get("investmentHighlights")
+    if isinstance(inv_highlights, (list, tuple)):
+        notes_val = " ".join([str(x) for x in inv_highlights if x])
+    elif isinstance(inv_highlights, dict):
+        notes_val = inv_highlights.get("en") or inv_highlights.get("pl") or ""
+    elif inv_highlights:
+        notes_val = str(inv_highlights)
+    else:
+        notes_val = ""
+
+    roof_material = (spec.roof_material if spec and spec.roof_material else None) or "Not documented in verified database"
+    roof_colour = (spec.roof_colour if spec and spec.roof_colour else None) or "Not documented in verified database"
+    flooring = (spec.flooring if spec and spec.flooring else None) or "Not documented in verified database"
+    walls = (spec.walls if spec and spec.walls else None) or "Not documented in verified database"
+    doors_windows = (spec.doors_windows if spec and spec.doors_windows else None) or "Not documented in verified database"
+    exterior_mat = (spec.exterior_materials if spec and spec.exterior_materials else None) or "Not documented in verified database"
+    interior_mat = (spec.interior_materials if spec and spec.interior_materials else None) or "Not documented in verified database"
+    arch_style = (spec.architectural_style if spec and spec.architectural_style else None) or (
+        merged.get("property_type") or "Not documented in verified database"
+    )
+    foundation_val = (
+        spec.construction_details.get("foundation")
+        if spec and isinstance(spec.construction_details, dict) and spec.construction_details.get("foundation")
+        else None
+    ) or "Not documented in verified database"
+
+    internal_notes = (spec.internal_notes if spec and spec.internal_notes else None) or (
+        notes_val if notes_val else "No confidential notes recorded for this development."
+    )
+
+    prop_id_val = (fs_prop.get("property_id") if fs_prop else None) or (prop.property_id if prop else clean_id)
+    prop_name_val = localize_name(merged.get("property_name")) or (
+        localize_name(fs_prop.get("name")) if fs_prop else None
+    ) or (prop.property_name if prop else clean_id)
+    prop_status = completion_status or (prop.status if prop else "Available")
+    prop_loc = merged.get("location") or (
+        f"{merged.get('district') or ''}, {merged.get('province') or ''}".strip(", ")
+    ) or "Thailand"
+
+    price_min = merged.get("price_numeric_min")
+    price_max = merged.get("price_numeric_max")
+    price_display = merged.get("price_display")
+    if price_display is None and price_min is not None:
+        price_display = f"{format_price_for_display(price_min)} THB"
+    currency = merged.get("currency") or "THB"
+
+    # Normalize parsed numerics
+    if price_min is not None:
+        try:
+            price_min = float(price_min)
+        except Exception:
+            price_min = parse_price_amount(price_min)
+    if price_max is not None:
+        try:
+            price_max = float(price_max)
+        except Exception:
+            price_max = parse_price_amount(price_max)
+
+    beds = {}
+    if merged.get("bedrooms_min") is not None or merged.get("bedrooms_display"):
+        beds = {
+            "bedrooms_min": merged.get("bedrooms_min"),
+            "bedrooms_max": merged.get("bedrooms_max"),
+            "bedrooms_display": merged.get("bedrooms_display"),
+        }
+    else:
+        beds = parse_bedrooms(merged.get("bedrooms_min"))
+
+    price_present = price_min is not None or price_max is not None or (
+        price_display is not None and str(price_display).strip()
+    )
+    price_empty = price_present and (
+        (price_min is None or price_min == 0)
+        and (price_max is None)
+        and (not price_display or str(price_display).strip().lower() in ("", "n/a", "none", "—", "-"))
+    )
+
+    has_pool_flag = merged.get("has_pool")
+    _notes_l = str(internal_notes or "").lower()
+    notes_mention_pool = ("pool" in _notes_l) or ("basen" in _notes_l)
+    pool_conflict_note = None
+    if has_pool_flag is False and notes_mention_pool:
+        pool_conflict_note = (
+            "The record has no pool flag; the internal notes mention a private pool"
+        )
+
+    result: Dict[str, Any] = {
+        "property_id": prop_id_val,
+        "property_name": prop_name_val,
+        "name": prop_name_val,
+        "status": prop_status,
+        "location": prop_loc,
+        "price_numeric_min": price_min,
+        "price_numeric_max": price_max,
+        "price_display": price_display,
+        "currency": currency,
+        "bedrooms_display": beds.get("bedrooms_display") or merged.get("bedrooms_display"),
+        "bedrooms_min": beds.get("bedrooms_min") if beds.get("bedrooms_min") is not None else merged.get("bedrooms_min"),
+        "bedrooms_max": beds.get("bedrooms_max") if beds.get("bedrooms_max") is not None else merged.get("bedrooms_max"),
+        "area_display": merged.get("area_display"),
+        "bathrooms": merged.get("bathrooms"),
+        "property_type": merged.get("property_type"),
+        "has_pool": has_pool_flag,
+        "pool_record_vs_notes": pool_conflict_note,
+        "fact_source": "record_fields",
+        "price_fields_present": bool(price_present),
+        "price_fields_empty": bool(price_empty),
         "specifications": {
             "roof_material": roof_material,
             "roof_colour": roof_colour,
@@ -73,9 +216,20 @@ def get_property_knowledge(db: Session, property_id: str) -> Optional[Dict[str, 
             "exterior_materials": exterior_mat,
             "interior_materials": interior_mat,
             "architectural_style": arch_style,
-            "construction_details": construction or (spec.construction_details if spec else {}),
-            "developer_contact": merged_specs.get("developer_contact", "Tajlandia Agency Desk")
+            "construction_details": {
+                "foundation": foundation_val,
+                "completion_status": completion_status or "Not documented",
+                "completion_date": completion_date or "Not documented",
+                "layouts_count": len(layouts) if isinstance(layouts, list) else 0,
+                "amenities": amenities,
+                "tags": tags
+            },
         },
-        "internal_notes": internal_notes,
         "is_private": True
     }
+
+    if include_internal_notes:
+        result["internal_notes"] = internal_notes
+        result["specifications"]["developer_contact"] = dev_name or "Tajlandia Agency Desk"
+
+    return result

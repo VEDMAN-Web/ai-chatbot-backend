@@ -1,0 +1,48 @@
+<section class="page contact-page" data-section="contact">
+  <span class="section-marker">SECTION:contact</span>
+  <div class="page-top-bar"></div>
+  <div class="page-chrome-header">
+    <span class="hdr-left">{{ header_text }}</span>
+  </div>
+  <div class="page-chrome-body">
+    <p class="label-caps" style="margin-bottom:3mm;">{{ labels.next_steps }}</p>
+    <h2 class="display" style="font-size:18pt;margin-bottom:5mm;">{{ labels.how_to_proceed }}</h2>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8mm;">
+      <div>
+        {% if logo_data_uri %}
+        <img src="{{ logo_data_uri }}" alt="" style="max-height:16mm;max-width:42mm;object-fit:contain;margin-bottom:4mm;"/>
+        {% endif %}
+        {% if data.tenant and data.tenant.brand_name %}
+        <h3 class="display" style="font-size:14pt;margin-bottom:3mm;">{{ data.tenant.brand_name }}</h3>
+        {% endif %}
+        <div class="body-text">
+          {% if data.contact and data.contact.email %}<p style="margin-bottom:2mm;">{{ data.contact.email }}</p>{% endif %}
+          {% if data.contact and data.contact.phone %}<p style="margin-bottom:2mm;">{{ data.contact.phone }}</p>{% endif %}
+          {% if data.contact and data.contact.website_url %}
+          <p style="margin-bottom:2mm;">{{ data.contact.website_url }}</p>
+          {% elif data.tenant and data.tenant.website_url %}
+          <p style="margin-bottom:2mm;">{{ data.tenant.website_url }}</p>
+          {% endif %}
+        </div>
+        {% if prepared.closing_line %}
+        <p class="body-text" style="margin-top:5mm;">{{ prepared.closing_line }}</p>
+        {% endif %}
+        <div style="margin-top:6mm;"><span class="btn-cta">{{ prepared.cta_text or labels.book_viewing }}</span></div>
+      </div>
+      <div>
+        {% for step in prepared.next_steps or labels.default_next_steps %}
+        <div style="display:flex;gap:4mm;margin-bottom:5mm;">
+          <div style="width:9mm;height:9mm;background:var(--accent);color:var(--accent_text);display:flex;align-items:center;justify-content:center;font-family:var(--serif);font-size:12pt;flex-shrink:0;{% if theme_shape == 'rounded' %}border-radius:50%;{% endif %}">{{ loop.index }}</div>
+          <p class="body-text" style="padding-top:1.5mm;">{{ step }}</p>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+    <p class="label-caps" style="margin-top:14mm;color:var(--muted);">{{ labels.contact_note }}</p>
+  </div>
+  <div class="page-chrome-footer">
+    <span></span>
+    <span class="page-num">{{ page_label }}</span>
+  </div>
+</section>

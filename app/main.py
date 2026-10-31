@@ -1,24 +1,50 @@
+import asyncio
+import logging
 import os
-from fastapi import FastAPI, Depends, Query, HTTPException, status
+import threading
+from fastapi import FastAPI, Depends, Query, HTTPException, status, Request, File, UploadFile, Form
+from pydantic import BaseModel, Field
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
-from typing import List, Optional
+from typing import List, Optional, Any
 from app.core.config import settings
-from app.db.session import get_db
-from app.services.property_search import PropertyFilterParams, search_properties_safe, get_property_by_id
+from app.db.session import get_db, get_admin_db, get_user_db
+from app.services.property_search import PropertyFilterParams, search_properties_safe, get_property_by_id, property_belongs_to_websites
+from app.core.tenant import normalize_website_list
 from app.db.models import Property
 from app.api.v1.chat import router as chat_router
 from app.api.v1.admin import router as admin_router
 from app.api.v1.auth import router as auth_router
+from app.api.v1.superadmin_instructions import router as superadmin_instructions_router
+from app.api.v1.chat_logs import router as chat_logs_router
+from app.api.v1.drive_ingestion import router as drive_ingestion_router
+
+logger = logging.getLogger(__name__)
+
+# Make the app's own "timing.*" lines visible in Cloud Run logs (they were silently dropped before,
+# because nothing set a log level). Set APP_LOG_LEVEL=WARNING to turn them off again.
+_app_log = logging.getLogger("app")
+_app_log.setLevel(os.getenv("APP_LOG_LEVEL", "INFO").strip().upper() or "INFO")
+if not _app_log.handlers:
+    _h = logging.StreamHandler()
+    _h.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
+    _app_log.addHandler(_h)
+
+# API docs list every route, enabled by default in local/staging (disable with ENABLE_API_DOCS=false in prod)
+_DOCS_ON = os.getenv("ENABLE_API_DOCS", "true").strip().lower() in ("1", "true", "yes")
+# Background purge of expired admin undo snapshots (every 6 hours)
+_snapshot_purge_task: Optional[Any] = None
+_SNAPSHOT_PURGE_INTERVAL_SEC = 6 * 60 * 60
 
 app = FastAPI(
     title="Tajlandia AI Property Intelligence Platform API",
     description="Multi-tenant backend for Public Customer Chatbot & Internal Admin Agent.",
     version="1.0.0",
-    docs_url="/docs",
-    redoc_url="/redoc"
+    docs_url="/docs" if _DOCS_ON else None,
+    redoc_url="/redoc" if _DOCS_ON else None,
+    openapi_url="/openapi.json" if _DOCS_ON else None,
 )
 
 # Mount Static Assets & Frontend
@@ -26,65 +52,159 @@ static_dir = os.path.join(os.path.dirname(__file__), "static")
 if os.path.exists(static_dir):
     app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
+
+def _prewarm_caches_background() -> None:
+    """Load catalog + name index without blocking startup; never raise."""
+    try:
+        from app.services.firestore_service import prewarm_property_catalog
+        prewarm_property_catalog(target="user")
+    except Exception as e:
+        logger.warning("Startup catalog pre-warm failed (non-fatal): %s", e)
+    try:
+        from app.services.property_name_index import prewarm_property_name_index
+        prewarm_property_name_index(target="user")
+    except Exception as e:
+        logger.warning("Startup name-index pre-warm failed (non-fatal): %s", e)
+
+
 @app.on_event("startup")
 def startup_db_init():
-    """Ensure all PostgreSQL tables and extensions exist on boot and seed admin user."""
+    """Ensure all PostgreSQL tables and extensions exist on boot for both admin and user databases."""
+    # Fail fast if DATABASE_URL is missing outside tests; then emit config flag warnings (no secrets)
     try:
-        import sqlalchemy as sa
-        from app.db.session import engine, Base, SessionLocal
-        import app.db.models  # noqa
-        from app.db.models import User
-        from app.core.security import hash_password
+        from app.core.config import (
+            assert_database_configured_or_exit,
+            assert_secrets_configured_or_exit,
+            log_config_warnings,
+        )
+        assert_database_configured_or_exit()
+        assert_secrets_configured_or_exit()
+        log_config_warnings()
+    except RuntimeError:
+        raise
+    except Exception as e:
+        logger.warning("Startup config checks failed (non-fatal if already asserted): %s", e)
 
-        # 1. Safe DDL synchronization for existing users table
-        with engine.begin() as conn:
-            conn.execute(sa.text("""
-                ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE;
-                ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash VARCHAR(255);
-                ALTER TABLE users ADD COLUMN IF NOT EXISTS google_email VARCHAR(255);
-                ALTER TABLE users ADD COLUMN IF NOT EXISTS google_refresh_token TEXT;
-            """))
+    try:
+        from app.db.schema_sync import ensure_postgres_schema
+        from app.db.session import admin_engine, user_engine
 
-        # 2. Ensure all tables (including user_sessions) exist
-        Base.metadata.create_all(bind=engine)
-        print("FastAPI Startup: Verified all database tables and columns.")
-
-        with SessionLocal() as db:
-            for admin_email in [settings.ADMIN_EMAIL, "admin@tajlandia.com"]:
-                clean_email = admin_email.strip().lower()
-                admin = db.query(User).filter(func.lower(User.email) == clean_email).first()
-                if not admin:
-                    admin = User(
-                        email=clean_email,
-                        name="Super Admin",
-                        role="super_admin",
-                        password_hash=hash_password(settings.ADMIN_PASSWORD),
-                        is_active=True
-                    )
-                    db.add(admin)
-                    db.commit()
-                    print(f"FastAPI Startup: Provisioned super-admin account '{clean_email}'.")
-                else:
-                    admin.password_hash = hash_password(settings.ADMIN_PASSWORD)
-                    admin.is_active = True
-                    admin.role = "super_admin"
-                    db.commit()
-                    print(f"FastAPI Startup: Updated password hash for super-admin '{clean_email}'.")
-
-            try:
-                from app.services.firestore_auth_service import add_or_update_admin_in_firestore
-                add_or_update_admin_in_firestore(
-                    email="admin@tajlandia.com",
-                    password=settings.ADMIN_PASSWORD,
-                    role="super_admin",
-                    name="Super Admin",
-                    is_active=True
-                )
-                print("FastAPI Startup: Synced admin@tajlandia.com to Firestore admin_authentication.")
-            except Exception as fe:
-                print(f"FastAPI Startup Firestore sync notice: {fe}")
+        try:
+            ensure_postgres_schema((admin_engine, user_engine))
+            print("FastAPI Startup: Verified all admin and user database tables and columns.")
+        except Exception as eng_e:
+            print(f"FastAPI Startup: Database schema was not fully applied: {eng_e}")
     except Exception as e:
         print(f"FastAPI Startup DB Notice: {e}")
+
+    # Non-blocking cache pre-warm (Firestore may be unavailable in some envs)
+    try:
+        threading.Thread(
+            target=_prewarm_caches_background,
+            daemon=True,
+            name="prewarm-property-caches",
+        ).start()
+    except Exception as e:
+        logger.warning("Could not start cache pre-warm thread: %s", e)
+
+
+def _run_purge_expired_snapshots_safe() -> int:
+    """Never raise — used by startup, loop, and maintenance endpoint internals."""
+    try:
+        from app.services.admin_batch_service import purge_expired_snapshots
+        return int(purge_expired_snapshots() or 0)
+    except Exception as e:
+        logger.warning("purge_expired_snapshots wrapper error: %s", e)
+        return 0
+
+
+def _run_purge_old_reports_safe() -> int:
+    """Never raise — purge reports older than retention (default 7 days)."""
+    try:
+        from app.services.report_service import purge_old_reports
+        return int(purge_old_reports() or 0)
+    except Exception as e:
+        logger.warning("purge_old_reports wrapper error: %s", e)
+        return 0
+
+
+async def _snapshot_purge_loop() -> None:
+    """Background asyncio loop: purge expired admin snapshots + old reports every 6 hours."""
+    while True:
+        try:
+            await asyncio.sleep(_SNAPSHOT_PURGE_INTERVAL_SEC)
+            deleted = await asyncio.to_thread(_run_purge_expired_snapshots_safe)
+            if deleted:
+                logger.info("Background snapshot purge deleted %s document(s)", deleted)
+            reports_deleted = await asyncio.to_thread(_run_purge_old_reports_safe)
+            if reports_deleted:
+                logger.info("Background report purge deleted %s file(s)", reports_deleted)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            # Must never crash the app
+            logger.warning("Background snapshot purge loop error (continuing): %s", e)
+
+
+@app.on_event("startup")
+async def startup_snapshot_purge():
+    """
+    (a) Purge expired admin undo snapshots once at boot.
+    (b) Start a 6-hour background asyncio purge loop.
+    Infra should also enable a Firestore TTL policy on field `expire_at` as a second safety net.
+    """
+    global _snapshot_purge_task
+    try:
+        deleted = await asyncio.to_thread(_run_purge_expired_snapshots_safe)
+        logger.info("Startup snapshot purge deleted %s expired document(s)", deleted)
+    except Exception as e:
+        logger.warning("Startup snapshot purge failed (non-fatal): %s", e)
+    try:
+        reports_deleted = await asyncio.to_thread(_run_purge_old_reports_safe)
+        if reports_deleted:
+            logger.info("Startup report purge deleted %s old report(s)", reports_deleted)
+    except Exception as e:
+        logger.warning("Startup report purge failed (non-fatal): %s", e)
+    try:
+        _snapshot_purge_task = asyncio.create_task(
+            _snapshot_purge_loop(),
+            name="admin-snapshot-purge-loop",
+        )
+    except Exception as e:
+        logger.warning("Could not start snapshot purge loop (non-fatal): %s", e)
+
+
+@app.on_event("startup")
+async def startup_resume_drive_ingestion():
+    """Restart Google Drive ingestion jobs that were queued or processing when the server stopped."""
+    from app.core.config import is_test_environment
+    if is_test_environment() or not bool(getattr(settings, "DRIVE_INGEST_RESUME_ON_STARTUP", True)):
+        return
+    try:
+        from app.services.drive_folder_ingest import resume_interrupted_jobs
+        await asyncio.to_thread(resume_interrupted_jobs)
+    except Exception as e:
+        logger.warning("Drive ingestion resume failed (non-fatal): %s", type(e).__name__)
+
+
+@app.on_event("shutdown")
+async def shutdown_snapshot_purge():
+    """Cancel the background snapshot purge loop on app shutdown."""
+    global _snapshot_purge_task
+    task = _snapshot_purge_task
+    _snapshot_purge_task = None
+    if task is not None:
+        try:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                logger.debug("Snapshot purge task shutdown: %s", e)
+        except Exception as e:
+            logger.warning("Error cancelling snapshot purge task: %s", e)
+
 
 @app.get("/", include_in_schema=False)
 def serve_frontend():
@@ -103,9 +223,16 @@ def serve_admin_frontend():
     return {"message": "Tajlandia AI Backend Active"}
 
 # Robust CORS Configuration: allows all frontend ports (Vite 5173, Next 3000, etc.) and deployed domains
+# Only our own sites, our Vercel apps and localhost may call the API from a browser.
+# Emergency switch: set CORS_ALLOW_ALL=true on Cloud Run to restore the old open behaviour without a deploy.
+_CORS_ORIGIN_REGEX = (
+    r"https://(www\.)?(varsoviaestate\.com|tajlandia\.com|tajlandia\.pl|thai\.estate)"
+    r"|https://ai-chatbot-[a-z0-9-]+\.vercel\.app"
+    r"|http://(localhost|127\.0\.0\.1)(:\d+)?"
+)
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=r".*",
+    allow_origin_regex=r".*" if os.getenv("CORS_ALLOW_ALL", "").lower() == "true" else _CORS_ORIGIN_REGEX,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -113,7 +240,11 @@ app.add_middleware(
 
 # Register Public Chatbot & Admin Agent Routers
 app.include_router(chat_router, prefix="/api/v1")
+app.include_router(chat_router, prefix="", include_in_schema=False)
 app.include_router(admin_router, prefix="/api/v1")
+app.include_router(superadmin_instructions_router, prefix="/api/v1")
+app.include_router(chat_logs_router, prefix="/api/v1")
+app.include_router(drive_ingestion_router, prefix="/api/v1")
 app.include_router(auth_router, prefix="/api/v1")
 
 # Convenience route aliases for authentication and user management
@@ -126,6 +257,7 @@ from app.api.v1.auth import (
     get_admin_user_details,
     update_admin_user,
     delete_admin_user,
+    block_admin_user,
     UserLoginResponse,
     UserLogoutResponse,
     AdminUserDirectoryItem
@@ -158,14 +290,24 @@ app.patch("/api/v1/users/{user_id}", response_model=AdminUserDirectoryItem, tags
 app.put("/api/v1/users/{user_id}", response_model=AdminUserDirectoryItem, tags=["Admin Directory"], include_in_schema=False)(update_admin_user)
 app.delete("/api/v1/admin/users/{user_id}", tags=["Admin Directory"], include_in_schema=False)(delete_admin_user)
 app.delete("/api/v1/users/{user_id}", tags=["Admin Directory"], include_in_schema=False)(delete_admin_user)
+app.post("/api/v1/admin/users/{user_id}/block", response_model=AdminUserDirectoryItem, tags=["Admin Directory"], include_in_schema=False)(block_admin_user)
+app.post("/api/v1/users/{user_id}/block", response_model=AdminUserDirectoryItem, tags=["Admin Directory"], include_in_schema=False)(block_admin_user)
 
 @app.get("/health", tags=["System"])
-def health_check(db: Session = Depends(get_db)):
-    """System health check, PostgreSQL, and Firestore connection test."""
+def health_check(
+    admin_db: Session = Depends(get_admin_db),
+    user_db: Session = Depends(get_user_db)
+):
+    """System health check, PostgreSQL (admin and user instances), and Firestore connection test."""
     try:
-        count = db.query(Property).count()
+        admin_count = admin_db.query(Property).count()
+        user_count = user_db.query(Property).count()
         fs_health = {"connected": False}
-        if getattr(settings, "ENABLE_FIRESTORE_SYNC", False):
+        if (
+            getattr(settings, "ENABLE_FIRESTORE_SYNC", False)
+            or settings.get_admin_enable_firestore_sync()
+            or settings.get_user_enable_firestore_sync()
+        ):
             try:
                 from app.services.firestore_service import check_firestore_health
                 fs_health = check_firestore_health()
@@ -176,13 +318,15 @@ def health_check(db: Session = Depends(get_db)):
             "status": "healthy",
             "environment": settings.ENVIRONMENT,
             "database": "connected",
-            "total_properties": count,
+            "admin_database": {"connected": True, "properties_count": admin_count},
+            "user_database": {"connected": True, "properties_count": user_count},
+            "total_properties": user_count or admin_count,
             "firestore": fs_health
         }
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Database connection failed."
+            detail=f"Database connection failed: {e}"
         )
 
 @app.get("/api/v1/branding", tags=["System"])
@@ -207,6 +351,7 @@ def get_branding(site_origin: Optional[str] = Query(None, description="Optional 
 
 @app.get("/api/v1/properties", tags=["Properties"])
 def list_properties(
+    request: Request,
     location: Optional[str] = Query(None, description="Location search query (e.g. Phuket, Bang Tao, Samui)"),
     property_type: Optional[str] = Query(None, description="Villa or Condominium"),
     min_price: Optional[float] = Query(None, ge=0),
@@ -215,9 +360,24 @@ def list_properties(
     has_pool: Optional[bool] = Query(None),
     beach_access: Optional[bool] = Query(None),
     status: Optional[str] = Query(None),
-    db: Session = Depends(get_db)
+    websites: Optional[str] = Query(None, description="Comma-separated website domains or single domain"),
+    site_origin: Optional[str] = Query(None, description="Tenant site origin domain"),
+    limit: Optional[int] = Query(50, ge=1, le=500, description="Max properties to return"),
+    offset: Optional[int] = Query(0, ge=0, description="Pagination offset"),
+    db: Session = Depends(get_user_db)
 ):
-    """Direct property filtering endpoint using safe SQLAlchemy query builder."""
+    """Direct property filtering endpoint using safe SQLAlchemy query builder with website scoping."""
+    raw_sites = (
+        websites
+        or request.query_params.get("selected_websites")
+        or request.query_params.get("sites")
+        or site_origin
+        or request.headers.get("x-selected-websites")
+        or request.headers.get("x-selected-sites")
+        or request.headers.get("x-site-origin")
+    )
+    target_websites = normalize_website_list(raw_sites) if raw_sites else None
+
     params = PropertyFilterParams(
         location=location,
         property_type=property_type,
@@ -226,7 +386,10 @@ def list_properties(
         bedrooms=bedrooms,
         has_pool=has_pool,
         beach_access=beach_access,
-        status=status
+        status=status,
+        websites=target_websites,
+        limit=limit or 50,
+        offset=offset or 0
     )
     results = search_properties_safe(db, params)
     
@@ -246,6 +409,7 @@ def list_properties(
             "has_pool": p.has_pool,
             "beach_access": p.beach_access,
             "images": img_urls,
+            "websites": p.websites or ["tajlandia.com"],
             "detail_page_url": p.detail_page_url
         })
     return {"count": len(output), "properties": output}
@@ -253,9 +417,23 @@ def list_properties(
 @app.get("/api/v1/properties/{property_id}", tags=["Properties"])
 def get_property(
     property_id: str,
-    db: Session = Depends(get_db)
+    request: Request,
+    websites: Optional[str] = Query(None, description="Optional website filter"),
+    site_origin: Optional[str] = Query(None, description="Tenant site origin domain"),
+    db: Session = Depends(get_user_db)
 ):
-    """Lookup property by exact Property ID."""
+    """Lookup property by exact Property ID with optional website scope check."""
+    raw_sites = (
+        websites
+        or request.query_params.get("selected_websites")
+        or request.query_params.get("sites")
+        or site_origin
+        or request.headers.get("x-selected-websites")
+        or request.headers.get("x-selected-sites")
+        or request.headers.get("x-site-origin")
+    )
+    target_websites = normalize_website_list(raw_sites) if raw_sites else None
+
     p = get_property_by_id(db, property_id)
     if not p:
         if getattr(settings, "ENABLE_FIRESTORE_SYNC", False):
@@ -263,6 +441,12 @@ def get_property(
                 from app.services.firestore_service import get_property_by_id_from_firestore
                 fs_p = get_property_by_id_from_firestore(property_id)
                 if fs_p:
+                    fs_websites = fs_p.get("websites") or fs_p.get("allowed_websites")
+                    if target_websites and fs_websites and not any(w in target_websites for w in fs_websites):
+                        raise HTTPException(
+                            status_code=status.HTTP_404_NOT_FOUND,
+                            detail=f"Property with ID '{property_id}' not found in website scope {target_websites}."
+                        )
                     return {
                         "found": True,
                         "property_id": fs_p["property_id"],
@@ -288,55 +472,151 @@ def get_property(
                         },
                         "amenities": fs_p.get("raw_firestore_data", {}).get("amenities", []),
                         "images": fs_p.get("images", []),
+                        "websites": fs_websites or ["tajlandia.com"],
                         "detail_page_url": fs_p.get("detail_page_url")
                     }
+            except HTTPException:
+                raise
             except Exception:
                 pass
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Property with ID '{property_id}' not found."
         )
-    
-    img_urls = [img.image_url for img in p.images]
+
+    if target_websites and not property_belongs_to_websites(p, target_websites):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Property with ID '{property_id}' does not belong to selected website(s) {target_websites}."
+        )
+
+    img_urls = [getattr(img, "image_url", img) for img in (getattr(p, "images", None) or [])]
     return {
         "found": True,
-        "property_id": p.property_id,
-        "property_name": p.property_name,
-        "project_name": p.project_name,
-        "property_type": p.property_type,
-        "status": p.status,
+        "property_id": getattr(p, "property_id", property_id),
+        "property_name": getattr(p, "property_name", None),
+        "project_name": getattr(p, "project_name", None),
+        "property_type": getattr(p, "property_type", None),
+        "status": getattr(p, "status", None),
         "location": {
-            "country": p.country,
-            "province": p.province,
-            "district": p.district,
-            "area": p.area,
-            "address": p.address,
-            "latitude": p.latitude,
-            "longitude": p.longitude
+            "country": getattr(p, "country", "India" if "gujarat" in str(getattr(p, "province", "")).lower() else "Thailand"),
+            "province": getattr(p, "province", None),
+            "district": getattr(p, "district", None),
+            "area": getattr(p, "area", None),
+            "address": getattr(p, "address", None),
+            "latitude": getattr(p, "latitude", None),
+            "longitude": getattr(p, "longitude", None)
         },
         "developer": {
-            "name": p.developer_name,
-            "description": p.developer_description
+            "name": getattr(p, "developer_name", None),
+            "description": getattr(p, "developer_description", None)
         },
         "pricing": {
-            "display": p.price_display,
-            "numeric_min": float(p.price_numeric_min) if p.price_numeric_min else None,
-            "currency": p.currency,
-            "note": p.price_note
+            "display": getattr(p, "price_display", None),
+            "numeric_min": float(p.price_numeric_min) if getattr(p, "price_numeric_min", None) else None,
+            "currency": getattr(p, "currency", "THB"),
+            "note": getattr(p, "price_note", None)
         },
         "details": {
-            "bedrooms": p.bedrooms_display,
-            "bathrooms": p.bathrooms,
-            "area": p.area_display,
-            "units": p.units
+            "bedrooms": getattr(p, "bedrooms_display", None),
+            "bathrooms": getattr(p, "bathrooms", None),
+            "area": getattr(p, "area_display", None),
+            "units": getattr(p, "units", None)
         },
-        "description": p.description,
-        "investment_info": p.investment_information,
-        "rental_info": p.rental_information,
-        "payment_info": p.payment_information,
-        "amenities": p.amenities,
-        "features": p.features,
-        "highlights": p.highlights,
+        "description": getattr(p, "description", None),
+        "investment_info": getattr(p, "investment_information", None),
+        "rental_info": getattr(p, "rental_information", None),
+        "payment_info": getattr(p, "payment_information", None),
+        "amenities": getattr(p, "amenities", []),
+        "features": getattr(p, "features", []),
+        "highlights": getattr(p, "highlights", []),
         "images": img_urls,
-        "detail_page_url": p.detail_page_url
+        "websites": getattr(p, "websites", ["tajlandia.com"]),
+        "detail_page_url": getattr(p, "detail_page_url", None)
     }
+
+# Root route aliases for Section 13 public endpoints
+app.get("/branding", tags=["System"], include_in_schema=False)(get_branding)
+app.get("/properties", tags=["Properties"], include_in_schema=False)(list_properties)
+app.get("/properties/{property_id}", tags=["Properties"], include_in_schema=False)(get_property)
+app.get("/api/v1/health", tags=["System"], include_in_schema=False)(health_check)
+
+
+# Dedicated Direct Media Proxy Endpoint for Frontend Websites
+@app.get("/api/v1/media/{full_path:path}", tags=["Media"])
+@app.get("/media/{full_path:path}", tags=["Media"], include_in_schema=False)
+def serve_public_media_asset(full_path: str):
+    import os
+    import urllib.parse
+    import httpx
+    from fastapi.responses import Response, FileResponse
+
+    local_base = os.path.join(getattr(settings, "REPORT_STORAGE_DIR", "data/reports"), "media")
+    local_file = os.path.join(local_base, full_path.replace("/", os.sep))
+    if os.path.isfile(local_file):
+        media_type = "image/webp" if local_file.endswith(".webp") else ("image/jpeg" if local_file.endswith((".jpg", ".jpeg")) else "image/png")
+        return FileResponse(local_file, media_type=media_type)
+
+    try:
+        from app.services.cloud_media_storage import cloud_storage
+        token = cloud_storage._get_access_token()
+        bucket = cloud_storage.bucket_name
+        quoted_name = urllib.parse.quote(full_path, safe="")
+        
+        headers = {}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+            
+        gcs_url = f"https://storage.googleapis.com/storage/v1/b/{bucket}/o/{quoted_name}?alt=media"
+        with httpx.Client(timeout=20.0) as client:
+            resp = client.get(gcs_url, headers=headers)
+            if resp.status_code == 200:
+                content_type = resp.headers.get("content-type", "image/jpeg")
+                return Response(
+                    content=resp.content,
+                    media_type=content_type,
+                    headers={
+                        "Cache-Control": "public, max-age=86400, stale-while-revalidate=604800",
+                        "Access-Control-Allow-Origin": "*"
+                    }
+                )
+    except Exception as e:
+        logger.error(f"Error proxying media asset {full_path}: {e}")
+
+    raise HTTPException(status_code=404, detail="Media asset not found")
+
+
+
+# =====================================================================
+# Enterprise Real Estate Document & URL Ingestion Endpoints
+# =====================================================================
+class IngestUrlRequest(BaseModel):
+    url: str
+    property_id: Optional[str] = None
+
+
+@app.post("/api/v1/properties/ingest-document", tags=["Properties"])
+async def ingest_property_document_endpoint(
+    file: UploadFile = File(...),
+    property_id: Optional[str] = Form(None)
+):
+    from app.services.document_ingestion_pipeline import process_and_ingest_property_document
+    content = await file.read()
+    result = process_and_ingest_property_document(
+        content_bytes=content,
+        filename=file.filename or "uploaded_document.pdf",
+        property_id_override=property_id,
+        save_to_database=True
+    )
+    return {"status": "success", "message": "Property ingested and synchronized successfully", "data": result}
+
+
+@app.post("/api/v1/properties/ingest-url", tags=["Properties"])
+def ingest_property_url_endpoint(req: IngestUrlRequest):
+    from app.services.document_ingestion_pipeline import process_and_ingest_property_url
+    result = process_and_ingest_property_url(
+        url=req.url,
+        property_id_override=req.property_id,
+        save_to_database=True
+    )
+    return {"status": "success", "message": "Property ingested from URL successfully", "data": result}

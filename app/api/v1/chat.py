@@ -1,15 +1,24 @@
 import os
 import logging
+import time
+import uuid
 from decimal import Decimal
+from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse, FileResponse
 from sqlalchemy.orm import Session
 from pydantic import BaseModel, Field, EmailStr, field_validator
-from typing import Optional, List, Dict, Any
 import io
+from typing import Optional, List, Dict, Any
 from app.core.config import settings
-from app.db.session import get_db
-from app.services.conversation_service import get_or_create_conversation, append_conversation_turn
+from app.db.session import get_user_db as get_db
+from app.services.conversation_service import (
+    get_or_create_conversation,
+    append_conversation_turn,
+    get_session_message_count,
+    increment_session_message_count,
+    persist_conversation_preferences,
+)
 from app.services.public_agent import public_agent, format_property_card
 from app.services.lead_service import record_or_update_lead
 from app.db.models import Property
@@ -28,33 +37,63 @@ class PublicChatRequest(BaseModel):
 
     # Optional lead / contact submission fields (allows frontend to submit contact forms directly through this single API!)
     contact_name: Optional[str] = Field(None, max_length=200, description="Visitor's full name", example="Alexander Smith")
-    contact_email: Optional[str] = Field(None, max_length=200, description="Visitor's email address", example="alexander.smith@example.com")
+    contact_email: Optional[str] = Field(None, max_length=200, description="Visitor's email address", example="alexander.smith@varsoviaestate.com")
     contact_phone: Optional[str] = Field(None, max_length=100, description="Visitor's phone or WhatsApp number", example="+48 501 234 567")
     preferred_location: Optional[str] = Field(None, max_length=200, description="Preferred area or island", example="Bang Tao, Phuket")
     budget: Optional[float] = Field(None, ge=0, description="Stated budget in THB", example=25000000)
     notes: Optional[str] = Field(None, max_length=2000, description="Inquiry comments or viewing preferences", example="Interested in viewing next week")
+    property_id: Optional[str] = Field(None, max_length=128, description="Listing the Inquire form was opened from (id or name)")
 
     @field_validator("site_origin", mode="before")
     def validate_origin(cls, v):
+        """
+        Keep the real site origin so resolve_tenant() can brand replies correctly.
+        Accepts tajlandia.com / tajlandia.pl, thai.estate, varsoviaestate.com, localhost.
+        Never collapse tajlandia → varsoviaestate.com.
+        """
         default_origin = getattr(settings, "SITE_ORIGIN", "varsoviaestate.com") or "varsoviaestate.com"
+        default_host = (
+            str(default_origin)
+            .strip()
+            .lower()
+            .replace("https://", "")
+            .replace("http://", "")
+            .split("/")[0]
+            .split(":")[0]
+        )
         if not v or not isinstance(v, str):
-            return default_origin
-        v_clean = v.strip().lower().replace("https://", "").replace("http://", "").split("/")[0]
-        if "tajlandia" in v_clean or default_origin in v_clean:
-            return default_origin
-        allowed = [default_origin, "thai.estate", "localhost", "127.0.0.1"]
-        for domain in allowed:
-            if domain in v_clean:
-                return v_clean
-        return default_origin
+            return default_host
+        host = (
+            v.strip()
+            .lower()
+            .replace("https://", "")
+            .replace("http://", "")
+            .split("/")[0]
+            .split(":")[0]
+        )
+        if host.startswith("www."):
+            host = host[4:]
+
+        if host in ("localhost", "127.0.0.1"):
+            return host
+        if "tajlandia" in host:
+            return "tajlandia.pl" if host.endswith(".pl") else "tajlandia.com"
+        if "thai.estate" in host or host == "thai.estate":
+            return "thai.estate"
+        if "varsovia" in host:
+            return "varsoviaestate.com"
+        if host == default_host or default_host in host:
+            return default_host
+        # Unknown hosts fall back to default (do not invent a brand)
+        return default_host
 
 class PropertyCard(BaseModel):
-    property_id: str = Field(..., example="PROP-PHK-001")
+    property_id: str = Field(..., example="15-sukhumvit-residences")
     name: str = Field(..., example="Aileen Residence Bangtao")
     property_type: str = Field(..., example="Villa")
-    price: str = Field(..., example="from 8.xx million THB")
+    price: str = Field(..., example="8,500,000 THB")
     bedrooms: str = Field(..., example="2–3")
-    area: str = Field(..., example="0–167 sqm")
+    area: str = Field(..., example="167 sqm")
     location: str = Field(..., example="Bang Tao, Phuket")
     status: str = Field(..., example="Under construction")
     has_pool: Optional[bool] = Field(False, example=True)
@@ -62,9 +101,18 @@ class PropertyCard(BaseModel):
     images: List[str] = Field(default_factory=list, example=["https://tajlandia.com/api/img?..."])
     detail_page_url: str = Field(..., example="https://tajlandia.com/oferty/phuket/aileen-residence-villas")
     highlights: List[str] = Field(default_factory=list, example=["54 exclusive pool villas", "Completion Q4 2027"])
+    latitude: Optional[float] = Field(None, example=7.9519)
+    longitude: Optional[float] = Field(None, example=98.3381)
+    maps_url: Optional[str] = Field(None, example="https://www.google.com/maps/search/?api=1&query=7.9519,98.3381")
+    maps_embed_url: Optional[str] = Field(None)
+    calendar_url: Optional[str] = Field(None, example="https://calendar.google.com/calendar/render?...")
 
 class PublicChatResponse(BaseModel):
-    type: str = Field(..., example="property_cards", description="Response type: 'property_cards', 'text', or 'brochure'")
+    type: str = Field(
+        ...,
+        example="property_cards",
+        description="Response type: 'property_cards', 'text', 'brochure', or 'session_limit'",
+    )
     text: str = Field(..., description="Grounded natural language response")
     properties: List[PropertyCard] = Field(default_factory=list, description="Array of matching property cards")
     quick_replies: List[str] = Field(default_factory=list, description="Suggested follow-up actions for user")
@@ -73,10 +121,23 @@ class PublicChatResponse(BaseModel):
     session_id: str = Field(..., example="sess_12345")
     conversation_id: str = Field(..., example="a9f234-bc23-...")
     language: str = Field("en", description="Active response language ('en', 'pl', or 'th')", example="en")
-    brochure_property_id: Optional[str] = Field(None, description="Property ID to auto-download brochure PDF. Set when type='brochure'.", example="PROP-PHK-001")
+    brochure_property_id: Optional[str] = Field(None, description="Property ID to auto-download brochure PDF. Set when type='brochure'.", example="15-sukhumvit-residences")
     pdf_url: Optional[str] = Field(None, description="Direct URL to view or download the generated PDF brochure", example="https://s3.hf.co/...")
     download_url: Optional[str] = Field(None, description="Direct URL to download the generated PDF brochure")
     lead_id: Optional[str] = Field(None, description="UUID of recorded lead if contact details were submitted", example="b182cb82-...")
+    lead_saved: Optional[bool] = Field(None, description="Contact submissions only: True when the lead was really stored (ENABLE_LEAD_SAVING), False when it was not")
+    session_limit_reached: Optional[bool] = Field(
+        False,
+        description="True when this chat has reached MAX_USER_MESSAGES_PER_SESSION and further messages are blocked",
+    )
+    message_limit: Optional[int] = Field(
+        None,
+        description="Configured max user messages per session when the limit is enabled",
+    )
+    session_limit_warning: Optional[bool] = Field(
+        False,
+        description="True when 5 or fewer user messages remain before the session limit",
+    )
 
 class ChatHistoryResponse(BaseModel):
     session_id: str
@@ -91,6 +152,10 @@ class LeadSubmitRequest(BaseModel):
     contact_name: Optional[str] = Field(None, max_length=100)
     contact_email: Optional[str] = Field(None, max_length=100)
     contact_phone: Optional[str] = Field(None, max_length=50)
+    name: Optional[str] = Field(None, max_length=100)
+    email: Optional[str] = Field(None, max_length=100)
+    phone: Optional[str] = Field(None, max_length=50)
+    property_id: Optional[str] = Field(None, max_length=64)
     preferred_location: Optional[str] = Field(None, max_length=100)
     budget: Optional[float] = Field(None, ge=0)
     notes: Optional[str] = Field(None, max_length=1000)
@@ -100,6 +165,7 @@ class LeadSubmitResponse(BaseModel):
     lead_id: str
     lead_score: float
     message: str
+    lead_saved: bool = True
 
 
 # --- Endpoints ---
@@ -114,6 +180,7 @@ def handle_public_chat(
     req: PublicChatRequest,
     db: Session = Depends(get_db)
 ):
+    req_t0 = time.monotonic()
     has_contact = bool(
         (req.contact_name and req.contact_name.strip()) or
         (req.contact_email and req.contact_email.strip()) or
@@ -128,46 +195,80 @@ def handle_public_chat(
         )
 
     try:
+        request_origin = req.site_origin or getattr(settings, "SITE_ORIGIN", "varsoviaestate.com")
         conversation = get_or_create_conversation(
             db=db,
             session_id=req.session_id,
-            site_origin=req.site_origin or getattr(settings, "SITE_ORIGIN", "varsoviaestate.com"),
+            site_origin=request_origin,
             agent_type="public"
         )
+        # Belt-and-suspenders: branding for this reply must follow THIS request origin
+        # (session ids are shared across sites on the multi-tenant web client).
+        from app.services.conversation_service import bind_conversation_site_origin
+        conversation = bind_conversation_site_origin(conversation, request_origin)
 
         recorded_lead_id = None
+        lead_saved_ok = False
         if has_contact:
             budget_dec = Decimal(str(req.budget)) if req.budget is not None else None
-            lead = record_or_update_lead(
-                db=db,
-                conversation=conversation,
-                contact_name=req.contact_name,
-                contact_email=req.contact_email,
-                contact_phone=req.contact_phone,
-                preferred_location=req.preferred_location,
-                budget_max=budget_dec,
-                buying_signal=f"Direct contact submission: {req.contact_email or req.contact_phone or req.contact_name}",
-                notes=req.notes
-            )
-            recorded_lead_id = str(lead.id)
-
-            # Sync lead to Firestore
-            if getattr(settings, "ENABLE_FIRESTORE_SYNC", False):
+            if getattr(settings, "ENABLE_LEAD_SAVING", False):
                 try:
-                    from app.services.firestore_service import create_lead_in_firestore
-                    create_lead_in_firestore({
-                        "name": req.contact_name,
-                        "email": req.contact_email,
-                        "phone": req.contact_phone,
-                        "brand": req.site_origin or getattr(settings, "BRAND_NAME", "Varsovia Estate"),
-                        "source_url": f"https://{req.site_origin or getattr(settings, 'SITE_ORIGIN', 'varsoviaestate.com')}",
-                        "message": req.notes or user_msg,
-                        "property_id": req.preferred_location or ""
-                    })
-                except Exception as e:
-                    logger.warning(f"Firestore lead sync error: {e}")
+                    from app.services.lead_service import enqueue_lead_save
+                    _lead_notes = (
+                        (f"[Listing: {req.property_id}] " if req.property_id else "")
+                        + (req.notes or "")
+                    ) or None
+                    lead = record_or_update_lead(
+                        db=None,
+                        conversation=conversation,
+                        contact_name=req.contact_name,
+                        contact_email=req.contact_email,
+                        contact_phone=req.contact_phone,
+                        preferred_location=req.preferred_location,
+                        budget_max=budget_dec,
+                        buying_signal=f"Direct contact submission: {req.contact_email or req.contact_phone or req.contact_name}",
+                        notes=_lead_notes,
+                    )
+                    recorded_lead_id = str(getattr(lead, "id", "") or "")
+                    enqueue_lead_save(
+                        db=db,
+                        conversation=conversation,
+                        contact_name=req.contact_name,
+                        contact_email=req.contact_email,
+                        contact_phone=req.contact_phone,
+                        preferred_location=req.preferred_location,
+                        budget_max=budget_dec,
+                        buying_signal=f"Direct contact submission: {req.contact_email or req.contact_phone or req.contact_name}",
+                        notes=_lead_notes,
+                    )
+                    lead_saved_ok = True
+                except Exception as lead_err:
+                    logger.warning("Lead save failed (chat reply unaffected): %s", lead_err)
+                    recorded_lead_id = None
+
+                # Sync lead to Firestore
+                if getattr(settings, "ENABLE_FIRESTORE_SYNC", False):
+                    try:
+                        from app.services.firestore_service import create_lead_in_firestore
+                        from app.core.tenant import resolve_tenant
+                        _tenant = resolve_tenant(req.site_origin)
+                        create_lead_in_firestore({
+                            "name": req.contact_name,
+                            "email": req.contact_email,
+                            "phone": req.contact_phone,
+                            "brand": _tenant.brand_name,
+                            "source_url": _tenant.website_url,
+                            "message": req.notes or user_msg,
+                            "property_id": req.property_id or req.preferred_location or ""
+                        })
+                    except Exception as e:
+                        logger.warning(f"Firestore lead sync error: {e}")
+            else:
+                import uuid
+                recorded_lead_id = f"lead_session_{uuid.uuid4().hex[:8]}"
 
         # If user submitted contact form with no extra message, return pleasant localized confirmation immediately
+        # Contact-only submissions do not count toward the session message limit.
         if not user_msg:
             from app.core.tenant import resolve_tenant
             tenant = resolve_tenant(req.site_origin)
@@ -196,8 +297,38 @@ def handle_public_chat(
                 "conversation_id": str(conversation.id),
                 "language": lang,
                 "brochure_property_id": None,
-                "lead_id": recorded_lead_id
+                "lead_id": recorded_lead_id,
+                "lead_saved": lead_saved_ok,
+                "session_limit_reached": False,
+                "message_limit": None,
+                "session_limit_warning": False,
             }
+
+        # Per-session visitor message limit (independent of trimmed message_history)
+        max_msgs = int(getattr(settings, "MAX_USER_MESSAGES_PER_SESSION", 50) or 0)
+        if max_msgs > 0:
+            current_count = get_session_message_count(conversation)
+            if current_count >= max_msgs:
+                from app.services.i18n_service import build_session_limit_reply
+                lang = req.language if req.language in ["en", "pl", "th"] else "en"
+                return {
+                    "type": "session_limit",
+                    "text": build_session_limit_reply(
+                        language=lang,
+                        site_origin=req.site_origin,
+                    ),
+                    "properties": [],
+                    "quick_replies": [],
+                    "lead_captured": False,
+                    "preferences": conversation.preferences or {},
+                    "session_id": conversation.session_id,
+                    "conversation_id": str(conversation.id),
+                    "language": lang,
+                    "brochure_property_id": None,
+                    "session_limit_reached": True,
+                    "message_limit": max_msgs,
+                    "session_limit_warning": False,
+                }
 
         # Otherwise, process message through chatbot agent
         response = public_agent.run_conversation(
@@ -209,9 +340,25 @@ def handle_public_chat(
         if has_contact:
             response["lead_captured"] = True
             response["lead_id"] = recorded_lead_id
+            response["lead_saved"] = lead_saved_ok
 
-        # Log query turn to Firestore
-        if getattr(settings, "ENABLE_FIRESTORE_SYNC", False) and user_msg:
+        # Count only successfully processed visitor chat messages
+        new_count = increment_session_message_count(conversation)
+        persist_conversation_preferences(conversation)
+        prefs = dict(response.get("preferences") or conversation.preferences or {})
+        prefs["session_message_count"] = new_count
+        response["preferences"] = prefs
+        response["session_limit_reached"] = False
+        if max_msgs > 0:
+            response["message_limit"] = max_msgs
+            remaining = max_msgs - new_count
+            response["session_limit_warning"] = remaining <= 5
+        else:
+            response["message_limit"] = None
+            response["session_limit_warning"] = False
+
+        # Log query turn to Firestore (only if ENABLE_CHAT_LOGGING is True)
+        if getattr(settings, "ENABLE_CHAT_LOGGING", False) and getattr(settings, "ENABLE_FIRESTORE_SYNC", False) and user_msg:
             try:
                 from app.services.firestore_service import log_query_to_firestore
                 matched_pids = [
@@ -227,6 +374,12 @@ def handle_public_chat(
             except Exception as e:
                 logger.warning(f"Firestore query logging error: {e}")
 
+        logger.info(
+            "timing.chat_endpoint duration_sec=%.3f session=%s origin=%s",
+            time.monotonic() - req_t0,
+            req.session_id,
+            req.site_origin,
+        )
         return response
     except HTTPException:
         raise
@@ -236,13 +389,12 @@ def handle_public_chat(
             db.rollback()
         except Exception:
             pass
+        from app.services.i18n_service import get_data_unavailable_fallback
         lang = (req.language or "en").lower()
-        if lang == "pl":
-            err_text = "Obecnie występuje tymczasowy problem z serwerem bazy danych. Prosimy spróbować ponownie za chwilę."
-        elif lang == "th":
-            err_text = "ขณะนี้เกิดข้อผิดพลาดชั่วคราวจากเซิร์ฟเวอร์ โปรดลองใหม่อีกครั้งในภายหลังครับ"
-        else:
-            err_text = "We are currently experiencing a temporary server error from our data server. We will be back soon! Please try again in a few moments."
+        err_text = get_data_unavailable_fallback(
+            language=lang if lang in ("en", "pl", "th") else "en",
+            site_origin=req.site_origin,
+        )
 
         return {
             "type": "text",
@@ -284,13 +436,22 @@ def get_chat_history(
                 st = turn_copy["structured_data"]
                 props = st.get("properties") or st.get("property_cards") or []
 
-            # If props contains string IDs (e.g. ['PROP-PHK-001']), hydrate them from database
+            # If props contains string IDs, hydrate from Firestore (authorized inventory)
             if props and isinstance(props, list) and len(props) > 0 and isinstance(props[0], str):
-                db_props = db.query(Property).filter(Property.property_id.in_(props)).all()
-                # Maintain original ID ordering
-                prop_map = {p.property_id: format_property_card(p) for p in db_props}
+                from app.services.property_search import get_properties_by_ids
+                hydrated = get_properties_by_ids(db, props) if db is not None else []
+                prop_map = {}
+                for p in hydrated or []:
+                    pid = getattr(p, "property_id", None) or (p.get("property_id") if isinstance(p, dict) else None)
+                    if not pid:
+                        continue
+                    try:
+                        prop_map[str(pid)] = format_property_card(p) if not isinstance(p, dict) else p
+                    except Exception:
+                        if isinstance(p, dict):
+                            prop_map[str(pid)] = p
                 props = [prop_map[pid] for pid in props if pid in prop_map]
-            
+
             turn_copy["properties"] = props
         enriched_history.append(turn_copy)
 
@@ -318,37 +479,129 @@ def submit_direct_lead(
         session_id=req.session_id,
         agent_type="public"
     )
-    lead = record_or_update_lead(
-        db=db,
-        conversation=conversation,
-        contact_name=req.contact_name,
-        contact_email=req.contact_email,
-        contact_phone=req.contact_phone,
-        preferred_location=req.preferred_location,
-        notes=req.notes,
-        buying_signal="Direct frontend lead submission"
-    )
-
-    if getattr(settings, "ENABLE_FIRESTORE_SYNC", False):
+    recorded_lead_id = f"lead_session_{uuid.uuid4().hex[:8]}"
+    lead_score = 0.8
+    lead_saved = False
+    from app.services.lead_service import validate_email, validate_phone, validate_name
+    c_name = validate_name(req.contact_name or req.name)
+    c_email = validate_email(req.contact_email or req.email)
+    c_phone = validate_phone(req.contact_phone or req.phone)
+    c_loc = req.preferred_location or req.property_id
+    if not c_email and not c_phone:
+        raise HTTPException(
+            status_code=400,
+            detail="A valid email address or phone number is required to submit contact information."
+        )
+    if getattr(settings, "ENABLE_LEAD_SAVING", False):
         try:
-            from app.services.firestore_service import create_lead_in_firestore
-            create_lead_in_firestore({
-                "name": req.contact_name,
-                "email": req.contact_email,
-                "phone": req.contact_phone,
-                "property_id": req.preferred_location or "",
-                "message": req.notes or "Direct frontend lead submission",
-                "brand": conversation.site_origin or "tajlandia"
-            })
-        except Exception as e:
-            logger.warning(f"Firestore direct lead sync error: {e}")
+            from app.services.lead_service import enqueue_lead_save
+            lead = record_or_update_lead(
+                db=None,
+                conversation=conversation,
+                contact_name=c_name,
+                contact_email=c_email,
+                contact_phone=c_phone,
+                preferred_location=c_loc,
+                notes=req.notes,
+                buying_signal="Direct frontend lead submission",
+            )
+            recorded_lead_id = str(getattr(lead, "id", recorded_lead_id))
+            lead_score = float(getattr(lead, "lead_score", 0.8) or 0.8)
+            enqueue_lead_save(
+                db=db,
+                conversation=conversation,
+                contact_name=c_name,
+                contact_email=c_email,
+                contact_phone=c_phone,
+                preferred_location=c_loc,
+                notes=req.notes,
+                buying_signal="Direct frontend lead submission",
+            )
+            lead_saved = True
+        except Exception as lead_err:
+            logger.warning("Direct lead save failed (response unaffected): %s", lead_err)
 
+        if getattr(settings, "ENABLE_FIRESTORE_SYNC", False):
+            try:
+                from app.services.firestore_service import create_lead_in_firestore
+                create_lead_in_firestore({
+                    "name": c_name,
+                    "email": c_email,
+                    "phone": c_phone,
+                    "property_id": c_loc or "",
+                    "message": req.notes or "Direct frontend lead submission",
+                    "brand": conversation.site_origin or "tajlandia"
+                })
+            except Exception as e:
+                logger.warning(f"Firestore direct lead sync error: {e}")
+
+    if not lead_saved:
+        return {
+            "status": "not_saved",
+            "lead_id": recorded_lead_id,
+            "lead_score": lead_score,
+            "lead_saved": False,
+            "message": "Thank you. We could not store your request just now, so please contact an advisor directly.",
+        }
     return {
         "status": "success",
-        "lead_id": str(lead.id),
-        "lead_score": lead.lead_score,
+        "lead_id": recorded_lead_id,
+        "lead_score": lead_score,
+        "lead_saved": True,
         "message": "Thank you! Your inquiry has been registered. An advisor will contact you shortly."
     }
+
+
+@router.get(
+    "/contact-info",
+    summary="Contact numbers and localized copy for the Inquire form",
+    description="Returns the public phone / WhatsApp numbers of the site and the localized texts of the Inquire pop-up form.",
+)
+def get_contact_info(
+    site_origin: Optional[str] = Query(None, description="Tenant site origin domain"),
+    language: str = Query("en", description="'en', 'pl' or 'th'"),
+):
+    from app.core.tenant import resolve_tenant
+    from app.services.contact_info import build_contact_info
+    return build_contact_info(resolve_tenant(site_origin), language)
+
+
+@router.get(
+    "/brochure/shortlist",
+    summary="Download Property Shortlist PDF",
+    description="Generates and downloads a professional PDF comparing and shortlisting selected properties.",
+)
+def download_property_shortlist(
+    property_ids: str = Query(..., description="Comma-separated property IDs (e.g. PROP-PHK-001,PROP-PHK-002)"),
+    lang: Optional[str] = Query("en", description="Brochure language: en, pl, or th"),
+    site_origin: Optional[str] = Query(None, description="Site origin (e.g. tajlandia.com, varsoviaestate.com)"),
+    client_name: Optional[str] = Query(None, description="Client name"),
+    db: Session = Depends(get_db),
+):
+    from app.services.brochure_service import generate_property_shortlist_pdf
+    pids = [pid.strip().upper() for pid in property_ids.split(",") if pid.strip()]
+    if not pids:
+        raise HTTPException(status_code=400, detail="At least one property ID is required.")
+    try:
+        pdf_bytes = generate_property_shortlist_pdf(
+            db=db,
+            property_ids=pids,
+            site_origin=site_origin,
+            language=lang or "en",
+            client_name=client_name or "Valued Client",
+        )
+        filename = f"Property_Shortlist_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+        return StreamingResponse(
+            io.BytesIO(pdf_bytes),
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "Content-Length": str(len(pdf_bytes)),
+            },
+        )
+    except Exception as e:
+        logger.error(f"Failed to generate property shortlist PDF: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to generate shortlist PDF.")
 
 
 @router.get(
@@ -362,11 +615,18 @@ def download_property_brochure(
     site_origin: Optional[str] = Query(None, description="Tenant site origin domain"),
     session_id: Optional[str] = Query(None, description="Optional session ID to link lead to conversation"),
     format: Optional[str] = Query(None, description="Optional response format ('json' returns download link)"),
+    template: Optional[int] = Query(
+        None,
+        ge=1,
+        le=7,
+        description="Optional brochure visual theme 1–7 (default: random)",
+    ),
+    lang: Optional[str] = Query(None, description="Brochure language: en, pl, or th"),
     db: Session = Depends(get_db)
 ):
     """
-    Public endpoint — generates a branded 8-page luxury presentation property brochure PDF on-demand.
-    Modeled after Varsovia_Estate_Dariusz_Tajlandia 2.pdf.
+    Public endpoint — generates a branded single-property brochure PDF on-demand.
+    HTML engine picks one of 7 visual themes at random unless ?template=N is set.
     Stores buying signal against the conversation for staff follow-up.
     """
     try:
@@ -374,23 +634,31 @@ def download_property_brochure(
         from app.core.tenant import resolve_tenant
         tenant = resolve_tenant(site_origin)
 
-        res = generate_single_property_brochure_pdf(db=db, property_id=property_id, site_origin=site_origin)
+        res = generate_single_property_brochure_pdf(
+            db=db,
+            property_id=property_id,
+            site_origin=site_origin,
+            language=(lang or "en"),
+            template=template,
+            session_key=session_id or property_id,
+        )
         pdf_bytes = res["pdf_bytes"]
         file_url = res.get("file_url") or res.get("download_url")
 
         # Record lead against conversation for staff follow-up if session_id provided
         if session_id:
             try:
+                from app.services.lead_service import enqueue_lead_save
                 conv = get_or_create_conversation(db=db, session_id=session_id, site_origin=tenant.site_origin)
                 prop = db.query(Property).filter(Property.property_id == property_id.upper()).first()
                 pref_loc = f"{prop.district}, {prop.province}" if prop and prop.district else (prop.province if prop else None)
-                record_or_update_lead(
+                enqueue_lead_save(
                     db=db,
                     conversation=conv,
                     preferred_location=pref_loc,
                     preferred_type=prop.property_type if prop else None,
                     buying_signal=f"Downloaded brochure for {property_id.upper()} ({prop.property_name if prop else ''})",
-                    notes=f"Customer downloaded brochure PDF via {tenant.brand_name} ({tenant.domain})"
+                    notes=f"Customer downloaded brochure PDF via {tenant.brand_name} ({tenant.domain})",
                 )
             except Exception as le:
                 logger.warning(f"Could not record lead on brochure download: {le}")
@@ -433,3 +701,5 @@ def get_brochure_file(filename: str):
     if not os.path.isfile(file_path):
         raise HTTPException(status_code=404, detail="Brochure file not found")
     return FileResponse(file_path, media_type="application/pdf", filename=filename)
+
+

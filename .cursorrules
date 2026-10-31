@@ -1,0 +1,44 @@
+# ==============================================================================
+# CURSOR RULES: TAJLANDIA & VARSOVIA REAL ESTATE AI BACKEND
+# ==============================================================================
+# Applies to all AI models and code generation within this repository.
+# Follow these rules strictly without exception.
+
+## 1. PROJECT ESSENCE & ARCHITECTURE
+- Framework: Python 3.11+ / FastAPI asynchronous backend.
+- Primary Dual Agents:
+  1. Public Client Bot (`app/services/public_agent.py`): Real estate advisory for buyers (EN / PL / TH).
+  2. Admin Staff Bot (`app/services/admin_agent.py`): Internal staff copilot with tool calls, dossiers, inventory stats, and staged actions.
+- Database:
+  - Google Cloud Firestore (`varsovia-8c135`): Authoritative production repository (collection: `projects`). Read-only in active testing.
+  - PostgreSQL (via SQLAlchemy): Internal administrative users, role-based access control (RBAC), and staged pending actions.
+
+## 2. ABSOLUTE CONSTRAINTS & NON-NEGOTIABLES
+- NEVER USE MOCK, HARDCODED, OR STATIC PROPERTY DATA. All property listings, pricing, and specs MUST be retrieved dynamically from live Cloud Firestore.
+- NEVER INVENT OR HALLUCINATE:
+  - No synthetic materials (e.g. fabricated roof/foundation specs). If missing, return "Not documented in verified database" / "Brak w bazie".
+  - No fake prices or decimal placeholders like "9.xx" or ".xx". Real numeric values only.
+  - No fake property IDs like "PROP-PHK-001". Use actual Firestore document IDs or real slugs.
+  - No placeholder emails like "client@example.com".
+- NEVER DROP, DELETE, OR WIPE PRODUCTION DATA:
+  - Prohibit all `db.collection(...).stream().delete()`, `DROP TABLE`, or destructive bulk operations.
+  - Any data mutation in Admin Bot MUST be staged via `action_service.create_pending_action()` requiring explicit human confirmation ("Two-Man Rule").
+- CONVERSATIONAL MEMORY:
+  - Maintain in-session conversation memory for at least 50 back-to-back turns (120 messages).
+  - Permanent persistence flags (`ENABLE_LEAD_SAVING`, `ENABLE_CHAT_LOGGING`, `ENABLE_AUDIT_LOGGING`) must be respected (off during restricted testing).
+
+## 3. FLOW & SERVICE INTEGRATION
+- Routing: `app/main.py` -> `app/api/v1/chat.py` (Public) & `app/api/v1/admin.py` (Admin).
+- Language: Handled by `app/services/i18n_service.py` (supports EN, PL, TH).
+- Guardrails:
+  - Off-topic inquiries (coding, trivia, recipes, homework) must be strictly refused using `app/services/guardrails.py` and `is_off_topic_query`.
+  - Re-query loop for unsolicited documents or hallucinations via `ResponseConfidenceGuardrail`.
+- Search & Knowledge:
+  - `app/services/property_search.py`: Live search against Firestore and Postgres with parameterized filters.
+  - `app/services/admin_knowledge_service.py`: Technical dossiers without fabricated construction specs.
+
+## 4. CODING & DEBUGGING GUIDELINES
+- When modifying Python files, preserve existing comments and logic.
+- Avoid introducing circular dependencies between `admin_agent`, `public_agent`, and `conversation_service`.
+- Always verify Python syntax and run local verification scripts (`scratch/run_5_admin_tests.py`) before completing tasks.
+- Keep timeouts generous (180s) to prevent "Service temporarily unavailable" errors.

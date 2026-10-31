@@ -1,0 +1,41 @@
+<section class="page master-page" data-section="master_plan">
+  <span class="section-marker">SECTION:master_plan</span>
+  <div class="master-hero">
+    {% set plans = prepared.master_plan or data.master_plan %}
+    {% if plans and plans[0] %}
+    <img class="img-cover" src="{{ plans[0] }}" alt=""/>
+    {% elif data.hero_image %}
+    <img class="img-cover" src="{{ data.hero_image }}" alt=""/>
+    {% else %}
+    <div class="master-fallback"></div>
+    {% endif %}
+  </div>
+  <div class="master-footer">
+    <h2>{{ labels.master_plan_title }}</h2>
+    <hr class="thin-rule"/>
+  </div>
+</section>
+<style>
+  .master-page {
+    display: grid;
+    grid-template-rows: 78% 22%;
+    background: var(--paper);
+  }
+  .master-hero { overflow: hidden; background: var(--cream); }
+  .master-fallback {
+    width: 100%;
+    height: 100%;
+    background: linear-gradient(140deg, var(--sage), var(--cream));
+  }
+  .master-footer {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+  }
+  .master-footer h2 {
+    font-size: 20pt;
+    letter-spacing: 0.32em;
+    text-transform: uppercase;
+  }
+</style>

@@ -1,0 +1,7 @@
+/* Theme 7 - Green + brown split */
+body.theme-7 .cover-page { background: var(--cream); }
+body.theme-7 .red-stripe { height: 4mm; background: var(--bar); width: 100%; }
+body.theme-7 .cover-split, body.theme-7 .overview-split {
+  display: grid; grid-template-columns: 48% 52%; gap: 0; height: 100%;
+}
+body.theme-7 .cover-split .cover-copy, body.theme-7 .overview-split .ov-copy { padding: 12mm; }

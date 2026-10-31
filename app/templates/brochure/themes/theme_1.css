@@ -1,0 +1,6 @@
+/* Theme 1 - Navy + red */
+body.theme-1 .cover-page { background: var(--bg); color: #fff; }
+body.theme-1 .cover-page h1, body.theme-1 .cover-page .display { color: #fff; }
+body.theme-1 .cover-band { height: 95mm; overflow: hidden; }
+body.theme-1 .page-top-bar { height: 8mm; background: var(--bar); }
+body.theme-1 .btn-cta { background: var(--accent); color: #fff; }

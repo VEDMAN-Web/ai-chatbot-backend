@@ -1,0 +1,23 @@
+<section class="page investment-page" data-section="investment">
+  <span class="section-marker">SECTION:investment</span>
+  <div class="page-top-bar"></div>
+  <div class="page-chrome-header">
+    <span class="hdr-left">{{ header_text }}</span>
+  </div>
+  <div class="page-chrome-body">
+    <p class="label-caps" style="margin-bottom:3mm;">{{ labels.investment_title }}</p>
+    <h2 class="display" style="font-size:18pt;margin-bottom:5mm;">{{ labels.investment_heading }}</h2>
+    {% if prepared.investment_text %}
+    <div class="{% if theme_layout == 'pastel' %}pastel-income{% else %}notice-bar{% endif %} body-text" style="margin-bottom:5mm;{% if theme_layout != 'pastel' %}white-space:pre-wrap;{% endif %}">
+      {{ prepared.investment_text }}
+    </div>
+    {% endif %}
+    {% if prepared.investment_blurb %}
+    <p class="body-text max-prose">{{ prepared.investment_blurb }}</p>
+    {% endif %}
+  </div>
+  <div class="page-chrome-footer">
+    <span></span>
+    <span class="page-num">{{ page_label }}</span>
+  </div>
+</section>

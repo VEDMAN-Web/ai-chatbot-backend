@@ -35,16 +35,10 @@ coverage.xml
 
 !tests/
 tests/*
-!tests/test_token_tracker.py
-!tests/test_single_property_brochure_s3.py
-!tests/test_dynamic_property_maps.py
-!tests/test_firestore_integration.py
-!tests/test_admin_batch_operations.py
-!tests/test_env_branding.py
-!tests/test_firestore_auth.py
-!tests/test_ai_guardrails.py
-!tests/test_admin_auth_and_audit_apis.py
-!tests/test_anti_pressure_and_admin_validation.py
+!tests/test_*.py
+!tests/fixtures/
+!tests/fixtures/**
+!tests/fixtures/**/*.csv
 *.cover
 
 # 3. Python & Virtual Environments
@@ -85,12 +79,21 @@ frontend_example.html
 
 # 5. Generated Documents & File Storage
 data/reports/
-data/drive_docs/private/
+data/brochure_theme_qa/
+*.log
+evidence/logs_*.txt
+data/brochure_samples/
+data/brochure_samples/**
+data/*.db
+data/**/*.db
+*.db
+data/drive_docs/
 *.pdf
 !Pdf_Templet/*.pdf
 *.xlsx
 *.docx
 *.csv
+!tests/fixtures/**/*.csv
 !data/tajlandia-com-2026-09-22.xlsx
 tajlandia_railway_dump.sql
 tajlandia_railway_dump.dump

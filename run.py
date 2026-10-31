@@ -11,34 +11,25 @@ sys.path.insert(0, BASE_DIR)
 def init_database():
     """Initializes tables and extensions with retries for cloud databases."""
     import sqlalchemy as sa
-    from app.db.session import engine, Base
+    from app.db.session import admin_engine, user_engine, Base
     import app.db.models  # Ensure all SQLAlchemy models are registered
 
     print("--> 1. Connecting to PostgreSQL and creating schema...")
     max_retries = 5
     for attempt in range(1, max_retries + 1):
         try:
-            with engine.connect() as conn:
-                try:
-                    conn.execute(sa.text("CREATE EXTENSION IF NOT EXISTS vector;"))
-                    conn.commit()
-                    print("    [OK] pgvector extension checked/enabled.")
-                except Exception as ve:
-                    print(f"    [NOTICE] pgvector extension: {ve}")
+            for eng in {admin_engine, user_engine}:
+                with eng.connect() as conn:
+                    try:
+                        conn.execute(sa.text("CREATE EXTENSION IF NOT EXISTS vector;"))
+                        conn.commit()
+                        print(f"    [OK] pgvector extension checked/enabled on {eng.url.database or 'database'}.")
+                    except Exception as ve:
+                        print(f"    [NOTICE] pgvector extension: {ve}")
 
-            # 1. Safe DDL synchronization for existing tables
-            with engine.begin() as conn:
-                conn.execute(sa.text("""
-                    ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE;
-                    ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash VARCHAR(255);
-                    ALTER TABLE users ADD COLUMN IF NOT EXISTS google_email VARCHAR(255);
-                    ALTER TABLE users ADD COLUMN IF NOT EXISTS google_refresh_token TEXT;
-                """))
-                print("    [OK] Checked and synchronized users table columns.")
-
-            # 2. Ensure all tables exist
-            Base.metadata.create_all(bind=engine)
-            print("    [OK] All database tables successfully created.")
+            from app.db.schema_sync import ensure_postgres_schema
+            ensure_postgres_schema((admin_engine, user_engine))
+            print("    [OK] All database tables successfully created for admin and user databases.")
 
             # 3. Upgrade alembic migrations to head
             try:
@@ -48,35 +39,18 @@ def init_database():
                 command.upgrade(alembic_cfg, "head")
                 print("    [OK] Alembic migration upgraded to head.")
             except Exception as ae:
+                msg = str(ae)
                 print(f"    [NOTICE] Alembic upgrade: {ae}")
-
-            # 4. Seed/verify admin@tajlandia.com in PostgreSQL
-            try:
-                from app.db.session import SessionLocal
-                from app.db.models import User
-                from app.core.config import settings
-                from app.core.security import hash_password
-                with SessionLocal() as db:
-                    admin = db.query(User).filter(User.email.ilike(settings.ADMIN_EMAIL)).first()
-                    if not admin:
-                        admin = User(
-                            email=settings.ADMIN_EMAIL.lower(),
-                            name="Admin Staff",
-                            role="super_admin",
-                            password_hash=hash_password(settings.ADMIN_PASSWORD),
-                            is_active=True
-                        )
-                        db.add(admin)
-                        db.commit()
-                        print(f"    [OK] Seeded super admin account '{settings.ADMIN_EMAIL}' in database.")
-                    else:
-                        admin.password_hash = hash_password(settings.ADMIN_PASSWORD)
-                        admin.is_active = True
-                        admin.role = "super_admin"
-                        db.commit()
-                        print(f"    [OK] Synchronized super admin password in database.")
-            except Exception as se:
-                print(f"    [NOTICE] Admin seed: {se}")
+                # Railway DB may reference a deleted revision id — re-stamp to current head
+                if "Can't locate revision" in msg or "Can't locate revision identified by" in msg:
+                    try:
+                        from alembic.config import Config
+                        from alembic import command
+                        alembic_cfg = Config(os.path.join(BASE_DIR, "alembic.ini"))
+                        command.stamp(alembic_cfg, "head")
+                        print("    [OK] Alembic version stamped to head after missing-revision recovery.")
+                    except Exception as stamp_e:
+                        print(f"    [NOTICE] Alembic stamp recovery: {stamp_e}")
 
             return True
         except Exception as e:
@@ -106,18 +80,12 @@ def main():
     else:
         print("--> [NOTICE] Skipping local PostgreSQL seeding (PostgreSQL not reachable or using remote Firestore).")
 
-    # Determine port from Railway environment
+    # Railway injects PORT and routes the public URL to that port.
     raw_port = os.environ.get("PORT", "8000")
     try:
         port = int(raw_port)
     except ValueError:
         port = 8000
-
-    #print(f"--> 3. Starting Uvicorn server on host 0.0.0.0 port {port}...")
-    #uvicorn.run("app.main:app", host="0.0.0.0", port=port, proxy_headers=True, forwarded_allow_ips="*")
-
-    # Start Uvicorn on port 8000
-    port = 8000
 
     print(f"--> 3. Starting Uvicorn server on host 0.0.0.0 port {port}...")
     uvicorn.run(

@@ -10,10 +10,14 @@ Resolves tenant based on:
 2. Environment configuration (DEFAULT_TENANT / SITE_ORIGIN / BOT_NAME)
 3. Default fallback (tajlandia.com)
 """
+import logging
 import os
-from dataclasses import dataclass
-from typing import Optional, Dict, Any
+from contextvars import ContextVar
+from dataclasses import dataclass, field
+from typing import Optional, Dict, Any, List
 from app.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class TenantProfile:
@@ -25,6 +29,8 @@ class TenantProfile:
     domain: str
     advisor_email: str
     website_url: str
+    # Public phone / WhatsApp numbers shown in the Inquire form (label, number in international format).
+    contacts: List[Dict[str, str]] = field(default_factory=list)
 
 
 TENANT_REGISTRY: Dict[str, TenantProfile] = {
@@ -56,7 +62,12 @@ TENANT_REGISTRY: Dict[str, TenantProfile] = {
         brand_subtitle="Exclusive Estates",
         domain="varsoviaestate.com",
         advisor_email="advisor@varsoviaestate.com",
-        website_url="https://varsoviaestate.com/en"
+        website_url="https://varsoviaestate.com/en",
+        # Taken from the varsoviaestate.com footer (Oct 2026).
+        contacts=[
+            {"label": "Thailand", "phone": "+66 81 679 4414"},
+            {"label": "Cambodia", "phone": "+855 96 301 5807"},
+        ],
     ),
 }
 
@@ -90,6 +101,63 @@ def normalize_tenant_domain_key(val: Optional[str]) -> str:
     elif "thai" in v:
         return "thai"
     return v
+
+
+ALL_CANONICAL_WEBSITES: list[str] = [
+    "varsoviaestate.com",
+    "tajlandia.com",
+    "thai.estate"
+]
+
+
+def normalize_website_domain(val: Optional[str]) -> str:
+    """
+    Normalizes any input (key or domain, e.g. 'tajlandia', 'thai.estate', 'varsovia')
+    to its full canonical domain string:
+      - 'tajlandia.com'
+      - 'varsoviaestate.com'
+      - 'thai.estate'
+    """
+    if not val:
+        return ""
+    key = normalize_tenant_domain_key(val)
+    if key in CANONICAL_DOMAINS:
+        return CANONICAL_DOMAINS[key]
+    val_clean = str(val).strip().lower()
+    for canonical in ALL_CANONICAL_WEBSITES:
+        if val_clean == canonical:
+            return canonical
+    return val_clean
+
+
+def normalize_website_list(vals: Any) -> list[str]:
+    """
+    Normalizes a list, comma-separated string, or single string of websites
+    into a deduplicated, ordered list of canonical domains.
+    Example:
+      ['tajlandia', 'varsoviaestate.com'] -> ['varsoviaestate.com', 'tajlandia.com']
+      'thai.estate,tajlandia' -> ['tajlandia.com', 'thai.estate']
+    """
+    if not vals:
+        return []
+    raw_list: list[str] = []
+    if isinstance(vals, str):
+        raw_list = [s.strip() for s in vals.split(",") if s.strip()]
+    elif isinstance(vals, (list, tuple, set)):
+        for item in vals:
+            if isinstance(item, str):
+                for s in item.split(","):
+                    if s.strip():
+                        raw_list.append(s.strip())
+    
+    result: list[str] = []
+    for r in raw_list:
+        canon = normalize_website_domain(r)
+        if canon and canon in ALL_CANONICAL_WEBSITES and canon not in result:
+            result.append(canon)
+        elif canon and canon not in result:
+            result.append(canon)
+    return result
 
 
 def get_current_env_domain_key() -> str:
@@ -181,8 +249,8 @@ def resolve_tenant(site_origin: Optional[str] = None) -> TenantProfile:
     """
     Resolves the appropriate TenantProfile based on incoming site_origin or environment.
     Priority:
-    1. If explicit site_origin matches an alternate tenant (e.g. thai.estate), return it.
-    2. Otherwise, return the dynamic default profile loaded directly from .env / settings!
+    1. Explicit site_origin matching a registry tenant (tajlandia / thai.estate / varsovia).
+    2. Otherwise, the dynamic default profile from .env / settings.
     """
     raw = (site_origin or "").strip().lower()
 
@@ -191,30 +259,73 @@ def resolve_tenant(site_origin: Optional[str] = None) -> TenantProfile:
         raw = raw.split("://")[1]
     raw = raw.split("/")[0].split(":")[0]
 
-    # Explicit match for other multi-tenant options if requested
     if raw:
-        if "thai" in raw:
-            return _apply_custom_bot_name(TENANT_REGISTRY.get("thai.estate", get_default_tenant_profile()))
+        key = normalize_tenant_domain_key(raw)
+        if key == "tajlandia":
+            return _apply_custom_bot_name(TENANT_REGISTRY["tajlandia.com"])
+        if key == "thai":
+            return _apply_custom_bot_name(TENANT_REGISTRY["thai.estate"])
+        if key == "varsovia":
+            return _apply_custom_bot_name(TENANT_REGISTRY["varsoviaestate.com"])
         for domain, profile in TENANT_REGISTRY.items():
-            if domain not in ("tajlandia.com", "varsoviaestate.com") and (domain == raw or domain in raw):
+            if domain == raw or raw.endswith(domain) or domain in raw:
                 return _apply_custom_bot_name(profile)
+
+        # Unknown host (e.g. "default", preview vercel.app) — keep default brand, log for ops.
+        logger.warning(
+            "Unknown site_origin=%r — using default tenant brand. "
+            "Check client site_origin / embed settings.",
+            site_origin or raw,
+        )
 
     # Return dynamic default tenant loaded purely from .env
     return get_default_tenant_profile()
 
 
 def _apply_custom_bot_name(profile: TenantProfile) -> TenantProfile:
-    """Allows BOT_NAME env override if explicitly set."""
-    custom_bot = getattr(settings, "BOT_NAME", "") or os.getenv("BOT_NAME", "")
-    if custom_bot and custom_bot.strip():
-        return TenantProfile(
-            site_origin=profile.site_origin,
-            brand_name=profile.brand_name,
-            bot_name=custom_bot.strip(),
-            brand_title=profile.brand_title,
-            brand_subtitle=profile.brand_subtitle,
-            domain=profile.domain,
-            advisor_email=profile.advisor_email,
-            website_url=profile.website_url
-        )
+    """
+    Registry tenant profiles keep their own brand/bot/email.
+    A global BOT_NAME (often Varsovia) must NOT overwrite tajlandia/thai tenants.
+    """
     return profile
+
+
+# ---------------------------------------------------------------------------
+# Market scope per site.
+# varsoviaestate.com sells every market in the catalogue (Thailand, Cambodia, Maldives).
+# tajlandia.com and thai.estate are Thailand-only sites, so they must never show other countries.
+# The site of the current public chat request is held in a ContextVar so every search path
+# (many call sites) is scoped without changing each signature. Admin code never sets it, so the
+# admin side stays unrestricted.
+# ---------------------------------------------------------------------------
+_REQUEST_SITE: ContextVar[Optional[str]] = ContextVar("request_site_origin", default=None)
+_THAILAND_ONLY_SITES = frozenset({"tajlandia.com", "thai.estate"})
+
+
+def set_request_site(site_origin: Optional[str]):
+    """Mark the current public chat request with its site. Returns a token for reset_request_site."""
+    return _REQUEST_SITE.set(str(site_origin or ""))
+
+
+def reset_request_site(token) -> None:
+    try:
+        _REQUEST_SITE.reset(token)
+    except Exception:
+        pass
+
+
+def allowed_countries_for_site(site_origin: Optional[str] = None) -> Optional[List[str]]:
+    """
+    Countries (lowercase, as stored in listing `province`) a site may show.
+    None means no restriction (varsoviaestate.com, admin, or outside a public chat request).
+    """
+    raw = site_origin if site_origin is not None else _REQUEST_SITE.get()
+    if raw is None:
+        return None
+    try:
+        domain = resolve_tenant(raw).site_origin
+    except Exception:
+        return None
+    if domain in _THAILAND_ONLY_SITES:
+        return ["thailand"]
+    return None

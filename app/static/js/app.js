@@ -61,7 +61,7 @@ const UI_STRINGS = {
     addListing: "Add Listing",
     batchOps: "Bulk File Ops (6D Undo)",
     activeFocus: "Active Focus:",
-    whatWeFetched: "What We Fetched",
+    whatWeFetched: "Matching properties",
     tryAsking: "Try asking me:",
     resetPreferences: "🔄 Reset Preferences",
     disclaimer: "Tajlandia AI can make mistakes. Check important information.",
@@ -74,12 +74,12 @@ const UI_STRINGS = {
     ],
     heroTitleAdmin: "Tajlandia AI — Admin Intelligence",
     heroSubtitleAdmin: "Privileged access to confidential developer specs, structural materials, bulk file operations with 6-day undo, and staged write actions.",
-    inputPlaceholderAdmin: "Ask internal intelligence (e.g. private specs for PROP-PHK-001, upload bulk file, generate PDF report)...",
+    inputPlaceholderAdmin: "Ask internal intelligence (e.g. upload bulk file, generate PDF report, inventory stats)...",
     samplePromptsAdmin: [
       "📂 Upload property Excel/PDF to bulk update or remove listings",
       "🕒 Show batch operations history & rollback within 6-day window",
-      "What are the private developer specs and roof material for PROP-PHK-001?",
-      "Generate a comprehensive PDF report for PROP-PHK-001"
+      "What are the private developer specs and roof material for 15 Sukhumvit Residences?",
+      "Generate a comprehensive PDF report for 15 Sukhumvit Residences"
     ]
   },
   pl: {
@@ -99,7 +99,7 @@ const UI_STRINGS = {
     addListing: "Dodaj Ofertę",
     batchOps: "Operacje Masowe (6D Undo)",
     activeFocus: "Aktywne Filtry:",
-    whatWeFetched: "Co Pobrano",
+    whatWeFetched: "Pasujące oferty",
     tryAsking: "Przykładowe pytania:",
     resetPreferences: "🔄 Zresetuj Preferencje",
     disclaimer: "Tajlandia AI może popełniać błędy. Sprawdź ważne informacje.",
@@ -112,12 +112,12 @@ const UI_STRINGS = {
     ],
     heroTitleAdmin: "Tajlandia AI — Panel Administracyjny",
     heroSubtitleAdmin: "Poufny dostęp do specyfikacji deweloperskich, operacji masowych z 6-dniowym cofaniem zmian i analizy leadów.",
-    inputPlaceholderAdmin: "Zapytaj asystenta zarządczego (np. wgraj plik Excel, specyfikacja PROP-PHK-001, wygeneruj raport PDF)...",
+    inputPlaceholderAdmin: "Zapytaj asystenta zarządczego (np. wgraj plik Excel, raport PDF, stan portfolio)...",
     samplePromptsAdmin: [
       "📂 Wgraj plik Excel/PDF z nieruchomościami, aby zaktualizować lub usunąć oferty",
       "🕒 Pokaż historię operacji masowych i cofnij zmiany (okno 6 dni)",
-      "Jakie są specyfikacje techniczne i materiał dachu dla PROP-PHK-001?",
-      "Wygeneruj oficjalny raport PDF dla inwestora dla PROP-PHK-001"
+      "Jakie są specyfikacje techniczne i materiał dachu dla 15 Sukhumvit Residences?",
+      "Wygeneruj oficjalny raport PDF dla inwestora dla 15 Sukhumvit Residences"
     ]
   },
   th: {
@@ -138,7 +138,7 @@ const UI_STRINGS = {
     addListing: "เพิ่มรายการ",
     batchOps: "จัดการไฟล์ชุดใหญ่ (ย้อนกลับได้ 6 วัน)",
     activeFocus: "เงื่อนไขที่เลือก:",
-    whatWeFetched: "ข้อมูลที่ดึงมา",
+    whatWeFetched: "รายการที่ตรงกัน",
     tryAsking: "ลองสอบถาม:",
     resetPreferences: "🔄 รีเซ็ตเงื่อนไข",
     disclaimer: "Tajlandia AI อาจมีข้อผิดพลาดได้ กรุณาตรวจสอบข้อมูลสำคัญอีกครั้ง",
@@ -151,12 +151,12 @@ const UI_STRINGS = {
     ],
     heroTitleAdmin: "Tajlandia AI — ระบบข่าวกรองผู้ดูแลระบบ",
     heroSubtitleAdmin: "สิทธิ์เข้าถึงข้อมูลเชิงลึกของผู้พัฒนาโครงการ การจัดการไฟล์ชุดใหญ่พร้อมระบบย้อนกลับ 6 วัน และการออกรายงาน",
-    inputPlaceholderAdmin: "สอบถามข้อมูลภายใน (เช่น อัปโหลดไฟล์ Excel, สเปก PROP-PHK-001, สร้างรายงาน PDF)...",
+    inputPlaceholderAdmin: "สอบถามข้อมูลภายใน (เช่น อัปโหลดไฟล์ Excel, สร้างรายงาน PDF, สถิติอสังหาริมทรัพย์)...",
     samplePromptsAdmin: [
       "📂 อัปโหลดไฟล์ Excel/PDF เพื่ออัปเดตหรือลบรายการอสังหาริมทรัพย์แบบกลุ่ม",
       "🕒 แสดงประวัติการดำเนินการแบบกลุ่มและย้อนกลับข้อมูลภายใน 6 วัน",
-      "สเปกเชิงลึกและวัสดุหลังคาของโครงการ PROP-PHK-001 คืออะไร?",
-      "สร้างรายงาน PDF สำหรับโครงการ PROP-PHK-001"
+      "สเปกเชิงลึกและวัสดุหลังคาของโครงการ 15 Sukhumvit Residences คืออะไร?",
+      "สร้างรายงาน PDF สำหรับโครงการ 15 Sukhumvit Residences"
     ]
   }
 };
@@ -283,8 +283,292 @@ const API_ROUTES = {
   adminHistory: (id) => `/api/v1/admin/chat/history/${id}`,
   confirmAction: (id) => `/api/v1/admin/actions/${id}/confirm`,
   rejectAction: (id) => `/api/v1/admin/actions/${id}/reject`,
-  properties: '/api/v1/properties'
+  properties: '/api/v1/properties',
+  login: '/api/v1/auth/login',
+  logout: '/api/v1/auth/logout',
 };
+
+const ADMIN_TOKEN_KEY = 'tajlandia_admin_access_token';
+const ADMIN_USER_KEY = 'tajlandia_admin_user';
+
+function getAdminAccessToken() {
+  return (localStorage.getItem(ADMIN_TOKEN_KEY) || '').trim();
+}
+
+function getAdminUser() {
+  try {
+    return JSON.parse(localStorage.getItem(ADMIN_USER_KEY) || 'null');
+  } catch (e) {
+    return null;
+  }
+}
+
+function isAdminLoggedIn() {
+  return Boolean(getAdminAccessToken());
+}
+
+function adminAuthHeaders(extra = {}) {
+  const token = getAdminAccessToken();
+  const headers = { ...extra };
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+  return headers;
+}
+
+function isProtectedAdminDownloadUrl(url) {
+  if (!url || typeof url !== 'string') return false;
+  try {
+    const path = url.startsWith('http') ? new URL(url).pathname : url;
+    return /\/api\/v1\/admin\//i.test(path);
+  } catch (_) {
+    return /\/api\/v1\/admin\//i.test(url);
+  }
+}
+
+function triggerBlobDownload(blob, filename) {
+  const objectUrl = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = objectUrl;
+  a.download = filename || 'download';
+  a.style.display = 'none';
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => {
+    try { URL.revokeObjectURL(objectUrl); } catch (_) {}
+    try { a.remove(); } catch (_) {}
+  }, 1500);
+}
+
+const LARGE_REPORT_BLOB_BYTES = 20 * 1024 * 1024;
+
+/**
+ * Authenticated admin file download (Bearer via fetch). Never opens a blank tab.
+ * For large files, requests a short-lived signed URL instead of buffering a huge blob.
+ */
+async function downloadAdminProtectedFile(url, filename, buttonEl) {
+  const originalLabel = buttonEl ? buttonEl.innerHTML : '';
+  const setBusy = (busy, label) => {
+    if (!buttonEl) return;
+    buttonEl.disabled = !!busy;
+    if (label != null) buttonEl.innerHTML = label;
+  };
+  const showErr = (msg) => {
+    if (buttonEl) {
+      buttonEl.innerHTML = msg;
+      buttonEl.disabled = false;
+      setTimeout(() => { buttonEl.innerHTML = originalLabel; }, 4000);
+    } else {
+      alert(msg);
+    }
+  };
+
+  setBusy(true, 'Preparing download...');
+  try {
+    const path = (() => {
+      try {
+        return url.startsWith('http') ? new URL(url).pathname + new URL(url).search : url;
+      } catch (_) {
+        return url;
+      }
+    })();
+
+    // Large-file path: signed link (no Authorization header needed on GET)
+    const fname = filename || (path.split('/').pop() || 'report.pdf');
+    const reportsMatch = path.match(/\/api\/v1\/admin\/reports\/([^/?#]+)/i);
+    if (reportsMatch && reportsMatch[1] && reportsMatch[1].toLowerCase() !== 'download') {
+      // Probe with HEAD/GET; if Content-Length is huge, use signed link
+      const probe = await fetch(path, { method: 'GET', headers: adminAuthHeaders(), credentials: 'same-origin' });
+      if (probe.status === 401 || probe.status === 403) {
+        showErr('Please sign in again');
+        return;
+      }
+      if (probe.status === 404 || probe.status === 410) {
+        showErr('This report is no longer available - regenerate it');
+        try { await probe.body?.cancel?.(); } catch (_) {}
+        return;
+      }
+      if (!probe.ok) {
+        showErr('Download failed — please try again');
+        try { await probe.body?.cancel?.(); } catch (_) {}
+        return;
+      }
+      const len = parseInt(probe.headers.get('Content-Length') || '0', 10);
+      if (len > LARGE_REPORT_BLOB_BYTES) {
+        try { await probe.body?.cancel?.(); } catch (_) {}
+        const linkRes = await fetch(`/api/v1/admin/reports/${encodeURIComponent(reportsMatch[1])}/link`, {
+          method: 'POST',
+          headers: adminAuthHeaders({ 'Content-Type': 'application/json' }),
+          credentials: 'same-origin',
+        });
+        if (linkRes.status === 401 || linkRes.status === 403) {
+          showErr('Please sign in again');
+          return;
+        }
+        if (linkRes.status === 404 || linkRes.status === 410) {
+          showErr('This report is no longer available - regenerate it');
+          return;
+        }
+        if (!linkRes.ok) {
+          showErr('Download failed — please try again');
+          return;
+        }
+        const linkData = await linkRes.json();
+        if (!linkData.url) {
+          showErr('Download failed — please try again');
+          return;
+        }
+        // Same-window navigation to signed URL (no blank tab)
+        const a = document.createElement('a');
+        a.href = linkData.url;
+        a.download = fname;
+        a.style.display = 'none';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setBusy(false, originalLabel);
+        return;
+      }
+      const blob = await probe.blob();
+      triggerBlobDownload(blob, fname);
+      setBusy(false, originalLabel);
+      return;
+    }
+
+    const res = await fetch(path, { method: 'GET', headers: adminAuthHeaders(), credentials: 'same-origin' });
+    if (res.status === 401 || res.status === 403) {
+      showErr('Please sign in again');
+      return;
+    }
+    if (res.status === 404 || res.status === 410) {
+      showErr('This report is no longer available - regenerate it');
+      return;
+    }
+    if (!res.ok) {
+      showErr('Download failed — please try again');
+      return;
+    }
+    const blob = await res.blob();
+    triggerBlobDownload(blob, fname);
+    setBusy(false, originalLabel);
+  } catch (err) {
+    console.error('Admin download failed', err);
+    showErr('Download failed — please try again');
+  }
+}
+
+function updateAdminLoginUI() {
+  const btn = document.getElementById('btnAdminLoginTop');
+  const label = document.getElementById('btnAdminLoginTopLabel');
+  const avatar = document.getElementById('staffAvatarBtn');
+  const user = getAdminUser();
+  const loggedIn = isAdminLoggedIn();
+  if (btn) {
+    btn.style.display = currentMode === 'admin' ? 'inline-flex' : 'none';
+    if (label) label.innerText = loggedIn ? (user?.email ? `Logout (${user.email.split('@')[0]})` : 'Logout') : 'Staff Login';
+    btn.onclick = loggedIn ? () => logoutAdminStaff() : () => openAdminLoginModal();
+  }
+  if (avatar && user?.name) {
+    const initials = String(user.name || user.email || 'AD').trim().slice(0, 2).toUpperCase();
+    avatar.innerText = initials;
+    avatar.title = loggedIn ? `${user.email || user.name} (${user.role || 'staff'})` : 'Staff Account';
+  }
+}
+
+function openAdminLoginModal() {
+  const overlay = document.getElementById('adminLoginOverlay');
+  const modal = document.getElementById('adminLoginModal');
+  const err = document.getElementById('adminLoginError');
+  const status = document.getElementById('adminLoginStatus');
+  if (err) { err.style.display = 'none'; err.innerText = ''; }
+  if (status) {
+    if (isAdminLoggedIn()) {
+      const u = getAdminUser();
+      status.style.display = 'block';
+      status.innerText = `Currently signed in as ${u?.email || 'staff'}. Sign in again to refresh token, or use Logout.`;
+    } else {
+      status.style.display = 'none';
+    }
+  }
+  if (overlay) overlay.style.display = 'block';
+  if (modal) modal.style.display = 'block';
+  const emailEl = document.getElementById('adminLoginEmail');
+  if (emailEl) setTimeout(() => emailEl.focus(), 50);
+}
+
+function closeAdminLoginModal() {
+  const overlay = document.getElementById('adminLoginOverlay');
+  const modal = document.getElementById('adminLoginModal');
+  if (overlay) overlay.style.display = 'none';
+  if (modal) modal.style.display = 'none';
+}
+
+async function submitAdminLogin() {
+  const email = (document.getElementById('adminLoginEmail')?.value || '').trim();
+  const password = document.getElementById('adminLoginPassword')?.value || '';
+  const domain = document.getElementById('adminLoginDomain')?.value || 'tajlandia.com';
+  const err = document.getElementById('adminLoginError');
+  const btn = document.getElementById('btnAdminLogin');
+  if (!email || !password) {
+    if (err) { err.style.display = 'block'; err.innerText = 'Email and password are required.'; }
+    return;
+  }
+  if (btn) { btn.disabled = true; btn.innerText = 'Signing in…'; }
+  if (err) err.style.display = 'none';
+  try {
+    const res = await fetch(API_ROUTES.login, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password, domain, site_origin: domain }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const detail = data.detail || data.message || `Login failed (${res.status})`;
+      throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail));
+    }
+    const token = data.access_token;
+    if (!token) throw new Error('Login response missing access_token');
+    localStorage.setItem(ADMIN_TOKEN_KEY, token);
+    localStorage.setItem(ADMIN_USER_KEY, JSON.stringify(data.user || { email }));
+    if (data.user?.domain) activeTenantOrigin = data.user.domain;
+    else activeTenantOrigin = domain;
+    updateAdminLoginUI();
+    closeAdminLoginModal();
+    appendMessageRow('assistant', `✅ Signed in as **${data.user?.email || email}** (${data.user?.role || 'staff'}). You can use Admin Team chat now.`);
+  } catch (e) {
+    if (err) {
+      err.style.display = 'block';
+      err.innerText = e.message || 'Login failed';
+    }
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerText = 'Sign in'; }
+  }
+}
+
+async function logoutAdminStaff() {
+  const token = getAdminAccessToken();
+  try {
+    if (token) {
+      await fetch(API_ROUTES.logout, {
+        method: 'POST',
+        headers: adminAuthHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({}),
+      });
+    }
+  } catch (e) { /* ignore */ }
+  localStorage.removeItem(ADMIN_TOKEN_KEY);
+  localStorage.removeItem(ADMIN_USER_KEY);
+  updateAdminLoginUI();
+  if (currentMode === 'admin') {
+    appendMessageRow('assistant', 'You have been logged out of Admin Team. Sign in again to continue.');
+    openAdminLoginModal();
+  }
+}
+
+async function ensureAdminAuthOrPrompt() {
+  if (isAdminLoggedIn()) return true;
+  openAdminLoginModal();
+  appendMessageRow('assistant', '⚠️ **Authentication required.** Please sign in with your staff email/password to use Admin Team chat.');
+  return false;
+}
 
 const FALLBACK_VILLA_IMAGES = [
   'https://images.unsplash.com/photo-1580587771525-78b9dba3b914?auto=format&fit=crop&w=800&q=80',
@@ -319,6 +603,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Batch dropzone drag and drop listeners
   initBatchDropzone();
+  updateAdminLoginUI();
+
+  // /admin-ui lands directly in Admin Team mode (+ login if needed)
+  if (window.location.pathname.replace(/\/$/, '') === '/admin-ui') {
+    setAgentMode('admin', false);
+  }
 });
 
 function initSession() {
@@ -400,11 +690,15 @@ function setAgentMode(mode, createNew = true) {
 
   // Update Hero texts & prompt cards according to current mode & language
   updateHeroAndInputUI();
+  updateAdminLoginUI();
 
   if (mode === 'admin') {
     const bar = document.getElementById('userFocusBar');
     if (bar) bar.style.display = 'none';
     closeFocusDrawer();
+    if (!isAdminLoggedIn()) {
+      openAdminLoginModal();
+    }
   } else {
     updateFocusBarUI();
   }
@@ -448,7 +742,7 @@ function triggerQuickAction(action) {
   const input = document.getElementById('chatInput');
   if (!input) return;
   if (action === 'report') {
-    input.value = "Generate a comprehensive investment and structural dossier PDF report for PROP-PHK-001";
+    input.value = "Generate a comprehensive investment and structural dossier PDF report for 15 Sukhumvit Residences";
     handleSendMessage();
   } else if (action === 'listing') {
     openBatchOpsModal('upload');
@@ -499,6 +793,12 @@ async function handleSendMessage() {
   const text = input.value.trim();
   if (!text) return;
 
+  if (currentMode === 'admin' && !isAdminLoggedIn()) {
+    openAdminLoginModal();
+    appendMessageRow('assistant', '⚠️ **Authentication required.** Please sign in with your staff email/password to use Admin Team chat.');
+    return;
+  }
+
   // Hide hero if visible
   const hero = document.getElementById('welcomeHero');
   if (hero) hero.style.display = 'none';
@@ -520,18 +820,42 @@ async function handleSendMessage() {
     language: currentLanguage
   };
 
+  // Long client timeout (10 min) so multi-turn LLM + Firestore never shows premature "unavailable"
+  const CHAT_TIMEOUT_MS = 600000;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), CHAT_TIMEOUT_MS);
+
+  const fallbackByLang = {
+    en: "I'm sorry — that information is not available right now from our verified production data. Please try again in a moment, or share a location/budget and I will search only verified listings.",
+    pl: "Przepraszam — obecnie nie mogę pobrać zweryfikowanych danych produkcyjnych. Spróbuj ponownie za chwilę albo podaj lokalizację/budżet — wyszukam wyłącznie wśród dostępnych ofert.",
+    th: "ขออภัยครับ ขณะนี้ยังดึงข้อมูลจากระบบ production ไม่ได้ชั่วคราว กรุณาลองใหม่อีกครั้ง หรือแจ้งทำเล/งบประมาณ เพื่อให้ผมค้นหาจากรายการที่ตรวจสอบแล้วเท่านั้นครับ"
+  };
+
   try {
+    const headers = currentMode === 'admin'
+      ? adminAuthHeaders({ 'Content-Type': 'application/json' })
+      : { 'Content-Type': 'application/json' };
     const res = await fetch(endpoint, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
+      headers,
+      body: JSON.stringify(payload),
+      signal: controller.signal
     });
 
     removeTypingIndicator(typingId);
 
     if (!res.ok) {
       const errData = await res.json().catch(() => ({}));
-      appendMessageRow('assistant', `⚠️ **Error (${res.status}):** ${errData.detail || 'Unable to process request.'}`);
+      if (res.status === 401 && currentMode === 'admin') {
+        localStorage.removeItem(ADMIN_TOKEN_KEY);
+        localStorage.removeItem(ADMIN_USER_KEY);
+        updateAdminLoginUI();
+        openAdminLoginModal();
+        appendMessageRow('assistant', '⚠️ **Session expired.** Please sign in again.');
+        return;
+      }
+      const fb = fallbackByLang[currentLanguage] || fallbackByLang.en;
+      appendMessageRow('assistant', errData.detail ? `⚠️ **Error (${res.status}):** ${errData.detail}` : fb);
       return;
     }
 
@@ -541,8 +865,14 @@ async function handleSendMessage() {
 
   } catch (err) {
     removeTypingIndicator(typingId);
-    appendMessageRow('assistant', `⚠️ **Connection Error:** Could not reach the server at ${endpoint}. Please ensure the backend is running.`);
+    const fb = fallbackByLang[currentLanguage] || fallbackByLang.en;
+    if (err && err.name === 'AbortError') {
+      appendMessageRow('assistant', fb);
+    } else {
+      appendMessageRow('assistant', fb);
+    }
   } finally {
+    clearTimeout(timeoutId);
     scrollToBottom();
   }
 }
@@ -554,6 +884,7 @@ async function appendAssistantResponse(data, animate = false) {
   const quickReplies = data.quick_replies || [];
   const requiresConfirm = data.requires_confirmation || false;
   const pendingActionId = data.pending_action_id || null;
+  const confirmViaChatOnly = data.confirm_via_chat_only === true;
 
   // Sync active language if backend changed or confirmed language
   if (data.language && data.language !== currentLanguage) {
@@ -575,7 +906,7 @@ async function appendAssistantResponse(data, animate = false) {
 
   // If in Public User mode and property results were returned, display inline AI focus pill showing what was fetched
   const hasProperties = data.type === 'property_cards' || (data.properties && data.properties.length > 0);
-  if (currentMode === 'public' && hasProperties && data.preferences && data.preferences.focus_summary && data.preferences.what_we_fetched && data.preferences.what_we_fetched.length > 0) {
+  if (currentMode === 'public' && hasProperties && data.preferences && data.preferences.focus_validated && data.preferences.focus_summary && data.preferences.what_we_fetched && data.preferences.what_we_fetched.length > 0) {
     const focusPill = document.createElement('div');
     focusPill.className = 'inline-assistant-focus';
     focusPill.onclick = () => openFocusDrawer();
@@ -583,7 +914,7 @@ async function appendAssistantResponse(data, animate = false) {
       <span class="inline-focus-icon">🎯</span>
       <span class="inline-focus-label">AI Focus:</span>
       <span class="inline-focus-text">${escapeHtml(data.preferences.focus_summary)}</span>
-      <span class="inline-focus-action">What We Fetched 📋</span>
+      <span class="inline-focus-action">Matching properties</span>
     `;
     bubble.appendChild(focusPill);
   }
@@ -618,10 +949,14 @@ async function appendAssistantResponse(data, animate = false) {
   // Detect if a report was generated and render prominent download card
   const directLink = data.download_link || null;
   const reportMatch = text.match(/\/api\/v1\/admin\/reports\/([a-zA-Z0-9_\-\.]+)/i) || 
-                      text.match(/(tajlandia_report_[a-zA-Z0-9_]+\.(pdf|xlsx|docx|csv))/i);
+                      text.match(/(tajlandia_(?:lead_)?report_[a-zA-Z0-9_]+\.(pdf|xlsx|docx|csv))/i);
   if (directLink || reportMatch) {
-    const downloadUrl = directLink || (reportMatch[0].startsWith('/') ? reportMatch[0] : `/api/v1/admin/reports/${reportMatch[1]}`);
-    const filename = downloadUrl.split('/').pop();
+    let downloadUrl = directLink || (reportMatch[0].startsWith('/') ? reportMatch[0] : `/api/v1/admin/reports/${reportMatch[1]}`);
+    // Strip signed-download tokens from display filename
+    if (/\/reports\/download\//i.test(downloadUrl)) {
+      downloadUrl = directLink;
+    }
+    const filename = (downloadUrl || '').split('/').pop().split('?')[0] || 'report.pdf';
     const isExcel = filename.endsWith('.xlsx');
     const isWord = filename.endsWith('.docx');
     const isCsv = filename.endsWith('.csv');
@@ -630,6 +965,11 @@ async function appendAssistantResponse(data, animate = false) {
 
     const reportCard = document.createElement('div');
     reportCard.className = 'report-download-card';
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'btn-download-report';
+    btn.innerHTML = `⬇ Download ${fileLabel}`;
+    btn.addEventListener('click', () => downloadAdminProtectedFile(downloadUrl, filename, btn));
     reportCard.innerHTML = `
       <div class="report-download-left">
         <div class="report-file-icon">${fileIcon}</div>
@@ -638,20 +978,19 @@ async function appendAssistantResponse(data, animate = false) {
           <div class="report-file-desc">${escapeHtml(filename)} (${fileLabel})</div>
         </div>
       </div>
-      <a href="${downloadUrl}" target="_blank" download="${filename}" class="btn-download-report">
-        ⬇ Download ${fileLabel}
-      </a>
     `;
+    reportCard.appendChild(btn);
     bubble.appendChild(reportCard);
   }
 
-  // Detect if a luxury brochure link was provided and render prominent action card
+  // Detect if a luxury brochure / dossier link was provided and render prominent action card
   const brochureLink = data.pdf_url || data.download_url || null;
   if (brochureLink && !directLink && !reportMatch) {
     const brochureCard = document.createElement('div');
     brochureCard.className = 'report-download-card';
     brochureCard.style.marginTop = '10px';
     const bTitle = data.property_name || (activeTenantBrand ? `${activeTenantBrand} Official Brochure` : 'Official Luxury Brochure');
+    const bFilename = (brochureLink.split('/').pop() || 'brochure.pdf').split('?')[0];
     brochureCard.innerHTML = `
       <div class="report-download-left">
         <div class="report-file-icon">📄</div>
@@ -660,10 +999,25 @@ async function appendAssistantResponse(data, animate = false) {
           <div class="report-file-desc">Official 8-Page Presentation Brochure (PDF)</div>
         </div>
       </div>
-      <a href="${brochureLink}" target="_blank" class="btn-download-report" style="background:#0284C7; color:#ffffff; font-weight:600;">
-        🔗 Open / Download PDF
-      </a>
     `;
+    if (isProtectedAdminDownloadUrl(brochureLink)) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'btn-download-report';
+      btn.style.cssText = 'background:#0284C7; color:#ffffff; font-weight:600;';
+      btn.innerHTML = '⬇ Download PDF';
+      btn.addEventListener('click', () => downloadAdminProtectedFile(brochureLink, bFilename, btn));
+      brochureCard.appendChild(btn);
+    } else {
+      const a = document.createElement('a');
+      a.href = brochureLink;
+      a.target = '_blank';
+      a.rel = 'noopener noreferrer';
+      a.className = 'btn-download-report';
+      a.style.cssText = 'background:#0284C7; color:#ffffff; font-weight:600;';
+      a.innerHTML = '🔗 Open / Download PDF';
+      brochureCard.appendChild(a);
+    }
     bubble.appendChild(brochureCard);
   }
 
@@ -689,7 +1043,9 @@ async function appendAssistantResponse(data, animate = false) {
       const name = p.name || p.property_name || 'Thailand Luxury Property';
       const price = p.price || p.price_display || 'Price on request';
       const loc = p.location || p.district || 'Thailand';
-      const beds = p.bedrooms ? `${p.bedrooms} Beds` : 'Villa';
+      const beds = (p.bedrooms && !/^beds:/i.test(String(p.bedrooms)))
+        ? `${p.bedrooms} Beds`
+        : (p.property_type || 'Beds: on request');
       const area = p.area || '';
       const photoCount = (p.images && p.images.length) ? `${p.images.length} Photos` : 'Verified';
       const propId = p.property_id || '';
@@ -715,8 +1071,8 @@ async function appendAssistantResponse(data, animate = false) {
           </div>
           <div class="property-item-actions">
             <button class="btn-card-action btn-card-map" title="View on Google Maps" onclick="openPropertyMap('${escapeHtml(propId)}')">📍 Map</button>
-            <button class="btn-card-action btn-card-cal" title="Schedule Tour on Google Calendar" onclick="openPropertyCalendar('${escapeHtml(propId)}')">📅 Tour</button>
-            <button class="btn-card-action btn-card-email" title="Email Specs via Gmail" onclick="openPropertyEmail('${escapeHtml(propId)}')">✉️ Email</button>
+            <button class="btn-card-action btn-card-cal" title="Request a viewing" onclick="openPropertyCalendar('${escapeHtml(propId)}')">📅 Tour</button>
+            <button class="btn-card-action btn-card-email" title="Request specs by email" onclick="openPropertyEmail('${escapeHtml(propId)}')">✉️ Email</button>
             <button class="btn-card-action btn-card-secondary" title="Download Verified PDF" onclick="generatePdfForProperty('${escapeHtml(propId)}')">📄 PDF</button>
             <button class="btn-card-action btn-card-primary" onclick="inquireProperty('${escapeHtml(propId || name)}')">Inquire</button>
           </div>
@@ -729,7 +1085,7 @@ async function appendAssistantResponse(data, animate = false) {
   }
 
   // If two-step confirmation required (Admin Agent)
-  if (requiresConfirm && pendingActionId) {
+  if (requiresConfirm && pendingActionId && !confirmViaChatOnly) {
     const actionCard = document.createElement('div');
     actionCard.className = 'action-confirmation-card';
     actionCard.id = `action-card-${pendingActionId}`;
@@ -811,6 +1167,11 @@ function streamTextToElement(element, fullText, speedMs = 14) {
 // Action Confirmation API Calls (Two-Step Admin Security)
 async function confirmAction(actionId) {
   const card = document.getElementById(`action-card-${actionId}`);
+  if (!isAdminLoggedIn()) {
+    openAdminLoginModal();
+    if (card) card.innerHTML = `<div style="color: var(--accent-red); font-size: 13px;">Sign in required before confirming.</div>`;
+    return;
+  }
   if (card) {
     card.innerHTML = `<div style="color: var(--gold); font-size: 13px;">Executing action...</div>`;
   }
@@ -818,21 +1179,32 @@ async function confirmAction(actionId) {
   try {
     const res = await fetch(API_ROUTES.confirmAction(actionId), {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: adminAuthHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({})
     });
 
     const data = await res.json();
     if (res.ok) {
       if (card) {
+        const toolName = data.tool_name || '';
+        const auditId = data.audit_log_id || '';
+        const auditDisabled = !!data.audit_logging_disabled || !auditId || String(auditId).startsWith('audit_ephemeral_');
+        const realAudit = toolName && auditId && !auditDisabled;
+        const auditLine = realAudit
+          ? `Tool: <code>${escapeHtml(toolName)}</code> | Audit Log ID: <code>${escapeHtml(auditId)}</code>`
+          : `Executed (audit logging disabled)${toolName ? ` — <code>${escapeHtml(toolName)}</code>` : ''}`;
+        const verifyLine = data.verification_line
+          ? `<div style="font-size: 12px; color: var(--text-muted); margin-top: 6px;">${escapeHtml(data.verification_line)}</div>`
+          : '';
         card.innerHTML = `
           <div style="color: var(--accent-green); font-weight: 700; font-size: 13px; display: flex; align-items: center; gap: 6px;">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>
             Action Executed Successfully
           </div>
           <div style="font-size: 12px; color: var(--text-muted); margin-top: 6px;">
-            Tool: <code>${escapeHtml(data.tool_name || '')}</code> | Audit Log ID: <code>${escapeHtml(data.audit_log_id || '')}</code>
+            ${auditLine}
           </div>
+          ${verifyLine}
         `;
       }
     } else {
@@ -847,10 +1219,15 @@ async function confirmAction(actionId) {
 
 async function rejectAction(actionId) {
   const card = document.getElementById(`action-card-${actionId}`);
+  if (!isAdminLoggedIn()) {
+    openAdminLoginModal();
+    if (card) card.innerHTML = `<div style="color: var(--accent-red); font-size: 13px;">Sign in required before rejecting.</div>`;
+    return;
+  }
   try {
     const res = await fetch(API_ROUTES.rejectAction(actionId), {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: adminAuthHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ reason: 'Rejected by staff via UI' })
     });
 
@@ -866,86 +1243,110 @@ async function rejectAction(actionId) {
   }
 }
 
+// ================= Inquire form (pop-up, no chat prompt) =================
+let activeInquiryPropId = '';
+let inquiryInfoCache = {};
+
+function _inquiryInfo(lang) {
+  const key = `${activeTenantOrigin}|${lang}`;
+  if (inquiryInfoCache[key]) return Promise.resolve(inquiryInfoCache[key]);
+  return fetch(`/api/v1/chat/contact-info?site_origin=${encodeURIComponent(activeTenantOrigin)}&language=${encodeURIComponent(lang)}`)
+    .then((r) => (r.ok ? r.json() : null))
+    .then((info) => {
+      if (info) inquiryInfoCache[key] = info;
+      return info;
+    })
+    .catch(() => null);
+}
+
 function inquireProperty(propId) {
-  const input = document.getElementById('chatInput');
-  if (input) {
-    input.value = `I am interested in ${propId}. Can you provide details and arrange a viewing?`;
-    handleSendMessage();
-  }
+  const p = propertyCache[propId] || {};
+  activeInquiryPropId = propId;
+  const modal = document.getElementById('inquiryModal');
+  const overlay = document.getElementById('inquiryModalOverlay');
+  if (!modal || !overlay) return;
+  const set = (id, text) => { const el = document.getElementById(id); if (el) el.textContent = text; };
+  set('inquiryPropName', p.name || p.property_name || propId);
+  ['inquiryError', 'inquiryResult'].forEach((id) => { const el = document.getElementById(id); if (el) el.style.display = 'none'; });
+  const btn = document.getElementById('btnSubmitInquiry');
+  if (btn) btn.disabled = false;
+  overlay.style.display = 'block';
+  modal.style.display = 'flex';
+
+  _inquiryInfo(currentLanguage).then((info) => {
+    if (!info) return;
+    const c = info.inquiry_form || {};
+    set('inquiryTitle', c.title); set('inquiryIntro', c.intro);
+    set('inquiryNameLabel', c.name_label); set('inquiryEmailLabel', c.email_label);
+    set('inquiryPhoneLabel', c.phone_label); set('inquiryMessageLabel', c.message_label);
+    set('inquiryContactLine', c.contact_line);
+    if (btn) btn.textContent = c.submit_label;
+    const list = document.getElementById('inquiryContactList');
+    if (list) {
+      list.innerHTML = '';
+      (info.contacts || []).forEach((ct) => {
+        const row = document.createElement('div');
+        const label = document.createElement('strong');
+        label.textContent = `${ct.label}: `;
+        const tel = document.createElement('a');
+        tel.href = ct.tel_url; tel.textContent = `${c.call} ${ct.phone}`; tel.style.cssText = 'margin-right:14px; color:#e8c77a; font-weight:600; text-decoration:underline;';
+        const wa = document.createElement('a');
+        wa.href = ct.whatsapp_url; wa.target = '_blank'; wa.rel = 'noopener'; wa.textContent = c.whatsapp; wa.style.cssText = 'color:#6ee7a0; font-weight:600; text-decoration:underline;';
+        row.append(label, tel, wa);
+        list.appendChild(row);
+      });
+      const box = document.getElementById('inquiryContactBox');
+      if (box) box.style.display = (info.contacts || []).length ? 'block' : 'none';
+    }
+  });
 }
 
-function requestReport(propId) {
-  if (currentMode !== 'admin') setAgentMode('admin', false);
-  const input = document.getElementById('chatInput');
-  if (input) {
-    input.value = propId ? `What are the private developer specs for ${propId}?` : 'Generate a PDF property report';
-    handleSendMessage();
-  }
+function closeInquiryModal() {
+  const modal = document.getElementById('inquiryModal');
+  const overlay = document.getElementById('inquiryModalOverlay');
+  if (modal) modal.style.display = 'none';
+  if (overlay) overlay.style.display = 'none';
 }
 
-function generatePdfForProperty(propId) {
-  if (!propId) return;
+function submitInquiry() {
+  const val = (id) => { const el = document.getElementById(id); return el ? el.value.trim() : ''; };
+  const name = val('inquiryNameInput'), email = val('inquiryEmailInput'), phone = val('inquiryPhoneInput');
+  const note = val('inquiryMessageInput');
+  const showErr = (msg) => { const el = document.getElementById('inquiryError'); if (el) { el.textContent = msg; el.style.display = 'block'; } };
+  const info = inquiryInfoCache[`${activeTenantOrigin}|${currentLanguage}`];
+  const copy = (info && info.inquiry_form) || {};
+  document.getElementById('inquiryError').style.display = 'none';
+  if (!email && !phone) { showErr(copy.need_contact || 'Please enter an email address or a phone number so we can reach you.'); return; }
+  if (email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) { showErr(copy.bad_email || 'Please enter a valid email address.'); return; }
 
-  // Show loading state on the button
-  const btn = event && event.target ? event.target : null;
-  const originalText = btn ? btn.innerHTML : '';
-  if (btn) {
-    btn.innerHTML = '⏳ Loading...';
-    btn.disabled = true;
-  }
-
-  // Request the official brochure link through the chatbot
-  const prop = propertyCache[propId];
-  const pName = prop ? (prop.name || prop.property_name || propId) : propId;
-  const chatInput = document.getElementById('chatInput');
-  if (chatInput) {
-    chatInput.value = `Download brochure for ${pName}`;
-    handleSendMessage();
-  } else {
-    const url = `/api/v1/chat/brochure/${encodeURIComponent(propId)}?site_origin=${encodeURIComponent(activeTenantOrigin)}&session_id=${encodeURIComponent(currentSessionId)}`;
-    window.open(url, '_blank');
-  }
-
-  if (btn) {
-    setTimeout(() => {
-      btn.innerHTML = originalText;
-      btn.disabled = false;
-    }, 1500);
-  }
+  const p = propertyCache[activeInquiryPropId] || {};
+  const btn = document.getElementById('btnSubmitInquiry');
+  if (btn) btn.disabled = true;
+  fetch('/api/v1/chat/public', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      session_id: currentSessionId || `inquiry_${Date.now()}`,
+      site_origin: activeTenantOrigin,
+      language: currentLanguage,
+      contact_name: name || null,
+      contact_email: email || null,
+      contact_phone: phone || null,
+      property_id: activeInquiryPropId || null,
+      notes: `Inquire form for ${p.name || p.property_name || activeInquiryPropId}${note ? ': ' + note : ''}`,
+    }),
+  })
+    .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+    .then((data) => {
+      const el = document.getElementById('inquiryResult');
+      if (el) {
+        el.textContent = data.lead_saved === false ? (copy.not_stored || 'Online requests are not switched on yet. Please call or WhatsApp us.') : (copy.success || 'Thank you! Our agent will reach out to you shortly.');
+        el.style.display = 'block';
+      }
+    })
+    .catch(() => { showErr('Something went wrong. Please try again, or call or WhatsApp us.'); if (btn) btn.disabled = false; });
 }
 
-
-
-// Image Lightbox Modal View
-function openLightbox(imgUrl, caption) {
-  const existing = document.getElementById('appLightbox');
-  if (existing) existing.remove();
-
-  const modal = document.createElement('div');
-  modal.className = 'image-lightbox';
-  modal.id = 'appLightbox';
-
-  modal.innerHTML = `
-    <div class="lightbox-content">
-      <button class="lightbox-close" onclick="closeLightbox()">&times;</button>
-      <img src="${escapeHtml(imgUrl)}" class="lightbox-img" alt="${escapeHtml(caption)}" />
-      <div class="lightbox-caption">${escapeHtml(caption)}</div>
-    </div>
-  `;
-
-  modal.onclick = (e) => {
-    if (e.target === modal) closeLightbox();
-  };
-
-  document.body.appendChild(modal);
-}
-
-function closeLightbox() {
-  const modal = document.getElementById('appLightbox');
-  if (modal) modal.remove();
-}
-
-// ================= Google Maps Modal Handler =================
 function openPropertyMap(propId) {
   const p = propertyCache[propId] || {};
   const modal = document.getElementById('mapModal');
@@ -988,11 +1389,9 @@ function openPropertyMap(propId) {
   // Render nearby landmarks
   if (proxGrid) {
     proxGrid.innerHTML = '';
-    const landmarks = (p.nearby_landmarks && p.nearby_landmarks.length > 0) ? p.nearby_landmarks : [
-      { name: 'Nearest White Sand Beach', distance_km: 1.8, drive_time_mins: 4 },
-      { name: 'International Airport', distance_km: 19.5, drive_time_mins: 25 },
-      { name: 'Shopping & Dining Marina', distance_km: 8.2, drive_time_mins: 12 },
-    ];
+    const landmarks = (p.nearby_landmarks && p.nearby_landmarks.length > 0) ? p.nearby_landmarks : [];
+    const proxSection = proxGrid.closest('.proximity-section');
+    if (proxSection) proxSection.style.display = landmarks.length ? '' : 'none';
     landmarks.forEach(lm => {
       const chip = document.createElement('div');
       chip.className = 'proximity-chip';
@@ -1146,6 +1545,7 @@ document.addEventListener('keydown', (e) => {
     closeMapModal();
     closeCalendarModal();
     closeEmailModal();
+    closeInquiryModal();
     closeBatchOpsModal();
     closeFocusDrawer();
     closeLightbox();
@@ -1570,6 +1970,12 @@ function initBatchDropzone() {
 }
 
 function openBatchOpsModal(initialTab = 'upload') {
+  if (!isAdminLoggedIn()) {
+    if (currentMode !== 'admin') setAgentMode('admin', false);
+    openAdminLoginModal();
+    appendMessageRow('assistant', '⚠️ **Authentication required.** Sign in as staff before using bulk operations.');
+    return;
+  }
   const modal = document.getElementById('batchModal');
   const overlay = document.getElementById('batchModalOverlay');
   if (modal) modal.style.display = 'flex';
@@ -1684,11 +2090,13 @@ async function submitBatchOperation() {
   }
 
   try {
+    if (!isAdminLoggedIn()) {
+      openAdminLoginModal();
+      throw new Error('Sign in required for batch operations');
+    }
     const res = await fetch('/api/v1/admin/properties/batch-file', {
       method: 'POST',
-      headers: {
-        'Authorization': 'Bearer admin-token'
-      },
+      headers: adminAuthHeaders(),
       body: formData
     });
 
@@ -1751,10 +2159,12 @@ async function loadBatchHistory(manual = false) {
   }
 
   try {
+    if (!isAdminLoggedIn()) {
+      if (listEl) listEl.innerHTML = '<div class="batch-empty-placeholder">Sign in as staff to view batch history.</div>';
+      return;
+    }
     const res = await fetch('/api/v1/admin/operations/history?limit=50', {
-      headers: {
-        'Authorization': 'Bearer admin-token'
-      }
+      headers: adminAuthHeaders()
     });
 
     if (!res.ok) throw new Error('Failed to fetch history');
@@ -1833,11 +2243,13 @@ async function executeBatchUndo(operationId, count) {
   if (!ok) return;
 
   try {
+    if (!isAdminLoggedIn()) {
+      openAdminLoginModal();
+      throw new Error('Sign in required to undo batch operations');
+    }
     const res = await fetch(`/api/v1/admin/operations/${encodeURIComponent(operationId)}/undo`, {
       method: 'POST',
-      headers: {
-        'Authorization': 'Bearer admin-token'
-      }
+      headers: adminAuthHeaders()
     });
 
     const data = await res.json();

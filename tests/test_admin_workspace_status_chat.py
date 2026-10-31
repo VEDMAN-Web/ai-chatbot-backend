@@ -1,0 +1,103 @@
+"""
+"my drive is connected ?" asked in the Admin Panel's AI Assistant is answered from the account, in every role,
+and Google/Drive wording is never refused as off-topic. (The model is not called for these answers.)
+"""
+import uuid
+
+import pytest
+from fastapi.testclient import TestClient
+
+from app.core.config import settings
+from app.core.security import hash_password
+from app.db.models import AuditLog, Conversation, User
+from app.db.session import SessionLocal
+from app.main import app
+from app.services.admin_agent import _granted_google_services, _is_workspace_status_question
+from app.services.google_services import SCOPES
+
+client = TestClient(app)
+RUN = uuid.uuid4().hex[:6]
+PASSWORD = "WsStatus#123"
+QUESTIONS = ["my drive is connected ?", "is my google drive connected", "Is my Gmail connected?", "check google workspace status",
+             "is my calendar linked?"]
+
+
+@pytest.fixture(autouse=True)
+def quiet(monkeypatch):
+    monkeypatch.setattr(settings, "ENABLE_FIRESTORE_SYNC", False)
+    for target in ("app.services.firestore_auth_service.get_firestore_client", "app.services.firestore_service.get_firestore_client"):
+        monkeypatch.setattr(target, lambda *a, **kw: None)
+
+
+def _account(role, connected):
+    email = f"ws_{RUN}_{role}_{'on' if connected else 'off'}_{uuid.uuid4().hex[:5]}@tajlandia.com"
+    prefs = {}
+    if connected:
+        prefs["google_workspace"] = {"connected": True, "google_email": f"{role}.drive@gmail.example", "refresh_token": "r",
+                                     "access_token": "a", "scopes": SCOPES}
+    with SessionLocal() as db:
+        db.add(User(email=email, name=role, role=role, password_hash=hash_password(PASSWORD), is_active=True,
+                    allowed_websites=["tajlandia.com", "varsoviaestate.com"], preferences=prefs))
+        db.commit()
+    token = client.post("/api/v1/auth/login", json={"email": email, "password": PASSWORD}).json()["access_token"]
+    return {"Authorization": f"Bearer {token}"}
+
+
+@pytest.fixture(scope="module", autouse=True)
+def cleanup():
+    yield
+    with SessionLocal() as db:
+        ids = [str(c.id) for c in db.query(Conversation).filter(Conversation.session_id.like(f"ws-{RUN}-%")).all()]
+        db.query(Conversation).filter(Conversation.session_id.like(f"ws-{RUN}-%")).delete(synchronize_session=False)
+        db.query(AuditLog).filter(AuditLog.staff_user_id.like(f"ws_{RUN}_%")).delete(synchronize_session=False)
+        db.query(User).filter(User.email.like(f"ws_{RUN}_%")).delete(synchronize_session=False)
+        db.commit()
+
+
+def _ask(headers, text):
+    res = client.post("/api/v1/admin/chat", headers=headers, json={"message": text, "session_id": f"ws-{RUN}-{uuid.uuid4().hex[:6]}"})
+    assert res.status_code == 200, res.text
+    return res.json()
+
+
+@pytest.mark.parametrize("role", ["super_admin", "admin", "worker"])
+@pytest.mark.parametrize("question", QUESTIONS)
+def test_a_connected_account_is_told_so(role, question):
+    body = _ask(_account(role, True), question)
+    text = body["text"]
+    assert "off-topic" not in text.lower() and "real estate portfolio" not in text.lower()
+    assert text.startswith("Yes") and f"{role}.drive@gmail.example" in text
+    assert "Drive: read-only" in text
+    assert [t["name"] for t in body["tools_used"]] == ["check_google_workspace_status"]
+
+
+@pytest.mark.parametrize("role", ["super_admin", "admin", "worker"])
+def test_an_unconnected_account_is_told_how_to_connect(role):
+    text = _ask(_account(role, False), "my drive is connected ?")["text"]
+    assert text.startswith("No") and "Connect" in text and "off-topic" not in text.lower()
+
+
+def test_one_account_never_sees_anothers_google_email():
+    on, off = _account("admin", True), _account("worker", False)
+    assert "admin.drive@gmail.example" not in _ask(off, "is my google drive connected")["text"]
+    assert "admin.drive@gmail.example" in _ask(on, "is my google drive connected")["text"]
+
+
+@pytest.mark.parametrize("message,expected", [
+    ("my drive is connected ?", True), ("is my google drive connected", True), ("check google workspace status", True),
+    ("read the Varsovia PDF from my drive", False), ("send an email to the client", False),
+    ("add the listing from this Drive file", False), ("how many properties do we have", False),
+])
+def test_only_status_questions_take_the_status_path(message, expected):
+    assert _is_workspace_status_question(message) is expected
+
+
+def test_services_come_from_the_scopes_google_granted():
+    assert _granted_google_services(SCOPES) == ["drive", "gmail", "calendar"]
+    assert _granted_google_services(["https://www.googleapis.com/auth/drive.readonly"]) == ["drive"]
+    assert _granted_google_services(None) == [] and _granted_google_services([]) == []
+
+
+def test_other_questions_are_still_refused_as_off_topic():
+    body = _ask(_account("admin", True), "what is the capital of india")
+    assert "off-topic" in body["text"].lower()

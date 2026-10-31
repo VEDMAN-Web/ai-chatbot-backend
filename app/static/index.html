@@ -130,7 +130,10 @@
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path><path d="M13.73 21a2 2 0 0 1-3.46 0"></path></svg>
         </div>
 
-        <div class="avatar-btn" title="Staff Account">
+        <button class="btn-secondary" id="btnAdminLoginTop" onclick="openAdminLoginModal()" title="Admin login" style="display: none;">
+          <span id="btnAdminLoginTopLabel">Staff Login</span>
+        </button>
+        <div class="avatar-btn" id="staffAvatarBtn" title="Staff Account" onclick="if(currentMode==='admin') openAdminLoginModal()">
           TJ
         </div>
       </div>
@@ -321,8 +324,8 @@
   <div class="app-modal-body">
     <div class="modal-form-property-chip">
       <span class="form-prop-label">Property:</span>
-      <strong id="calModalPropName">Villa Amanzi</strong>
-      <span class="form-prop-id" id="calModalPropId">PROP-PHK-001</span>
+      <strong id="calModalPropName">Selected Listing</strong>
+      <span class="form-prop-id" id="calModalPropId"></span>
     </div>
     
     <div class="modal-form-row">
@@ -342,8 +345,8 @@
         <input type="text" id="calNameInput" class="modal-form-input" placeholder="e.g. John Doe" />
       </div>
       <div class="modal-form-group">
-        <label class="modal-form-label">Your Email (for Calendar Invite) *</label>
-        <input type="email" id="calEmailInput" class="modal-form-input" placeholder="e.g. client@example.com" />
+        <label class="modal-form-label">Your Email (to confirm the viewing) *</label>
+        <input type="email" id="calEmailInput" class="modal-form-input" placeholder="e.g. client@domain.com" />
       </div>
     </div>
 
@@ -353,14 +356,14 @@
     </div>
 
     <div class="modal-alert-info">
-      💡 <strong>One-Click Sync:</strong> You will immediately receive a direct 1-click Google Calendar add link to sync the appointment with your personal calendar.
+      💡 Our advisor will confirm the viewing time with you by email.
     </div>
   </div>
   <div class="app-modal-footer">
     <button class="btn-modal-secondary" onclick="closeCalendarModal()">Cancel</button>
     <button class="btn-modal-primary" id="btnConfirmViewing" onclick="submitScheduleViewing()">
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect><line x1="16" y1="2" x2="16" y2="6"></line><line x1="8" y1="2" x2="8" y2="6"></line><line x1="3" y1="10" x2="21" y2="10"></line></svg>
-      Schedule & Add to Google Calendar
+      Request this viewing
     </button>
   </div>
 </div>
@@ -373,7 +376,7 @@
       <div class="app-modal-icon">✉️</div>
       <div>
         <div class="app-modal-title">Email Verified Property Specs</div>
-        <div class="app-modal-subtitle">Direct dispatch via Gmail with complete floor plans & investment analysis</div>
+        <div class="app-modal-subtitle">We email you the verified specifications</div>
       </div>
     </div>
     <button class="app-modal-close" onclick="closeEmailModal()">&times;</button>
@@ -381,13 +384,13 @@
   <div class="app-modal-body">
     <div class="modal-form-property-chip">
       <span class="form-prop-label">Listing:</span>
-      <strong id="emailModalPropName">Villa Amanzi</strong>
-      <span class="form-prop-id" id="emailModalPropId">PROP-PHK-001</span>
+      <strong id="emailModalPropName">Selected Listing</strong>
+      <span class="form-prop-id" id="emailModalPropId"></span>
     </div>
 
     <div class="modal-form-group">
       <label class="modal-form-label">Recipient Email *</label>
-      <input type="email" id="emailBrochureInput" class="modal-form-input" placeholder="e.g. client@example.com" />
+      <input type="email" id="emailBrochureInput" class="modal-form-input" placeholder="e.g. client@domain.com" />
     </div>
 
     <div class="modal-form-group">
@@ -396,15 +399,64 @@
     </div>
 
     <div class="modal-alert-info">
-      📨 The email will include verified specifications, high-res photos, ownership guidelines, and ROI estimates dispatched directly via Gmail.
+      📨 Our advisor will email you the verified specifications for this listing.
     </div>
   </div>
   <div class="app-modal-footer">
     <button class="btn-modal-secondary" onclick="closeEmailModal()">Cancel</button>
     <button class="btn-modal-primary" id="btnConfirmSendBrochure" onclick="submitSendBrochure()">
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
-      Send via Gmail 🚀
+      Request specs by email
     </button>
+  </div>
+</div>
+
+<!-- ================= 3b. Inquire Form Modal (no chat prompt) ================= -->
+<div class="app-modal-overlay" id="inquiryModalOverlay" onclick="closeInquiryModal()" style="display: none;"></div>
+<div class="app-modal" id="inquiryModal" style="display: none;">
+  <div class="app-modal-header">
+    <div class="app-modal-title-wrap">
+      <div class="app-modal-icon">💬</div>
+      <div>
+        <div class="app-modal-title" id="inquiryTitle">We're glad you're interested!</div>
+        <div class="app-modal-subtitle" id="inquiryIntro">Just give us your name, email or phone number so our agent can reach out to you in minutes.</div>
+      </div>
+    </div>
+    <button class="app-modal-close" onclick="closeInquiryModal()">&times;</button>
+  </div>
+  <div class="app-modal-body">
+    <div class="modal-form-property-chip">
+      <span class="form-prop-label">Listing:</span>
+      <strong id="inquiryPropName">Selected Listing</strong>
+    </div>
+    <div class="modal-form-group">
+      <label class="modal-form-label" id="inquiryNameLabel">Your name</label>
+      <input type="text" id="inquiryNameInput" class="modal-form-input" autocomplete="name" />
+    </div>
+    <div class="modal-form-row">
+      <div class="modal-form-group">
+        <label class="modal-form-label" id="inquiryEmailLabel">Email</label>
+        <input type="email" id="inquiryEmailInput" class="modal-form-input" autocomplete="email" />
+      </div>
+      <div class="modal-form-group">
+        <label class="modal-form-label" id="inquiryPhoneLabel">Phone / WhatsApp</label>
+        <input type="tel" id="inquiryPhoneInput" class="modal-form-input" autocomplete="tel" />
+      </div>
+    </div>
+    <div class="modal-form-group">
+      <label class="modal-form-label" id="inquiryMessageLabel">Anything we should know? (optional)</label>
+      <input type="text" id="inquiryMessageInput" class="modal-form-input" />
+    </div>
+    <div id="inquiryError" class="modal-alert-info" style="display:none; border-color: var(--accent-red, #e5484d);"></div>
+    <div id="inquiryResult" class="modal-alert-info" style="display:none;"></div>
+    <div class="modal-alert-info" id="inquiryContactBox">
+      <div id="inquiryContactLine">If you would rather contact us directly, you can call or WhatsApp us anytime on:</div>
+      <div id="inquiryContactList" style="margin-top:8px; display:flex; flex-direction:column; gap:6px;"></div>
+    </div>
+  </div>
+  <div class="app-modal-footer">
+    <button class="btn-modal-secondary" onclick="closeInquiryModal()">Cancel</button>
+    <button class="btn-modal-primary" id="btnSubmitInquiry" onclick="submitInquiry()">Request a call back</button>
   </div>
 </div>
 
@@ -516,6 +568,45 @@
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"></path></svg>
       <span id="btnExecuteBatchText">Execute Instantly</span>
     </button>
+  </div>
+</div>
+
+<!-- Admin Login Modal (required for /api/v1/admin/* on Railway) -->
+<div class="app-modal-overlay" id="adminLoginOverlay" style="display: none;" onclick="if(event.target===this) closeAdminLoginModal()"></div>
+<div class="app-modal" id="adminLoginModal" style="display: none; max-width: 420px;">
+  <div class="app-modal-header">
+    <div class="app-modal-title-wrap">
+      <div class="app-modal-icon">🔐</div>
+      <div>
+        <div class="app-modal-title">Admin Staff Login</div>
+        <div class="app-modal-subtitle">Sign in to use Admin Team chat on this Railway API</div>
+      </div>
+    </div>
+    <button class="app-modal-close" onclick="closeAdminLoginModal()">&times;</button>
+  </div>
+  <div class="app-modal-body" style="display: flex; flex-direction: column; gap: 14px;">
+    <div class="modal-form-group">
+      <label class="modal-form-label">Email</label>
+      <input type="email" id="adminLoginEmail" class="modal-form-input" placeholder="admin@tajlandia.com" autocomplete="username" />
+    </div>
+    <div class="modal-form-group">
+      <label class="modal-form-label">Password</label>
+      <input type="password" id="adminLoginPassword" class="modal-form-input" placeholder="••••••••" autocomplete="current-password" onkeydown="if(event.key==='Enter') submitAdminLogin()" />
+    </div>
+    <div class="modal-form-group">
+      <label class="modal-form-label">Domain / website</label>
+      <select id="adminLoginDomain" class="modal-form-input">
+        <option value="tajlandia.com">tajlandia.com</option>
+        <option value="varsoviaestate.com">varsoviaestate.com</option>
+        <option value="thai.estate">thai.estate</option>
+      </select>
+    </div>
+    <div id="adminLoginError" style="display:none; color:#f87171; font-size:13px;"></div>
+    <div id="adminLoginStatus" style="display:none; color:var(--text-muted); font-size:12px;"></div>
+  </div>
+  <div class="app-modal-footer">
+    <button class="btn-modal-secondary" onclick="closeAdminLoginModal()">Cancel</button>
+    <button class="btn-modal-primary" id="btnAdminLogin" onclick="submitAdminLogin()">Sign in</button>
   </div>
 </div>
 

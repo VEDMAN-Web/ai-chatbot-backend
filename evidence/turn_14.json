@@ -1,0 +1,320 @@
+{
+  "turn": 14,
+  "session_id": "qa-master-25turn-81b0d2d9",
+  "requirement": "N6",
+  "user_message": "Anything with a rooftop terrace in Bangkok?",
+  "expected": "Says none found or offers nearest match / human without hallucination",
+  "curl_command": "curl -sS -X POST \"http://127.0.0.1:8000/api/v1/chat/public\" -H \"Content-Type: application/json\" -d '{\"session_id\": \"qa-master-25turn-81b0d2d9\", \"site_origin\": \"tajlandia.com\", \"message\": \"Anything with a rooftop terrace in Bangkok?\"}'",
+  "http_status": 200,
+  "latency_ms": 17008.8,
+  "response_headers": {
+    "date": "Fri, 30 Oct 2026 14:16:34 GMT",
+    "server": "uvicorn",
+    "content-type": "application/json"
+  },
+  "response_type": "property_cards",
+  "response_text": "Here are verified listings that match your criteria: \u2022 15 Suite Sukhumvit 15 (Bangkok): from 4.80M THB | Pool\n\u2022 15 Sukhumvit Residences (Bangkok): from 3.10M THB | Pool, Beach Access\n\u2022 2 Bedroom Condo For Sale At Still Sukhumvit 20 (Bangkok): from 44.20M THB | 2 Beds To narrow this down to the best fit, may I ask:\n\u2022 What target budget or investment range are you envisioning (in THB, USD, or EUR)? \u2022 How many bedrooms are you envisioning for yourself or your family? I can also send an official brochure or arrange a private viewing - our advisory team (advisor@tajlandia.com) is ready to help. To narrow this down to the best fit, may I ask:\n\u2022 How many bedrooms are you envisioning for yourself or your family?",
+  "property_cards_count": 3,
+  "property_cards": [
+    {
+      "property_id": "15-suite-sukhumvit-15",
+      "title": "15 Suite Sukhumvit 15",
+      "price": "from 4.80M THB",
+      "link": "https://varsoviaestate.com/en/properties/thailand/bangkok/15-suite-sukhumvit-15"
+    },
+    {
+      "property_id": "15-sukhumvit-residences",
+      "title": "15 Sukhumvit Residences",
+      "price": "from 3.10M THB",
+      "link": "https://varsoviaestate.com/en/properties/thailand/bangkok/15-sukhumvit-residences"
+    },
+    {
+      "property_id": "2-bedroom-condo-for-sale-at-still-sukhumvit-20",
+      "title": "2 Bedroom Condo For Sale At Still Sukhumvit 20",
+      "price": "from 44.20M THB",
+      "link": "https://tajlandia.com/oferty/2-bedroom-condo-for-sale-at-still-sukhumvit-20"
+    }
+  ],
+  "verdict": "PASS",
+  "hallucination_verdict": "SUPPORTED",
+  "raw_response": {
+    "type": "property_cards",
+    "text": "Here are verified listings that match your criteria: \u2022 15 Suite Sukhumvit 15 (Bangkok): from 4.80M THB | Pool\n\u2022 15 Sukhumvit Residences (Bangkok): from 3.10M THB | Pool, Beach Access\n\u2022 2 Bedroom Condo For Sale At Still Sukhumvit 20 (Bangkok): from 44.20M THB | 2 Beds To narrow this down to the best fit, may I ask:\n\u2022 What target budget or investment range are you envisioning (in THB, USD, or EUR)? \u2022 How many bedrooms are you envisioning for yourself or your family? I can also send an official brochure or arrange a private viewing - our advisory team (advisor@tajlandia.com) is ready to help. To narrow this down to the best fit, may I ask:\n\u2022 How many bedrooms are you envisioning for yourself or your family?",
+    "properties": [
+      {
+        "property_id": "15-suite-sukhumvit-15",
+        "name": "15 Suite Sukhumvit 15",
+        "property_type": "condo",
+        "price": "from 4.80M THB",
+        "bedrooms": "Beds: on request",
+        "area": "92 sqm",
+        "location": "Bangkok",
+        "status": "Completed",
+        "has_pool": true,
+        "beach_access": false,
+        "images": [
+          "https://storage.googleapis.com/kalinka-thailand-prod.firebasestorage.app/projects/cd-15-suite-sukhumvit-15/condodee/3ed9db2259677dcf42c57569b1f09325.webp",
+          "https://storage.googleapis.com/kalinka-thailand-prod.firebasestorage.app/projects/cd-15-suite-sukhumvit-15/condodee/1993785ba5c8571da0c73786b340202c.webp",
+          "https://storage.googleapis.com/kalinka-thailand-prod.firebasestorage.app/projects/cd-15-suite-sukhumvit-15/condodee/a8a259ecc8fdc37fada1cbbe37cae1d7.webp",
+          "https://storage.googleapis.com/kalinka-thailand-prod.firebasestorage.app/projects/cd-15-suite-sukhumvit-15/condodee/a26e5f3111593b7bcd1085bfbf10e67a.webp",
+          "https://storage.googleapis.com/kalinka-thailand-prod.firebasestorage.app/projects/cd-15-suite-sukhumvit-15/condodee/c31a9af8eea2158940e699beacdf2876.webp",
+          "https://storage.googleapis.com/kalinka-thailand-prod.firebasestorage.app/projects/cd-15-suite-sukhumvit-15/condodee/c72838663d720124540cb8d6baf90f9e.webp",
+          "https://storage.googleapis.com/kalinka-thailand-prod.firebasestorage.app/projects/cd-15-suite-sukhumvit-15/condodee/ddf3825846e6736a8225fd720e68d28e.webp",
+          "https://storage.googleapis.com/kalinka-thailand-prod.firebasestorage.app/projects/cd-15-suite-sukhumvit-15/condodee/31f55b5b6dcd07f5a94d8f43ef1f116b.webp",
+          "https://storage.googleapis.com/kalinka-thailand-prod.firebasestorage.app/projects/cd-15-suite-sukhumvit-15/condodee/1602390b8ad7faf04a24a30c35ad59cf.webp",
+          "https://storage.googleapis.com/kalinka-thailand-prod.firebasestorage.app/projects/cd-15-suite-sukhumvit-15/condodee/59c7d8cd27d748bc5711f639fa0cd47b.webp"
+        ],
+        "detail_page_url": "https://varsoviaestate.com/en/properties/thailand/bangkok/15-suite-sukhumvit-15",
+        "highlights": [
+          "Pool",
+          "Parking",
+          "Gym",
+          "Spa",
+          "Garden"
+        ],
+        "latitude": 13.7458279,
+        "longitude": 100.5586829,
+        "maps_url": "https://www.google.com/maps/search/?api=1&query=13.7458279%2C100.5586829",
+        "maps_embed_url": "https://www.google.com/maps/embed/v1/place?key=***REDACTED***&q=13.7458279%2C100.5586829&zoom=14",
+        "calendar_url": null
+      },
+      {
+        "property_id": "15-sukhumvit-residences",
+        "name": "15 Sukhumvit Residences",
+        "property_type": "condo",
+        "price": "from 3.10M THB",
+        "bedrooms": "Beds: on request",
+        "area": "28-631 sqm",
+        "location": "Bangkok",
+        "status": "Completed",
+        "has_pool": true,
+        "beach_access": true,
+        "images": [
+          "https://storage.googleapis.com/kalinka-thailand-prod.firebasestorage.app/projects/cd-15-sukhumvit-residences/condodee/d0ae674cfc9ccb337cb8fbb49441bcef.webp",
+          "https://storage.googleapis.com/kalinka-thailand-prod.firebasestorage.app/projects/cd-15-sukhumvit-residences/condodee/48a7c15e75d379688f050802312be96f.webp",
+          "https://storage.googleapis.com/kalinka-thailand-prod.firebasestorage.app/projects/cd-15-sukhumvit-residences/condodee/9c1755e7b930d015fe17a2c7c7200f48.webp",
+          "https://storage.googleapis.com/kalinka-thailand-prod.firebasestorage.app/projects/cd-15-sukhumvit-residences/condodee/031497ecf83a5defab0ab061d9fcf915.webp",
+          "https://storage.googleapis.com/kalinka-thailand-prod.firebasestorage.app/projects/cd-15-sukhumvit-residences/condodee/36df9bd8b73bd6bf43990f835ec4226c.webp",
+          "https://storage.googleapis.com/kalinka-thailand-prod.firebasestorage.app/projects/cd-15-sukhumvit-residences/condodee/a808f2d44eb3462cc62b2c70da578ea4.webp",
+          "https://storage.googleapis.com/kalinka-thailand-prod.firebasestorage.app/projects/cd-15-sukhumvit-residences/condodee/7df2ffd9c83faac8efac96189f16d866.webp",
+          "https://storage.googleapis.com/kalinka-thailand-prod.firebasestorage.app/projects/cd-15-sukhumvit-residences/condodee/ca05f3f9413d9b11e2805687cbab1fa0.webp",
+          "https://storage.googleapis.com/kalinka-thailand-prod.firebasestorage.app/projects/cd-15-sukhumvit-residences/condodee/8a3d2a852320f944fcb99153764b2acc.webp",
+          "https://storage.googleapis.com/kalinka-thailand-prod.firebasestorage.app/projects/cd-15-sukhumvit-residences/condodee/4546b81f492f0c2a814c685f744d4da8.webp",
+          "https://storage.googleapis.com/kalinka-thailand-prod.firebasestorage.app/projects/cd-15-sukhumvit-residences/condodee/6ed04a0a2be19c0654fa928593957d74.webp",
+          "https://storage.googleapis.com/kalinka-thailand-prod.firebasestorage.app/projects/cd-15-sukhumvit-residences/condodee/6a98a7291861981ed5b56a51185201fe.webp"
+        ],
+        "detail_page_url": "https://varsoviaestate.com/en/properties/thailand/bangkok/15-sukhumvit-residences",
+        "highlights": [
+          "Pool",
+          "Beach access",
+          "Parking",
+          "Spa",
+          "Garden"
+        ],
+        "latitude": 13.7420051,
+        "longitude": 100.5580817,
+        "maps_url": "https://www.google.com/maps/search/?api=1&query=13.7420051%2C100.5580817",
+        "maps_embed_url": "https://www.google.com/maps/embed/v1/place?key=***REDACTED***&q=13.7420051%2C100.5580817&zoom=14",
+        "calendar_url": null
+      },
+      {
+        "property_id": "2-bedroom-condo-for-sale-at-still-sukhumvit-20",
+        "name": "2 Bedroom Condo For Sale At Still Sukhumvit 20",
+        "property_type": "Condominium",
+        "price": "from 44.20M THB",
+        "bedrooms": "2 Beds",
+        "area": "N/A",
+        "location": "Bangkok",
+        "status": "Available",
+        "has_pool": false,
+        "beach_access": false,
+        "images": [
+          "https://cdn.fazwaz.com/wbr/AYhi532l6EYYEOEvg8gzOgj7Xks/950x505/gallery/191515/002.jpg",
+          "https://cdn.fazwaz.com/wbr/gM2MczfITjnrEalxnMzlq0h8CQ4/250x250/gallery/191515/028.jpg",
+          "https://cdn.fazwaz.com/wbr/TW9JUu3GaALhYxbcblzcAg1l3G4/250x250/gallery/191515/006.jpg",
+          "https://cdn.fazwaz.com/wbr/MrTiLReh3NAVTv6af40nqKm0UiI/250x250/gallery/191515/013.jpg",
+          "https://cdn.fazwaz.com/wbr/KIezQgKiHZBO3Z-yq-oU23j5LUo/250x250/gallery/191515/027.jpg",
+          "https://cdn.fazwaz.com/wbr/yCYxgL8leIb9cv7ldgQdiF7n_-I/0x0/gallery/191515/002.jpg",
+          "https://cdn.fazwaz.com/wbr/ASLTuoZeVJVFrbsMiudwHDsE10w/0x0/gallery/191515/028.jpg",
+          "https://cdn.fazwaz.com/wbr/N7UgvkG5wZiaDEumnAdSYoh-gWE/0x0/gallery/191515/006.jpg",
+          "https://cdn.fazwaz.com/wbr/BYCi073-_aoRrOeiSwOJw1xeE1g/0x0/gallery/191515/013.jpg",
+          "https://cdn.fazwaz.com/wbr/eLccCd86tU9SUvJeln7RoB9MC08/0x0/gallery/191515/027.jpg",
+          "https://cdn.fazwaz.com/wbr/K-xRB7nX61Uxr82QARgdItnhWDE/0x0/gallery/191515/003.jpg",
+          "https://cdn.fazwaz.com/wbr/CjmHRaOmOy6f8IhmpT_2Pu6p2g8/0x0/gallery/191515/004.jpg"
+        ],
+        "detail_page_url": "https://tajlandia.com/oferty/2-bedroom-condo-for-sale-at-still-sukhumvit-20",
+        "highlights": [],
+        "latitude": null,
+        "longitude": null,
+        "maps_url": "https://www.google.com/maps/search/?api=1&query=2+Bedroom+Condo+For+Sale+At+Still+Sukhumvit+20+Bangkok+Thailand",
+        "maps_embed_url": "https://www.google.com/maps/embed/v1/place?key=***REDACTED***&q=2%20Bedroom%20Condo%20For%20Sale%20At%20Still%20Sukhumvit%2020%20Bangkok%20Thailand&zoom=14",
+        "calendar_url": null
+      }
+    ],
+    "quick_replies": [
+      "Which of these has a pool?",
+      "Can a foreigner buy these?",
+      "Show something cheaper"
+    ],
+    "lead_captured": false,
+    "preferences": {
+      "language": "en",
+      "property_context": {
+        "conversation_id": "public__qa-master-25turn-81b0d2d9",
+        "active_property_id": "PROP-PHG-005",
+        "active_property_reference": "Akiraya Villa",
+        "recently_discussed_ids": [
+          "59-heritage-sukhumvit-59",
+          "2-bedroom-condo-for-sale-at-still-sukhumvit-20",
+          "15-sukhumvit-residences",
+          "15-suite-sukhumvit-15",
+          "PROP-PHK-001",
+          "PROP-PHG-005",
+          "the-title-artrio",
+          "Jo5t4clIFRL6hi1A1tRX",
+          "the-trees-residence",
+          "citygate-phuket",
+          "8-atelier-residence",
+          "777-beach-condo",
+          "3-bedroom-villa-for-sale-at-baan-maneekram-jomthong-thani-for-29"
+        ],
+        "reference_map": {
+          "3 bedroom villa for sale at baan maneekram-jomthong thani for $293,000 | u5928175": "3-bedroom-villa-for-sale-at-baan-maneekram-jomthong-thani-for-29",
+          "3 Bedroom Villa for Sale at Baan Maneekram-Jomthong Thani for $293,000 | U5928175": "3-bedroom-villa-for-sale-at-baan-maneekram-jomthong-thani-for-29",
+          "777 beach condo": "777-beach-condo",
+          "777 Beach Condo": "777-beach-condo",
+          "8 atelier residence": "8-atelier-residence",
+          "8 Atelier Residence": "8-atelier-residence",
+          "sun hills layan phuket": "Jo5t4clIFRL6hi1A1tRX",
+          "Sun Hills Layan Phuket": "Jo5t4clIFRL6hi1A1tRX",
+          "first property": "15-suite-sukhumvit-15",
+          "1st": "15-suite-sukhumvit-15",
+          "first one": "15-suite-sukhumvit-15",
+          "1": "15-suite-sukhumvit-15",
+          "second property": "15-sukhumvit-residences",
+          "2nd": "15-sukhumvit-residences",
+          "second one": "15-sukhumvit-residences",
+          "2": "15-sukhumvit-residences",
+          "third property": "2-bedroom-condo-for-sale-at-still-sukhumvit-20",
+          "3rd": "2-bedroom-condo-for-sale-at-still-sukhumvit-20",
+          "third one": "2-bedroom-condo-for-sale-at-still-sukhumvit-20",
+          "3": "2-bedroom-condo-for-sale-at-still-sukhumvit-20",
+          "fourth property": "59-heritage-sukhumvit-59",
+          "4th": "59-heritage-sukhumvit-59",
+          "fourth one": "59-heritage-sukhumvit-59",
+          "4": "59-heritage-sukhumvit-59",
+          "3 bedroom villa for sale at baan maneekram jomthong thani for 29": "3-bedroom-villa-for-sale-at-baan-maneekram-jomthong-thani-for-29",
+          "3 Bedroom Villa For Sale At Baan Maneekram Jomthong Thani For 29": "3-bedroom-villa-for-sale-at-baan-maneekram-jomthong-thani-for-29",
+          "citygate phuket": "citygate-phuket",
+          "CityGate Phuket": "citygate-phuket",
+          "the title artrio": "the-title-artrio",
+          "The Title Artrio": "the-title-artrio",
+          "the trees residence": "the-trees-residence",
+          "The Trees Residence": "the-trees-residence",
+          "prop phk 001": "PROP-PHK-001",
+          "Prop Phk 001": "PROP-PHK-001",
+          "akiraya villa": "PROP-PHG-005",
+          "Akiraya Villa": "PROP-PHG-005",
+          "prop phg 005": "PROP-PHG-005",
+          "Prop Phg 005": "PROP-PHG-005",
+          "15 suite sukhumvit 15": "15-suite-sukhumvit-15",
+          "15 Suite Sukhumvit 15": "15-suite-sukhumvit-15",
+          "15 sukhumvit residences": "15-sukhumvit-residences",
+          "15 Sukhumvit Residences": "15-sukhumvit-residences",
+          "2 bedroom condo for sale at still sukhumvit 20": "2-bedroom-condo-for-sale-at-still-sukhumvit-20",
+          "2 Bedroom Condo For Sale At Still Sukhumvit 20": "2-bedroom-condo-for-sale-at-still-sukhumvit-20",
+          "59 heritage sukhumvit 59": "59-heritage-sukhumvit-59",
+          "59 Heritage Sukhumvit 59": "59-heritage-sukhumvit-59"
+        },
+        "comparison_set": [
+          "PROP-PHG-005",
+          "PROP-PHK-001"
+        ],
+        "user_preferences": {},
+        "decisions_summary": "active=PROP-PHK-001; recent=PROP-PHK-001,Jo5t4clIFRL6hi1A1tRX,the-trees-residence,the-title-artrio,citygate-phuket; compare=; turns=6",
+        "unresolved_questions": [],
+        "rolling_summary": "active=PROP-PHK-001 | Q:Show me full details of property PROP-PHK-001 | discussed:PROP-PHK-001 || active=PROP-PHK-001 | Q:Does it have a gym? | discussed:PROP-PHK-001 || active=PROP-PHK-001 | Q:How far is it from the airport? | discussed:PROP-PHK-001 || active=PROP-PHK-001 | Q:What will the price be next year? | discussed:PROP-PHK-001 || active=PROP-PHK-001 | Q:Is this a good investment? What is the rental yield? | discussed:PROP-PHK-001 || active=PROP-PHK-001 | Q:Show cards for 3 properties near the beach | discussed:PROP-PHK-001",
+        "turn_count": 6,
+        "updated_at": "2026-10-30T14:16:46.956083+00:00"
+      },
+      "active_filters": {
+        "location": "Bangkok",
+        "property_type": null,
+        "bedrooms": null,
+        "min_bedrooms": null,
+        "max_bedrooms": null,
+        "max_price": null,
+        "has_pool": null,
+        "required_amenities": null
+      },
+      "seen_property_ids": [
+        "8-atelier-residence",
+        "15-suite-sukhumvit-15",
+        "3-bedroom-villa-for-sale-at-baan-maneekram-jomthong-thani-for-29",
+        "15-sukhumvit-residences",
+        "2-bedroom-condo-for-sale-at-still-sukhumvit-20",
+        "PROP-PHG-005",
+        "59-heritage-sukhumvit-59",
+        "the-trees-residence",
+        "777-beach-condo",
+        "citygate-phuket",
+        "the-title-artrio",
+        "Jo5t4clIFRL6hi1A1tRX",
+        "PROP-PHK-001"
+      ],
+      "last_result_ids": [
+        "15-suite-sukhumvit-15",
+        "15-sukhumvit-residences",
+        "2-bedroom-condo-for-sale-at-still-sukhumvit-20",
+        "59-heritage-sukhumvit-59"
+      ],
+      "last_shown_names": [
+        "15 Suite Sukhumvit 15",
+        "15 Sukhumvit Residences",
+        "2 Bedroom Condo For Sale At Still Sukhumvit 20",
+        "59 Heritage Sukhumvit 59"
+      ],
+      "asked_slots": [
+        "budget",
+        "bedrooms"
+      ],
+      "location": "Bangkok",
+      "what_we_fetched": [
+        "\ud83d\udccd Location: Bangkok",
+        "\ud83d\udecf\ufe0f Bedrooms: 2 Bedrooms",
+        "\ud83d\udcb0 Budget: Under 8M THB (~$228,571 USD)",
+        "\u2728 Features: Private Pool"
+      ],
+      "focus_summary": "Focusing on 2 Bedrooms properties in Bangkok with private pool (Under 8M THB (~$228,571 USD)).",
+      "focus_validated": true,
+      "session_message_count": 14,
+      "selected_property_ids": [
+        "PROP-PHG-005"
+      ],
+      "budget_max": 8000000.0,
+      "max_price_exclusive": true,
+      "bedrooms_num": 2,
+      "bedrooms": "2 Bedrooms",
+      "budget_display": "Under 8M THB (~$228,571 USD)",
+      "has_pool": true,
+      "features": [
+        "Private Pool"
+      ],
+      "comparison_set": [
+        "PROP-PHG-005",
+        "PROP-PHK-001"
+      ]
+    },
+    "session_id": "qa-master-25turn-81b0d2d9",
+    "conversation_id": "public__qa-master-25turn-81b0d2d9",
+    "language": "en",
+    "brochure_property_id": null,
+    "pdf_url": null,
+    "download_url": null,
+    "lead_id": null,
+    "lead_saved": null,
+    "session_limit_reached": false,
+    "message_limit": 50,
+    "session_limit_warning": false
+  }
+}

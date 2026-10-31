@@ -1,0 +1,35 @@
+<section class="page location-page" data-section="nearby_places">
+  <span class="section-marker">SECTION:nearby_places</span>
+  <div class="page-top-bar"></div>
+  <div class="page-chrome-header">
+    <span class="hdr-left">{{ header_text }}</span>
+  </div>
+  <div class="page-chrome-body">
+    <p class="label-caps" style="margin-bottom:3mm;">{{ labels.location_title }}</p>
+    {% if data.location_text %}
+    <h2 class="display" style="font-size:18pt;margin-bottom:4mm;">{{ data.location_text }}</h2>
+    {% endif %}
+    {% if prepared.location_blurb %}
+    <p class="body-text max-prose" style="margin-bottom:6mm;">{{ prepared.location_blurb }}</p>
+    {% endif %}
+    {% if prepared.nearby_by_category %}
+    <p class="label-caps" style="margin-bottom:3mm;">{{ labels.nearby_title }}</p>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:5mm;">
+      {% for cat, places in prepared.nearby_by_category.items() %}
+      <div style="padding:4mm;background:var(--card);{% if theme_shape == 'rounded' %}border-radius:12px;{% endif %}">
+        <p class="label-caps" style="margin-bottom:2mm;color:var(--accent);">{{ cat }}</p>
+        {% for place in places %}
+        <p class="body-text" style="margin-bottom:1.5mm;">
+          {{ place.name }}{% if place.distance_text %} <span style="color:var(--muted);">· {{ place.distance_text }}</span>{% endif %}
+        </p>
+        {% endfor %}
+      </div>
+      {% endfor %}
+    </div>
+    {% endif %}
+  </div>
+  <div class="page-chrome-footer">
+    <span></span>
+    <span class="page-num">{{ page_label }}</span>
+  </div>
+</section>
