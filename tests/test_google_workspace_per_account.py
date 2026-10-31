@@ -17,7 +17,7 @@ from app.services import drive_service
 from app.services.admin_agent import _execute_admin_tool_uncached
 from app.services.google_services import SCOPES, google_manager
 
-RUN = uuid.uuid4().hex[:6].translate(str.maketrans("0123456789", "ghijklmnop"))  # letters only: digits in a name get parsed as a price
+RUN = uuid.uuid4().hex[:6].translate(str.maketrans("0123456789abcdef", "bcdfghjklmnpqrst"))  # consonants only: digits parse as a price, vowels can spell words (e.g. "off")
 ROLES = ["super_admin", "admin", "worker"]
 SHARED = object()   # stands for credentials/google_token.json or service_account.json
 

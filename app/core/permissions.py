@@ -53,6 +53,7 @@ TOOL_PERMISSIONS: Dict[str, str] = {
     "ingest_property_from_drive": PROPERTIES_IMPORT,
     "propose_drive_property_ingest": PROPERTIES_IMPORT,
     "ingest_property_from_url": PROPERTIES_IMPORT,
+    "approve_drive_ingestion": PROPERTIES_IMPORT,
     "execute_batch_property_action": PROPERTIES_IMPORT,
     "undo_batch_property_operation": PROPERTIES_UNDO,
     "archive_listing": PROPERTIES_WRITE,
