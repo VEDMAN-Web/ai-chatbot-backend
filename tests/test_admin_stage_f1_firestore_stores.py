@@ -473,3 +473,15 @@ def test_missing_firestore_client_raises(db, monkeypatch):
             tool_name="send_email",
             action_payload={"to": "a@b.com", "subject": "x", "body": "y"},
         )
+
+
+def test_listing_writes_bump_the_store_they_write_to(monkeypatch):
+    """Listings are written to the admin store, so the cache counter is bumped there.
+    On staging the admin store is the test project; the user store is production and must not be touched."""
+    import app.services.firestore_service as fsvc
+    from app.services.action_service import _bump_properties_version
+
+    seen = []
+    monkeypatch.setattr(fsvc, "bump_properties_version", lambda target="user": seen.append(target) or 1)
+    _bump_properties_version()
+    assert seen == ["admin"]
