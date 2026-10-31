@@ -106,6 +106,9 @@ def _serialize_correction(doc_id: str, data: Dict[str, Any], include_embedding: 
         "original_answer": data.get("originalAnswer"),
         "corrected_answer": data.get("correctedAnswer"),
         "scope": data.get("scope") or {},
+        "scope_type": data.get("scopeType"),
+        "category": data.get("category"),
+        "expires_at": _iso(data.get("expiresAt")),
         "status": data.get("status"),
         "version": data.get("version") or 0,
         "revision": data.get("revision") or 1,
@@ -553,5 +556,183 @@ def active_corrections(include_embedding: bool = False) -> List[Dict[str, Any]]:
     client = query._client()
     if client is None:
         return []
-    return [_serialize_correction(d.id, d.to_dict(), include_embedding)
-            for d in client.collection(CORRECTIONS).where("status", "==", "approved").stream()]
+    now = _now()
+    results = []
+    for d in client.collection(CORRECTIONS).where("status", "==", "approved").stream():
+        data = d.to_dict()
+        expires_raw = data.get("expiresAt")
+        if expires_raw is not None:
+            try:
+                from datetime import timezone as _tz
+                exp_dt = datetime.fromisoformat(str(expires_raw).replace("Z", "+00:00"))
+                if exp_dt.tzinfo is None:
+                    exp_dt = exp_dt.replace(tzinfo=_tz.utc)
+                if now > exp_dt:
+                    continue  # expired, skip
+            except Exception:
+                pass  # unparseable expiry: treat as non-expiring
+        results.append(_serialize_correction(d.id, data, include_embedding))
+    return results
+
+
+# ---- direct correction (no linked conversation/remark) -----------------------------------------
+
+VALID_SCOPE_TYPES = ("global", "site_specific", "admin_only")
+VALID_CATEGORIES = ("property_fact", "agency_policy", "pricing_rule", "contact_info", "clarification")
+
+
+def _load_correction_direct(client, staff: AuthenticatedStaff, correction_id: str) -> Dict[str, Any]:
+    """Load a correction that may not have a linked conversation (direct corrections)."""
+    snap = client.collection(CORRECTIONS).document(correction_id).get() if query.valid_key(correction_id) else None
+    if snap is None or not snap.exists:
+        raise RemarkError(404, "Correction not found.")
+    data = snap.to_dict()
+    # Only check visibility for conversation-linked corrections
+    if data.get("conversationId"):
+        _header_for(client, staff, data["conversationId"])
+    elif not _is_reviewer(staff):
+        raise RemarkError(403, "Only a reviewer can access direct corrections.")
+    return data
+
+
+def create_correction_direct(
+    staff: AuthenticatedStaff,
+    trigger_query: str,
+    corrected_answer: str,
+    original_answer: Optional[str] = None,
+    scope_type: str = "global",
+    category: str = "clarification",
+    expires_at: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Creates a correction without a linked conversation/remark.
+
+    Status is initially 'proposed'. Callers that want to auto-approve (e.g. super_admin)
+    should call decide_correction_direct() immediately after.
+    """
+    if scope_type not in VALID_SCOPE_TYPES:
+        raise RemarkError(422, f"scope_type must be one of {VALID_SCOPE_TYPES}.")
+    if category not in VALID_CATEGORIES:
+        raise RemarkError(422, f"category must be one of {VALID_CATEGORIES}.")
+
+    question = _text(trigger_query, "trigger_query", ISSUE_MIN, ISSUE_MAX)
+    corrected = _text(corrected_answer, "corrected_answer", ANSWER_MIN, ANSWER_MAX)
+    original = _text(original_answer, "original_answer", ANSWER_MIN, ANSWER_MAX, required=False)
+
+    # Validate expires_at is a parseable ISO 8601 string if provided
+    if expires_at is not None:
+        try:
+            from datetime import timezone as _tz
+            exp_dt = datetime.fromisoformat(str(expires_at).replace("Z", "+00:00"))
+            if exp_dt.tzinfo is None:
+                exp_dt = exp_dt.replace(tzinfo=_tz.utc)
+            expires_at = exp_dt.isoformat()
+        except Exception:
+            raise RemarkError(422, "expires_at must be a valid ISO 8601 date/time string.")
+
+    client = query._require_client()
+    correction_id = f"COR-{uuid.uuid4().hex[:12].upper()}"
+    correction_ref = client.collection(CORRECTIONS).document(correction_id)
+    now = _now()
+
+    doc: Dict[str, Any] = {
+        "remarkId": None,
+        "conversationId": None,
+        "messageId": None,
+        "question": question,
+        "originalAnswer": original or "",
+        "correctedAnswer": corrected,
+        "scope": {},
+        "scopeType": scope_type,
+        "category": category,
+        "status": "proposed",
+        "version": 0,
+        "revision": 1,
+        "proposedBy": _identity(staff),
+        "proposedAt": now,
+        "reviewedBy": None,
+        "reviewedAt": None,
+        "reviewNote": None,
+    }
+    if expires_at is not None:
+        doc["expiresAt"] = expires_at
+
+    correction_ref.set(doc)
+    correction_ref.collection(REVISIONS).document("r0001").set({
+        "revision": 1, "at": now, "by": _identity(staff), "change": "proposed_direct",
+        "snapshot": {
+            "correctedAnswer": corrected, "scope": {}, "scopeType": scope_type,
+            "category": category, "status": "proposed",
+        },
+    })
+    return _serialize_correction(correction_id, doc)
+
+
+def decide_correction_direct(
+    db,
+    staff: AuthenticatedStaff,
+    correction_id: str,
+    decision: str,
+    note: Any = None,
+) -> Dict[str, Any]:
+    """Approve, reject or deactivate a direct (no-conversation) correction."""
+    from google.cloud import firestore
+    from app.services.audit_service import record_audit_log, record_sensitive_audit
+
+    if decision not in _DECISIONS:
+        raise RemarkError(422, "decision must be approve, reject or deactivate.")
+    if not _is_reviewer(staff):
+        raise RemarkError(403, "Only a super admin can approve, reject or deactivate corrections.")
+    client = query._require_client()
+    review_note = _text(note, "The note", 0, NOTE_MAX, required=False) if note is not None else None
+    current = _load_correction_direct(client, staff, correction_id)
+    allowed_from, new_status = _DECISIONS[decision]
+    if current.get("status") not in allowed_from:
+        raise RemarkError(409, f"A {current.get('status')} correction cannot be {decision}d.")
+    record_sensitive_audit(
+        db=db, tool_name=f"correction_direct:{decision}", staff_user_id=staff.email,
+        proposed_payload={"correction_id": correction_id, "from_status": current.get("status"),
+                          "to_status": new_status, "note": review_note},
+        confirmed_by_staff=True, status="PENDING",
+    )
+    ref = client.collection(CORRECTIONS).document(correction_id)
+    now = _now()
+    vector = None
+    if new_status == "approved":
+        from app.services import correction_retrieval
+        vector = correction_retrieval.embed(current.get("question") or "")
+
+    @firestore.transactional
+    def write(txn):
+        data = ref.get(transaction=txn).to_dict()
+        if data.get("status") not in allowed_from:
+            raise RemarkError(409, f"A {data.get('status')} correction cannot be {decision}d.")
+        revision = int(data.get("revision") or 1) + 1
+        changes: Dict[str, Any] = {"status": new_status, "reviewedBy": _identity(staff), "reviewedAt": now,
+                                   "reviewNote": review_note, "revision": revision}
+        if new_status == "approved":
+            changes["version"] = int(data.get("version") or 0) + 1
+            changes["embedding"] = vector
+            changes["embeddingModel"] = getattr(settings, "EMBEDDING_MODEL", None) if vector else None
+        txn.update(ref, changes)
+        txn.set(ref.collection(REVISIONS).document(f"r{revision:04d}"), {
+            "revision": revision, "at": now, "by": _identity(staff), "change": decision, "note": review_note,
+            "snapshot": {"status": new_status, "correctedAnswer": data.get("correctedAnswer")}})
+        return {**data, **changes}
+
+    def outcome(status: str, error: Optional[str] = None) -> None:
+        try:
+            record_audit_log(db=db, tool_name=f"correction_direct:{decision}", staff_user_id=staff.email,
+                             proposed_payload={"correction_id": correction_id, "to_status": new_status},
+                             confirmed_by_staff=True, status=status, error_message=error)
+        except Exception:
+            pass
+
+    try:
+        result = write(_transaction(client))
+    except Exception as exc:
+        outcome("FAILED", str(exc)[:300])
+        raise
+    outcome("SUCCESS")
+    from app.services import correction_retrieval
+    correction_retrieval.invalidate_cache()
+    return _serialize_correction(correction_id, result)

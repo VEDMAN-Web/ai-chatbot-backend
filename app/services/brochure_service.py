@@ -1023,3 +1023,165 @@ def generate_and_upload_brochure(
         language=language,
         client_name=client_name
     )
+
+
+def generate_property_shortlist_pdf(
+    db: Any,
+    property_ids: List[str],
+    site_origin: Optional[str] = None,
+    language: str = "en",
+    client_name: Optional[str] = None,
+) -> bytes:
+    """
+    Generates a professional multi-property shortlist & comparison PDF document.
+    Includes side-by-side comparison matrix, verified specifications, amenities, and pricing.
+    """
+    import io
+    from datetime import datetime, timezone
+    from reportlab.lib.pagesizes import letter
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, KeepTogether
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib import colors
+    from xml.sax.saxutils import escape
+
+    from app.core.tenant import resolve_tenant
+    from app.services.property_search import get_properties_by_ids
+
+    # 1. Fetch properties (PostgreSQL, then fallback to individual loaders)
+    props = []
+    if db is not None:
+        props = get_properties_by_ids(db, property_ids)
+    if not props:
+        for pid in property_ids:
+            p = _load_property_for_brochure(db, pid)
+            if p:
+                props.append(p)
+
+    if not props:
+        raise ValueError(f"No valid properties found for IDs: {property_ids}")
+
+    tenant = resolve_tenant(site_origin)
+    lang = language if language in ["en", "pl", "th"] else "en"
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=letter, rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=36)
+    story = []
+    styles = getSampleStyleSheet()
+
+    title_style = ParagraphStyle("ShortlistTitle", parent=styles["Title"], fontSize=20, leading=24, textColor=colors.HexColor("#0F172A"), alignment=0)
+    sub_style = ParagraphStyle("ShortlistSub", parent=styles["Normal"], fontSize=9.5, leading=13, textColor=colors.HexColor("#64748B"))
+    h2_style = ParagraphStyle("ShortlistH2", parent=styles["Heading2"], fontSize=13, leading=17, textColor=colors.HexColor("#1E3A8A"), spaceBefore=10, spaceAfter=5)
+    cell_style = ParagraphStyle("ShortlistCell", parent=styles["Normal"], fontSize=8, leading=10.5)
+    head_style = ParagraphStyle("ShortlistHead", parent=cell_style, fontName="Helvetica-Bold", fontSize=8.5, textColor=colors.whitesmoke)
+    body_style = ParagraphStyle("ShortlistBody", parent=styles["Normal"], fontSize=8.5, leading=12, textColor=colors.HexColor("#334155"))
+
+    # Header / Title Block
+    title_text = {
+        "en": f"<b>{escape(tenant.brand_name)} — Property Shortlist & Comparison</b>",
+        "pl": f"<b>{escape(tenant.brand_name)} — Zestawienie i Porównanie Ofert</b>",
+        "th": f"<b>{escape(tenant.brand_name)} — รายการอสังหาริมทรัพย์ที่เลือกและตารางเปรียบเทียบ</b>",
+    }.get(lang, f"<b>{escape(tenant.brand_name)} — Property Shortlist & Comparison</b>")
+
+    client_display = (client_name or ("Valued Client" if lang == "en" else "Szanowny Kliencie")).strip()
+    date_str = datetime.now(timezone.utc).strftime("%d %B %Y")
+    subtitle_text = f"Curated selection of {len(props)} verified properties for {escape(client_display)} • Prepared {date_str} • {escape(tenant.advisor_email)}"
+
+    story.append(Paragraph(title_text, title_style))
+    story.append(Spacer(1, 4))
+    story.append(Paragraph(subtitle_text, sub_style))
+    story.append(Spacer(1, 12))
+
+    # Side-by-Side Comparison Table
+    table_heading = {"en": "Side-by-Side Comparison", "pl": "Zestawienie Porównawcze", "th": "ตารางเปรียบเทียบ"}.get(lang, "Side-by-Side Comparison")
+    story.append(Paragraph(f"<b>{table_heading}</b>", h2_style))
+
+    table_headers = ["Property ID", "Property Name", "Location", "Price", "Type", "Beds", "Area", "Pool", "Status"]
+    table_data = [[Paragraph(f"<b>{h}</b>", head_style) for h in table_headers]]
+    for p in props:
+        p_name = getattr(p, "property_name", None) or getattr(p, "property_id", "")
+        loc = f"{getattr(p, 'district', '') or ''}, {getattr(p, 'province', '') or ''}".strip(", ") or "Thailand"
+        price = getattr(p, "price_display", None) or "On request"
+        ptype = getattr(p, "property_type", None) or "Residential"
+        beds = getattr(p, "bedrooms_display", None) or str(getattr(p, "bedrooms_min", "N/A"))
+        area = getattr(p, "area_display", None) or "N/A"
+        has_pool = "Yes" if getattr(p, "has_pool", False) else "No"
+        status = getattr(p, "status", None) or "Available"
+
+        table_data.append([
+            Paragraph(escape(getattr(p, "property_id", "")), cell_style),
+            Paragraph(escape(p_name), cell_style),
+            Paragraph(escape(loc), cell_style),
+            Paragraph(escape(price), cell_style),
+            Paragraph(escape(ptype), cell_style),
+            Paragraph(escape(beds), cell_style),
+            Paragraph(escape(area), cell_style),
+            Paragraph(has_pool, cell_style),
+            Paragraph(escape(status), cell_style),
+        ])
+
+    col_w = [65, 115, 80, 80, 50, 35, 55, 30, 60]
+    t = Table(table_data, colWidths=col_w)
+    t.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#1E3A8A")),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+        ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor("#F8FAFC")]),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#E2E8F0")),
+        ('TOPPADDING', (0, 0), (-1, -1), 4),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+    ]))
+    story.append(t)
+    story.append(Spacer(1, 14))
+
+    # Detailed Property Specification Cards
+    specs_heading = {"en": "Individual Property Specifications", "pl": "Szczegółowa Specyfikacja Ofert", "th": "ข้อมูลจำเพาะรายโครงการ"}.get(lang, "Individual Property Specifications")
+    story.append(Paragraph(f"<b>{specs_heading}</b>", h2_style))
+
+    for p in props:
+        p_name = getattr(p, "property_name", None) or getattr(p, "property_id", "")
+        p_id = getattr(p, "property_id", "")
+        loc = f"{getattr(p, 'district', '') or ''}, {getattr(p, 'province', '') or ''}".strip(", ") or "Thailand"
+        price = getattr(p, "price_display", None) or "On request"
+        ptype = getattr(p, "property_type", None) or "Residential"
+        beds = getattr(p, "bedrooms_display", None) or str(getattr(p, "bedrooms_min", "N/A"))
+        area = getattr(p, "area_display", None) or "N/A"
+        ownership = getattr(p, "ownership_type", None) or "Freehold / Leasehold"
+        amenities = list(getattr(p, "amenities", None) or [])
+        highlights = list(getattr(p, "highlights", None) or [])
+
+        card_elements = []
+        card_elements.append(Paragraph(f"<b>{escape(p_name)}</b> <font color='#64748B'>({escape(p_id)})</font>", h2_style))
+        card_elements.append(Spacer(1, 2))
+
+        info_line = (
+            f"<b>Location:</b> {escape(loc)} &nbsp;|&nbsp; <b>Price:</b> {escape(price)} &nbsp;|&nbsp; "
+            f"<b>Type:</b> {escape(ptype)} &nbsp;|&nbsp; <b>Beds:</b> {escape(beds)} &nbsp;|&nbsp; "
+            f"<b>Area:</b> {escape(area)} &nbsp;|&nbsp; <b>Ownership:</b> {escape(ownership)}"
+        )
+        card_elements.append(Paragraph(info_line, body_style))
+
+        if amenities:
+            card_elements.append(Paragraph(f"<b>Amenities:</b> {escape(', '.join(amenities[:6]))}", body_style))
+        if highlights:
+            card_elements.append(Paragraph(f"<b>Highlights:</b> {escape(' • '.join(highlights[:5]))}", body_style))
+
+        desc = getattr(p, "description", None) or ""
+        if desc:
+            card_elements.append(Spacer(1, 3))
+            desc_snip = desc[:280] + ("..." if len(desc) > 280 else "")
+            card_elements.append(Paragraph(f"<i>{escape(desc_snip)}</i>", body_style))
+
+        card_elements.append(Spacer(1, 10))
+        story.append(KeepTogether(card_elements))
+
+    # Disclaimer / Footer
+    disclaimer_text = (
+        f"Disclaimer: All property data is sourced directly from verified portfolio listings as of {date_str}. "
+        f"Subject to prior sale and availability. For viewings and legal due diligence, contact {escape(tenant.advisor_email)}."
+    )
+    story.append(Spacer(1, 8))
+    story.append(Paragraph(f"<font color='#94A3B8' size='7'>{escape(disclaimer_text)}</font>", body_style))
+
+    doc.build(story)
+    return buf.getvalue()

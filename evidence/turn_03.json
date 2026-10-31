@@ -1,0 +1,160 @@
+{
+  "turn": 3,
+  "session_id": "qa-master-25turn-81b0d2d9",
+  "requirement": "A3",
+  "user_message": "Which one is the cheapest?",
+  "expected": "Resolves 'one' from turn 2 results; correct price",
+  "curl_command": "curl -sS -X POST \"http://127.0.0.1:8000/api/v1/chat/public\" -H \"Content-Type: application/json\" -d '{\"session_id\": \"qa-master-25turn-81b0d2d9\", \"site_origin\": \"tajlandia.com\", \"message\": \"Which one is the cheapest?\"}'",
+  "http_status": 200,
+  "latency_ms": 6827.3,
+  "response_headers": {
+    "date": "Fri, 30 Oct 2026 14:14:50 GMT",
+    "server": "uvicorn",
+    "content-type": "application/json"
+  },
+  "response_type": "text",
+  "response_text": "Of the listings above, the lowest starting price is **Sun Hills Layan Phuket** (from 4.00M THB), followed by **The Trees Residence** (from 4.03M THB). Prices are starting prices per project; units differ in size.",
+  "property_cards_count": 0,
+  "property_cards": [],
+  "verdict": "PASS",
+  "hallucination_verdict": "SUPPORTED",
+  "raw_response": {
+    "type": "text",
+    "text": "Of the listings above, the lowest starting price is **Sun Hills Layan Phuket** (from 4.00M THB), followed by **The Trees Residence** (from 4.03M THB). Prices are starting prices per project; units differ in size.",
+    "properties": [],
+    "quick_replies": [
+      "Tell me more about Sun Hills Layan Phuket",
+      "Show me other options",
+      "Connect me with an advisor"
+    ],
+    "lead_captured": false,
+    "preferences": {
+      "language": "en",
+      "property_context": {
+        "conversation_id": "public__qa-master-25turn-81b0d2d9",
+        "active_property_id": "3-bedroom-villa-for-sale-at-baan-maneekram-jomthong-thani-for-29",
+        "active_property_reference": null,
+        "recently_discussed_ids": [
+          "Jo5t4clIFRL6hi1A1tRX",
+          "the-trees-residence",
+          "the-title-artrio",
+          "citygate-phuket",
+          "8-atelier-residence",
+          "777-beach-condo",
+          "3-bedroom-villa-for-sale-at-baan-maneekram-jomthong-thani-for-29"
+        ],
+        "reference_map": {
+          "3 bedroom villa for sale at baan maneekram-jomthong thani for $293,000 | u5928175": "3-bedroom-villa-for-sale-at-baan-maneekram-jomthong-thani-for-29",
+          "3 Bedroom Villa for Sale at Baan Maneekram-Jomthong Thani for $293,000 | U5928175": "3-bedroom-villa-for-sale-at-baan-maneekram-jomthong-thani-for-29",
+          "777 beach condo": "777-beach-condo",
+          "777 Beach Condo": "777-beach-condo",
+          "8 atelier residence": "8-atelier-residence",
+          "8 Atelier Residence": "8-atelier-residence",
+          "sun hills layan phuket": "Jo5t4clIFRL6hi1A1tRX",
+          "Sun Hills Layan Phuket": "Jo5t4clIFRL6hi1A1tRX",
+          "first property": "citygate-phuket",
+          "1st": "citygate-phuket",
+          "first one": "citygate-phuket",
+          "1": "citygate-phuket",
+          "second property": "the-title-artrio",
+          "2nd": "the-title-artrio",
+          "second one": "the-title-artrio",
+          "2": "the-title-artrio",
+          "third property": "the-trees-residence",
+          "3rd": "the-trees-residence",
+          "third one": "the-trees-residence",
+          "3": "the-trees-residence",
+          "fourth property": "Jo5t4clIFRL6hi1A1tRX",
+          "4th": "Jo5t4clIFRL6hi1A1tRX",
+          "fourth one": "Jo5t4clIFRL6hi1A1tRX",
+          "4": "Jo5t4clIFRL6hi1A1tRX",
+          "3 bedroom villa for sale at baan maneekram jomthong thani for 29": "3-bedroom-villa-for-sale-at-baan-maneekram-jomthong-thani-for-29",
+          "3 Bedroom Villa For Sale At Baan Maneekram Jomthong Thani For 29": "3-bedroom-villa-for-sale-at-baan-maneekram-jomthong-thani-for-29",
+          "citygate phuket": "citygate-phuket",
+          "CityGate Phuket": "citygate-phuket",
+          "the title artrio": "the-title-artrio",
+          "The Title Artrio": "the-title-artrio",
+          "the trees residence": "the-trees-residence",
+          "The Trees Residence": "the-trees-residence"
+        },
+        "comparison_set": [],
+        "user_preferences": {},
+        "decisions_summary": "",
+        "unresolved_questions": [],
+        "rolling_summary": "",
+        "turn_count": 0,
+        "updated_at": "2026-10-30T14:14:52.642453+00:00"
+      },
+      "active_filters": {
+        "location": "Phuket",
+        "property_type": null,
+        "bedrooms": 2,
+        "min_bedrooms": null,
+        "max_bedrooms": null,
+        "max_price": 8000000.0,
+        "has_pool": true,
+        "beach_access": null,
+        "required_amenities": [
+          "pool"
+        ]
+      },
+      "seen_property_ids": [
+        "8-atelier-residence",
+        "3-bedroom-villa-for-sale-at-baan-maneekram-jomthong-thani-for-29",
+        "the-trees-residence",
+        "777-beach-condo",
+        "citygate-phuket",
+        "the-title-artrio",
+        "Jo5t4clIFRL6hi1A1tRX"
+      ],
+      "last_result_ids": [
+        "citygate-phuket",
+        "the-title-artrio",
+        "the-trees-residence",
+        "Jo5t4clIFRL6hi1A1tRX"
+      ],
+      "last_shown_names": [
+        "CityGate Phuket",
+        "The Title Artrio",
+        "The Trees Residence",
+        "Sun Hills Layan Phuket"
+      ],
+      "asked_slots": [
+        "budget"
+      ],
+      "location": "Phuket",
+      "what_we_fetched": [
+        "\ud83d\udccd Location: Phuket",
+        "\ud83d\udecf\ufe0f Bedrooms: 2 Bedrooms",
+        "\ud83d\udcb0 Budget: Under 8M THB (~$228,571 USD)",
+        "\u2728 Features: Private Pool"
+      ],
+      "focus_summary": "Focusing on 2 Bedrooms properties in Phuket with private pool (Under 8M THB (~$228,571 USD)).",
+      "focus_validated": true,
+      "session_message_count": 3,
+      "selected_property_ids": [
+        "3-bedroom-villa-for-sale-at-baan-maneekram-jomthong-thani-for-29"
+      ],
+      "budget_max": 8000000,
+      "max_price_exclusive": true,
+      "bedrooms_num": 2,
+      "bedrooms": "2 Bedrooms",
+      "budget_display": "Under 8M THB (~$228,571 USD)",
+      "has_pool": true,
+      "features": [
+        "Private Pool"
+      ]
+    },
+    "session_id": "qa-master-25turn-81b0d2d9",
+    "conversation_id": "public__qa-master-25turn-81b0d2d9",
+    "language": "en",
+    "brochure_property_id": null,
+    "pdf_url": null,
+    "download_url": null,
+    "lead_id": null,
+    "lead_saved": null,
+    "session_limit_reached": false,
+    "message_limit": 50,
+    "session_limit_warning": false
+  }
+}

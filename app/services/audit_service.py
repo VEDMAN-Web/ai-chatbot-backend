@@ -30,6 +30,7 @@ _TEXT_SECRET_PATTERNS = [
     (re.compile(r"\b1//[A-Za-z0-9._-]{10,}"), "[REDACTED_SECRET]"),
     (re.compile(r"\bAIza[A-Za-z0-9_-]{20,}"), "[REDACTED_SECRET]"),
     (re.compile(r"\bact_[0-9a-fA-F]{16,}"), "[REDACTED_SECRET]"),
+    (re.compile(r"\b(?:\d{4}[-\s]?){3}\d{4}\b|\b\d{15,16}\b"), "[REDACTED_SECRET]"),
     (re.compile(r"(?i)([?&;\s](?:access_token|refresh_token|id_token|token|api_key|apikey|key|secret|client_secret|password|signature|sig|code)=)[^&\s\"']+"),
      r"\1[REDACTED_SECRET]"),
 ]

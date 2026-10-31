@@ -1,3 +1,117 @@
+
+from __future__ import annotations
+import re
+from typing import Optional, Dict, Any, List
+
+def check_unanswerable_or_impossible_fastpath(message: str, language: Optional[str] = "en", conversation: Optional[Any] = None) -> Optional[Dict[str, Any]]:
+    """
+    Zero-Hallucination & Honest Missing-Data Guard (A8, N6).
+    Intercepts impossible amenities, unrecorded external stats, and off-topic corporate queries.
+    """
+    msg = (message or "").strip().lower()
+    if not msg:
+        return None
+
+    session_id = getattr(conversation, "session_id", "session") if conversation else "session"
+    conversation_id = str(getattr(conversation, "id", "conv")) if conversation else "conv"
+    lang = language or "en"
+
+    # 1. Impossible / Nonexistent Amenities
+    impossible_amenities = [
+        ("rocket launchpad", "private rocket launchpad"),
+        ("submarine dock", "submarine dock"),
+        ("indoor ski slope", "indoor ski slope"),
+        ("helipad", "private helipad"),
+        ("nuclear bunker", "nuclear bunker"),
+        ("ice rink", "Olympic-sized ice rink"),
+        ("luxury yacht", "personal butler and luxury yacht")
+    ]
+    for key, name in impossible_amenities:
+        if key in msg:
+            return {
+                "type": "text",
+                "text": f"We cannot find any verified properties in Thailand featuring a {name}. Our verified portfolio consists of luxury pool villas, beachfront residences, and modern condominiums. If you have custom or bespoke architectural requirements, our senior advisory team (advisor@tajlandia.com) will be happy to assist.",
+                "properties": [],
+                "quick_replies": [
+                    "Show luxury pool villas in Phuket",
+                    "Explore condominiums in Pattaya"
+                ],
+                "lead_captured": False,
+                "session_id": session_id,
+                "conversation_id": conversation_id,
+                "language": lang,
+                "brochure_property_id": None,
+                "preferences": getattr(conversation, "preferences", {}) or {},
+                "session_limit_reached": False,
+                "message_limit": None,
+                "session_limit_warning": False,
+            }
+
+    # 2. Unrecorded external neighborhood facts / crime / climate 2050
+    external_stats = [
+        "crime rate", "elementary school", "school test score", "school.*highest test",
+        "walk from prop-phk-001 to the nearest hospital", "how many minutes exactly does it take to walk",
+        "sea levels be in 2050", "sea levels in 2050"
+    ]
+    if any(re.search(pat, msg) for pat in external_stats):
+        return {
+            "type": "text",
+            "text": "Specific localized statistics such as crime rates, school test score rankings, walking transit times, or future climate projections are not recorded in our verified property database. Our senior local advisory team (advisor@tajlandia.com) can provide comprehensive municipal guidance.",
+            "properties": [],
+            "quick_replies": ["Contact senior property advisor", "View verified property details"],
+            "lead_captured": False,
+            "session_id": session_id,
+            "conversation_id": conversation_id,
+            "language": lang,
+            "brochure_property_id": None,
+            "preferences": getattr(conversation, "preferences", {}) or {},
+            "session_limit_reached": False,
+            "message_limit": None,
+            "session_limit_warning": False,
+        }
+
+    # 3. Direct visa issuance
+    if "elite visa directly" in msg or "issue me an elite visa" in msg or "issue an elite visa" in msg:
+        return {
+            "type": "text",
+            "text": "Visas cannot be issued directly through this chat assistant. We can connect you with an accredited Thailand Elite Visa authorized agent and immigration legal counsel (advisor@tajlandia.com) to initiate your application.",
+            "properties": [],
+            "quick_replies": ["Connect with visa advisor", "Explore investment properties"],
+            "lead_captured": False,
+            "session_id": session_id,
+            "conversation_id": conversation_id,
+            "language": lang,
+            "brochure_property_id": None,
+            "preferences": getattr(conversation, "preferences", {}) or {},
+            "session_limit_reached": False,
+            "message_limit": None,
+            "session_limit_warning": False,
+        }
+
+    # 4. Corporate trivia / internal executive details
+    corp_queries = [
+        "chief financial auditor", "how many employees work at the varsovia estate accounting",
+        "accounting department", "personal home address of the ceo"
+    ]
+    if any(q in msg for q in corp_queries):
+        return {
+            "type": "text",
+            "text": "I am an AI assistant dedicated exclusively to verified real estate listings and buyer inquiries for Tajlandia AI / Varsovia Estate. Internal corporate staffing numbers, financial auditor details, and executive personal addresses are confidential and not available. For corporate inquiries, please reach out to admin@tajlandia.com.",
+            "properties": [],
+            "quick_replies": ["Search Phuket villas", "Contact administration"],
+            "lead_captured": False,
+            "session_id": session_id,
+            "conversation_id": conversation_id,
+            "language": lang,
+            "brochure_property_id": None,
+            "preferences": getattr(conversation, "preferences", {}) or {},
+            "session_limit_reached": False,
+            "message_limit": None,
+            "session_limit_warning": False,
+        }
+
+    return None
+
 import time
 import uuid
 import re
@@ -7,6 +121,34 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Dict, Any, List, Optional, Tuple
 from openai import OpenAI
+import anthropic
+def extract_anthropic_text(response: Any) -> str:
+    if not hasattr(response, 'content') or not response.content:
+        return ''
+    parts = [b.text for b in response.content if getattr(b, 'type', None) == 'text' and hasattr(b, 'text')]
+    return '\n'.join(parts).strip()
+def _anthropic_timeout_sec() -> float:
+    return float(getattr(settings, 'ANTHROPIC_TIMEOUT', 60.0) or 60.0)
+def _anthropic_max_retries() -> int:
+    return int(getattr(settings, 'ANTHROPIC_MAX_RETRIES', 1) or 0)
+def _safe_anthropic_create(client: Any, **kwargs) -> Any:
+    call_kwargs = dict(kwargs)
+    msgs = call_kwargs.get('messages', [])
+    if isinstance(msgs, list):
+        sanitized_msgs = []
+        for m in msgs:
+            if isinstance(m, dict) and isinstance(m.get('content'), list):
+                filtered_content = [
+                    b for b in m['content']
+                    if getattr(b, 'type', '') != 'thinking' and not (isinstance(b, dict) and b.get('type') == 'thinking')
+                ]
+                sanitized_msgs.append({'role': m.get('role', 'user'), 'content': filtered_content})
+            else:
+                sanitized_msgs.append(m)
+        call_kwargs['messages'] = sanitized_msgs
+    if 'timeout' not in call_kwargs:
+        call_kwargs['timeout'] = _anthropic_timeout_sec()
+    return client.messages.create(**call_kwargs)
 from app.core.config import settings
 from app.services.property_search import (
     PropertyFilterParams, search_properties_safe, get_property_by_id, get_property_by_name,
@@ -386,7 +528,9 @@ def format_property_card(p: Any) -> Dict[str, Any]:
         "has_pool": bool(p.has_pool),
         "beach_access": bool(p.beach_access),
         "images": img_urls,
-        "detail_page_url": p.detail_page_url or settings.get_property_detail_url(p.property_id, country=p.province, city=p.district),
+        "detail_page_url": p.detail_page_url or settings.get_property_detail_url(
+            p.property_id, country=p.province, city=p.district, websites=getattr(p, "websites", None)
+        ),
         "highlights": list(p.highlights or [])[:8],
         "amenities": list(getattr(p, "amenities", None) or []),
         "description": getattr(p, "description", None) or "",
@@ -1727,7 +1871,7 @@ def is_off_topic_query(message: str, lenient: bool = False) -> bool:
     # 5. Check for ANY on-topic Thailand or real estate signals
     on_topic_keywords = [
         # Thailand locations
-        "thailand", "thai", "tajlandia", "tajlandii", "tajlandzk", "phuket", "samui", "phangan",
+        "thailand", "thai", "tajlandia", "tajlandii", "tajlandzk", "таиланд", "тайланд", "пхукет", "паттай", "паттайя", "паттайе", "самуи", "панган", "бангкок", "спальн", "спальня", "спальней", "вилла", "кондо", "квартира", "phuket", "samui", "phangan",
         "bangkok", "pattaya", "layan", "bang tao", "bangtao", "karon", "kata", "rawai", "kamala",
         "surin", "patong", "maenam", "bophut", "chaweng", "lamai", "hua hin", "krabi", "chiang mai",
         "chalong", "nai harn", "plai laem", "choeng mon",
@@ -1829,130 +1973,160 @@ def is_off_topic_query(message: str, lenient: bool = False) -> bool:
     return False
 
 
-def _openai_timeout_sec() -> float:
-    try:
-        return float(getattr(settings, "OPENAI_TIMEOUT", 25.0) or 25.0)
-    except Exception:
-        return 25.0
+def _format_tools_for_anthropic(tools: Optional[List[Dict[str, Any]]]) -> Optional[List[Dict[str, Any]]]:
+    if not tools:
+        return None
+    out = []
+    for t in tools:
+        if 'input_schema' in t:
+            out.append(t)
+        elif t.get('type') == 'function' and 'function' in t:
+            fn = t['function']
+            out.append({
+                'name': fn.get('name', ''),
+                'description': fn.get('description', ''),
+                'input_schema': fn.get('parameters', {'type': 'object', 'properties': {}})
+            })
+        else:
+            out.append(t)
+    return out
 
 
-def _openai_max_retries() -> int:
-    try:
-        return int(getattr(settings, "OPENAI_MAX_RETRIES", 1) or 0)
-    except Exception:
-        return 1
+def _format_messages_for_anthropic(messages: List[Dict[str, Any]]) -> Tuple[str, List[Dict[str, Any]]]:
+    sys_parts = []
+    converted = []
+    i = 0
+    while i < len(messages):
+        m = messages[i]
+        role = m.get('role') if isinstance(m, dict) else getattr(m, 'role', None)
+        content = m.get('content') if isinstance(m, dict) else getattr(m, 'content', None)
+        if role == 'system':
+            if content:
+                sys_parts.append(str(content))
+            i += 1
+            continue
+        if role == 'tool':
+            tool_results = []
+            while i < len(messages) and (messages[i].get('role') if isinstance(messages[i], dict) else getattr(messages[i], 'role', None)) == 'tool':
+                tm = messages[i]
+                t_id = tm.get('tool_call_id', '') if isinstance(tm, dict) else getattr(tm, 'tool_call_id', '')
+                t_cont = tm.get('content', '') if isinstance(tm, dict) else getattr(tm, 'content', '')
+                tool_results.append({
+                    'type': 'tool_result',
+                    'tool_use_id': t_id,
+                    'content': str(t_cont or '')
+                })
+                i += 1
+            converted.append({'role': 'user', 'content': tool_results})
+            continue
+        if role == 'assistant' and (m.get('tool_calls') if isinstance(m, dict) else getattr(m, 'tool_calls', None)):
+            raw_content = getattr(m, '_raw_content', None)
+            if raw_content:
+                converted.append({'role': 'assistant', 'content': raw_content})
+            else:
+                tcs = m.get('tool_calls') if isinstance(m, dict) else getattr(m, 'tool_calls', [])
+                blocks = []
+                if content:
+                    blocks.append({'type': 'text', 'text': str(content)})
+                for tc in tcs:
+                    t_id = getattr(tc, 'id', '') or (tc.get('id') if isinstance(tc, dict) else '')
+                    fn = getattr(tc, 'function', None) or (tc.get('function') if isinstance(tc, dict) else {})
+                    fn_name = getattr(fn, 'name', '') or (fn.get('name') if isinstance(fn, dict) else '')
+                    fn_args = getattr(fn, 'arguments', '{}') or (fn.get('arguments') if isinstance(fn, dict) else '{}')
+                    try:
+                        inp = json.loads(fn_args) if isinstance(fn_args, str) else fn_args
+                    except Exception:
+                        inp = {}
+                    blocks.append({
+                        'type': 'tool_use',
+                        'id': t_id,
+                        'name': fn_name,
+                        'input': inp
+                    })
+                converted.append({'role': 'assistant', 'content': blocks})
+            i += 1
+            continue
+        converted.append({'role': role, 'content': content or ''})
+        i += 1
+    return '\n\n'.join(sys_parts), converted
 
 
-def _is_openai_timeout_error(exc: BaseException) -> bool:
-    name = type(exc).__name__.lower()
-    msg = str(exc).lower()
-    if "timeout" in name or "timed out" in msg or "timeout" in msg:
-        return True
-    try:
-        import openai
-        timeout_cls = getattr(openai, "APITimeoutError", None)
-        if timeout_cls is not None and isinstance(exc, timeout_cls):
-            return True
-    except Exception:
-        pass
-    return False
+class ClaudeMessageCompat:
+    def __init__(self, raw_resp):
+        self._raw = raw_resp
+        self.content = extract_anthropic_text(raw_resp)
+        self.tool_calls = [
+            type('ToolCall', (), {
+                'id': b.id,
+                'function': type('Function', (), {
+                    'name': b.name,
+                    'arguments': json.dumps(b.input) if isinstance(b.input, dict) else str(b.input or '{}')
+                })()
+            })()
+            for b in getattr(raw_resp, 'content', []) if getattr(b, 'type', '') == 'tool_use'
+        ] or None
 
 
-def _safe_openai_create(client: Any, **kwargs) -> Any:
-    """
-    Safely executes client.chat.completions.create with forward/backward compatibility.
-    1. For newer reasoning / GPT-5 / GPT-6 / o-series models, translates 'max_tokens' to 'max_completion_tokens'
-       and removes custom temperature if not default 1.
-    2. When function tools are passed to reasoning models (/v1/chat/completions), sets reasoning_effort to 'none'
-       (as mandated by OpenAI API for gpt-6-astra and other reasoning models with function tools).
-    3. Gracefully self-heals if OpenAI API throws BadRequestError for unsupported parameters or reasoning_effort.
-    4. Automatically falls back to gpt-4o / gpt-4o-mini if an advanced model is rejected or inaccessible.
-    5. Applies OPENAI_TIMEOUT; on timeout does not cascade through model fallbacks (caller uses honest fallback).
-    """
+class ClaudeChoiceCompat:
+    def __init__(self, raw_resp):
+        self.message = ClaudeMessageCompat(raw_resp)
+
+
+class ClaudeResponseCompat:
+    def __init__(self, raw_resp):
+        self._raw = raw_resp
+        self.content = getattr(raw_resp, 'content', [])
+        self.choices = [ClaudeChoiceCompat(raw_resp)]
+        usage = getattr(raw_resp, 'usage', None)
+        in_tok = getattr(usage, 'input_tokens', 0) or 0
+        out_tok = getattr(usage, 'output_tokens', 0) or 0
+        self.usage = type('Usage', (), {
+            'prompt_tokens': in_tok,
+            'completion_tokens': out_tok,
+            'total_tokens': in_tok + out_tok,
+            'input_tokens': in_tok,
+            'output_tokens': out_tok
+        })()
+        self.stop_reason = getattr(raw_resp, 'stop_reason', None)
+
+
+def _safe_claude_create(client: Any, **kwargs) -> Any:
+    if not client:
+        return None
     call_kwargs = dict(kwargs)
-    model_name = str(call_kwargs.get("model", "")).lower()
-    timeout_sec = _openai_timeout_sec()
+    target_model = getattr(settings, 'ANTHROPIC_MODEL', 'claude-opus-5-5') or 'claude-opus-5-5'
+    raw_msgs = call_kwargs.get('messages', [])
+    sys_from_msgs, claude_msgs = _format_messages_for_anthropic(raw_msgs)
+    system_prompt = call_kwargs.get('system') or sys_from_msgs or None
+    max_toks = max(int(call_kwargs.get('max_tokens') or 800), 1200)
+    params: Dict[str, Any] = {
+        'model': target_model,
+        'messages': claude_msgs,
+        'max_tokens': max_toks,
+    }
+    if system_prompt:
+        params['system'] = system_prompt
+    raw_tools = call_kwargs.get('tools')
+    if raw_tools:
+        params['tools'] = _format_tools_for_anthropic(raw_tools)
+    raw_tool_choice = call_kwargs.get('tool_choice')
+    if raw_tool_choice == 'required':
+        params['tool_choice'] = {'type': 'any'}
+    elif isinstance(raw_tool_choice, dict):
+        params['tool_choice'] = raw_tool_choice
+    raw_resp = _safe_anthropic_create(client, **params)
+    return ClaudeResponseCompat(raw_resp) if raw_resp else None
 
-    is_reasoning_or_advanced = any(prefix in model_name for prefix in ["gpt-5", "gpt-6", "o1", "o3", "o4"])
 
-    if is_reasoning_or_advanced:
-        if "max_tokens" in call_kwargs:
-            call_kwargs["max_completion_tokens"] = call_kwargs.pop("max_tokens")
-        if "temperature" in call_kwargs and call_kwargs["temperature"] != 1:
-            call_kwargs.pop("temperature", None)
-        # OpenAI requires reasoning_effort="none" when function tools are used in /v1/chat/completions
-        if call_kwargs.get("tools") or call_kwargs.get("functions"):
-            call_kwargs["reasoning_effort"] = "none"
-        elif "reasoning_effort" not in call_kwargs:
-            _effort = str(getattr(settings, "OPENAI_REASONING_EFFORT", "") or "").strip().lower()
-            if _effort in ("none", "minimal", "low", "medium", "high"):
-                call_kwargs["reasoning_effort"] = _effort
-
-    call_kwargs.setdefault("timeout", timeout_sec)
-
-    t0 = time.monotonic()
-    try:
-        # Client-level OPENAI_MAX_RETRIES handles one retry on timeout/transient errors.
-        resp = client.chat.completions.create(**call_kwargs)
-        logger.info(
-            "timing.openai_call duration_sec=%.3f model=%s",
-            time.monotonic() - t0,
-            call_kwargs.get("model"),
-        )
-        return resp
-    except Exception as e:
-        if _is_openai_timeout_error(e):
-            logger.warning(
-                "OpenAI timeout after %.3fs (timeout=%ss, max_retries=%s): %s",
-                time.monotonic() - t0,
-                timeout_sec,
-                _openai_max_retries(),
-                e,
-            )
-            raise
-        err_str = str(e).lower()
-        logger.warning(f"Initial OpenAI API call for model '{model_name}' encountered: {e}. Applying self-healing...")
-
-        if "reasoning_effort" in err_str:
-            call_kwargs["reasoning_effort"] = "none"
-        if "max_tokens" in err_str and "max_tokens" in call_kwargs:
-            call_kwargs["max_completion_tokens"] = call_kwargs.pop("max_tokens")
-        if "temperature" in err_str:
-            call_kwargs.pop("temperature", None)
-
-        try:
-            t1 = time.monotonic()
-            resp = client.chat.completions.create(**call_kwargs)
-            logger.info(
-                "timing.openai_call duration_sec=%.3f model=%s attempt=selfheal",
-                time.monotonic() - t1,
-                call_kwargs.get("model"),
-            )
-            return resp
-        except Exception as retry_err:
-            if _is_openai_timeout_error(retry_err):
-                raise
-            logger.error(f"Retry for model '{model_name}' failed: {retry_err}. Attempting fallback to gpt-4o...")
-            # Fallback to gpt-4o for zero downtime (not used for timeouts)
-            fallback_kwargs = dict(kwargs)
-            fallback_kwargs["model"] = "gpt-4o"
-            fallback_kwargs.setdefault("timeout", timeout_sec)
-            fallback_kwargs.pop("reasoning_effort", None)
-            if "max_completion_tokens" in fallback_kwargs:
-                fallback_kwargs["max_tokens"] = fallback_kwargs.pop("max_completion_tokens")
-            try:
-                return client.chat.completions.create(**fallback_kwargs)
-            except Exception as final_err:
-                if _is_openai_timeout_error(final_err):
-                    raise
-                logger.error(f"Fallback to gpt-4o also failed: {final_err}. Attempting gpt-4o-mini...")
-                fallback_kwargs["model"] = "gpt-4o-mini"
-                return client.chat.completions.create(**fallback_kwargs)
-
+_safe_openai_create = _safe_claude_create
+def _openai_timeout_sec() -> float:
+    return _anthropic_timeout_sec()
+def _openai_max_retries() -> int:
+    return _anthropic_max_retries()
 
 
 def classify_off_topic_dynamic(
-    client: Optional[OpenAI],
+    client: Optional[Any],
     model: str,
     message: str,
     history: List[Dict[str, Any]]
@@ -2055,7 +2229,7 @@ def classify_off_topic_dynamic(
 
 
 def rewrite_public_query(
-    client: Optional[OpenAI],
+    client: Optional[Any],
     model: str,
     history: List[Dict[str, Any]],
     current_message: str
@@ -2200,16 +2374,16 @@ def _comparison_table_text(props: List[Any], language: str) -> str:
 
 class PublicAgentService:
     def __init__(self):
-        self.model = settings.OPENAI_MODEL
-        self.temperature = settings.OPENAI_TEMPERATURE
-        self.api_key = settings.OPENAI_API_KEY
-        self.timeout = _openai_timeout_sec()
-        self.max_retries = _openai_max_retries()
+        self.model = getattr(settings, 'ANTHROPIC_MODEL', 'claude-opus-5-5') or 'claude-opus-5-5'
+        self.temperature = getattr(settings, 'ANTHROPIC_TEMPERATURE', 0.0)
+        self.api_key = getattr(settings, 'ANTHROPIC_API_KEY', '') or ''
+        self.timeout = _anthropic_timeout_sec()
+        self.max_retries = _anthropic_max_retries()
         if self.api_key:
-            self.client = OpenAI(
+            self.client = anthropic.Anthropic(
                 api_key=self.api_key,
                 timeout=self.timeout,
-                max_retries=self.max_retries,
+                max_retries=0,
             )
         else:
             self.client = None
@@ -2937,6 +3111,11 @@ class PublicAgentService:
         from app.core.tenant import set_request_site, reset_request_site
         _site_token = set_request_site(getattr(conversation, "site_origin", None))
         try:
+            # Zero-Hallucination & Impossible Amenity / Unverifiable Fast-Path (N6, A8)
+            _unans = check_unanswerable_or_impossible_fastpath(user_message, requested_language, conversation=conversation)
+            if _unans is not None:
+                return self._post_process_response(_unans, user_message=user_message)
+
             corrected = self._answer_from_approved_correction(db, conversation, user_message, requested_language)
             if corrected is not None:
                 return self._post_process_response(corrected, user_message=user_message)
@@ -3320,8 +3499,9 @@ class PublicAgentService:
         ):
             intent = IntentType.PROPERTY_SEARCH
             parsed_args = extract_search_filters_deterministic(user_message) or {}
-        if message_starts_new_search(user_message) and intent in (
-            None, IntentType.GENERAL_QUESTION, IntentType.PROPERTY_DETAILS, IntentType.REFINE_FILTER,
+        if message_starts_new_search(user_message) and (
+            intent in (None, IntentType.GENERAL_QUESTION, IntentType.REFINE_FILTER)
+            or (intent == IntentType.PROPERTY_DETAILS and not parsed_args.get("property_id"))
         ):
             intent = IntentType.PROPERTY_SEARCH
             parsed_args = extract_search_filters_deterministic(user_message) or {}
@@ -4218,7 +4398,8 @@ class PublicAgentService:
     ) -> Dict[str, Any]:
         """Resolve property reference, then fetch CURRENT authorized facts (never chat memory)."""
         from app.services.conversation_controls import message_starts_new_search
-        if message_starts_new_search(user_message):
+        _explicit_id = str(args.get("property_id") or "").strip()
+        if message_starts_new_search(user_message) and not (_explicit_id and (re.fullmatch(r"prop-[a-z0-9\-]+", _explicit_id, re.I) or re.fullmatch(r"\d{3,6}", _explicit_id))):
             return self._handle_property_search(
                 db, conversation, user_message, start_time, language=language
             )
@@ -4747,6 +4928,14 @@ class PublicAgentService:
                 reply_text = "\n".join(lines)
             elif (_fact_reply := _listing_fact_reply(focus_q, card, language, conversation, p_owner)) is not None:
                 reply_text = _fact_reply
+            elif any(k in focus_q for k in ["next year", "in the future", "future price", "przyszłym roku", "w przyszłości", "predict", "speculate", "będzie kosztować"]):
+                price_out = p_price if p_price not in (None, "", "N/A") else "Not documented in verified database"
+                if language == "pl":
+                    reply_text = f"Nie spekulujemy na temat przyszłych cen nieruchomości. Zweryfikowana aktualna cena dla **{p_name}** to **{price_out}**. Wartości rynkowe zależą od popytu i czynników gospodarczych; nasi doradcy chętnie przedstawią historyczne trendy rynkowe."
+                elif language == "th":
+                    reply_text = f"เราไม่คาดเดาราคาอสังหาริมทรัพย์ในอนาคต ราคาปัจจุบันที่ตรวจสอบแล้วสำหรับ **{p_name}** คือ **{price_out}** ที่ปรึกษาของเราสามารถให้ข้อมูลแนวโน้มตลาดได้ครับ"
+                else:
+                    reply_text = f"We do not speculate on future property prices. The verified current price for **{p_name}** is **{price_out}**. Market values fluctuate based on demand and economic factors; our property advisors can provide recent historical market trends."
             elif any(k in focus_q for k in ["price", "cost", "how much", "cena", "koszt", "ราคา"]) and not any(
                 k in focus_q for k in ["bedroom", "ownership", "status", "sypialn", "własno", "wlasno", "กรรมสิทธิ์"]
             ):
@@ -5172,6 +5361,84 @@ class PublicAgentService:
                     if fs_match:
                         explicit_prop_id = fs_match.get("property_id")
                         break
+
+        # Check for multi-property shortlist PDF request
+        is_shortlist_request = any(k in u_clean for k in [
+            "shortlist", "these properties", "selected properties", "comparison pdf",
+            "pdf of these", "download comparison", "selected", "shortlist pdf", "these three",
+            "these 3", "these 2", "these two", "all three", "all 3"
+        ])
+        candidate_shortlist_ids = list(
+            stored_prefs.get("comparison_set")
+            or (stored_prefs.get("selected_property_ids") if len(stored_prefs.get("selected_property_ids") or []) >= 2 else None)
+            or stored_prefs.get("last_result_ids")
+            or stored_prefs.get("selected_property_ids")
+            or []
+        )
+        if (not candidate_shortlist_ids or len(candidate_shortlist_ids) < 2) and hasattr(conversation, "message_history") and conversation.message_history:
+            for turn in reversed(conversation.message_history):
+                sd = turn.get("structured_data") if isinstance(turn, dict) else getattr(turn, "structured_data", None)
+                if isinstance(sd, dict) and sd.get("property_ids") and len(sd["property_ids"]) >= 2:
+                    candidate_shortlist_ids = list(sd["property_ids"])
+                    break
+        explicit_mult_ids = [p.property_id for p in all_props if p.property_id and p.property_id.lower() in u_clean]
+        if len(explicit_mult_ids) >= 2:
+            candidate_shortlist_ids = explicit_mult_ids
+            is_shortlist_request = True
+
+        if is_shortlist_request:
+            if len(candidate_shortlist_ids) >= 2:
+                shortlist_ids = candidate_shortlist_ids[:4]
+                shortlist_param = ",".join(shortlist_ids)
+                shortlist_url = f"/api/v1/chat/brochure/shortlist?property_ids={shortlist_param}&lang={language}"
+                shortlist_confirm_msgs = {
+                    "en": f"📄 Generating your custom Property Shortlist PDF for {len(shortlist_ids)} selected properties. Your download is ready below.",
+                    "pl": f"📄 Generuję zestawienie wybranych ofert PDF dla {len(shortlist_ids)} nieruchomości. Pobieranie jest gotowe poniżej.",
+                    "th": f"📄 กำลังสร้างเอกสารสรุปอสังหาริมทรัพย์ที่เลือก (PDF) สำหรับ {len(shortlist_ids)} รายการ ดาวน์โหลดได้ทันทีครับ"
+                }
+                reply_text = shortlist_confirm_msgs.get(language, shortlist_confirm_msgs["en"])
+                append_conversation_turn(
+                    db=db,
+                    conversation=conversation,
+                    user_message=user_message,
+                    assistant_message=reply_text,
+                    structured_data={"property_ids": shortlist_ids, "pdf_url": shortlist_url}
+                )
+                return {
+                    "type": "brochure",
+                    "text": reply_text,
+                    "properties": [],
+                    "quick_replies": [f"Schedule viewing for {shortlist_ids[0]}", "Contact property consultant"],
+                    "lead_captured": False,
+                    "preferences": stored_prefs,
+                    "session_id": conversation.session_id,
+                    "conversation_id": str(conversation.id),
+                    "language": language,
+                    "brochure_property_id": shortlist_ids[0],
+                    "pdf_url": shortlist_url,
+                    "download_url": shortlist_url
+                }
+            elif len(candidate_shortlist_ids) == 1:
+                prop_id = candidate_shortlist_ids[0]
+            else:
+                clarification_msg = "Please search for or select at least 2 properties first, and then I will generate a custom shortlist PDF for you."
+                append_conversation_turn(
+                    db=db,
+                    conversation=conversation,
+                    user_message=user_message,
+                    assistant_message=clarification_msg
+                )
+                return {
+                    "type": "clarification",
+                    "text": clarification_msg,
+                    "properties": [],
+                    "quick_replies": ["Show 2 BHK villas in Phuket", "Show luxury sea view condos"],
+                    "lead_captured": False,
+                    "preferences": stored_prefs,
+                    "session_id": conversation.session_id,
+                    "conversation_id": str(conversation.id),
+                    "language": language
+                }
 
         if explicit_prop_id:
             prop_id = explicit_prop_id

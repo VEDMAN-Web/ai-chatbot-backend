@@ -426,6 +426,8 @@ def apply_presentation_to_card(
         location=card.get("location"),
         address=card.get("address"),
     )
+    if not card.get("images"):
+        card["images"] = ["https://images.unsplash.com/photo-1580587771525-78b9dba3b914?auto=format&fit=crop&w=1200&q=80"]
     ownership = extract_ownership_from_property(card)
     if ownership:
         card["ownership"] = ownership

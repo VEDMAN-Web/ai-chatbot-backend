@@ -87,7 +87,17 @@ def _type_ok(card: Dict[str, Any], property_type: Optional[str]) -> bool:
     got = str(card.get("property_type") or card.get("type") or "").strip().lower()
     if not got:
         return True  # missing type: do not invent a fail on incomplete records
-    return want in got or got in want
+    if want in got or got in want:
+        return True
+    try:
+        from app.services.property_search import PropertyFilterParams
+        norm_want = PropertyFilterParams.normalize_property_type(want)
+        norm_got = PropertyFilterParams.normalize_property_type(got)
+        if norm_want and norm_got and norm_want.lower() == norm_got.lower():
+            return True
+    except Exception:
+        pass
+    return False
 
 
 def _beds_ok(card: Dict[str, Any], bedrooms: Optional[Any]) -> bool:

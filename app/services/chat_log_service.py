@@ -163,7 +163,7 @@ def model_of(agent_type: Optional[str]) -> str:
     """The model configured for this bot. It is the configured name, not proof of which fallback answered."""
     if agent_type == "admin":
         return getattr(settings, "ADMIN_MAIN_MODEL", "") or getattr(settings, "ANTHROPIC_MODEL", "") or ""
-    return getattr(settings, "OPENAI_MODEL", "") or ""
+    return getattr(settings, "ANTHROPIC_MODEL", "") or "claude-opus-5-5"
 
 
 def website_of(site_origin: Optional[str]) -> str:
@@ -178,6 +178,7 @@ def record_turn(
     tool_results: Optional[List[Dict[str, Any]]] = None,
     structured_data: Optional[Dict[str, Any]] = None,
     latency_ms: Optional[int] = None,
+    intent_result=None,
 ) -> bool:
     """Append one user message and the bot's reply to the log. Returns whether it was stored."""
     if not getattr(settings, "ENABLE_CHAT_LOG_STORE", True) or conversation is None:
@@ -214,11 +215,20 @@ def record_turn(
                 "language": language, "remarkStatus": "none",
                 "tokens": tokens_of(content),
             }
+            if role == "user":
+                doc.update({
+                    "classified_intent": intent_result.intent if intent_result else None,
+                    "detected_language": intent_result.detected_language if intent_result else language,
+                    "confidence_score": intent_result.confidence if intent_result else None,
+                    "user_feedback": None,
+                })
             if role == "assistant":
                 doc.update({
                     "propertyIds": property_ids, "evidenceStatus": evidence["evidenceStatus"], "sources": evidence["sources"],
                     "responseStatus": status, "toolSummary": tool_summary, "latencyMs": latency_ms, "model": model,
                     "errorMessage": _clean_text(answer, 500) if status == "error" else None,
+                    "user_feedback": None,
+                    "confidence_score": None,
                 })
             return doc
 

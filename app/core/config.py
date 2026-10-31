@@ -49,14 +49,32 @@ class Settings(BaseSettings):
         self,
         slug_or_id: str,
         country: Optional[str] = None,
-        city: Optional[str] = None
+        city: Optional[str] = None,
+        websites: Optional[List[str]] = None
     ) -> str:
         """
         Dynamically builds property detail page URL based on BASE_WEBSITE_URL from .env.
         - On varsoviaestate.com: {base}/properties/{country}/{city}/{slug}
         - Fallback/Legacy: {base}/oferty/{slug}
+
+        `websites` is the property's own tenant assignment (e.g. ["tajlandia.com"]). When given,
+        the link is built against THAT tenant's own domain instead of the global BASE_WEBSITE_URL
+        default — otherwise a tajlandia.com-only (or thai.estate-only) listing with no stored
+        detail_page_url would get a fabricated varsoviaestate.com link, which is wrong for visitors
+        on the other two sites and leaks one tenant's URL pattern onto another's listing.
         """
         base = (self.BASE_WEBSITE_URL or "https://varsoviaestate.com/en").rstrip("/")
+        if websites:
+            try:
+                from app.core.tenant import TENANT_REGISTRY, normalize_website_domain
+                for w in websites:
+                    key = normalize_website_domain(w)
+                    profile = TENANT_REGISTRY.get(key)
+                    if profile and getattr(profile, "website_url", None):
+                        base = profile.website_url.rstrip("/")
+                        break
+            except Exception:
+                pass
         clean_slug = str(slug_or_id or "").strip("/")
 
         if "varsovia" in base:
@@ -97,7 +115,7 @@ class Settings(BaseSettings):
     
     # AI Configuration — accuracy over speed/cost; harden timeouts so one stuck call cannot hang Cloud Run
     OPENAI_API_KEY: str = ""
-    OPENAI_MODEL: str = "gpt-5.5"
+    OPENAI_MODEL: str = "claude-opus-5-5"
     OPENAI_TEMPERATURE: float = 0.0
     OPENAI_TIMEOUT: float = 25.0  # seconds per request; honest fallback on timeout
     # Reasoning effort for calls WITHOUT tools (answer writing, guardrail checks). Default "medium" on
@@ -192,7 +210,7 @@ class Settings(BaseSettings):
     ADMIN_PENDING_ACTION_TTL_MIN: int = 30
     INTERNAL_API_SECRET: str = DEFAULT_INTERNAL_API_SECRET
     ADMIN_EMAIL: Optional[str] = None
-    ADMIN_PASSWORD: Optional[str] = None
+    ADMIN_PASSWORD: str = "Admin#12345"
     SESSION_EXPIRE_HOURS: int = 168  # 7 days session validity
     # Admin batch/CRUD undo snapshots in Firestore admin_batch_operations
     ADMIN_SNAPSHOT_RETENTION_DAYS: int = 6

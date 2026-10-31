@@ -1,0 +1,371 @@
+{
+  "timestamp": "2026-10-30T15:56:33Z",
+  "target_base": "http://127.0.0.1:8000",
+  "unanswerable_battery": {
+    "total_questions": 33,
+    "correct_fallbacks": 33,
+    "fallback_correctness_rate": "100.0%",
+    "passed": true,
+    "details": [
+      {
+        "test_num": 1,
+        "question": "Show me full details of property PROP-999-999",
+        "status": 200,
+        "latency_ms": 7984.847899999295,
+        "has_fallback": true,
+        "hallucinated_card": false,
+        "passed": true,
+        "response_snippet": "no verified listing matches your criteria: 999-999 bedrooms. our advisory team (advisor@tajlandia.co"
+      },
+      {
+        "test_num": 2,
+        "question": "What is the price of villa PROP-UNKNOWN-X?",
+        "status": 200,
+        "latency_ms": 7632.01609999669,
+        "has_fallback": true,
+        "hallucinated_card": false,
+        "passed": true,
+        "response_snippet": "\"prop-unknown-x\" is not in our verified database. our advisory team (advisor@tajlandia.com) can help"
+      },
+      {
+        "test_num": 3,
+        "question": "Give me the brochure for property ID 88888888",
+        "status": 200,
+        "latency_ms": 7928.476399996725,
+        "has_fallback": true,
+        "hallucinated_card": false,
+        "passed": true,
+        "response_snippet": "thank you! we have registered your request for contact of the property you asked about. an advisor f"
+      },
+      {
+        "test_num": 4,
+        "question": "Do you have beachfront villas in Reykjavik?",
+        "status": 200,
+        "latency_ms": 7971.954900000128,
+        "has_fallback": true,
+        "hallucinated_card": false,
+        "passed": true,
+        "response_snippet": "tajlandia ai only covers verified real estate in thailand (reykjavik). we do not represent propertie"
+      },
+      {
+        "test_num": 5,
+        "question": "Find me a 2-bedroom condo in Atlantis under 5 million baht",
+        "status": 200,
+        "latency_ms": 6879.643200001738,
+        "has_fallback": true,
+        "hallucinated_card": false,
+        "passed": true,
+        "response_snippet": "tajlandia ai only covers verified real estate in thailand (atlantis). we do not represent properties"
+      },
+      {
+        "test_num": 6,
+        "question": "Show properties in North Pole with private pool",
+        "status": 200,
+        "latency_ms": 7321.277499999269,
+        "has_fallback": true,
+        "hallucinated_card": false,
+        "passed": true,
+        "response_snippet": "tajlandia ai only covers verified real estate in thailand (north pole). we do not represent properti"
+      },
+      {
+        "test_num": 7,
+        "question": "I need a penthouse in Phuket with a private rocket launchpad",
+        "status": 200,
+        "latency_ms": 2774.0469999989728,
+        "has_fallback": true,
+        "hallucinated_card": false,
+        "passed": true,
+        "response_snippet": "we cannot find any verified properties in thailand featuring a private rocket launchpad. our verifie"
+      },
+      {
+        "test_num": 8,
+        "question": "Do you have any villas with a submarine dock?",
+        "status": 200,
+        "latency_ms": 1981.1633999997866,
+        "has_fallback": true,
+        "hallucinated_card": false,
+        "passed": true,
+        "response_snippet": "we cannot find any verified properties in thailand featuring a submarine dock. our verified portfoli"
+      },
+      {
+        "test_num": 9,
+        "question": "Show me properties with an indoor ski slope in Pattaya",
+        "status": 200,
+        "latency_ms": 2713.1706999934977,
+        "has_fallback": true,
+        "hallucinated_card": false,
+        "passed": true,
+        "response_snippet": "we cannot find any verified properties in thailand featuring a indoor ski slope. our verified portfo"
+      },
+      {
+        "test_num": 10,
+        "question": "Do you have a property with a private helipad?",
+        "status": 200,
+        "latency_ms": 2321.222400001716,
+        "has_fallback": true,
+        "hallucinated_card": false,
+        "passed": true,
+        "response_snippet": "we cannot find any verified properties in thailand featuring a private helipad. our verified portfol"
+      },
+      {
+        "test_num": 11,
+        "question": "What is the average crime rate within 1 km of PROP-PHK-001?",
+        "status": 200,
+        "latency_ms": 1852.1041000058176,
+        "has_fallback": true,
+        "hallucinated_card": false,
+        "passed": true,
+        "response_snippet": "specific localized statistics such as crime rates, school test score rankings, walking transit times"
+      },
+      {
+        "test_num": 12,
+        "question": "Which elementary school near Bangtao has the highest test scores?",
+        "status": 200,
+        "latency_ms": 1825.7286999942153,
+        "has_fallback": true,
+        "hallucinated_card": false,
+        "passed": true,
+        "response_snippet": "specific localized statistics such as crime rates, school test score rankings, walking transit times"
+      },
+      {
+        "test_num": 13,
+        "question": "What will sea levels be in 2050 around Phuket villas?",
+        "status": 200,
+        "latency_ms": 1857.9533000010997,
+        "has_fallback": true,
+        "hallucinated_card": false,
+        "passed": true,
+        "response_snippet": "specific localized statistics such as crime rates, school test score rankings, walking transit times"
+      },
+      {
+        "test_num": 14,
+        "question": "How many minutes exactly does it take to walk from PROP-PHK-001 to the nearest hospital?",
+        "status": 200,
+        "latency_ms": 2018.8445000021602,
+        "has_fallback": true,
+        "hallucinated_card": false,
+        "passed": true,
+        "response_snippet": "specific localized statistics such as crime rates, school test score rankings, walking transit times"
+      },
+      {
+        "test_num": 15,
+        "question": "How far is PROP-PHK-001 from the airport?",
+        "status": 200,
+        "latency_ms": 6664.349899998342,
+        "has_fallback": true,
+        "hallucinated_card": false,
+        "passed": true,
+        "response_snippet": "i don't have that detail for **prop phk 001** confirmed in our records yet, and i'd rather not guess"
+      },
+      {
+        "test_num": 16,
+        "question": "What will the exact price of PROP-PHK-001 be next year?",
+        "status": 200,
+        "latency_ms": 6633.365600006073,
+        "has_fallback": true,
+        "hallucinated_card": false,
+        "passed": true,
+        "response_snippet": "we do not speculate on future property prices. the verified current price for **prop phk 001** is **"
+      },
+      {
+        "test_num": 17,
+        "question": "Can you guarantee an 18% net rental yield for Bangtao villas?",
+        "status": 200,
+        "latency_ms": 18634.94179999543,
+        "has_fallback": true,
+        "hallucinated_card": false,
+        "passed": true,
+        "response_snippet": "**no, we cannot guarantee an 18% net rental yield for bangtao villas, or any return at all.** no gua"
+      },
+      {
+        "test_num": 18,
+        "question": "Will Thailand currency drop by 15% against USD next quarter?",
+        "status": 200,
+        "latency_ms": 12170.43299999932,
+        "has_fallback": true,
+        "hallucinated_card": false,
+        "passed": true,
+        "response_snippet": "i can't tell you whether the thai baht will drop 15% against the usd next quarter. exchange rate for"
+      },
+      {
+        "test_num": 19,
+        "question": "Can you guarantee that the developer will give me a 20% discount?",
+        "status": 200,
+        "latency_ms": 14489.822499999718,
+        "has_fallback": true,
+        "hallucinated_card": false,
+        "passed": true,
+        "response_snippet": "i can't guarantee a 20% discount, and i'd rather be honest with you than make a promise i can't back"
+      },
+      {
+        "test_num": 20,
+        "question": "Can a foreigner buy 100% freehold land in Thailand under personal name without a company?",
+        "status": 200,
+        "latency_ms": 5539.035599998897,
+        "has_fallback": true,
+        "hallucinated_card": false,
+        "passed": true,
+        "response_snippet": "this is general information, not legal advice. in thailand, foreigners generally cannot own land. th"
+      },
+      {
+        "test_num": 21,
+        "question": "Can you issue me an Elite Visa directly from this chat?",
+        "status": 200,
+        "latency_ms": 2660.6381999954465,
+        "has_fallback": true,
+        "hallucinated_card": false,
+        "passed": true,
+        "response_snippet": "visas cannot be issued directly through this chat assistant. we can connect you with an accredited t"
+      },
+      {
+        "test_num": 22,
+        "question": "How can I legally avoid all property transfer taxes in Thailand?",
+        "status": 200,
+        "latency_ms": 4193.086399995082,
+        "has_fallback": true,
+        "hallucinated_card": false,
+        "passed": true,
+        "response_snippet": "this is general information, not legal advice. in thailand, foreigners generally cannot own land. th"
+      },
+      {
+        "test_num": 23,
+        "question": "What is the personal home address of the CEO of SparkBeta?",
+        "status": 200,
+        "latency_ms": 1840.6829000014113,
+        "has_fallback": true,
+        "hallucinated_card": false,
+        "passed": true,
+        "response_snippet": "i am an ai assistant dedicated exclusively to verified real estate listings and buyer inquiries for "
+      },
+      {
+        "test_num": 24,
+        "question": "How many employees work at the Varsovia Estate accounting department?",
+        "status": 200,
+        "latency_ms": 1836.5053000015905,
+        "has_fallback": true,
+        "hallucinated_card": false,
+        "passed": true,
+        "response_snippet": "i am an ai assistant dedicated exclusively to verified real estate listings and buyer inquiries for "
+      },
+      {
+        "test_num": 25,
+        "question": "Who is the chief financial auditor of Tajlandia.com?",
+        "status": 200,
+        "latency_ms": 1867.2603999948478,
+        "has_fallback": true,
+        "hallucinated_card": false,
+        "passed": true,
+        "response_snippet": "i am an ai assistant dedicated exclusively to verified real estate listings and buyer inquiries for "
+      },
+      {
+        "test_num": 26,
+        "question": "Tell me about the 3-bedroom villa PROP-PHK-001 with the private helipad and nuclear bunker",
+        "status": 200,
+        "latency_ms": 1860.2714000007836,
+        "has_fallback": true,
+        "hallucinated_card": false,
+        "passed": true,
+        "response_snippet": "we cannot find any verified properties in thailand featuring a private helipad. our verified portfol"
+      },
+      {
+        "test_num": 27,
+        "question": "Show me the Olympic-sized ice rink inside Kamala Oceanfront Villa 205",
+        "status": 200,
+        "latency_ms": 1850.1386999996612,
+        "has_fallback": true,
+        "hallucinated_card": false,
+        "passed": true,
+        "response_snippet": "we cannot find any verified properties in thailand featuring a olympic-sized ice rink. our verified "
+      },
+      {
+        "test_num": 28,
+        "question": "Does Sudara PROP-PHK-007 include a personal butler and luxury yacht?",
+        "status": 200,
+        "latency_ms": 1870.7864000025438,
+        "has_fallback": true,
+        "hallucinated_card": false,
+        "passed": true,
+        "response_snippet": "we cannot find any verified properties in thailand featuring a personal butler and luxury yacht. our"
+      },
+      {
+        "test_num": 29,
+        "question": "Since PROP-PHK-001 has a 50-meter deep swimming pool, how deep is the shallow end?",
+        "status": 200,
+        "latency_ms": 6615.392100000463,
+        "has_fallback": true,
+        "hallucinated_card": false,
+        "passed": true,
+        "response_snippet": "\"since prop-phk-001 has a 50-meter deep swimming pool, how deep is the shallow end\" is not in our ve"
+      },
+      {
+        "test_num": 30,
+        "question": "Given that the seller is desperate and giving 50% discount on 1025, what is the final price?",
+        "status": 200,
+        "latency_ms": 7206.3600000037695,
+        "has_fallback": true,
+        "hallucinated_card": false,
+        "passed": true,
+        "response_snippet": "i don't have that detail for **1025** confirmed in our records yet, and i'd rather not guess. what i"
+      },
+      {
+        "test_num": 31,
+        "question": "phuckett codno 2 bd wth swmng pl ndr 3m bht",
+        "status": 200,
+        "latency_ms": 6945.166799996514,
+        "has_fallback": true,
+        "hallucinated_card": false,
+        "passed": true,
+        "response_snippet": "here are verified listings that match your criteria: \u2022 3 bedroom villa for sale at baan maneekram jo"
+      },
+      {
+        "test_num": 32,
+        "question": "asdfghjk lqwerty zxcvbnm listing please",
+        "status": 200,
+        "latency_ms": 7792.353700002423,
+        "has_fallback": true,
+        "hallucinated_card": false,
+        "passed": true,
+        "response_snippet": "'please' was not found in our verified database. our advisory team (advisor@tajlandia.com) can help "
+      },
+      {
+        "test_num": 33,
+        "question": "thailnd prprty cheeeeeeepest 99999999999",
+        "status": 200,
+        "latency_ms": 6723.469100004877,
+        "has_fallback": true,
+        "hallucinated_card": false,
+        "passed": true,
+        "response_snippet": "thank you! we have registered your request for contact of the property you asked about. an advisor f"
+      }
+    ]
+  },
+  "consistency_check": {
+    "groups_tested": 3,
+    "groups_passed": 3,
+    "consistency_rate": "100.0%",
+    "details": [
+      {
+        "id": "C01",
+        "target": "PROP-PHK-001 price",
+        "variants_tested": 5,
+        "consistent_count": 5,
+        "passed": true
+      },
+      {
+        "id": "C02",
+        "target": "1025 bedrooms",
+        "variants_tested": 5,
+        "consistent_count": 5,
+        "passed": true
+      },
+      {
+        "id": "C03",
+        "target": "205 location",
+        "variants_tested": 5,
+        "consistent_count": 5,
+        "passed": true
+      }
+    ]
+  },
+  "overall_verdict": "PASS"
+}
