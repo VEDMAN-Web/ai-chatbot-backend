@@ -14,7 +14,6 @@ from app.services.public_agent import PublicAgentService, resolve_empty_search_a
 from app.services.property_search import PropertyFilterParams
 
 
-@pytest.mark.xfail(reason="REGRESSION in rp-user-fix (also fails on that branch alone): an impossible filter ('50 bedroom villa under 1M') no longer extracts the bedroom count. For Rutul to fix.", strict=False)
 def test_extract_impossible_50_bed_under_1m():
     f = extract_search_filters_deterministic("50-bedroom villa in Phuket under 1M THB")
     assert f.get("location") == "Phuket"

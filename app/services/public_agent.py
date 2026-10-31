@@ -1946,6 +1946,11 @@ def is_off_topic_query(message: str, lenient: bool = False) -> bool:
     if has_random_noun:
         return True
 
+    # "Do you have X?" / "Does X have a gym?" is a listing-availability or amenity question about a name that may
+    # not exist. It is NOT off-topic: the property lookup then answers honestly ("not found").
+    if re.match(r"^(do|does|did|is|are|can)\s+(you|we|they)\s+have\b", msg) or re.match(r"^does\s+\S.*\s+(have|offer|include)\b", msg):
+        return False
+
     # Safe real-estate follow-ups even without explicit Thailand keywords
     # (session context / deterministic intent will resolve the property)
     re_followup_ok = [

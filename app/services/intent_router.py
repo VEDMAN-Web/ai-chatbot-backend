@@ -1854,7 +1854,7 @@ def _extract_search_filters_deterministic_impl(message: str) -> Dict[str, Any]:
         if bed_match:
             try:
                 _bed_val = int(float(bed_match.group(1)))
-                if _bed_val <= 20:
+                if _bed_val >= 1:  # keep impossible counts (e.g. 50) so the search honestly finds nothing instead of dropping the filter
                     filters["bedrooms"] = _bed_val
             except (ValueError, TypeError):
                 pass

@@ -73,7 +73,6 @@ def test_show_me_villas_in_phuket_still_search(name_index):
     assert args.get("property_type") == "Villa"
 
 
-@pytest.mark.xfail(reason="REGRESSION in rp-user-fix (also fails on that branch alone): asking about an unknown named property is now classified off-topic instead of an honest 'not found'. For Rutul to fix.", strict=False)
 def test_unknown_named_fact_is_details_not_search(name_index):
     """Unknown proper names go to details (honest not-found), never a filtered search."""
     intent, args = detect_deterministic_intent(
@@ -144,7 +143,6 @@ def test_above_element_spa_reply_is_about_property_not_no_match(name_index, monk
     assert "above element" in text or "spa" in text or "not documented" in text or "not in" in text
 
 
-@pytest.mark.xfail(reason="REGRESSION in rp-user-fix (also fails on that branch alone): asking about an unknown named property is now classified off-topic instead of an honest 'not found'. For Rutul to fix.", strict=False)
 def test_zorblax_returns_honest_not_found(name_index, monkeypatch):
     agent = PublicAgentService.__new__(PublicAgentService)
     agent.model = "test"
