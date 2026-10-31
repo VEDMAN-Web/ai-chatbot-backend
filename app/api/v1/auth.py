@@ -868,7 +868,7 @@ def list_admin_users_with_google_status(
     role: Optional[str] = Query(None, description="Filter by role: super_admin, admin, worker"),
     search: Optional[str] = Query(None, description="Search by name or email"),
     is_active: Optional[bool] = Query(None, description="Filter by active status"),
-    status: Optional[str] = Query(None, description="Filter by status: active, blocked, deactivated"),
+    status_filter: Optional[str] = Query(None, alias="status", description="Filter by status: active, blocked, deactivated"),
     staff: AuthenticatedStaff = Depends(require_admin_or_super_admin),
     db: Any = Depends(get_db)
 ):
@@ -882,7 +882,7 @@ def list_admin_users_with_google_status(
     """
     active_env_key = get_current_env_domain_key()
     staff_domain_key = staff.domain_key or get_user_domain_key(staff.email, staff.domain)
-    if staff_domain_key and staff_domain_key != active_env_key:
+    if staff.role != "super_admin" and staff_domain_key and staff_domain_key != active_env_key:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Access denied: Your account belongs to a different domain."
@@ -898,7 +898,7 @@ def list_admin_users_with_google_status(
         roles_filter = wanted if roles_filter is None else [r for r in wanted if r in roles_filter]
 
     all_users = _store_call(lambda: users_repo.list_users(
-        db, roles=roles_filter, search=search, is_active=is_active, status=status
+        db, roles=roles_filter, search=search, is_active=is_active, status=status_filter
     ))
 
     # Filter by domain: Super Admins can inspect all domains; regular Admins are restricted to their allowed websites or active env
@@ -1082,14 +1082,14 @@ def get_admin_user_details(
 
     active_env_key = get_current_env_domain_key()
     staff_domain_key = staff.domain_key or get_user_domain_key(staff.email, staff.domain)
-    if staff_domain_key and staff_domain_key != active_env_key:
+    if staff.role != "super_admin" and staff_domain_key and staff_domain_key != active_env_key:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Access denied: Your account belongs to a different domain."
         )
 
     target_user_domain_key = get_user_domain_key(user)
-    if target_user_domain_key != active_env_key:
+    if staff.role != "super_admin" and target_user_domain_key != active_env_key:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="User not found on this website domain."

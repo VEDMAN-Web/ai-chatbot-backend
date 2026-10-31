@@ -1622,7 +1622,16 @@ def _savable(prov: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
             continue
         if _blank(p.get("value")):
             continue
+        if key in ("price_numeric_min", "price_numeric_max"):
+            try:
+                if float(p.get("value") or 0) <= 0:
+                    continue
+            except (ValueError, TypeError):
+                continue
         out[key] = p["value"]
+    if _blank(out.get("price_numeric_min")) and _blank(out.get("price_display")):
+        raw_pd = (prov.get("price_display") or {}).get("value")
+        out["price_display"] = str(raw_pd).strip() if raw_pd else "Price on Request"
     return out
 
 
@@ -1644,7 +1653,7 @@ def missing_required(prov: Dict[str, Dict[str, Any]]) -> List[str]:
 
 def _confidence(prov: Dict[str, Dict[str, Any]]) -> Tuple[float, str]:
     keys = ("property_name", "property_type", "province", "price_numeric_min", "status", "bedrooms_min", "area_sqm_min")
-    scores = [prov[k]["confidence_score"] for k in keys if k in prov]
+    scores = [float(prov[k].get("confidence_score") or 0.75) for k in keys if k in prov and isinstance(prov[k], dict)]
     if not scores:
         return 0.0, "low"
     completeness = 1.0 - 0.12 * len(missing_required(prov))
