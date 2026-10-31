@@ -512,7 +512,7 @@ def test_worker_cannot_perform_property_crud_but_can_chat():
         "/api/v1/admin/properties",
         headers=worker_headers,
         json={
-            "property_id": f"prop-w-{uuid.uuid4().hex[:4]}",
+            "property_id": f"prop-w-{uuid.uuid4().hex[:4].translate(str.maketrans('0123456789abcdef', 'bcdfghjklmnpqrst'))}",
             "property_name": "Worker Villa",
             "websites": ["tajlandia.com"]
         }

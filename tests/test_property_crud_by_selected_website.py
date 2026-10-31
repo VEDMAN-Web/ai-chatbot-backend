@@ -61,7 +61,7 @@ def people():
 
 
 def _pid(tag):
-    return f"crud-{RUN}-{tag}-{uuid.uuid4().hex[:4]}"
+    return f"crud-{RUN}-{tag}-{uuid.uuid4().hex[:4].translate(str.maketrans('0123456789abcdef', 'bcdfghjklmnpqrst'))}"
 
 
 def _body(pid, name=None, **extra):
