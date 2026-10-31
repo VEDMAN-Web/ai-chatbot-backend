@@ -90,7 +90,7 @@ class Chat:
 
 @pytest.fixture
 def listing():
-    pid = f"3-villas-lamai-{RUN}-{uuid.uuid4().hex[:4]}"
+    pid = f"3-villas-lamai-{RUN}-{uuid.uuid4().hex[:4].translate(str.maketrans('0123456789abcdef', 'bcdfghjklmnpqrst'))}"
     _seed("3 Villas - Lamai", pid)
     return pid
 
@@ -361,7 +361,7 @@ def _report_rows(chat, response):
 
 
 def test_export_koh_samui_listings_is_a_property_file_with_only_those_listings(people, listing):
-    other = f"phuket-only-{RUN}-{uuid.uuid4().hex[:4]}"
+    other = f"phuket-only-{RUN}-{uuid.uuid4().hex[:4].translate(str.maketrans('0123456789abcdef', 'bcdfghjklmnpqrst'))}"
     _FS.collection("projects").document(other).set({"name": f"Phuket Only {RUN}", "status": "Available", "isActive": True, "websites": [TAJ],
                                 "priceFrom": 9_000_000, "province": "Phuket", "cityId": "phuket", "propertyType": "Villa"})
     chat = Chat(people.taj, TAJ)
