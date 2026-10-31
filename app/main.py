@@ -2,7 +2,8 @@ import asyncio
 import logging
 import os
 import threading
-from fastapi import FastAPI, Depends, Query, HTTPException, status, Request
+from fastapi import FastAPI, Depends, Query, HTTPException, status, Request, File, UploadFile, Form
+from pydantic import BaseModel, Field
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -489,49 +490,49 @@ def get_property(
             detail=f"Property with ID '{property_id}' does not belong to selected website(s) {target_websites}."
         )
 
-    img_urls = [img.image_url for img in p.images]
+    img_urls = [getattr(img, "image_url", img) for img in (getattr(p, "images", None) or [])]
     return {
         "found": True,
-        "property_id": p.property_id,
-        "property_name": p.property_name,
-        "project_name": p.project_name,
-        "property_type": p.property_type,
-        "status": p.status,
+        "property_id": getattr(p, "property_id", property_id),
+        "property_name": getattr(p, "property_name", None),
+        "project_name": getattr(p, "project_name", None),
+        "property_type": getattr(p, "property_type", None),
+        "status": getattr(p, "status", None),
         "location": {
-            "country": p.country,
-            "province": p.province,
-            "district": p.district,
-            "area": p.area,
-            "address": p.address,
-            "latitude": p.latitude,
-            "longitude": p.longitude
+            "country": getattr(p, "country", "India" if "gujarat" in str(getattr(p, "province", "")).lower() else "Thailand"),
+            "province": getattr(p, "province", None),
+            "district": getattr(p, "district", None),
+            "area": getattr(p, "area", None),
+            "address": getattr(p, "address", None),
+            "latitude": getattr(p, "latitude", None),
+            "longitude": getattr(p, "longitude", None)
         },
         "developer": {
-            "name": p.developer_name,
-            "description": p.developer_description
+            "name": getattr(p, "developer_name", None),
+            "description": getattr(p, "developer_description", None)
         },
         "pricing": {
-            "display": p.price_display,
-            "numeric_min": float(p.price_numeric_min) if p.price_numeric_min else None,
-            "currency": p.currency,
-            "note": p.price_note
+            "display": getattr(p, "price_display", None),
+            "numeric_min": float(p.price_numeric_min) if getattr(p, "price_numeric_min", None) else None,
+            "currency": getattr(p, "currency", "THB"),
+            "note": getattr(p, "price_note", None)
         },
         "details": {
-            "bedrooms": p.bedrooms_display,
-            "bathrooms": p.bathrooms,
-            "area": p.area_display,
-            "units": p.units
+            "bedrooms": getattr(p, "bedrooms_display", None),
+            "bathrooms": getattr(p, "bathrooms", None),
+            "area": getattr(p, "area_display", None),
+            "units": getattr(p, "units", None)
         },
-        "description": p.description,
-        "investment_info": p.investment_information,
-        "rental_info": p.rental_information,
-        "payment_info": p.payment_information,
-        "amenities": p.amenities,
-        "features": p.features,
-        "highlights": p.highlights,
+        "description": getattr(p, "description", None),
+        "investment_info": getattr(p, "investment_information", None),
+        "rental_info": getattr(p, "rental_information", None),
+        "payment_info": getattr(p, "payment_information", None),
+        "amenities": getattr(p, "amenities", []),
+        "features": getattr(p, "features", []),
+        "highlights": getattr(p, "highlights", []),
         "images": img_urls,
-        "websites": p.websites or ["tajlandia.com"],
-        "detail_page_url": p.detail_page_url
+        "websites": getattr(p, "websites", ["tajlandia.com"]),
+        "detail_page_url": getattr(p, "detail_page_url", None)
     }
 
 # Root route aliases for Section 13 public endpoints
@@ -539,3 +540,83 @@ app.get("/branding", tags=["System"], include_in_schema=False)(get_branding)
 app.get("/properties", tags=["Properties"], include_in_schema=False)(list_properties)
 app.get("/properties/{property_id}", tags=["Properties"], include_in_schema=False)(get_property)
 app.get("/api/v1/health", tags=["System"], include_in_schema=False)(health_check)
+
+
+# Dedicated Direct Media Proxy Endpoint for Frontend Websites
+@app.get("/api/v1/media/{full_path:path}", tags=["Media"])
+@app.get("/media/{full_path:path}", tags=["Media"], include_in_schema=False)
+def serve_public_media_asset(full_path: str):
+    import os
+    import urllib.parse
+    import httpx
+    from fastapi.responses import Response, FileResponse
+
+    local_base = os.path.join(getattr(settings, "REPORT_STORAGE_DIR", "data/reports"), "media")
+    local_file = os.path.join(local_base, full_path.replace("/", os.sep))
+    if os.path.isfile(local_file):
+        media_type = "image/webp" if local_file.endswith(".webp") else ("image/jpeg" if local_file.endswith((".jpg", ".jpeg")) else "image/png")
+        return FileResponse(local_file, media_type=media_type)
+
+    try:
+        from app.services.cloud_media_storage import cloud_storage
+        token = cloud_storage._get_access_token()
+        bucket = cloud_storage.bucket_name
+        quoted_name = urllib.parse.quote(full_path, safe="")
+        
+        headers = {}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+            
+        gcs_url = f"https://storage.googleapis.com/storage/v1/b/{bucket}/o/{quoted_name}?alt=media"
+        with httpx.Client(timeout=20.0) as client:
+            resp = client.get(gcs_url, headers=headers)
+            if resp.status_code == 200:
+                content_type = resp.headers.get("content-type", "image/jpeg")
+                return Response(
+                    content=resp.content,
+                    media_type=content_type,
+                    headers={
+                        "Cache-Control": "public, max-age=86400, stale-while-revalidate=604800",
+                        "Access-Control-Allow-Origin": "*"
+                    }
+                )
+    except Exception as e:
+        logger.error(f"Error proxying media asset {full_path}: {e}")
+
+    raise HTTPException(status_code=404, detail="Media asset not found")
+
+
+
+# =====================================================================
+# Enterprise Real Estate Document & URL Ingestion Endpoints
+# =====================================================================
+class IngestUrlRequest(BaseModel):
+    url: str
+    property_id: Optional[str] = None
+
+
+@app.post("/api/v1/properties/ingest-document", tags=["Properties"])
+async def ingest_property_document_endpoint(
+    file: UploadFile = File(...),
+    property_id: Optional[str] = Form(None)
+):
+    from app.services.document_ingestion_pipeline import process_and_ingest_property_document
+    content = await file.read()
+    result = process_and_ingest_property_document(
+        content_bytes=content,
+        filename=file.filename or "uploaded_document.pdf",
+        property_id_override=property_id,
+        save_to_database=True
+    )
+    return {"status": "success", "message": "Property ingested and synchronized successfully", "data": result}
+
+
+@app.post("/api/v1/properties/ingest-url", tags=["Properties"])
+def ingest_property_url_endpoint(req: IngestUrlRequest):
+    from app.services.document_ingestion_pipeline import process_and_ingest_property_url
+    result = process_and_ingest_property_url(
+        url=req.url,
+        property_id_override=req.property_id,
+        save_to_database=True
+    )
+    return {"status": "success", "message": "Property ingested from URL successfully", "data": result}

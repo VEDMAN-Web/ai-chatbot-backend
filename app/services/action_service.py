@@ -1935,6 +1935,27 @@ def rest_create_property(
             operation_id=operation_id,
         )
 
+    if images:
+        try:
+            from app.db.models import PropertyImage
+            for img_url in images:
+                if img_url and str(img_url).strip():
+                    clean_url = str(img_url).strip()
+                    existing_img = db.query(PropertyImage).filter(
+                        PropertyImage.property_id == prop.property_id,
+                        PropertyImage.image_url == clean_url
+                    ).first()
+                    if not existing_img:
+                        db.add(PropertyImage(
+                            property_id=prop.property_id,
+                            image_url=clean_url,
+                            image_type="cover" if clean_url == cover_image else "exterior"
+                        ))
+            db.commit()
+            db.refresh(prop)
+        except Exception as e:
+            logger.warning(f"Error persisting property images in SQL: {e}")
+
     fs_ok = False
     if fs_required:
         try:

@@ -237,7 +237,7 @@ class Settings(BaseSettings):
     DRIVE_INGEST_ZIP_MAX_MEMBERS: int = 200
     DRIVE_INGEST_ZIP_MAX_TOTAL_BYTES: int = 100 * 1024 * 1024
     DRIVE_INGEST_ZIP_MAX_RATIO: float = 100.0
-    DRIVE_INGEST_OCR_ENABLED: bool = False       # Claude vision OCR for scanned PDFs and images (sends images to Anthropic)
+    DRIVE_INGEST_OCR_ENABLED: bool = True       # Claude vision OCR for scanned PDFs and images (sends images to Anthropic)
     DRIVE_INGEST_OCR_MODEL: str = ""             # empty -> ANTHROPIC_MODEL
     DRIVE_INGEST_OCR_MAX_PAGES: int = 10         # OCR pages per PDF
     DRIVE_INGEST_OCR_TIMEOUT_SEC: float = 90.0

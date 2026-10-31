@@ -5,6 +5,7 @@ import hashlib
 import json
 import time
 import urllib.parse
+import uuid
 from datetime import datetime, timedelta
 from typing import Dict, Any, Optional, List
 import httpx
@@ -345,6 +346,15 @@ class GoogleAuthInfo(BaseModel):
     google_email: Optional[str] = None
     connected_at: Optional[str] = None
     services: list[str] = Field(default_factory=list)
+
+
+def _user_by_id(db: Session, user_id: Any) -> Optional[User]:
+    """The user with this id, or None. A malformed id is 'not found' instead of a database error (HTTP 500)."""
+    try:
+        user_uuid = uuid.UUID(str(user_id))
+    except (ValueError, TypeError, AttributeError):
+        return None
+    return db.query(User).filter(User.id == user_uuid).first()
 
 
 def _get_user_google_info(user: Optional[User]) -> GoogleAuthInfo:
@@ -804,7 +814,8 @@ def list_admin_users_with_google_status(
     role: Optional[str] = Query(None, description="Filter by role: super_admin, admin, worker"),
     search: Optional[str] = Query(None, description="Search by name or email"),
     is_active: Optional[bool] = Query(None, description="Filter by active status"),
-    status: Optional[str] = Query(None, description="Filter by status: active, blocked, deactivated"),
+    # Named status_filter so it does not shadow fastapi.status (that turned the 403 below into a 500).
+    status_filter: Optional[str] = Query(None, alias="status", description="Filter by status: active, blocked, deactivated"),
     staff: AuthenticatedStaff = Depends(require_admin_or_super_admin),
     db: Session = Depends(get_db)
 ):
@@ -818,7 +829,8 @@ def list_admin_users_with_google_status(
     """
     active_env_key = get_current_env_domain_key()
     staff_domain_key = staff.domain_key or get_user_domain_key(staff.email, staff.domain)
-    if staff_domain_key and staff_domain_key != active_env_key:
+    # Super admins work across all websites (same rule as create/update/block/delete).
+    if staff.role != "super_admin" and staff_domain_key and staff_domain_key != active_env_key:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Access denied: Your account belongs to a different domain."
@@ -848,8 +860,8 @@ def list_admin_users_with_google_status(
     if is_active is not None:
         query = query.filter(User.is_active == is_active)
 
-    if status:
-        query = query.filter(func.lower(User.status) == status.strip().lower())
+    if status_filter:
+        query = query.filter(func.lower(User.status) == status_filter.strip().lower())
 
     all_users = query.order_by(User.created_at.asc()).all()
 
@@ -1050,13 +1062,14 @@ def get_admin_user_details(
     Retrieves details and status for a specific user account.
     Enforces strict domain isolation (cannot access user of other website).
     """
-    user = db.query(User).filter(User.id == user_id).first()
+    user = _user_by_id(db, user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found.")
 
     active_env_key = get_current_env_domain_key()
     staff_domain_key = staff.domain_key or get_user_domain_key(staff.email, staff.domain)
-    if staff_domain_key and staff_domain_key != active_env_key:
+    # Super admins work across all websites (same rule as create/update/block/delete).
+    if staff.role != "super_admin" and staff_domain_key and staff_domain_key != active_env_key:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Access denied: Your account belongs to a different domain."
@@ -1115,7 +1128,7 @@ def update_admin_user(
       - Admin can only grant websites within their own allowed_websites.
     Syncs with PostgreSQL and Cloud Firestore.
     """
-    user = db.query(User).filter(User.id == user_id).first()
+    user = _user_by_id(db, user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found.")
 
@@ -1291,7 +1304,7 @@ def delete_admin_user(
       - Cross-domain deletion is strictly blocked (403).
     Removes account from PostgreSQL and Cloud Firestore admin_authentication.
     """
-    user = db.query(User).filter(User.id == user_id).first()
+    user = _user_by_id(db, user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found.")
 
@@ -1376,7 +1389,7 @@ def block_admin_user(
       - Blocked users cannot log in (403 Forbidden) and cannot call any admin APIs (chat, CRUD, etc.).
     A Super Admin cannot block their own account.
     """
-    user = db.query(User).filter(User.id == user_id).first()
+    user = _user_by_id(db, user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found.")
 
