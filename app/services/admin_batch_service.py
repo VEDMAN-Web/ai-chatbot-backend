@@ -1039,7 +1039,7 @@ def undo_batch_property_operation(
             pass
         try:
             from app.services.firestore_service import bump_properties_version
-            bump_properties_version(target="user")
+            bump_properties_version(target="admin")
         except Exception:
             pass
 

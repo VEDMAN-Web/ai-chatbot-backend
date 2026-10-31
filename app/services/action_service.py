@@ -1653,7 +1653,7 @@ def _fs_sync_enabled() -> bool:
 def _bump_properties_version() -> None:
     try:
         from app.services.firestore_service import bump_properties_version
-        bump_properties_version(target="user")
+        bump_properties_version(target="admin")
     except Exception as e:
         logger.debug("bump_properties_version skipped: %s", e)
 

@@ -972,7 +972,7 @@ def execute_property_image_change(db: Any, payload: Dict[str, Any], staff: Any) 
         pass
     try:
         from app.services.firestore_service import bump_properties_version
-        bump_properties_version(target="user")
+        bump_properties_version(target="admin")
     except Exception:
         pass
     return {
