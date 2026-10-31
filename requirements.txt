@@ -27,6 +27,9 @@ Jinja2>=3.1.0
 openpyxl>=3.1.5
 python-docx>=1.1.2
 pypdf>=5.0.0
+python-pptx>=1.0.0      # Google Drive ingestion: PowerPoint / Google Slides export
+xlrd>=2.0.1             # Google Drive ingestion: legacy .xls workbooks
+defusedxml>=0.7.1       # Google Drive ingestion: XML without entity/DTD attacks
 boto3>=1.34.0
 
 # Google Workspace Integrations

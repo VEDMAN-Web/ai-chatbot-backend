@@ -18,6 +18,7 @@ from app.api.v1.admin import router as admin_router
 from app.api.v1.auth import router as auth_router
 from app.api.v1.superadmin_instructions import router as superadmin_instructions_router
 from app.api.v1.chat_logs import router as chat_logs_router
+from app.api.v1.drive_ingestion import router as drive_ingestion_router
 
 logger = logging.getLogger(__name__)
 
@@ -172,6 +173,19 @@ async def startup_snapshot_purge():
         logger.warning("Could not start snapshot purge loop (non-fatal): %s", e)
 
 
+@app.on_event("startup")
+async def startup_resume_drive_ingestion():
+    """Restart Google Drive ingestion jobs that were queued or processing when the server stopped."""
+    from app.core.config import is_test_environment
+    if is_test_environment() or not bool(getattr(settings, "DRIVE_INGEST_RESUME_ON_STARTUP", True)):
+        return
+    try:
+        from app.services.drive_folder_ingest import resume_interrupted_jobs
+        await asyncio.to_thread(resume_interrupted_jobs)
+    except Exception as e:
+        logger.warning("Drive ingestion resume failed (non-fatal): %s", type(e).__name__)
+
+
 @app.on_event("shutdown")
 async def shutdown_snapshot_purge():
     """Cancel the background snapshot purge loop on app shutdown."""
@@ -229,6 +243,7 @@ app.include_router(chat_router, prefix="", include_in_schema=False)
 app.include_router(admin_router, prefix="/api/v1")
 app.include_router(superadmin_instructions_router, prefix="/api/v1")
 app.include_router(chat_logs_router, prefix="/api/v1")
+app.include_router(drive_ingestion_router, prefix="/api/v1")
 app.include_router(auth_router, prefix="/api/v1")
 
 # Convenience route aliases for authentication and user management

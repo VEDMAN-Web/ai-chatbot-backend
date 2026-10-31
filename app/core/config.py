@@ -220,6 +220,35 @@ class Settings(BaseSettings):
     INGEST_TIMEOUT_SEC: float = 10.0
     INGEST_MAX_URLS_PER_HOUR: int = 10
 
+    # Google Drive folder bulk ingestion (all formats). Drafts only; writes need explicit admin approval.
+    DRIVE_INGEST_BATCH_SIZE: int = 10            # default files per batch
+    DRIVE_INGEST_MAX_BATCH_SIZE: int = 25        # highest batch size an admin may request
+    DRIVE_INGEST_MAX_FILES: int = 1000           # files discovered per job
+    DRIVE_INGEST_MAX_DEPTH: int = 10             # subfolder depth when recursive
+    DRIVE_INGEST_RECURSIVE_DEFAULT: bool = True
+    DRIVE_INGEST_MAX_FILE_BYTES: int = 25 * 1024 * 1024
+    DRIVE_INGEST_FILE_TIMEOUT_SEC: float = 180.0 # per-file processing limit
+    DRIVE_INGEST_WORKERS: int = 2                # files processed in parallel inside a batch
+    DRIVE_INGEST_MAX_ATTEMPTS: int = 3           # retries per file
+    DRIVE_INGEST_MAX_ROWS: int = 5000            # rows per sheet / records per JSON or XML file
+    DRIVE_INGEST_MAX_PDF_PAGES: int = 300
+    DRIVE_INGEST_MAX_DRAFTS_PER_FILE: int = 500
+    DRIVE_INGEST_MAX_IMAGE_PIXELS: int = 60_000_000
+    DRIVE_INGEST_ZIP_MAX_MEMBERS: int = 200
+    DRIVE_INGEST_ZIP_MAX_TOTAL_BYTES: int = 100 * 1024 * 1024
+    DRIVE_INGEST_ZIP_MAX_RATIO: float = 100.0
+    DRIVE_INGEST_OCR_ENABLED: bool = False       # Claude vision OCR for scanned PDFs and images (sends images to Anthropic)
+    DRIVE_INGEST_OCR_MODEL: str = ""             # empty -> ANTHROPIC_MODEL
+    DRIVE_INGEST_OCR_MAX_PAGES: int = 10         # OCR pages per PDF
+    DRIVE_INGEST_OCR_TIMEOUT_SEC: float = 90.0
+    DRIVE_INGEST_LLM_ENABLED: bool = True        # evidence-checked Claude extraction for unstructured documents
+    DRIVE_INGEST_LLM_MODEL: str = ""             # empty -> ANTHROPIC_MODEL
+    DRIVE_INGEST_LLM_MAX_CHARS: int = 40000
+    DRIVE_INGEST_LLM_TIMEOUT_SEC: float = 120.0
+    DRIVE_INGEST_LEASE_SEC: int = 300            # a job runner's lease; another instance resumes after it lapses
+    DRIVE_INGEST_RESUME_ON_STARTUP: bool = True
+    DRIVE_INGEST_ALLOW_MEMORY_STORE: bool = False  # dev only: keep jobs in memory when Firestore is absent
+
     # Super-admin instruction store. "user" is the public bot's Firestore project.
     INSTRUCTIONS_FIRESTORE_TARGET: str = "user"
 
@@ -522,5 +551,9 @@ def get_admin_config_status() -> Dict[str, Any]:
         "ingest_max_bytes": int(getattr(settings, "INGEST_MAX_BYTES", 3_000_000) or 3_000_000),
         "ingest_timeout_sec": float(getattr(settings, "INGEST_TIMEOUT_SEC", 10.0) or 10.0),
         "ingest_max_urls_per_hour": int(getattr(settings, "INGEST_MAX_URLS_PER_HOUR", 10) or 10),
+        "drive_ingest_batch_size": int(getattr(settings, "DRIVE_INGEST_BATCH_SIZE", 10) or 10),
+        "drive_ingest_max_batch_size": int(getattr(settings, "DRIVE_INGEST_MAX_BATCH_SIZE", 25) or 25),
+        "drive_ingest_max_file_bytes": int(getattr(settings, "DRIVE_INGEST_MAX_FILE_BYTES", 0) or 0),
+        "drive_ingest_ocr_enabled": bool(getattr(settings, "DRIVE_INGEST_OCR_ENABLED", False)),
         **_instruction_status(),
     }

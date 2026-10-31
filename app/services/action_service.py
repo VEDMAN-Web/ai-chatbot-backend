@@ -836,6 +836,12 @@ def confirm_and_execute_action(
             result_data = _execute_batch_property_action(
                 db, payload, authenticated_staff
             )
+        elif action.tool_name == "approve_drive_ingestion":
+            from app.services.drive_folder_ingest import approve_drafts
+            result_data = approve_drafts(
+                db, authenticated_staff, str(payload.get("job_id") or ""),
+                list(payload.get("draft_ids") or []), confirm=True,
+            )
         else:
             raise ValueError(f"Unsupported tool action: {action.tool_name}")
 
@@ -978,7 +984,7 @@ def confirm_and_execute_action(
         raise HTTPException(
             status_code=(
                 status.HTTP_422_UNPROCESSABLE_ENTITY
-                if exc.__class__.__name__ in ("BatchOperationError", "OperationNotFound")
+                if exc.__class__.__name__ in ("BatchOperationError", "OperationNotFound", "IngestionError")
                 else status.HTTP_500_INTERNAL_SERVER_ERROR
             ),
             detail=f"Action execution failed: {safe_error}"
@@ -2262,6 +2268,8 @@ def save_ingested_listing(
     db: Session,
     staff: AuthenticatedStaff,
     draft: Dict[str, Any],
+    *,
+    audit_tool_name: str = "ingest_property_from_url",
 ) -> Dict[str, Any]:
     """
     Write one chat-confirmed URL draft through the REST create/update path.
@@ -2298,6 +2306,8 @@ def save_ingested_listing(
         "admin_fields": provided,
         "content_hash": draft.get("content_hash"),
     }
+    if isinstance(draft.get("drive_ingestion"), dict):
+        ingest_meta["drive_ingestion"] = draft["drive_ingestion"]
     existing_meta: Dict[str, Any] = {}
     if mode == "update":
         current = _load_sql_property(db, property_id)
@@ -2347,7 +2357,7 @@ def save_ingested_listing(
         log = record_audit_log(
             db=db,
             staff_user_id=actor,
-            tool_name="ingest_property_from_url",
+            tool_name=audit_tool_name,
             tool_arguments={
                 "actor": actor,
                 "property_id": property_id,
