@@ -15,7 +15,7 @@ from app.services.admin_drive_chat import detect_drive_search
 from app.services.google_services import SCOPES
 
 client = TestClient(app)
-RUN = uuid.uuid4().hex[:6].translate(str.maketrans("0123456789", "ghijklmnop"))  # letters only: digits in a name get parsed as a price
+RUN = uuid.uuid4().hex[:6].translate(str.maketrans("0123456789abcdef", "bcdfghjklmnpqrst"))  # consonants only: digits parse as a price, vowels can spell words (e.g. "off")
 FOLDER = "application/vnd.google-apps.folder"
 
 

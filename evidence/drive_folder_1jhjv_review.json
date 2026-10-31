@@ -1,0 +1,1783 @@
+{
+  "job": {
+    "job_id": "dij_4c582760c5024952",
+    "folder_id": "1jhjvGFkpSYkYR2_Ti6USE6J0nD3snfJ3",
+    "folder_name": "Shared property folder",
+    "folder_url": "https://drive.google.com/drive/folders/1jhjvGFkpSYkYR2_Ti6USE6J0nD3snfJ3",
+    "recursive": true,
+    "batch_size": 10,
+    "websites": [
+      "tajlandia.com"
+    ],
+    "staff_email": "admin@tajlandia.com",
+    "staff_user_id": "admin-1",
+    "staff_role": "admin",
+    "conversation_id": null,
+    "status": "partially_completed",
+    "total_files": 4,
+    "subfolders": 0,
+    "skipped_folders": [],
+    "discovery_truncated": false,
+    "max_files": 1000,
+    "counts_by_format": {
+      "PDF": 4
+    },
+    "batches_total": 1,
+    "current_batch": null,
+    "ocr_enabled": true,
+    "created_at": "2026-10-31T10:38:32Z",
+    "started_at": "2026-10-31T10:38:32Z",
+    "finished_at": "2026-10-31T10:41:35Z",
+    "error": null,
+    "counts": {
+      "pending": 0,
+      "processing": 0,
+      "completed": 3,
+      "partially_completed": 1,
+      "failed": 0,
+      "skipped": 0
+    },
+    "files_done": 4,
+    "progress_percent": 100.0,
+    "batches": [
+      {
+        "index": 0,
+        "total": 4,
+        "pending": 0,
+        "processing": 0,
+        "completed": 3,
+        "partially_completed": 1,
+        "failed": 0,
+        "skipped": 0,
+        "status": "done"
+      }
+    ],
+    "batches_done": 1,
+    "updated_at": "2026-10-31T10:41:35Z",
+    "draft_counts": {
+      "total": 4,
+      "by_action": {
+        "manual_review": 4
+      },
+      "by_review_status": {
+        "pending_review": 4
+      }
+    },
+    "files": [
+      {
+        "drive_file_id": "1p4Sq4payq8r39Z26fARnRIXerSzbpNmd",
+        "name": "Brouchar.pdf",
+        "mime_type": "application/pdf",
+        "size": 15034054,
+        "modified_time": "2026-10-30T10:00:00Z",
+        "folder_path": "Shared property folder",
+        "format": "pdf",
+        "format_label": "PDF",
+        "detected_format": "pdf",
+        "batch_index": 0,
+        "status": "partially_completed",
+        "reason": "1 page(s) have no text layer and OCR did not read them",
+        "attempts": 1,
+        "draft_count": 1,
+        "extraction": {
+          "format": "pdf",
+          "status": "partial",
+          "segments": 23,
+          "records": 0,
+          "images": 24,
+          "warnings": [
+            "1 page(s) have no text layer and OCR did not read them"
+          ],
+          "error": null,
+          "meta": {
+            "pages": 24,
+            "text_pages": 0,
+            "ocr_pages": 24,
+            "image_only_pages": [
+              1,
+              2,
+              3,
+              4,
+              5,
+              6,
+              7,
+              8,
+              9,
+              10,
+              11,
+              12,
+              13,
+              14,
+              15,
+              16,
+              17,
+              18,
+              19,
+              20,
+              21,
+              22,
+              23,
+              24
+            ]
+          },
+          "archive_members": []
+        },
+        "started_at": "2026-10-31T10:38:32Z",
+        "finished_at": "2026-10-31T10:41:35Z",
+        "retryable": false
+      },
+      {
+        "drive_file_id": "1bHEBolkQROK2TtAy5gZNkLSqhRf72vgb",
+        "name": "KALHAR RESIDENCY PRESENTATION 11.03.2026.pdf",
+        "mime_type": "application/pdf",
+        "size": 3206912,
+        "modified_time": "2026-10-30T10:00:00Z",
+        "folder_path": "Shared property folder",
+        "format": "pdf",
+        "format_label": "PDF",
+        "detected_format": "pdf",
+        "batch_index": 0,
+        "status": "completed",
+        "reason": null,
+        "attempts": 1,
+        "draft_count": 1,
+        "extraction": {
+          "format": "pdf",
+          "status": "ok",
+          "segments": 5,
+          "records": 0,
+          "images": 58,
+          "warnings": [],
+          "error": null,
+          "meta": {
+            "pages": 5,
+            "text_pages": 5,
+            "ocr_pages": 0,
+            "image_only_pages": []
+          },
+          "archive_members": []
+        },
+        "started_at": "2026-10-31T10:38:32Z",
+        "finished_at": "2026-10-31T10:40:07Z",
+        "retryable": false
+      },
+      {
+        "drive_file_id": "1qU0MObI6_suuJHVEoN30uaC1zmJ9RRoa",
+        "name": "Suryoday Hills-3.pdf",
+        "mime_type": "application/pdf",
+        "size": 8317226,
+        "modified_time": "2026-10-30T10:00:00Z",
+        "folder_path": "Shared property folder",
+        "format": "pdf",
+        "format_label": "PDF",
+        "detected_format": "pdf",
+        "batch_index": 0,
+        "status": "completed",
+        "reason": null,
+        "attempts": 1,
+        "draft_count": 1,
+        "extraction": {
+          "format": "pdf",
+          "status": "ok",
+          "segments": 12,
+          "records": 0,
+          "images": 12,
+          "warnings": [],
+          "error": null,
+          "meta": {
+            "pages": 12,
+            "text_pages": 0,
+            "ocr_pages": 12,
+            "image_only_pages": [
+              1,
+              2,
+              3,
+              4,
+              5,
+              6,
+              7,
+              8,
+              9,
+              10,
+              11,
+              12
+            ]
+          },
+          "archive_members": []
+        },
+        "started_at": "2026-10-31T10:40:07Z",
+        "finished_at": "2026-10-31T10:41:09Z",
+        "retryable": false
+      },
+      {
+        "drive_file_id": "1nu7JC9EfxXtDpUv7G6-rLDdqGTmqTQ0u",
+        "name": "Varsovia_Estate_Property_Aileen_Residence_Bangtao_20261030_142552.pdf",
+        "mime_type": "application/pdf",
+        "size": 1395776,
+        "modified_time": "2026-10-30T10:00:00Z",
+        "folder_path": "Shared property folder",
+        "format": "pdf",
+        "format_label": "PDF",
+        "detected_format": "pdf",
+        "batch_index": 0,
+        "status": "completed",
+        "reason": null,
+        "attempts": 1,
+        "draft_count": 1,
+        "extraction": {
+          "format": "pdf",
+          "status": "ok",
+          "segments": 8,
+          "records": 0,
+          "images": 11,
+          "warnings": [],
+          "error": null,
+          "meta": {
+            "pages": 8,
+            "text_pages": 8,
+            "ocr_pages": 0,
+            "image_only_pages": []
+          },
+          "archive_members": []
+        },
+        "started_at": "2026-10-31T10:41:09Z",
+        "finished_at": "2026-10-31T10:41:19Z",
+        "retryable": false
+      }
+    ]
+  },
+  "drafts": [
+    {
+      "draft_id": "dd_0f7a8118c677b8fe7dd2",
+      "job_id": "dij_4c582760c5024952",
+      "property_id": "ayodhyapuram",
+      "property_name": "AYODHYAPURAM",
+      "proposed_action": "manual_review",
+      "action_override": null,
+      "effective_action": "manual_review",
+      "action_reasons": [
+        "validation: location: province or location is required; price: price_numeric_min (> 0) or price_display is required; status: status is required (Archived, Available, For sale, Off-plan, Planned, Pre-sale, Ready to move in, Reserved, Sold Out, Under construction); province: province was not found in the source"
+      ],
+      "review_status": "pending_review",
+      "confidence": "low",
+      "confidence_score": 0.38,
+      "source": {
+        "file_name": "Brouchar.pdf",
+        "drive_file_id": "1p4Sq4payq8r39Z26fARnRIXerSzbpNmd",
+        "file_format": "pdf",
+        "reference": {},
+        "label": "Brouchar.pdf",
+        "link": "https://drive.google.com/file/d/1p4Sq4payq8r39Z26fARnRIXerSzbpNmd/view"
+      },
+      "fields": {
+        "address": null,
+        "amenities": [
+          "LANDSCAPED GARDEN WITH SEATING AREA",
+          "BOX CRICKET",
+          "BADMINTON COURT",
+          "CHILDREN PLAY AREA",
+          "KID'S FLOOR GAME",
+          "ZULA COURT WITH SEATING",
+          "WATERBODY WITH GAZEBO SEATING",
+          "TERRACE GARDEN WITH SEATING",
+          "SWIMMING POOL"
+        ],
+        "area_display": null,
+        "area_sqm_max": null,
+        "area_sqm_min": null,
+        "area_unit": null,
+        "availability": null,
+        "bathrooms": null,
+        "beach_access": null,
+        "bedrooms_display": "3",
+        "bedrooms_max": 3,
+        "bedrooms_min": 3,
+        "city": null,
+        "country": null,
+        "currency": null,
+        "description": null,
+        "developer_name": "Radhe",
+        "district": null,
+        "furnishing": null,
+        "has_pool": null,
+        "images": null,
+        "ownership_type": null,
+        "price_display": null,
+        "price_numeric_max": null,
+        "price_numeric_min": null,
+        "project_name": null,
+        "property_id": null,
+        "property_name": "AYODHYAPURAM",
+        "property_type": "Apartment",
+        "province": null,
+        "sea_view": null,
+        "status": null
+      },
+      "evidence": {
+        "property_name": {
+          "status": "found",
+          "source": "llm",
+          "evidence": "AYODHYAPURAM",
+          "ref": {
+            "page": 3,
+            "ocr": true
+          },
+          "confidence": "medium",
+          "needs_decision": false
+        },
+        "property_type": {
+          "status": "inferred",
+          "source": "llm",
+          "evidence": "3 BHK FUTURISTIC APARTMENTS",
+          "ref": {
+            "page": 1,
+            "ocr": true
+          },
+          "confidence": "medium",
+          "reason": "'3 BHK FUTURISTIC APARTMENTS' mapped to Apartment",
+          "needs_decision": false
+        },
+        "bedrooms_min": {
+          "status": "found",
+          "source": "llm",
+          "evidence": "3 BHK FUTURISTIC APARTMENTS",
+          "ref": {
+            "page": 1,
+            "ocr": true
+          },
+          "confidence": "medium",
+          "needs_decision": false
+        },
+        "bedrooms_max": {
+          "status": "found",
+          "source": "llm",
+          "evidence": "3 BHK FUTURISTIC APARTMENTS",
+          "ref": {
+            "page": 1,
+            "ocr": true
+          },
+          "confidence": "medium",
+          "needs_decision": false
+        },
+        "bedrooms_display": {
+          "status": "found",
+          "source": "llm",
+          "evidence": "3 BHK FUTURISTIC APARTMENTS",
+          "ref": {
+            "page": 1,
+            "ocr": true
+          },
+          "confidence": "medium",
+          "needs_decision": false
+        },
+        "developer_name": {
+          "status": "found",
+          "source": "llm",
+          "evidence": "PROJECT BY Radhe",
+          "ref": {
+            "page": 24,
+            "ocr": true
+          },
+          "confidence": "medium",
+          "needs_decision": false
+        },
+        "amenities": {
+          "status": "found",
+          "source": "llm",
+          "evidence": "LANDSCAPED\nGARDEN WITH\nSEATING AREA\nBOX\nCRICKET\nBADMINTON\nCOURT\nCHILDREN\nPLAY AREA\nKID'S\nFLOOR GAME\nZULA COURT\nWITH SEATING\nWATERBODY\nWITH GAZEBO SEATING\nTERRACE GARDEN\nWITH SEATING\nSWIMMING\nPOOL",
+          "confidence": "medium",
+          "needs_decision": false
+        }
+      },
+      "missing_required": [
+        "province",
+        "price",
+        "status"
+      ],
+      "validation_errors": {
+        "location": "province or location is required",
+        "price": "price_numeric_min (> 0) or price_display is required",
+        "status": "status is required (Archived, Available, For sale, Off-plan, Planned, Pre-sale, Ready to move in, Reserved, Sold Out, Under construction)",
+        "province": "province was not found in the source"
+      },
+      "conflicts": [],
+      "duplicate_of": null,
+      "duplicates": [],
+      "existing_match": null,
+      "changes": [
+        {
+          "field": "property_name",
+          "current": null,
+          "proposed": "AYODHYAPURAM"
+        },
+        {
+          "field": "property_type",
+          "current": null,
+          "proposed": "Apartment"
+        },
+        {
+          "field": "bedrooms_min",
+          "current": null,
+          "proposed": 3
+        },
+        {
+          "field": "bedrooms_max",
+          "current": null,
+          "proposed": 3
+        },
+        {
+          "field": "developer_name",
+          "current": null,
+          "proposed": "Radhe"
+        }
+      ],
+      "image_references": [
+        {
+          "drive_file_id": "1p4Sq4payq8r39Z26fARnRIXerSzbpNmd",
+          "file_name": "Brouchar.pdf",
+          "name": "Im0.jpg",
+          "ref": {
+            "page": 1
+          }
+        },
+        {
+          "drive_file_id": "1p4Sq4payq8r39Z26fARnRIXerSzbpNmd",
+          "file_name": "Brouchar.pdf",
+          "name": "Im0.jpg",
+          "ref": {
+            "page": 2
+          }
+        },
+        {
+          "drive_file_id": "1p4Sq4payq8r39Z26fARnRIXerSzbpNmd",
+          "file_name": "Brouchar.pdf",
+          "name": "Im0.jpg",
+          "ref": {
+            "page": 3
+          }
+        },
+        {
+          "drive_file_id": "1p4Sq4payq8r39Z26fARnRIXerSzbpNmd",
+          "file_name": "Brouchar.pdf",
+          "name": "Im0.jpg",
+          "ref": {
+            "page": 4
+          }
+        },
+        {
+          "drive_file_id": "1p4Sq4payq8r39Z26fARnRIXerSzbpNmd",
+          "file_name": "Brouchar.pdf",
+          "name": "Im0.jpg",
+          "ref": {
+            "page": 5
+          }
+        },
+        {
+          "drive_file_id": "1p4Sq4payq8r39Z26fARnRIXerSzbpNmd",
+          "file_name": "Brouchar.pdf",
+          "name": "Im0.jpg",
+          "ref": {
+            "page": 6
+          }
+        },
+        {
+          "drive_file_id": "1p4Sq4payq8r39Z26fARnRIXerSzbpNmd",
+          "file_name": "Brouchar.pdf",
+          "name": "Im0.jpg",
+          "ref": {
+            "page": 7
+          }
+        },
+        {
+          "drive_file_id": "1p4Sq4payq8r39Z26fARnRIXerSzbpNmd",
+          "file_name": "Brouchar.pdf",
+          "name": "Im0.jpg",
+          "ref": {
+            "page": 8
+          }
+        },
+        {
+          "drive_file_id": "1p4Sq4payq8r39Z26fARnRIXerSzbpNmd",
+          "file_name": "Brouchar.pdf",
+          "name": "Im0.jpg",
+          "ref": {
+            "page": 9
+          }
+        },
+        {
+          "drive_file_id": "1p4Sq4payq8r39Z26fARnRIXerSzbpNmd",
+          "file_name": "Brouchar.pdf",
+          "name": "Im0.jpg",
+          "ref": {
+            "page": 10
+          }
+        },
+        {
+          "drive_file_id": "1p4Sq4payq8r39Z26fARnRIXerSzbpNmd",
+          "file_name": "Brouchar.pdf",
+          "name": "Im0.jpg",
+          "ref": {
+            "page": 11
+          }
+        },
+        {
+          "drive_file_id": "1p4Sq4payq8r39Z26fARnRIXerSzbpNmd",
+          "file_name": "Brouchar.pdf",
+          "name": "Im0.jpg",
+          "ref": {
+            "page": 12
+          }
+        },
+        {
+          "drive_file_id": "1p4Sq4payq8r39Z26fARnRIXerSzbpNmd",
+          "file_name": "Brouchar.pdf",
+          "name": "Im0.jpg",
+          "ref": {
+            "page": 13
+          }
+        },
+        {
+          "drive_file_id": "1p4Sq4payq8r39Z26fARnRIXerSzbpNmd",
+          "file_name": "Brouchar.pdf",
+          "name": "Im0.jpg",
+          "ref": {
+            "page": 14
+          }
+        },
+        {
+          "drive_file_id": "1p4Sq4payq8r39Z26fARnRIXerSzbpNmd",
+          "file_name": "Brouchar.pdf",
+          "name": "Im0.jpg",
+          "ref": {
+            "page": 15
+          }
+        },
+        {
+          "drive_file_id": "1p4Sq4payq8r39Z26fARnRIXerSzbpNmd",
+          "file_name": "Brouchar.pdf",
+          "name": "Im0.jpg",
+          "ref": {
+            "page": 16
+          }
+        },
+        {
+          "drive_file_id": "1p4Sq4payq8r39Z26fARnRIXerSzbpNmd",
+          "file_name": "Brouchar.pdf",
+          "name": "Im0.jpg",
+          "ref": {
+            "page": 17
+          }
+        },
+        {
+          "drive_file_id": "1p4Sq4payq8r39Z26fARnRIXerSzbpNmd",
+          "file_name": "Brouchar.pdf",
+          "name": "Im0.jpg",
+          "ref": {
+            "page": 18
+          }
+        },
+        {
+          "drive_file_id": "1p4Sq4payq8r39Z26fARnRIXerSzbpNmd",
+          "file_name": "Brouchar.pdf",
+          "name": "Im0.jpg",
+          "ref": {
+            "page": 19
+          }
+        },
+        {
+          "drive_file_id": "1p4Sq4payq8r39Z26fARnRIXerSzbpNmd",
+          "file_name": "Brouchar.pdf",
+          "name": "Im0.jpg",
+          "ref": {
+            "page": 20
+          }
+        },
+        {
+          "drive_file_id": "1p4Sq4payq8r39Z26fARnRIXerSzbpNmd",
+          "file_name": "Brouchar.pdf",
+          "name": "Im0.jpg",
+          "ref": {
+            "page": 21
+          }
+        },
+        {
+          "drive_file_id": "1p4Sq4payq8r39Z26fARnRIXerSzbpNmd",
+          "file_name": "Brouchar.pdf",
+          "name": "Im0.jpg",
+          "ref": {
+            "page": 22
+          }
+        },
+        {
+          "drive_file_id": "1p4Sq4payq8r39Z26fARnRIXerSzbpNmd",
+          "file_name": "Brouchar.pdf",
+          "name": "Im0.jpg",
+          "ref": {
+            "page": 23
+          }
+        },
+        {
+          "drive_file_id": "1p4Sq4payq8r39Z26fARnRIXerSzbpNmd",
+          "file_name": "Brouchar.pdf",
+          "name": "Im0.jpg",
+          "ref": {
+            "page": 24
+          }
+        }
+      ],
+      "approval": null,
+      "websites": [
+        "tajlandia.com"
+      ]
+    },
+    {
+      "draft_id": "dd_4f57bfe230af22c9d4ab",
+      "job_id": "dij_4c582760c5024952",
+      "property_id": "kalhar-residency",
+      "property_name": "KALHAR RESIDENCY",
+      "proposed_action": "manual_review",
+      "action_override": null,
+      "effective_action": "manual_review",
+      "action_reasons": [
+        "validation: property_type: property_type is required (Apartment, Commercial, Condominium, House, Land, Penthouse, Townhouse, Villa); location: province or location is required; price: price_numeric_min (> 0) or price_display is required; status: status is required (Archived, Available, For sale, Off-plan, Planned, Pre-sale, Ready to move in, Reserved, Sold Out, Under construction); province: province was not found in the source"
+      ],
+      "review_status": "pending_review",
+      "confidence": "low",
+      "confidence_score": 0.39,
+      "source": {
+        "file_name": "KALHAR RESIDENCY PRESENTATION 11.03.2026.pdf",
+        "drive_file_id": "1bHEBolkQROK2TtAy5gZNkLSqhRf72vgb",
+        "file_format": "pdf",
+        "reference": {},
+        "label": "KALHAR RESIDENCY PRESENTATION 11.03.2026.pdf",
+        "link": "https://drive.google.com/file/d/1bHEBolkQROK2TtAy5gZNkLSqhRf72vgb/view"
+      },
+      "fields": {
+        "address": null,
+        "amenities": [
+          "CLUB HOUSE"
+        ],
+        "area_display": null,
+        "area_sqm_max": null,
+        "area_sqm_min": null,
+        "area_unit": null,
+        "availability": null,
+        "bathrooms": null,
+        "beach_access": null,
+        "bedrooms_display": null,
+        "bedrooms_max": null,
+        "bedrooms_min": null,
+        "city": null,
+        "country": null,
+        "currency": null,
+        "description": "TYPICAL FLOOR PLAN ( 1ST TO 13TH ) :- BLOCK - A",
+        "developer_name": null,
+        "district": null,
+        "furnishing": null,
+        "has_pool": null,
+        "images": null,
+        "ownership_type": null,
+        "price_display": null,
+        "price_numeric_max": null,
+        "price_numeric_min": null,
+        "project_name": null,
+        "property_id": null,
+        "property_name": "KALHAR RESIDENCY",
+        "property_type": null,
+        "province": null,
+        "sea_view": null,
+        "status": null
+      },
+      "evidence": {
+        "property_name": {
+          "status": "found",
+          "source": "llm",
+          "evidence": "KALHAR RESIDENCY",
+          "ref": {
+            "page": 1
+          },
+          "confidence": "medium",
+          "needs_decision": false
+        },
+        "amenities": {
+          "status": "found",
+          "source": "llm",
+          "evidence": "CLUB HOUSE",
+          "ref": {
+            "page": 2
+          },
+          "confidence": "medium",
+          "needs_decision": false
+        },
+        "description": {
+          "status": "found",
+          "source": "llm",
+          "evidence": "TYPICAL FLOOR PLAN ( 1ST TO 13TH ) :- BLOCK - A",
+          "ref": {
+            "page": 4
+          },
+          "confidence": "medium",
+          "needs_decision": false
+        }
+      },
+      "missing_required": [
+        "property_type",
+        "province",
+        "price",
+        "status"
+      ],
+      "validation_errors": {
+        "property_type": "property_type is required (Apartment, Commercial, Condominium, House, Land, Penthouse, Townhouse, Villa)",
+        "location": "province or location is required",
+        "price": "price_numeric_min (> 0) or price_display is required",
+        "status": "status is required (Archived, Available, For sale, Off-plan, Planned, Pre-sale, Ready to move in, Reserved, Sold Out, Under construction)",
+        "province": "province was not found in the source"
+      },
+      "conflicts": [],
+      "duplicate_of": null,
+      "duplicates": [],
+      "existing_match": null,
+      "changes": [
+        {
+          "field": "property_name",
+          "current": null,
+          "proposed": "KALHAR RESIDENCY"
+        }
+      ],
+      "image_references": [
+        {
+          "drive_file_id": "1bHEBolkQROK2TtAy5gZNkLSqhRf72vgb",
+          "file_name": "KALHAR RESIDENCY PRESENTATION 11.03.2026.pdf",
+          "name": "Xop1.png",
+          "ref": {
+            "page": 1
+          }
+        },
+        {
+          "drive_file_id": "1bHEBolkQROK2TtAy5gZNkLSqhRf72vgb",
+          "file_name": "KALHAR RESIDENCY PRESENTATION 11.03.2026.pdf",
+          "name": "Xop2.jp2",
+          "ref": {
+            "page": 1
+          }
+        },
+        {
+          "drive_file_id": "1bHEBolkQROK2TtAy5gZNkLSqhRf72vgb",
+          "file_name": "KALHAR RESIDENCY PRESENTATION 11.03.2026.pdf",
+          "name": "Xop3.png",
+          "ref": {
+            "page": 1
+          }
+        },
+        {
+          "drive_file_id": "1bHEBolkQROK2TtAy5gZNkLSqhRf72vgb",
+          "file_name": "KALHAR RESIDENCY PRESENTATION 11.03.2026.pdf",
+          "name": "Xop4.jp2",
+          "ref": {
+            "page": 1
+          }
+        },
+        {
+          "drive_file_id": "1bHEBolkQROK2TtAy5gZNkLSqhRf72vgb",
+          "file_name": "KALHAR RESIDENCY PRESENTATION 11.03.2026.pdf",
+          "name": "Xop5.png",
+          "ref": {
+            "page": 1
+          }
+        },
+        {
+          "drive_file_id": "1bHEBolkQROK2TtAy5gZNkLSqhRf72vgb",
+          "file_name": "KALHAR RESIDENCY PRESENTATION 11.03.2026.pdf",
+          "name": "Xop6.jp2",
+          "ref": {
+            "page": 1
+          }
+        },
+        {
+          "drive_file_id": "1bHEBolkQROK2TtAy5gZNkLSqhRf72vgb",
+          "file_name": "KALHAR RESIDENCY PRESENTATION 11.03.2026.pdf",
+          "name": "Xop1.png",
+          "ref": {
+            "page": 2
+          }
+        },
+        {
+          "drive_file_id": "1bHEBolkQROK2TtAy5gZNkLSqhRf72vgb",
+          "file_name": "KALHAR RESIDENCY PRESENTATION 11.03.2026.pdf",
+          "name": "Xop10.jp2",
+          "ref": {
+            "page": 2
+          }
+        },
+        {
+          "drive_file_id": "1bHEBolkQROK2TtAy5gZNkLSqhRf72vgb",
+          "file_name": "KALHAR RESIDENCY PRESENTATION 11.03.2026.pdf",
+          "name": "Xop100.jp2",
+          "ref": {
+            "page": 2
+          }
+        },
+        {
+          "drive_file_id": "1bHEBolkQROK2TtAy5gZNkLSqhRf72vgb",
+          "file_name": "KALHAR RESIDENCY PRESENTATION 11.03.2026.pdf",
+          "name": "Xop101.png",
+          "ref": {
+            "page": 2
+          }
+        },
+        {
+          "drive_file_id": "1bHEBolkQROK2TtAy5gZNkLSqhRf72vgb",
+          "file_name": "KALHAR RESIDENCY PRESENTATION 11.03.2026.pdf",
+          "name": "Xop102.jp2",
+          "ref": {
+            "page": 2
+          }
+        },
+        {
+          "drive_file_id": "1bHEBolkQROK2TtAy5gZNkLSqhRf72vgb",
+          "file_name": "KALHAR RESIDENCY PRESENTATION 11.03.2026.pdf",
+          "name": "Xop103.png",
+          "ref": {
+            "page": 2
+          }
+        },
+        {
+          "drive_file_id": "1bHEBolkQROK2TtAy5gZNkLSqhRf72vgb",
+          "file_name": "KALHAR RESIDENCY PRESENTATION 11.03.2026.pdf",
+          "name": "Xop104.jp2",
+          "ref": {
+            "page": 2
+          }
+        },
+        {
+          "drive_file_id": "1bHEBolkQROK2TtAy5gZNkLSqhRf72vgb",
+          "file_name": "KALHAR RESIDENCY PRESENTATION 11.03.2026.pdf",
+          "name": "Xop105.png",
+          "ref": {
+            "page": 2
+          }
+        },
+        {
+          "drive_file_id": "1bHEBolkQROK2TtAy5gZNkLSqhRf72vgb",
+          "file_name": "KALHAR RESIDENCY PRESENTATION 11.03.2026.pdf",
+          "name": "Xop106.jp2",
+          "ref": {
+            "page": 2
+          }
+        },
+        {
+          "drive_file_id": "1bHEBolkQROK2TtAy5gZNkLSqhRf72vgb",
+          "file_name": "KALHAR RESIDENCY PRESENTATION 11.03.2026.pdf",
+          "name": "Xop107.png",
+          "ref": {
+            "page": 2
+          }
+        },
+        {
+          "drive_file_id": "1bHEBolkQROK2TtAy5gZNkLSqhRf72vgb",
+          "file_name": "KALHAR RESIDENCY PRESENTATION 11.03.2026.pdf",
+          "name": "Xop108.jp2",
+          "ref": {
+            "page": 2
+          }
+        },
+        {
+          "drive_file_id": "1bHEBolkQROK2TtAy5gZNkLSqhRf72vgb",
+          "file_name": "KALHAR RESIDENCY PRESENTATION 11.03.2026.pdf",
+          "name": "Xop109.png",
+          "ref": {
+            "page": 2
+          }
+        },
+        {
+          "drive_file_id": "1bHEBolkQROK2TtAy5gZNkLSqhRf72vgb",
+          "file_name": "KALHAR RESIDENCY PRESENTATION 11.03.2026.pdf",
+          "name": "Xop11.png",
+          "ref": {
+            "page": 2
+          }
+        },
+        {
+          "drive_file_id": "1bHEBolkQROK2TtAy5gZNkLSqhRf72vgb",
+          "file_name": "KALHAR RESIDENCY PRESENTATION 11.03.2026.pdf",
+          "name": "Xop110.jp2",
+          "ref": {
+            "page": 2
+          }
+        },
+        {
+          "drive_file_id": "1bHEBolkQROK2TtAy5gZNkLSqhRf72vgb",
+          "file_name": "KALHAR RESIDENCY PRESENTATION 11.03.2026.pdf",
+          "name": "Xop111.png",
+          "ref": {
+            "page": 2
+          }
+        },
+        {
+          "drive_file_id": "1bHEBolkQROK2TtAy5gZNkLSqhRf72vgb",
+          "file_name": "KALHAR RESIDENCY PRESENTATION 11.03.2026.pdf",
+          "name": "Xop112.jp2",
+          "ref": {
+            "page": 2
+          }
+        },
+        {
+          "drive_file_id": "1bHEBolkQROK2TtAy5gZNkLSqhRf72vgb",
+          "file_name": "KALHAR RESIDENCY PRESENTATION 11.03.2026.pdf",
+          "name": "Xop113.png",
+          "ref": {
+            "page": 2
+          }
+        },
+        {
+          "drive_file_id": "1bHEBolkQROK2TtAy5gZNkLSqhRf72vgb",
+          "file_name": "KALHAR RESIDENCY PRESENTATION 11.03.2026.pdf",
+          "name": "Xop114.jp2",
+          "ref": {
+            "page": 2
+          }
+        },
+        {
+          "drive_file_id": "1bHEBolkQROK2TtAy5gZNkLSqhRf72vgb",
+          "file_name": "KALHAR RESIDENCY PRESENTATION 11.03.2026.pdf",
+          "name": "Xop115.png",
+          "ref": {
+            "page": 2
+          }
+        },
+        {
+          "drive_file_id": "1bHEBolkQROK2TtAy5gZNkLSqhRf72vgb",
+          "file_name": "KALHAR RESIDENCY PRESENTATION 11.03.2026.pdf",
+          "name": "Xop116.jp2",
+          "ref": {
+            "page": 2
+          }
+        },
+        {
+          "drive_file_id": "1bHEBolkQROK2TtAy5gZNkLSqhRf72vgb",
+          "file_name": "KALHAR RESIDENCY PRESENTATION 11.03.2026.pdf",
+          "name": "Xop1.png",
+          "ref": {
+            "page": 3
+          }
+        },
+        {
+          "drive_file_id": "1bHEBolkQROK2TtAy5gZNkLSqhRf72vgb",
+          "file_name": "KALHAR RESIDENCY PRESENTATION 11.03.2026.pdf",
+          "name": "Xop10.jp2",
+          "ref": {
+            "page": 3
+          }
+        },
+        {
+          "drive_file_id": "1bHEBolkQROK2TtAy5gZNkLSqhRf72vgb",
+          "file_name": "KALHAR RESIDENCY PRESENTATION 11.03.2026.pdf",
+          "name": "Xop100.jp2",
+          "ref": {
+            "page": 3
+          }
+        },
+        {
+          "drive_file_id": "1bHEBolkQROK2TtAy5gZNkLSqhRf72vgb",
+          "file_name": "KALHAR RESIDENCY PRESENTATION 11.03.2026.pdf",
+          "name": "Xop101.png",
+          "ref": {
+            "page": 3
+          }
+        }
+      ],
+      "approval": null,
+      "websites": [
+        "tajlandia.com"
+      ]
+    },
+    {
+      "draft_id": "dd_8b7c1b0a4f0cf07949ac",
+      "job_id": "dij_4c582760c5024952",
+      "property_id": "suryoday-hills",
+      "property_name": "SURYODAY HILLS",
+      "proposed_action": "manual_review",
+      "action_override": null,
+      "effective_action": "manual_review",
+      "action_reasons": [
+        "validation: price: price_numeric_min (> 0) or price_display is required; status: status is required (Archived, Available, For sale, Off-plan, Planned, Pre-sale, Ready to move in, Reserved, Sold Out, Under construction)"
+      ],
+      "review_status": "pending_review",
+      "confidence": "low",
+      "confidence_score": 0.46,
+      "source": {
+        "file_name": "Suryoday Hills-3.pdf",
+        "drive_file_id": "1qU0MObI6_suuJHVEoN30uaC1zmJ9RRoa",
+        "file_format": "pdf",
+        "reference": {},
+        "label": "Suryoday Hills-3.pdf",
+        "link": "https://drive.google.com/file/d/1qU0MObI6_suuJHVEoN30uaC1zmJ9RRoa/view"
+      },
+      "fields": {
+        "address": "Swami Vivekananda Chowk, Behind Devasya School, Vastral, Ahmedabad, Gujrat - 380038",
+        "amenities": [
+          "Kids Play Area",
+          "Common Toilet",
+          "Sit Out",
+          "PNG Line Provision",
+          "24 x 7 Security",
+          "Fire Safety"
+        ],
+        "area_display": null,
+        "area_sqm_max": null,
+        "area_sqm_min": null,
+        "area_unit": null,
+        "availability": null,
+        "bathrooms": null,
+        "beach_access": null,
+        "bedrooms_display": "2-3",
+        "bedrooms_max": 3,
+        "bedrooms_min": 2,
+        "city": "Ahmedabad",
+        "country": null,
+        "currency": null,
+        "description": null,
+        "developer_name": "MISHVA INFRA",
+        "district": "Vastral",
+        "furnishing": null,
+        "has_pool": null,
+        "images": null,
+        "ownership_type": null,
+        "price_display": null,
+        "price_numeric_max": null,
+        "price_numeric_min": null,
+        "project_name": null,
+        "property_id": null,
+        "property_name": "SURYODAY HILLS",
+        "property_type": "Apartment",
+        "province": "Gujrat",
+        "sea_view": null,
+        "status": null
+      },
+      "evidence": {
+        "property_name": {
+          "status": "found",
+          "source": "llm",
+          "evidence": "SURYODAY HILLS sets a standard of elegance",
+          "ref": {
+            "page": 3,
+            "ocr": true
+          },
+          "confidence": "medium",
+          "needs_decision": false
+        },
+        "property_type": {
+          "status": "inferred",
+          "source": "llm",
+          "evidence": "2 & 3 BHK FLATS & SHOPS",
+          "ref": {
+            "page": 1,
+            "ocr": true
+          },
+          "confidence": "medium",
+          "reason": "'2 & 3 BHK FLATS & SHOPS' mapped to Apartment",
+          "needs_decision": false
+        },
+        "bedrooms_min": {
+          "status": "found",
+          "source": "llm",
+          "evidence": "2 & 3 BHK FLATS & SHOPS",
+          "ref": {
+            "page": 1,
+            "ocr": true
+          },
+          "confidence": "medium",
+          "needs_decision": false
+        },
+        "bedrooms_max": {
+          "status": "found",
+          "source": "llm",
+          "evidence": "2 & 3 BHK FLATS & SHOPS",
+          "ref": {
+            "page": 1,
+            "ocr": true
+          },
+          "confidence": "medium",
+          "needs_decision": false
+        },
+        "bedrooms_display": {
+          "status": "found",
+          "source": "llm",
+          "evidence": "2 & 3 BHK FLATS & SHOPS",
+          "ref": {
+            "page": 1,
+            "ocr": true
+          },
+          "confidence": "medium",
+          "needs_decision": false
+        },
+        "address": {
+          "status": "found",
+          "source": "llm",
+          "evidence": "Swami Vivekananda Chowk, Behind Devasya School,\nVastral, Ahmedabad, Gujrat - 380038",
+          "ref": {
+            "page": 1,
+            "ocr": true
+          },
+          "confidence": "medium",
+          "needs_decision": false
+        },
+        "district": {
+          "status": "found",
+          "source": "llm",
+          "evidence": "Vastral, Ahmedabad, Gujrat - 380038",
+          "ref": {
+            "page": 1,
+            "ocr": true
+          },
+          "confidence": "medium",
+          "needs_decision": false
+        },
+        "city": {
+          "status": "found",
+          "source": "llm",
+          "evidence": "Vastral, Ahmedabad, Gujrat - 380038",
+          "ref": {
+            "page": 1,
+            "ocr": true
+          },
+          "confidence": "medium",
+          "needs_decision": false
+        },
+        "province": {
+          "status": "found",
+          "source": "llm",
+          "evidence": "Vastral, Ahmedabad, Gujrat - 380038",
+          "ref": {
+            "page": 1,
+            "ocr": true
+          },
+          "confidence": "medium",
+          "needs_decision": false
+        },
+        "developer_name": {
+          "status": "found",
+          "source": "llm",
+          "evidence": "DEVELOPERS :\nMISHVA\nINFRA",
+          "ref": {
+            "page": 12,
+            "ocr": true
+          },
+          "confidence": "medium",
+          "needs_decision": false
+        },
+        "amenities": {
+          "status": "found",
+          "source": "llm",
+          "evidence": "Kids Play Area | Common\nToilet | Sit Out\nPNG Line\nProvision | 24 x 7 Security | Fire Safety",
+          "ref": {
+            "page": 6,
+            "ocr": true
+          },
+          "confidence": "medium",
+          "needs_decision": false
+        }
+      },
+      "missing_required": [
+        "price",
+        "status"
+      ],
+      "validation_errors": {
+        "price": "price_numeric_min (> 0) or price_display is required",
+        "status": "status is required (Archived, Available, For sale, Off-plan, Planned, Pre-sale, Ready to move in, Reserved, Sold Out, Under construction)"
+      },
+      "conflicts": [],
+      "duplicate_of": null,
+      "duplicates": [],
+      "existing_match": null,
+      "changes": [
+        {
+          "field": "property_name",
+          "current": null,
+          "proposed": "SURYODAY HILLS"
+        },
+        {
+          "field": "property_type",
+          "current": null,
+          "proposed": "Apartment"
+        },
+        {
+          "field": "bedrooms_min",
+          "current": null,
+          "proposed": 2
+        },
+        {
+          "field": "bedrooms_max",
+          "current": null,
+          "proposed": 3
+        },
+        {
+          "field": "address",
+          "current": null,
+          "proposed": "Swami Vivekananda Chowk, Behind Devasya School, Vastral, Ahmedabad, Gujrat - 380038"
+        },
+        {
+          "field": "district",
+          "current": null,
+          "proposed": "Vastral"
+        },
+        {
+          "field": "province",
+          "current": null,
+          "proposed": "Gujrat"
+        },
+        {
+          "field": "developer_name",
+          "current": null,
+          "proposed": "MISHVA INFRA"
+        }
+      ],
+      "image_references": [
+        {
+          "drive_file_id": "1qU0MObI6_suuJHVEoN30uaC1zmJ9RRoa",
+          "file_name": "Suryoday Hills-3.pdf",
+          "name": "Im0.jpg",
+          "ref": {
+            "page": 1
+          }
+        },
+        {
+          "drive_file_id": "1qU0MObI6_suuJHVEoN30uaC1zmJ9RRoa",
+          "file_name": "Suryoday Hills-3.pdf",
+          "name": "Im0.jpg",
+          "ref": {
+            "page": 2
+          }
+        },
+        {
+          "drive_file_id": "1qU0MObI6_suuJHVEoN30uaC1zmJ9RRoa",
+          "file_name": "Suryoday Hills-3.pdf",
+          "name": "Im0.jpg",
+          "ref": {
+            "page": 3
+          }
+        },
+        {
+          "drive_file_id": "1qU0MObI6_suuJHVEoN30uaC1zmJ9RRoa",
+          "file_name": "Suryoday Hills-3.pdf",
+          "name": "Im0.jpg",
+          "ref": {
+            "page": 4
+          }
+        },
+        {
+          "drive_file_id": "1qU0MObI6_suuJHVEoN30uaC1zmJ9RRoa",
+          "file_name": "Suryoday Hills-3.pdf",
+          "name": "Im0.jpg",
+          "ref": {
+            "page": 5
+          }
+        },
+        {
+          "drive_file_id": "1qU0MObI6_suuJHVEoN30uaC1zmJ9RRoa",
+          "file_name": "Suryoday Hills-3.pdf",
+          "name": "Im0.jpg",
+          "ref": {
+            "page": 6
+          }
+        },
+        {
+          "drive_file_id": "1qU0MObI6_suuJHVEoN30uaC1zmJ9RRoa",
+          "file_name": "Suryoday Hills-3.pdf",
+          "name": "Im0.jpg",
+          "ref": {
+            "page": 7
+          }
+        },
+        {
+          "drive_file_id": "1qU0MObI6_suuJHVEoN30uaC1zmJ9RRoa",
+          "file_name": "Suryoday Hills-3.pdf",
+          "name": "Im0.jpg",
+          "ref": {
+            "page": 8
+          }
+        },
+        {
+          "drive_file_id": "1qU0MObI6_suuJHVEoN30uaC1zmJ9RRoa",
+          "file_name": "Suryoday Hills-3.pdf",
+          "name": "Im0.jpg",
+          "ref": {
+            "page": 9
+          }
+        },
+        {
+          "drive_file_id": "1qU0MObI6_suuJHVEoN30uaC1zmJ9RRoa",
+          "file_name": "Suryoday Hills-3.pdf",
+          "name": "Im0.jpg",
+          "ref": {
+            "page": 10
+          }
+        },
+        {
+          "drive_file_id": "1qU0MObI6_suuJHVEoN30uaC1zmJ9RRoa",
+          "file_name": "Suryoday Hills-3.pdf",
+          "name": "Im0.jpg",
+          "ref": {
+            "page": 11
+          }
+        },
+        {
+          "drive_file_id": "1qU0MObI6_suuJHVEoN30uaC1zmJ9RRoa",
+          "file_name": "Suryoday Hills-3.pdf",
+          "name": "Im0.jpg",
+          "ref": {
+            "page": 12
+          }
+        }
+      ],
+      "approval": null,
+      "websites": [
+        "tajlandia.com"
+      ]
+    },
+    {
+      "draft_id": "dd_c99b7694843749503695",
+      "job_id": "dij_4c582760c5024952",
+      "property_id": "prop-phk-001",
+      "property_name": "Aileen Residence Bangtao",
+      "proposed_action": "manual_review",
+      "action_override": null,
+      "effective_action": "manual_review",
+      "action_reasons": [
+        "needs a decision: price_display"
+      ],
+      "review_status": "pending_review",
+      "confidence": "medium",
+      "confidence_score": 0.71,
+      "source": {
+        "file_name": "Varsovia_Estate_Property_Aileen_Residence_Bangtao_20261030_142552.pdf",
+        "drive_file_id": "1nu7JC9EfxXtDpUv7G6-rLDdqGTmqTQ0u",
+        "file_format": "pdf",
+        "reference": {},
+        "label": "Varsovia_Estate_Property_Aileen_Residence_Bangtao_20261030_142552.pdf",
+        "link": "https://drive.google.com/file/d/1nu7JC9EfxXtDpUv7G6-rLDdqGTmqTQ0u/view"
+      },
+      "fields": {
+        "address": "BANG TAO, PHUKET",
+        "amenities": [
+          "24/7 gated security & CCTV"
+        ],
+        "area_display": null,
+        "area_sqm_max": null,
+        "area_sqm_min": null,
+        "area_unit": null,
+        "availability": null,
+        "bathrooms": 3,
+        "beach_access": null,
+        "bedrooms_display": "2-3",
+        "bedrooms_max": 3,
+        "bedrooms_min": 2,
+        "city": null,
+        "country": "Thailand",
+        "currency": "THB",
+        "description": "A complex of 54 villas in Bang Tao, completion Q4 2027.",
+        "developer_name": "Aileen Residence",
+        "district": "Bang Tao",
+        "furnishing": null,
+        "has_pool": true,
+        "images": null,
+        "ownership_type": "Leasehold / Freehold available",
+        "price_display": "from 8.xx million THB",
+        "price_numeric_max": null,
+        "price_numeric_min": null,
+        "project_name": "AILEEN RESIDENCE BANGTAO",
+        "property_id": "PROP-PHK-001",
+        "property_name": "Aileen Residence Bangtao",
+        "property_type": "Villa",
+        "province": "Phuket",
+        "sea_view": null,
+        "status": "Under construction"
+      },
+      "evidence": {
+        "price_display": {
+          "status": "found",
+          "source": "label",
+          "evidence": "PRICE FROM → from 8.xx million THB",
+          "ref": {
+            "page": 1
+          },
+          "confidence": "high",
+          "reason": "the price in the source is a placeholder (e.g. '8.xx'); enter the real price",
+          "needs_decision": true
+        },
+        "property_id": {
+          "status": "found",
+          "source": "label",
+          "evidence": "ID: PROP-PHK-001",
+          "ref": {
+            "page": 1
+          },
+          "confidence": "high",
+          "needs_decision": false
+        },
+        "project_name": {
+          "status": "found",
+          "source": "label",
+          "evidence": "PROJEKT: AILEEN RESIDENCE BANGTAO",
+          "ref": {
+            "page": 2
+          },
+          "confidence": "high",
+          "needs_decision": false
+        },
+        "address": {
+          "status": "found",
+          "source": "label",
+          "evidence": "LOKALIZACJA: BANG TAO, PHUKET",
+          "ref": {
+            "page": 2
+          },
+          "confidence": "high",
+          "needs_decision": false
+        },
+        "status": {
+          "status": "found",
+          "source": "label",
+          "evidence": "STATUS BUDOWY → Under construction",
+          "ref": {
+            "page": 3
+          },
+          "confidence": "high",
+          "needs_decision": false
+        },
+        "bedrooms_min": {
+          "status": "found",
+          "source": "label",
+          "evidence": "SYPIALNIE → 2–3",
+          "ref": {
+            "page": 3
+          },
+          "confidence": "high",
+          "needs_decision": false
+        },
+        "bedrooms_max": {
+          "status": "found",
+          "source": "label",
+          "evidence": "SYPIALNIE → 2–3",
+          "ref": {
+            "page": 3
+          },
+          "confidence": "high",
+          "needs_decision": false
+        },
+        "bedrooms_display": {
+          "status": "found",
+          "source": "label",
+          "evidence": "SYPIALNIE → 2–3",
+          "ref": {
+            "page": 3
+          },
+          "confidence": "high",
+          "needs_decision": false
+        },
+        "bathrooms": {
+          "status": "found",
+          "source": "label",
+          "evidence": "ŁAZIENKI → 3 Łazienki",
+          "ref": {
+            "page": 3
+          },
+          "confidence": "high",
+          "needs_decision": false
+        },
+        "has_pool": {
+          "status": "found",
+          "source": "label",
+          "evidence": "PRYWATNY BASEN → Tak (System ze słoną wodą)",
+          "ref": {
+            "page": 3
+          },
+          "confidence": "high",
+          "needs_decision": false
+        },
+        "ownership_type": {
+          "status": "found",
+          "source": "label",
+          "evidence": "FORMA WŁASNOŚCI → Leasehold / Freehold available",
+          "ref": {
+            "page": 3
+          },
+          "confidence": "high",
+          "needs_decision": false
+        },
+        "developer_name": {
+          "status": "found",
+          "source": "label",
+          "evidence": "DEWELOPER → Aileen Residence",
+          "ref": {
+            "page": 3
+          },
+          "confidence": "high",
+          "needs_decision": false
+        },
+        "property_name": {
+          "status": "found",
+          "source": "llm",
+          "evidence": "Executive Brief: Aileen Residence Bangtao",
+          "ref": {
+            "page": 2
+          },
+          "confidence": "medium",
+          "needs_decision": false
+        },
+        "property_type": {
+          "status": "found",
+          "source": "llm",
+          "evidence": "A complex of 54 villas in Bang Tao, completion Q4 2027",
+          "ref": {
+            "page": 2
+          },
+          "confidence": "medium",
+          "needs_decision": false
+        },
+        "description": {
+          "status": "found",
+          "source": "llm",
+          "evidence": "A complex of 54 villas in Bang Tao, completion Q4 2027.",
+          "ref": {
+            "page": 2
+          },
+          "confidence": "medium",
+          "needs_decision": false
+        },
+        "country": {
+          "status": "found",
+          "source": "llm",
+          "evidence": "BANG TAO • PHUKET • VARSOVIA ESTATE\nTHAILAND.",
+          "ref": {
+            "page": 1
+          },
+          "confidence": "medium",
+          "needs_decision": false
+        },
+        "province": {
+          "status": "found",
+          "source": "llm",
+          "evidence": "Located in Bang Tao, Phuket",
+          "ref": {
+            "page": 2
+          },
+          "confidence": "medium",
+          "needs_decision": false
+        },
+        "district": {
+          "status": "found",
+          "source": "llm",
+          "evidence": "Located in Bang Tao, Phuket",
+          "ref": {
+            "page": 2
+          },
+          "confidence": "medium",
+          "needs_decision": false
+        },
+        "currency": {
+          "status": "found",
+          "source": "llm",
+          "evidence": "from 8.xx million THB",
+          "ref": {
+            "page": 1
+          },
+          "confidence": "medium",
+          "needs_decision": false
+        },
+        "amenities": {
+          "status": "found",
+          "source": "llm",
+          "evidence": "24/7 GATED SECURITY & CCTV",
+          "ref": {
+            "page": 5
+          },
+          "confidence": "medium",
+          "needs_decision": false
+        }
+      },
+      "missing_required": [
+        "price"
+      ],
+      "validation_errors": {
+        "price": "price_numeric_min (> 0) or price_display is required"
+      },
+      "conflicts": [],
+      "duplicate_of": null,
+      "duplicates": [],
+      "existing_match": null,
+      "changes": [
+        {
+          "field": "project_name",
+          "current": null,
+          "proposed": "AILEEN RESIDENCE BANGTAO"
+        },
+        {
+          "field": "address",
+          "current": null,
+          "proposed": "BANG TAO, PHUKET"
+        },
+        {
+          "field": "status",
+          "current": null,
+          "proposed": "Under construction"
+        },
+        {
+          "field": "bedrooms_min",
+          "current": null,
+          "proposed": 2
+        },
+        {
+          "field": "bedrooms_max",
+          "current": null,
+          "proposed": 3
+        },
+        {
+          "field": "bathrooms",
+          "current": null,
+          "proposed": 3
+        },
+        {
+          "field": "has_pool",
+          "current": null,
+          "proposed": true
+        },
+        {
+          "field": "ownership_type",
+          "current": null,
+          "proposed": "Leasehold / Freehold available"
+        },
+        {
+          "field": "developer_name",
+          "current": null,
+          "proposed": "Aileen Residence"
+        },
+        {
+          "field": "property_name",
+          "current": null,
+          "proposed": "Aileen Residence Bangtao"
+        },
+        {
+          "field": "property_type",
+          "current": null,
+          "proposed": "Villa"
+        },
+        {
+          "field": "country",
+          "current": null,
+          "proposed": "Thailand"
+        },
+        {
+          "field": "province",
+          "current": null,
+          "proposed": "Phuket"
+        },
+        {
+          "field": "district",
+          "current": null,
+          "proposed": "Bang Tao"
+        },
+        {
+          "field": "currency",
+          "current": null,
+          "proposed": "THB"
+        }
+      ],
+      "image_references": [
+        {
+          "drive_file_id": "1nu7JC9EfxXtDpUv7G6-rLDdqGTmqTQ0u",
+          "file_name": "Varsovia_Estate_Property_Aileen_Residence_Bangtao_20261030_142552.pdf",
+          "name": "FormXob.82703036688fafe8edbb5d247bf4ef28.png",
+          "ref": {
+            "page": 1
+          }
+        },
+        {
+          "drive_file_id": "1nu7JC9EfxXtDpUv7G6-rLDdqGTmqTQ0u",
+          "file_name": "Varsovia_Estate_Property_Aileen_Residence_Bangtao_20261030_142552.pdf",
+          "name": "FormXob.c42fddc75962e9ba5b583e8f31b76c7a.png",
+          "ref": {
+            "page": 1
+          }
+        },
+        {
+          "drive_file_id": "1nu7JC9EfxXtDpUv7G6-rLDdqGTmqTQ0u",
+          "file_name": "Varsovia_Estate_Property_Aileen_Residence_Bangtao_20261030_142552.pdf",
+          "name": "FormXob.82703036688fafe8edbb5d247bf4ef28.png",
+          "ref": {
+            "page": 2
+          }
+        },
+        {
+          "drive_file_id": "1nu7JC9EfxXtDpUv7G6-rLDdqGTmqTQ0u",
+          "file_name": "Varsovia_Estate_Property_Aileen_Residence_Bangtao_20261030_142552.pdf",
+          "name": "FormXob.82703036688fafe8edbb5d247bf4ef28.png",
+          "ref": {
+            "page": 3
+          }
+        },
+        {
+          "drive_file_id": "1nu7JC9EfxXtDpUv7G6-rLDdqGTmqTQ0u",
+          "file_name": "Varsovia_Estate_Property_Aileen_Residence_Bangtao_20261030_142552.pdf",
+          "name": "FormXob.c42fddc75962e9ba5b583e8f31b76c7a.png",
+          "ref": {
+            "page": 3
+          }
+        },
+        {
+          "drive_file_id": "1nu7JC9EfxXtDpUv7G6-rLDdqGTmqTQ0u",
+          "file_name": "Varsovia_Estate_Property_Aileen_Residence_Bangtao_20261030_142552.pdf",
+          "name": "FormXob.82703036688fafe8edbb5d247bf4ef28.png",
+          "ref": {
+            "page": 4
+          }
+        },
+        {
+          "drive_file_id": "1nu7JC9EfxXtDpUv7G6-rLDdqGTmqTQ0u",
+          "file_name": "Varsovia_Estate_Property_Aileen_Residence_Bangtao_20261030_142552.pdf",
+          "name": "FormXob.c42fddc75962e9ba5b583e8f31b76c7a.png",
+          "ref": {
+            "page": 4
+          }
+        },
+        {
+          "drive_file_id": "1nu7JC9EfxXtDpUv7G6-rLDdqGTmqTQ0u",
+          "file_name": "Varsovia_Estate_Property_Aileen_Residence_Bangtao_20261030_142552.pdf",
+          "name": "FormXob.82703036688fafe8edbb5d247bf4ef28.png",
+          "ref": {
+            "page": 5
+          }
+        },
+        {
+          "drive_file_id": "1nu7JC9EfxXtDpUv7G6-rLDdqGTmqTQ0u",
+          "file_name": "Varsovia_Estate_Property_Aileen_Residence_Bangtao_20261030_142552.pdf",
+          "name": "FormXob.82703036688fafe8edbb5d247bf4ef28.png",
+          "ref": {
+            "page": 6
+          }
+        },
+        {
+          "drive_file_id": "1nu7JC9EfxXtDpUv7G6-rLDdqGTmqTQ0u",
+          "file_name": "Varsovia_Estate_Property_Aileen_Residence_Bangtao_20261030_142552.pdf",
+          "name": "FormXob.82703036688fafe8edbb5d247bf4ef28.png",
+          "ref": {
+            "page": 7
+          }
+        },
+        {
+          "drive_file_id": "1nu7JC9EfxXtDpUv7G6-rLDdqGTmqTQ0u",
+          "file_name": "Varsovia_Estate_Property_Aileen_Residence_Bangtao_20261030_142552.pdf",
+          "name": "FormXob.82703036688fafe8edbb5d247bf4ef28.png",
+          "ref": {
+            "page": 8
+          }
+        }
+      ],
+      "approval": null,
+      "websites": [
+        "tajlandia.com"
+      ]
+    }
+  ],
+  "note": "Draft-only run of the Drive ingestion pipeline on the public folder 1jhjvGFkpSYkYR2_Ti6USE6J0nD3snfJ3 (files downloaded without credentials). In-memory job store, empty SQLite catalogue, no Postgres/Firestore writes. OCR and extraction via Claude (only api.anthropic.com reachable)."
+}

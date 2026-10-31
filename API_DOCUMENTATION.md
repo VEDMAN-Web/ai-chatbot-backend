@@ -22,6 +22,7 @@
 14. [Property Inventory Management & Batch Undo (C1, C2)](#14-property-inventory-management-and-batch-undo-c1-c2)
 15. [System Diagnostics, Audit Logs & Maintenance (C3, C4)](#15-system-diagnostics-audit-logs-and-maintenance-c3-c4)
 16. [Standard Error Responses & Status Codes](#16-standard-error-responses--status-codes)
+17. [Google Drive Folder Bulk Ingestion (All Formats)](#17-google-drive-folder-bulk-ingestion-all-formats)
 
 ---
 
@@ -2159,3 +2160,32 @@ The API standardizes error outputs following RFC 7807 problem details:
 | **`422 Unprocessable`** | Schema Violation | Request parameters failed type or constraint checks. |
 | **`500 Internal Error`** | Server Error | Unhandled backend exception (automatically audited to Firestore). |
 | **`503 Unavailable`** | Service Down | Staging PostgreSQL or Firestore unreachable. |
+
+---
+
+## 17. GOOGLE DRIVE FOLDER BULK INGESTION (ALL FORMATS)
+
+Admin / super admin only. Imports every supported file (PDF, Word, Google Docs, Excel, CSV, Google Sheets, PowerPoint,
+Google Slides, TXT/MD/RTF, HTML, JSON, XML, images via optional OCR, ZIP) from a Google Drive folder into **draft**
+property records. Nothing is written to Postgres or Firestore until an admin approves with `"confirm": true`.
+Full reference, statuses, request/response examples, cURL and QA results: `GOOGLE_DRIVE_BULK_INGESTION_QA.md`.
+
+| Method | Path | Purpose |
+|:---|:---|:---|
+| `GET` | `/api/v1/admin/drive-ingestion/formats` | Supported / unsupported formats and limits |
+| `POST` | `/api/v1/admin/drive-ingestion/jobs` | Validate folder, discover files, start processing (202; `Idempotency-Key` header supported) |
+| `GET` | `/api/v1/admin/drive-ingestion/jobs` | Caller's jobs |
+| `GET` | `/api/v1/admin/drive-ingestion/jobs/{job_id}` | Job, batch and file-count progress |
+| `GET` | `/api/v1/admin/drive-ingestion/jobs/{job_id}/files` | Per-file status and reason (`?status=`) |
+| `GET` | `/api/v1/admin/drive-ingestion/jobs/{job_id}/events` | Server-sent progress events |
+| `POST` | `/api/v1/admin/drive-ingestion/jobs/{job_id}/retry` | Re-process failed files only |
+| `POST` | `/api/v1/admin/drive-ingestion/jobs/{job_id}/resume` | Continue an interrupted job |
+| `POST` | `/api/v1/admin/drive-ingestion/jobs/{job_id}/cancel` | Stop processing |
+| `GET` | `/api/v1/admin/drive-ingestion/jobs/{job_id}/drafts` | Review data: values, evidence, source reference, confidence, validation, duplicates, conflicts, proposed action |
+| `GET` | `/api/v1/admin/drive-ingestion/jobs/{job_id}/drafts/{draft_id}` | One draft |
+| `PATCH` | `/api/v1/admin/drive-ingestion/jobs/{job_id}/drafts/{draft_id}` | Correct values, accept flagged values, set action, reject |
+| `POST` | `/api/v1/admin/drive-ingestion/jobs/{job_id}/approve` | Save selected / all ready drafts (requires `"confirm": true`) |
+| `POST` | `/api/v1/admin/drive-ingestion/jobs/{job_id}/rollback` | Undo every listing the job saved (requires `"confirm": true`) |
+
+Admin chat: paste a Drive folder link to start; then `import status`, `show import drafts`, `retry failed import
+files`, `approve import` (stages one pending action) and `confirm`.

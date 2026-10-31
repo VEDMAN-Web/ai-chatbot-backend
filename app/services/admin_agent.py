@@ -1634,6 +1634,15 @@ def _process_admin_chat_inner(
     if target_action and getattr(target_action, "status", None) != ACTION_STATUS_PENDING:
         target_action = open_pending[0] if open_pending else None
 
+    # Google Drive folder import (all formats): a folder link starts a draft-only job; follow-ups show progress,
+    # drafts, retry, and stage approval for the normal confirm step. Runs before URL import so a Drive folder link
+    # is never fetched as a public web page.
+    if clean_message and staff_user is not None:
+        from app.services.admin_drive_ingest_chat import try_handle_drive_ingest_turn
+        drive_ingest_turn = try_handle_drive_ingest_turn(db, conv, clean_message, staff_user, active_lang)
+        if drive_ingest_turn is not None:
+            return drive_ingest_turn
+
     # URL import is chat-only: a pasted link or an edit of that draft never reaches other write tools.
     if clean_message and staff_user is not None and not attached_images:
         from app.services.property_web_ingest import try_handle_property_url_turn
@@ -2012,6 +2021,9 @@ def _process_admin_chat_inner(
                         "\n\n\u26a0\ufe0f **Saved in the database, but the Firestore sync failed**, so the Admin Panel list may not show this "
                         "change yet. Nothing was lost; retry, undo it, or ask a developer to re-sync."
                     )
+            elif target_action.tool_name == "approve_drive_ingestion":
+                from app.services.admin_drive_ingest_chat import format_approval_result
+                reply_text = format_approval_result(raw_exec if isinstance(raw_exec, dict) else {})
             elif target_action.tool_name == "archive_listing":
                 _res = raw_exec if isinstance(raw_exec, dict) else {}
                 _stores = _res.get("stores") or {}

@@ -1,0 +1,1522 @@
+{
+  "generated_at": "2026-10-31T10:07:32Z",
+  "environment": "TestClient + simulated Google Drive (FakeDrive) + SQLite in memory + fake Firestore; external network and configured databases blocked",
+  "postgres_rows_after_approval": [
+    [
+      "bang-tao-beach-house",
+      "29000000.00"
+    ],
+    [
+      "chalong-bay-townhouse",
+      "11200000.00"
+    ],
+    [
+      "chaweng-studio",
+      "3500000.00"
+    ],
+    [
+      "kamala-sky-villa",
+      "45500000.00"
+    ],
+    [
+      "karon-hill-villa",
+      "19000000.00"
+    ],
+    [
+      "lamai-garden-condo",
+      "8500000.00"
+    ],
+    [
+      "layan-hills-estate",
+      "28000000.00"
+    ],
+    [
+      "maenam-bay-villa",
+      "22000000.00"
+    ],
+    [
+      "patong-loft",
+      "4200000.00"
+    ],
+    [
+      "rawai-1",
+      "18500000.00"
+    ],
+    [
+      "surin-beach-residence",
+      "15000000.00"
+    ]
+  ],
+  "firestore_projects_after_approval": [
+    "bang-tao-beach-house",
+    "chalong-bay-townhouse",
+    "chaweng-studio",
+    "kamala-sky-villa",
+    "karon-hill-villa",
+    "lamai-garden-condo",
+    "layan-hills-estate",
+    "maenam-bay-villa",
+    "patong-loft",
+    "rawai-1",
+    "surin-beach-residence"
+  ],
+  "postgres_rows_after_rollback": [
+    [
+      "bang-tao-beach-house",
+      "28000000.00"
+    ]
+  ],
+  "calls": [
+    {
+      "request": {
+        "method": "GET",
+        "path": "/api/v1/admin/drive-ingestion/formats",
+        "params": null,
+        "headers": null,
+        "body": null
+      },
+      "status": 200,
+      "elapsed_ms": 418,
+      "response": {
+        "supported_formats": [
+          "pdf",
+          "docx",
+          "google_doc",
+          "xlsx",
+          "xls",
+          "csv",
+          "google_sheet",
+          "pptx",
+          "google_slides",
+          "txt/md/rtf",
+          "html",
+          "json",
+          "xml",
+          "image",
+          "zip"
+        ],
+        "unsupported": [
+          {
+            "format": "doc",
+            "reason": "Legacy Word 97-2003 (.doc) files cannot be parsed reliably. Save it as .docx (or open it as a Google Doc) and re-run."
+          },
+          {
+            "format": "ppt",
+            "reason": "Legacy PowerPoint 97-2003 (.ppt) files cannot be parsed reliably. Save it as .pptx (or open it in Google Slides) and re-run."
+          },
+          {
+            "format": "docm",
+            "reason": "Macro-enabled Word files (.docm) are not processed. Macros are never run; save it as .docx and re-run."
+          }
+        ],
+        "ocr_enabled": false,
+        "limits": {
+          "default_batch_size": 10,
+          "max_batch_size": 25,
+          "max_file_bytes": 26214400
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/api/v1/admin/drive-ingestion/jobs",
+        "params": null,
+        "headers": {
+          "Idempotency-Key": "qa-run-1"
+        },
+        "body": {
+          "folder_url": "https://drive.google.com/drive/folders/rootFolder000001",
+          "recursive": true,
+          "batch_size": 4
+        }
+      },
+      "status": 202,
+      "elapsed_ms": 833,
+      "response": {
+        "job_id": "dij_e5df0061af9a4c05",
+        "folder_name": "Phuket Listings",
+        "status": "partially_completed",
+        "total_files": 21,
+        "subfolders": 2,
+        "counts_by_format": {
+          "Excel (.xlsx)": 1,
+          "Word (.docx)": 1,
+          "Google Docs": 1,
+          "Google Sheets": 1,
+          "Google Slides": 1,
+          "Word 97-2003 (.doc)": 1,
+          "PDF": 6,
+          "JSON": 1,
+          "XML": 1,
+          "Image": 1,
+          "ZIP archive": 1,
+          "CSV": 1,
+          "HTML": 1,
+          "Markdown (.md)": 1,
+          "Unsupported": 1,
+          "Text (.txt)": 1
+        },
+        "batch_size": 4,
+        "batches_total": 6,
+        "counts": {
+          "pending": 0,
+          "processing": 0,
+          "completed": 12,
+          "partially_completed": 0,
+          "failed": 2,
+          "skipped": 7
+        },
+        "progress_percent": 100.0,
+        "draft_counts": {
+          "total": 14,
+          "by_action": {
+            "manual_review": 3,
+            "create": 8,
+            "skip": 2,
+            "update": 1
+          },
+          "by_review_status": {
+            "pending_review": 14
+          }
+        },
+        "ocr_enabled": false
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/api/v1/admin/drive-ingestion/jobs",
+        "params": null,
+        "headers": {
+          "Idempotency-Key": "qa-run-1"
+        },
+        "body": {
+          "folder_url": "https://drive.google.com/drive/folders/rootFolder000001",
+          "batch_size": 4
+        }
+      },
+      "status": 202,
+      "elapsed_ms": 351,
+      "response": {
+        "job_id": "dij_33b41b248df94139",
+        "reused": null,
+        "status": "partially_completed"
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "path": "/api/v1/admin/drive-ingestion/jobs/dij_e5df0061af9a4c05",
+        "params": null,
+        "headers": null,
+        "body": null
+      },
+      "status": 200,
+      "elapsed_ms": 14,
+      "response": {
+        "job_id": "dij_e5df0061af9a4c05",
+        "status": "partially_completed",
+        "progress_percent": 100.0,
+        "files_done": 21,
+        "total_files": 21,
+        "counts": {
+          "pending": 0,
+          "processing": 0,
+          "completed": 12,
+          "partially_completed": 0,
+          "failed": 2,
+          "skipped": 7
+        },
+        "batches_done": 6,
+        "batches_total": 6,
+        "batches": [
+          {
+            "index": 0,
+            "total": 4,
+            "pending": 0,
+            "processing": 0,
+            "completed": 4,
+            "partially_completed": 0,
+            "failed": 0,
+            "skipped": 0,
+            "status": "done"
+          },
+          {
+            "index": 1,
+            "total": 4,
+            "pending": 0,
+            "processing": 0,
+            "completed": 1,
+            "partially_completed": 0,
+            "failed": 0,
+            "skipped": 3,
+            "status": "done"
+          },
+          {
+            "index": 2,
+            "total": 4,
+            "pending": 0,
+            "processing": 0,
+            "completed": 2,
+            "partially_completed": 0,
+            "failed": 0,
+            "skipped": 2,
+            "status": "done"
+          },
+          {
+            "index": 3,
+            "total": 4,
+            "pending": 0,
+            "processing": 0,
+            "completed": 1,
+            "partially_completed": 0,
+            "failed": 2,
+            "skipped": 1,
+            "status": "done"
+          },
+          {
+            "index": 4,
+            "total": 4,
+            "pending": 0,
+            "processing": 0,
+            "completed": 3,
+            "partially_completed": 0,
+            "failed": 0,
+            "skipped": 1,
+            "status": "done"
+          },
+          {
+            "index": 5,
+            "total": 1,
+            "pending": 0,
+            "processing": 0,
+            "completed": 1,
+            "partially_completed": 0,
+            "failed": 0,
+            "skipped": 0,
+            "status": "done"
+          }
+        ],
+        "draft_counts": {
+          "total": 14,
+          "by_action": {
+            "manual_review": 3,
+            "create": 8,
+            "skip": 2,
+            "update": 1
+          },
+          "by_review_status": {
+            "pending_review": 14
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "path": "/api/v1/admin/drive-ingestion/jobs/dij_e5df0061af9a4c05/files",
+        "params": null,
+        "headers": null,
+        "body": null
+      },
+      "status": 200,
+      "elapsed_ms": 16,
+      "response": [
+        {
+          "name": "listings.xlsx",
+          "format_label": "Excel (.xlsx)",
+          "detected_format": "xlsx",
+          "batch_index": 0,
+          "status": "completed",
+          "reason": null,
+          "attempts": 1,
+          "draft_count": 2
+        },
+        {
+          "name": "Kamala brochure.docx",
+          "format_label": "Word (.docx)",
+          "detected_format": "docx",
+          "batch_index": 0,
+          "status": "completed",
+          "reason": null,
+          "attempts": 1,
+          "draft_count": 1
+        },
+        {
+          "name": "Surin notes",
+          "format_label": "Google Docs",
+          "detected_format": "google_doc",
+          "batch_index": 0,
+          "status": "completed",
+          "reason": null,
+          "attempts": 1,
+          "draft_count": 1
+        },
+        {
+          "name": "Price list",
+          "format_label": "Google Sheets",
+          "detected_format": "google_sheet",
+          "batch_index": 0,
+          "status": "completed",
+          "reason": null,
+          "attempts": 1,
+          "draft_count": 1
+        },
+        {
+          "name": "Deck",
+          "format_label": "Google Slides",
+          "detected_format": "google_slides",
+          "batch_index": 1,
+          "status": "completed",
+          "reason": null,
+          "attempts": 1,
+          "draft_count": 1
+        },
+        {
+          "name": "old.doc",
+          "format_label": "Word 97-2003 (.doc)",
+          "detected_format": null,
+          "batch_index": 1,
+          "status": "skipped",
+          "reason": "Legacy Word 97-2003 (.doc) files cannot be parsed reliably. Save it as .docx (or open it as a Google Doc) and re-run.",
+          "attempts": 0,
+          "draft_count": null
+        },
+        {
+          "name": "scan.pdf",
+          "format_label": "PDF",
+          "detected_format": "pdf",
+          "batch_index": 1,
+          "status": "skipped",
+          "reason": "The PDF is scanned or image-only and has no text layer. OCR is not enabled (DRIVE_INGEST_OCR_ENABLED), so nothing was read.",
+          "attempts": 1,
+          "draft_count": 0
+        },
+        {
+          "name": "huge.pdf",
+          "format_label": "PDF",
+          "detected_format": null,
+          "batch_index": 1,
+          "status": "skipped",
+          "reason": "The file is 524,288,000 bytes, above the 26,214,400-byte limit.",
+          "attempts": 0,
+          "draft_count": null
+        },
+        {
+          "name": "locked.pdf",
+          "format_label": "PDF",
+          "detected_format": null,
+          "batch_index": 2,
+          "status": "skipped",
+          "reason": "The owner has disabled downloading for this file.",
+          "attempts": 0,
+          "draft_count": null
+        },
+        {
+          "name": "feed.json",
+          "format_label": "JSON",
+          "detected_format": "json",
+          "batch_index": 2,
+          "status": "completed",
+          "reason": null,
+          "attempts": 1,
+          "draft_count": 2
+        },
+        {
+          "name": "feed.xml",
+          "format_label": "XML",
+          "detected_format": "xml",
+          "batch_index": 2,
+          "status": "completed",
+          "reason": null,
+          "attempts": 1,
+          "draft_count": 2
+        },
+        {
+          "name": "photo.png",
+          "format_label": "Image",
+          "detected_format": "image",
+          "batch_index": 2,
+          "status": "skipped",
+          "reason": "Images need OCR, which is not enabled (DRIVE_INGEST_OCR_ENABLED), so no text was read.",
+          "attempts": 1,
+          "draft_count": 0
+        },
+        {
+          "name": "archive.zip",
+          "format_label": "ZIP archive",
+          "detected_format": "zip",
+          "batch_index": 3,
+          "status": "completed",
+          "reason": null,
+          "attempts": 1,
+          "draft_count": 1
+        },
+        {
+          "name": "invoice.pdf",
+          "format_label": "PDF",
+          "detected_format": "pdf",
+          "batch_index": 3,
+          "status": "skipped",
+          "reason": "The file content is an executable or script; it was not opened.",
+          "attempts": 1,
+          "draft_count": 0
+        },
+        {
+          "name": "corrupted.pdf",
+          "format_label": "PDF",
+          "detected_format": "pdf",
+          "batch_index": 3,
+          "status": "failed",
+          "reason": "The PDF could not be opened (PdfStreamError); it may be corrupted.",
+          "attempts": 1,
+          "draft_count": 0
+        },
+        {
+          "name": "flaky.csv",
+          "format_label": "CSV",
+          "detected_format": null,
+          "batch_index": 3,
+          "status": "failed",
+          "reason": "Google Drive is temporarily unavailable (503) while downloading the file.",
+          "attempts": 1,
+          "draft_count": null
+        },
+        {
+          "name": "page.html",
+          "format_label": "HTML",
+          "detected_format": "html",
+          "batch_index": 4,
+          "status": "completed",
+          "reason": null,
+          "attempts": 1,
+          "draft_count": 1
+        },
+        {
+          "name": "notes.md",
+          "format_label": "Markdown (.md)",
+          "detected_format": "md",
+          "batch_index": 4,
+          "status": "completed",
+          "reason": "No property data was recognised in this file.",
+          "attempts": 1,
+          "draft_count": 0
+        },
+        {
+          "name": "shortcut",
+          "format_label": "Unsupported",
+          "detected_format": null,
+          "batch_index": 4,
+          "status": "skipped",
+          "reason": "Drive shortcuts are not followed; add the target file to the folder instead.",
+          "attempts": 0,
+          "draft_count": null
+        },
+        {
+          "name": "Maenam brochure.pdf",
+          "format_label": "PDF",
+          "detected_format": "pdf",
+          "batch_index": 4,
+          "status": "completed",
+          "reason": null,
+          "attempts": 1,
+          "draft_count": 1
+        },
+        {
+          "name": "old listing.txt",
+          "format_label": "Text (.txt)",
+          "detected_format": "txt",
+          "batch_index": 5,
+          "status": "completed",
+          "reason": null,
+          "attempts": 1,
+          "draft_count": 1
+        }
+      ]
+    },
+    {
+      "request": {
+        "method": "GET",
+        "path": "/api/v1/admin/drive-ingestion/jobs/dij_e5df0061af9a4c05/drafts",
+        "params": null,
+        "headers": null,
+        "body": null
+      },
+      "status": 200,
+      "elapsed_ms": 59,
+      "response": {
+        "draft_counts": {
+          "total": 14,
+          "by_action": {
+            "manual_review": 3,
+            "create": 8,
+            "skip": 2,
+            "update": 1
+          },
+          "by_review_status": {
+            "pending_review": 14
+          }
+        },
+        "ready_to_approve": 9,
+        "drafts": [
+          {
+            "draft_id": "dd_190523fd378e030e61b2",
+            "property_id": "kamala-sky-villa",
+            "property_name": "Kamala Sky Villa",
+            "effective_action": "manual_review",
+            "action_reasons": [
+              "conflicting values between source files: price_numeric_min"
+            ],
+            "confidence": "high",
+            "missing_required": [],
+            "duplicate_of": null,
+            "source": "listings.xlsx · sheet Listings · row 2",
+            "conflicts": [
+              {
+                "field": "price_numeric_min",
+                "values": [
+                  {
+                    "value": 45000000,
+                    "source_label": "listings.xlsx · sheet Listings · row 2",
+                    "evidence": "Price (THB): 45000000"
+                  },
+                  {
+                    "value": 46000000,
+                    "source_label": "Kamala brochure.docx",
+                    "evidence": "Price: 46,000,000 THB"
+                  }
+                ]
+              }
+            ],
+            "existing_match": null
+          },
+          {
+            "draft_id": "dd_b049520375c6cedece01",
+            "property_id": "lamai-garden-condo",
+            "property_name": "Lamai Garden Condo",
+            "effective_action": "create",
+            "action_reasons": [
+              "new listing"
+            ],
+            "confidence": "high",
+            "missing_required": [],
+            "duplicate_of": null,
+            "source": "listings.xlsx · sheet Listings · row 3",
+            "conflicts": [],
+            "existing_match": null
+          },
+          {
+            "draft_id": "dd_286910e960cb62dac423",
+            "property_id": "kamala-sky-villa",
+            "property_name": "Kamala Sky Villa",
+            "effective_action": "skip",
+            "action_reasons": [
+              "duplicate of draft dd_190523fd378e030e61b2 (merged into it)"
+            ],
+            "confidence": "high",
+            "missing_required": [],
+            "duplicate_of": "dd_190523fd378e030e61b2",
+            "source": "Kamala brochure.docx",
+            "conflicts": [],
+            "existing_match": null
+          },
+          {
+            "draft_id": "dd_6eca8fbb51615a3b7bf0",
+            "property_id": "surin-beach-residence",
+            "property_name": "Surin Beach Residence",
+            "effective_action": "create",
+            "action_reasons": [
+              "new listing"
+            ],
+            "confidence": "high",
+            "missing_required": [],
+            "duplicate_of": null,
+            "source": "Surin notes",
+            "conflicts": [],
+            "existing_match": null
+          },
+          {
+            "draft_id": "dd_3b131c2f0a55e2f218a3",
+            "property_id": "chalong-bay-townhouse",
+            "property_name": "Chalong Bay Townhouse",
+            "effective_action": "create",
+            "action_reasons": [
+              "new listing"
+            ],
+            "confidence": "high",
+            "missing_required": [],
+            "duplicate_of": null,
+            "source": "Price list · sheet Prices · row 2",
+            "conflicts": [],
+            "existing_match": null
+          },
+          {
+            "draft_id": "dd_c2ff750ed2f837d62f06",
+            "property_id": "layan-hills-estate",
+            "property_name": "Layan Hills Estate",
+            "effective_action": "create",
+            "action_reasons": [
+              "new listing"
+            ],
+            "confidence": "high",
+            "missing_required": [],
+            "duplicate_of": null,
+            "source": "Deck · slide 2 · table 1 · row 2",
+            "conflicts": [],
+            "existing_match": null
+          },
+          {
+            "draft_id": "dd_52e0a2228707127a2092",
+            "property_id": "bang-tao-beach-house",
+            "property_name": "Bang Tao Beach House",
+            "effective_action": "update",
+            "action_reasons": [
+              "matches existing bang-tao-beach-house by property name; 6 field(s) differ"
+            ],
+            "confidence": "high",
+            "missing_required": [],
+            "duplicate_of": null,
+            "source": "feed.json · $.properties[0]",
+            "conflicts": [],
+            "existing_match": {
+              "property_id": "bang-tao-beach-house",
+              "name": "Bang Tao Beach House",
+              "store": "Postgres",
+              "match_by": "property name"
+            }
+          },
+          {
+            "draft_id": "dd_2d353ffa97d0830afc29",
+            "property_id": "chaweng-studio",
+            "property_name": "Chaweng Studio",
+            "effective_action": "create",
+            "action_reasons": [
+              "new listing"
+            ],
+            "confidence": "high",
+            "missing_required": [],
+            "duplicate_of": null,
+            "source": "feed.json · $.properties[1]",
+            "conflicts": [],
+            "existing_match": null
+          },
+          {
+            "draft_id": "dd_dd7e8935f50dc0d8dee0",
+            "property_id": "rawai-1",
+            "property_name": "Rawai Hill Villa",
+            "effective_action": "create",
+            "action_reasons": [
+              "new listing"
+            ],
+            "confidence": "high",
+            "missing_required": [],
+            "duplicate_of": null,
+            "source": "feed.xml · /feed/listings/property[1]",
+            "conflicts": [],
+            "existing_match": null
+          },
+          {
+            "draft_id": "dd_21068510e349fe9a4325",
+            "property_id": "rawai-2",
+            "property_name": "Rawai Hill Villa B",
+            "effective_action": "manual_review",
+            "action_reasons": [
+              "needs a decision: price_numeric_min, price_display"
+            ],
+            "confidence": "high",
+            "missing_required": [
+              "price"
+            ],
+            "duplicate_of": null,
+            "source": "feed.xml · /feed/listings/property[2]",
+            "conflicts": [],
+            "existing_match": null
+          },
+          {
+            "draft_id": "dd_6794b3a74e30dd6f88cd",
+            "property_id": "karon-hill-villa",
+            "property_name": "Karon Hill Villa",
+            "effective_action": "create",
+            "action_reasons": [
+              "new listing"
+            ],
+            "confidence": "high",
+            "missing_required": [],
+            "duplicate_of": null,
+            "source": "archive.zip · inner.csv · sheet csv · row 2",
+            "conflicts": [],
+            "existing_match": null
+          },
+          {
+            "draft_id": "dd_6514fd99c0cc2c6895f9",
+            "property_id": "kata-rocks-suite",
+            "property_name": "Kata Rocks Suite",
+            "effective_action": "manual_review",
+            "action_reasons": [
+              "new listing",
+              "instruction-like text was found in the document and ignored"
+            ],
+            "confidence": "high",
+            "missing_required": [],
+            "duplicate_of": null,
+            "source": "page.html",
+            "conflicts": [],
+            "existing_match": null
+          },
+          {
+            "draft_id": "dd_1c34d90161f16fe9b2e9",
+            "property_id": "maenam-bay-villa",
+            "property_name": "Maenam Bay Villa",
+            "effective_action": "create",
+            "action_reasons": [
+              "new listing"
+            ],
+            "confidence": "high",
+            "missing_required": [],
+            "duplicate_of": null,
+            "source": "Maenam brochure.pdf",
+            "conflicts": [],
+            "existing_match": null
+          },
+          {
+            "draft_id": "dd_e6af3de48d74e250a823",
+            "property_id": "lamai-garden-condo",
+            "property_name": "Lamai Garden Condo",
+            "effective_action": "skip",
+            "action_reasons": [
+              "duplicate of draft dd_b049520375c6cedece01 (merged into it)"
+            ],
+            "confidence": "high",
+            "missing_required": [],
+            "duplicate_of": "dd_b049520375c6cedece01",
+            "source": "old listing.txt",
+            "conflicts": [],
+            "existing_match": null
+          }
+        ]
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "path": "/api/v1/admin/drive-ingestion/jobs/dij_e5df0061af9a4c05/drafts",
+        "params": {
+          "action": "create"
+        },
+        "headers": null,
+        "body": null
+      },
+      "status": 200,
+      "elapsed_ms": 38,
+      "response": [
+        {
+          "draft_id": "dd_b049520375c6cedece01",
+          "job_id": "dij_e5df0061af9a4c05",
+          "property_id": "lamai-garden-condo",
+          "property_name": "Lamai Garden Condo",
+          "proposed_action": "create",
+          "action_override": null,
+          "effective_action": "create",
+          "action_reasons": [
+            "new listing"
+          ],
+          "review_status": "pending_review",
+          "confidence": "high",
+          "confidence_score": 0.95,
+          "source": {
+            "file_name": "listings.xlsx",
+            "drive_file_id": "file_xlsx_01",
+            "file_format": "xlsx",
+            "reference": {
+              "sheet": "Listings",
+              "row": 3
+            },
+            "label": "listings.xlsx · sheet Listings · row 3",
+            "link": "https://drive.google.com/file/d/file_xlsx_01/view"
+          },
+          "fields": {
+            "address": null,
+            "amenities": [
+              "Pool",
+              "Parking"
+            ],
+            "area_display": "45-68",
+            "area_sqm_max": 68.0,
+            "area_sqm_min": 45.0,
+            "area_unit": "sqm",
+            "availability": null,
+            "bathrooms": 1,
+            "beach_access": null,
+            "bedrooms_display": "1-2",
+            "bedrooms_max": 2,
+            "bedrooms_min": 1,
+            "city": null,
+            "country": "Thailand",
+            "currency": "THB",
+            "description": null,
+            "developer_name": null,
+            "district": "Lamai",
+            "furnishing": null,
+            "has_pool": null,
+            "images": null,
+            "ownership_type": null,
+            "price_display": "8,500,000",
+            "price_numeric_max": null,
+            "price_numeric_min": 8500000,
+            "project_name": null,
+            "property_id": "lamai-garden-condo",
+            "property_name": "Lamai Garden Condo",
+            "property_type": "Condominium",
+            "province": "Surat Thani",
+            "sea_view": null,
+            "status": "Under construction"
+          },
+          "evidence": {
+            "property_id": {
+              "status": "found",
+              "source": "column",
+              "evidence": "Property ID: lamai-garden-condo",
+              "ref": {
+                "sheet": "Listings",
+                "row": 3
+              },
+              "confidence": "high",
+              "needs_decision": false
+            },
+            "property_name": {
+              "status": "found",
+              "source": "column",
+              "evidence": "Property Name: Lamai Garden Condo",
+              "ref": {
+                "sheet": "Listings",
+                "row": 3
+              },
+              "confidence": "high",
+              "needs_decision": false
+            },
+            "property_type": {
+              "status": "found",
+              "source": "column",
+              "evidence": "Type: Condo",
+              "ref": {
+                "sheet": "Listings",
+                "row": 3
+              },
+              "confidence": "high",
+              "needs_decision": false
+            },
+            "status": {
+              "status": "found",
+              "source": "column",
+              "evidence": "Status: Under construction",
+              "ref": {
+                "sheet": "Listings",
+                "row": 3
+              },
+              "confidence": "high",
+              "needs_decision": false
+            },
+            "province": {
+              "status": "found",
+              "source": "column",
+              "evidence": "Province: Surat Thani",
+              "ref": {
+                "sheet": "Listings",
+                "row": 3
+              },
+              "confidence": "high",
+              "needs_decision": false
+            },
+            "district": {
+              "status": "found",
+              "source": "column",
+              "evidence": "District: Lamai",
+              "ref": {
+                "sheet": "Listings",
+                "row": 3
+              },
+              "confidence": "high",
+              "needs_decision": false
+            },
+            "price_numeric_min": {
+              "status": "found",
+              "source": "column",
+              "evidence": "Price (THB): 8,500,000",
+              "ref": {
+                "sheet": "Listings",
+                "row": 3
+              },
+              "confidence": "high",
+              "needs_decision": false
+            },
+            "price_display": {
+              "status": "found",
+              "source": "column",
+              "evidence": "Price (THB): 8,500,000",
+              "ref": {
+                "sheet": "Listings",
+                "row": 3
+              },
+              "confidence": "high",
+              "needs_decision": false
+            },
+            "currency": {
+              "status": "inferred",
+              "source": "column",
+              "evidence": "Price (THB): 8,500,000",
+              "ref": {
+                "sheet": "Listings",
+                "row": 3
+              },
+              "confidence": "high",
+              "reason": "currency taken from the column header",
+              "needs_decision": false
+            },
+            "bedrooms_min": {
+              "status": "found",
+              "source": "column",
+              "evidence": "Bedrooms: 1-2",
+              "ref": {
+                "sheet": "Listings",
+                "row": 3
+              },
+              "confidence": "high",
+              "needs_decision": false
+            },
+            "bedrooms_max": {
+              "status": "found",
+              "source": "column",
+              "evidence": "Bedrooms: 1-2",
+              "ref": {
+                "sheet": "Listings",
+                "row": 3
+              },
+              "confidence": "high",
+              "needs_decision": false
+            },
+            "bedrooms_display": {
+              "status": "found",
+              "source": "column",
+              "evidence": "Bedrooms: 1-2",
+              "ref": {
+                "sheet": "Listings",
+                "row": 3
+              },
+              "confidence": "high",
+              "needs_decision": false
+            },
+            "bathrooms": {
+              "status": "found",
+              "source": "column",
+              "evidence": "Bathrooms: 1",
+              "ref": {
+                "sheet": "Listings",
+                "row": 3
+              },
+              "confidence": "high",
+              "needs_decision": false
+            },
+            "area_display": {
+              "status": "found",
+              "source": "column",
+              "evidence": "Area (sqm): 45-68",
+              "ref": {
+                "sheet": "Listings",
+                "row": 3
+              },
+              "confidence": "high",
+              "needs_decision": false
+            },
+            "area_unit": {
+              "status": "found",
+              "source": "column",
+              "evidence": "Area (sqm): 45-68",
+              "ref": {
+                "sheet": "Listings",
+                "row": 3
+              },
+              "confidence": "high",
+              "needs_decision": false
+            },
+            "area_sqm_min": {
+              "status": "found",
+              "source": "column",
+              "evidence": "Area (sqm): 45-68",
+              "ref": {
+                "sheet": "Listings",
+                "row": 3
+              },
+              "confidence": "high",
+              "needs_decision": false
+            },
+            "area_sqm_max": {
+              "status": "found",
+              "source": "column",
+              "evidence": "Area (sqm): 45-68",
+              "ref": {
+                "sheet": "Listings",
+                "row": 3
+              },
+              "confidence": "high",
+              "needs_decision": false
+            },
+            "amenities": {
+              "status": "found",
+              "source": "column",
+              "evidence": "Amenities: Pool; Parking",
+              "ref": {
+                "sheet": "Listings",
+                "row": 3
+              },
+              "confidence": "high",
+              "needs_decision": false
+            },
+            "country": {
+              "status": "inferred",
+              "source": "inferred",
+              "confidence": "medium",
+              "reason": "province is in Thailand",
+              "needs_decision": false
+            }
+          },
+          "missing_required": [],
+          "validation_errors": {},
+          "conflicts": [],
+          "duplicate_of": null,
+          "duplicates": [
+            {
+              "draft_id": "dd_e6af3de48d74e250a823",
+              "source_label": "old listing.txt",
+              "file_format": "txt"
+            }
+          ],
+          "existing_match": null,
+          "changes": [
+            {
+              "field": "property_name",
+              "current": null,
+              "proposed": "Lamai Garden Condo"
+            },
+            {
+              "field": "property_type",
+              "current": null,
+              "proposed": "Condominium"
+            },
+            {
+              "field": "status",
+              "current": null,
+              "proposed": "Under construction"
+            },
+            {
+              "field": "province",
+              "current": null,
+              "proposed": "Surat Thani"
+            },
+            {
+              "field": "district",
+              "current": null,
+              "proposed": "Lamai"
+            },
+            {
+              "field": "price_numeric_min",
+              "current": null,
+              "proposed": 8500000
+            },
+            {
+              "field": "currency",
+              "current": null,
+              "proposed": "THB"
+            },
+            {
+              "field": "bedrooms_min",
+              "current": null,
+              "proposed": 1
+            },
+            {
+              "field": "bedrooms_max",
+              "current": null,
+              "proposed": 2
+            },
+            {
+              "field": "bathrooms",
+              "current": null,
+              "proposed": 1
+            },
+            {
+              "field": "area_sqm_min",
+              "current": null,
+              "proposed": 45.0
+            },
+            {
+              "field": "area_sqm_max",
+              "current": null,
+              "proposed": 68.0
+            },
+            {
+              "field": "country",
+              "current": null,
+              "proposed": "Thailand"
+            }
+          ],
+          "image_references": [],
+          "approval": null,
+          "websites": [
+            "tajlandia.com"
+          ]
+        }
+      ]
+    },
+    {
+      "request": {
+        "method": "GET",
+        "path": "/api/v1/admin/drive-ingestion/jobs/dij_e5df0061af9a4c05/events",
+        "params": null,
+        "headers": null,
+        "body": null
+      },
+      "status": 200,
+      "elapsed_ms": 16,
+      "response": "event: progress\ndata: {\"status\": \"partially_completed\", \"progress_percent\": 100.0, \"files_done\": 21, \"total_files\": 21, \"counts\": {\"pending\": 0, \"processing\": 0, \"completed\": 12, \"partially_completed\": 0, \"failed\": 2, \"skipped\": 7}, \"batches_done\": 6, \"batches_total\": 6, \"current_batch\": null, \"draft_counts\": {\"total\": 14, \"by_action\": {\"manual_review\": 3, \"create\": 8, \"skip\": 2, \"update\": 1}, \"by_review_status\": {\"pending_review\": 14}}, \"error\": null}\n\nevent: done\ndata: {\"status\": \"partially_completed\", \"progress_percent\": 100.0, \"files_done\": 21, \"total_files\": 21, \"counts\": {\"pending\": 0, \"processing\": 0, \"completed\": 12, \"partially_completed\": 0, \"failed\": 2, \"skipped\": 7}, \"batches_done\": 6, \"batches_total\": 6, \"current_batch\": null, \"draft_counts\": {\"total\": 14, \"by_action\": {\"manual_review\": 3, \"create\": 8, \"skip\": 2, \"update\": 1}, \"by_review_status\": {\"pending_review\": 14}}, \"error\": null}\n\n"
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/api/v1/admin/drive-ingestion/jobs/dij_e5df0061af9a4c05/retry",
+        "params": null,
+        "headers": null,
+        "body": {}
+      },
+      "status": 200,
+      "elapsed_ms": 90,
+      "response": {
+        "requeued": [
+          "corrupted.pdf",
+          "flaky.csv"
+        ],
+        "attempts_exhausted": [],
+        "status": "partially_completed",
+        "counts": {
+          "pending": 0,
+          "processing": 0,
+          "completed": 13,
+          "partially_completed": 0,
+          "failed": 1,
+          "skipped": 7
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "PATCH",
+        "path": "/api/v1/admin/drive-ingestion/jobs/dij_e5df0061af9a4c05/drafts/dd_190523fd378e030e61b2",
+        "params": null,
+        "headers": null,
+        "body": {
+          "fields": {
+            "price_numeric_min": 45500000
+          },
+          "action": "create"
+        }
+      },
+      "status": 200,
+      "elapsed_ms": 47,
+      "response": {
+        "draft_id": "dd_190523fd378e030e61b2",
+        "effective_action": "create",
+        "action_reasons": [
+          "conflicting values between source files: price_numeric_min"
+        ],
+        "review_status": "pending_review",
+        "price_evidence": {
+          "status": "provided",
+          "source": "admin",
+          "evidence": "entered by admin@tajlandia.com",
+          "confidence": "high",
+          "needs_decision": false
+        }
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/api/v1/admin/drive-ingestion/jobs/dij_e5df0061af9a4c05/approve",
+        "params": null,
+        "headers": null,
+        "body": {
+          "all_ready": true
+        }
+      },
+      "status": 400,
+      "elapsed_ms": 17,
+      "response": {
+        "detail": "Approval needs explicit confirmation (confirm=true). Nothing was saved."
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/api/v1/admin/drive-ingestion/jobs/dij_e5df0061af9a4c05/approve",
+        "params": null,
+        "headers": null,
+        "body": {
+          "all_ready": true,
+          "confirm": true
+        }
+      },
+      "status": 200,
+      "elapsed_ms": 439,
+      "response": {
+        "job_id": "dij_e5df0061af9a4c05",
+        "results": [
+          {
+            "draft_id": "dd_190523fd378e030e61b2",
+            "saved": true,
+            "operation_id": "crud_721aa6b55d6c",
+            "property_id": "kamala-sky-villa",
+            "action": "create",
+            "approved_by": "admin@tajlandia.com",
+            "approved_at": "2026-10-31T10:07:31Z",
+            "message": "Saved: Kamala Sky Villa (kamala-sky-villa) - verified in database. guessed: currency, country, area. provided by admin: price_numeric_min. Undo operation id: crud_721aa6b55d6c. Next: open the property, generate a brochure, or paste another URL.",
+            "sql": true,
+            "firestore": true
+          },
+          {
+            "draft_id": "dd_b049520375c6cedece01",
+            "saved": true,
+            "operation_id": "crud_4e1635dfa1db",
+            "property_id": "lamai-garden-condo",
+            "action": "create",
+            "approved_by": "admin@tajlandia.com",
+            "approved_at": "2026-10-31T10:07:31Z",
+            "message": "Saved: Lamai Garden Condo (lamai-garden-condo) - verified in database. guessed: currency, country. Undo operation id: crud_4e1635dfa1db. Next: open the property, generate a brochure, or paste another URL.",
+            "sql": true,
+            "firestore": true
+          },
+          {
+            "draft_id": "dd_6eca8fbb51615a3b7bf0",
+            "saved": true,
+            "operation_id": "crud_d819b4de9aab",
+            "property_id": "surin-beach-residence",
+            "action": "create",
+            "approved_by": "admin@tajlandia.com",
+            "approved_at": "2026-10-31T10:07:31Z",
+            "message": "Saved: Surin Beach Residence (surin-beach-residence) - verified in database. guessed: country. Undo operation id: crud_d819b4de9aab. Next: open the property, generate a brochure, or paste another URL.",
+            "sql": true,
+            "firestore": true
+          },
+          {
+            "draft_id": "dd_3b131c2f0a55e2f218a3",
+            "saved": true,
+            "operation_id": "crud_0afee7d830fe",
+            "property_id": "chalong-bay-townhouse",
+            "action": "create",
+            "approved_by": "admin@tajlandia.com",
+            "approved_at": "2026-10-31T10:07:31Z",
+            "message": "Saved: Chalong Bay Townhouse (chalong-bay-townhouse) - verified in database. guessed: country. Undo operation id: crud_0afee7d830fe. Next: open the property, generate a brochure, or paste another URL.",
+            "sql": true,
+            "firestore": true
+          },
+          {
+            "draft_id": "dd_c2ff750ed2f837d62f06",
+            "saved": true,
+            "operation_id": "crud_131db782c48a",
+            "property_id": "layan-hills-estate",
+            "action": "create",
+            "approved_by": "admin@tajlandia.com",
+            "approved_at": "2026-10-31T10:07:31Z",
+            "message": "Saved: Layan Hills Estate (layan-hills-estate) - verified in database. guessed: country. Undo operation id: crud_131db782c48a. Next: open the property, generate a brochure, or paste another URL.",
+            "sql": true,
+            "firestore": true
+          },
+          {
+            "draft_id": "dd_52e0a2228707127a2092",
+            "saved": true,
+            "operation_id": "crud_05e730bdfb67",
+            "property_id": "bang-tao-beach-house",
+            "action": "update",
+            "approved_by": "admin@tajlandia.com",
+            "approved_at": "2026-10-31T10:07:31Z",
+            "message": "Saved: Bang Tao Beach House (bang-tao-beach-house) - verified in database. guessed: district. Undo operation id: crud_05e730bdfb67. Next: open the property, generate a brochure, or paste another URL.",
+            "sql": true,
+            "firestore": true
+          },
+          {
+            "draft_id": "dd_2d353ffa97d0830afc29",
+            "saved": true,
+            "operation_id": "crud_98d4d1bf6bc0",
+            "property_id": "chaweng-studio",
+            "action": "create",
+            "approved_by": "admin@tajlandia.com",
+            "approved_at": "2026-10-31T10:07:31Z",
+            "message": "Saved: Chaweng Studio (chaweng-studio) - verified in database. guessed: country. Undo operation id: crud_98d4d1bf6bc0. Next: open the property, generate a brochure, or paste another URL.",
+            "sql": true,
+            "firestore": true
+          },
+          {
+            "draft_id": "dd_dd7e8935f50dc0d8dee0",
+            "saved": true,
+            "operation_id": "crud_a090d5151a5a",
+            "property_id": "rawai-1",
+            "action": "create",
+            "approved_by": "admin@tajlandia.com",
+            "approved_at": "2026-10-31T10:07:31Z",
+            "message": "Saved: Rawai Hill Villa (rawai-1) - verified in database. guessed: country. Undo operation id: crud_a090d5151a5a. Next: open the property, generate a brochure, or paste another URL.",
+            "sql": true,
+            "firestore": true
+          },
+          {
+            "draft_id": "dd_6794b3a74e30dd6f88cd",
+            "saved": true,
+            "operation_id": "crud_5efbb84c129e",
+            "property_id": "karon-hill-villa",
+            "action": "create",
+            "approved_by": "admin@tajlandia.com",
+            "approved_at": "2026-10-31T10:07:31Z",
+            "message": "Saved: Karon Hill Villa (karon-hill-villa) - verified in database. guessed: country. Undo operation id: crud_5efbb84c129e. Next: open the property, generate a brochure, or paste another URL.",
+            "sql": true,
+            "firestore": true
+          },
+          {
+            "draft_id": "dd_f9b5878babf513c27359",
+            "saved": true,
+            "operation_id": "crud_0c14171ad7d3",
+            "property_id": "patong-loft",
+            "action": "create",
+            "approved_by": "admin@tajlandia.com",
+            "approved_at": "2026-10-31T10:07:31Z",
+            "message": "Saved: Patong Loft (patong-loft) - verified in database. guessed: country. Undo operation id: crud_0c14171ad7d3. Next: open the property, generate a brochure, or paste another URL.",
+            "sql": true,
+            "firestore": true
+          },
+          {
+            "draft_id": "dd_1c34d90161f16fe9b2e9",
+            "saved": true,
+            "operation_id": "crud_ef4f94590682",
+            "property_id": "maenam-bay-villa",
+            "action": "create",
+            "approved_by": "admin@tajlandia.com",
+            "approved_at": "2026-10-31T10:07:31Z",
+            "message": "Saved: Maenam Bay Villa (maenam-bay-villa) - verified in database. guessed: province, district, area, country. Undo operation id: crud_ef4f94590682. Next: open the property, generate a brochure, or paste another URL.",
+            "sql": true,
+            "firestore": true
+          }
+        ],
+        "saved": 11,
+        "failed": 0
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/api/v1/admin/drive-ingestion/jobs/dij_e5df0061af9a4c05/approve",
+        "params": null,
+        "headers": null,
+        "body": {
+          "draft_ids": [
+            "dd_190523fd378e030e61b2"
+          ],
+          "confirm": true
+        }
+      },
+      "status": 200,
+      "elapsed_ms": 45,
+      "response": {
+        "job_id": "dij_e5df0061af9a4c05",
+        "results": [
+          {
+            "draft_id": "dd_190523fd378e030e61b2",
+            "saved": true,
+            "already_approved": true,
+            "operation_id": "crud_721aa6b55d6c",
+            "property_id": "kamala-sky-villa",
+            "action": "create",
+            "approved_by": "admin@tajlandia.com",
+            "approved_at": "2026-10-31T10:07:31Z",
+            "message": "Saved: Kamala Sky Villa (kamala-sky-villa) - verified in database. guessed: currency, country, area. provided by admin: price_numeric_min. Undo operation id: crud_721aa6b55d6c. Next: open the property, generate a brochure, or paste another URL.",
+            "sql": true,
+            "firestore": true
+          }
+        ],
+        "saved": 1,
+        "failed": 0
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/api/v1/admin/drive-ingestion/jobs/dij_e5df0061af9a4c05/rollback",
+        "params": null,
+        "headers": null,
+        "body": {
+          "confirm": true
+        }
+      },
+      "status": 200,
+      "elapsed_ms": 107,
+      "response": {
+        "undone": 11,
+        "results": [
+          {
+            "draft_id": "dd_1c34d90161f16fe9b2e9",
+            "operation_id": "crud_ef4f94590682",
+            "undone": true,
+            "message": "Operation 'crud_ef4f94590682' successfully undone. 1 properties restored to their previous state."
+          },
+          {
+            "draft_id": "dd_f9b5878babf513c27359",
+            "operation_id": "crud_0c14171ad7d3",
+            "undone": true,
+            "message": "Operation 'crud_0c14171ad7d3' successfully undone. 1 properties restored to their previous state."
+          }
+        ]
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/api/v1/admin/drive-ingestion/jobs",
+        "params": null,
+        "headers": null,
+        "body": {
+          "folder_url": "https://evil.example.com/folders/x"
+        }
+      },
+      "status": 400,
+      "elapsed_ms": 8,
+      "response": {
+        "detail": "Only Google Drive folder links (https://drive.google.com/drive/folders/...) are accepted."
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/api/v1/admin/drive-ingestion/jobs",
+        "params": null,
+        "headers": null,
+        "body": {
+          "folder_url": "https://drive.google.com/drive/folders/missingFolder123"
+        }
+      },
+      "status": 403,
+      "elapsed_ms": 9,
+      "response": {
+        "detail": "The folder was not found, or your Google account has no access to it. Check the link and that the folder is shared with your connected Google account."
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "path": "/api/v1/admin/drive-ingestion/jobs/unknown-job",
+        "params": null,
+        "headers": null,
+        "body": null
+      },
+      "status": 404,
+      "elapsed_ms": 12,
+      "response": {
+        "detail": "Ingestion job not found."
+      }
+    }
+  ]
+}
