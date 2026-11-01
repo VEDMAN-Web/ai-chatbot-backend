@@ -2053,6 +2053,7 @@ def _process_admin_chat_inner(
                     f"\u2705 **Undone.** Operation `{(target_action.action_payload or {}).get('operation_id')}` was rolled back; "
                     f"{len(_ids)} listing(s) are back to how they were: {', '.join('`' + str(i) + '`' for i in _ids[:10])}."
                 )
+                from app.services.admin_reply_helpers import remember_admin_session_fact
                 remember_admin_session_fact(
                     conv,
                     last_undo={
