@@ -86,16 +86,16 @@ def test_single_diff_uses_stored_current_values():
         )
 
     fields = {r["field"] for r in diff["rows"]}
-    assert "price_display" in fields
+    # price_numeric_min is the single authoritative price row (no duplicate price_display row)
     assert "price_numeric_min" in fields
+    assert "price_display" not in fields
     assert "status" not in fields  # unchanged
-    price_row = next(r for r in diff["rows"] if r["field"] == "price_display")
-    # Display string kept; numeric companion may also appear normalized
+    price_row = next(r for r in diff["rows"] if r["field"] == "price_numeric_min")
     assert "10" in str(price_row["current"])
     assert "15" in str(price_row["new"])
     md = diff["diff_markdown"]
     assert "Field" in md and "Current" in md and "New" in md
-    assert "10M THB" in md and "15M THB" in md
+    assert "10,000,000 THB" in md and "15,000,000 THB" in md
 
 
 def test_batch_diff_summary_and_ellipsis():

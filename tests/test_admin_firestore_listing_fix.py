@@ -57,7 +57,7 @@ def test_firestore_only_price_update_one_diff_row(monkeypatch):
         "_source": "firestore",
     }
 
-    def fake_resolve(db, pid):
+    def fake_resolve(db, pid, **kwargs):
         if str(pid).lower().startswith("pirak"):
             return "firestore", fs_record
         return None, None
@@ -109,7 +109,7 @@ def test_no_change_message_when_price_same(monkeypatch):
     }
     monkeypatch.setattr(
         "app.services.admin_change_diff.resolve_existing_property",
-        lambda db, pid: ("firestore", fs_record),
+        lambda db, pid, **kwargs: ("firestore", fs_record),
     )
     diff = build_single_listing_change_diff(
         db=None,
