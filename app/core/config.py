@@ -8,9 +8,6 @@ from pydantic import field_validator
 
 logger = logging.getLogger(__name__)
 
-# Clearly fake — no real credentials. Production/dev must set DATABASE_URL via env/.env.
-_DATABASE_URL_PLACEHOLDER = "postgresql://USER:PASSWORD@127.0.0.1:5432/tajlandia_db"
-
 _WEAK_SECRETS = {
     "",
     "secret",
@@ -113,11 +110,6 @@ class Settings(BaseSettings):
 
         return f"{base}/oferty/{clean_slug}"
     
-    # Database Configuration (Multi-Database Support for Admin vs User Side)
-    # Must be set via environment / .env in non-test runs — default has no real credentials.
-    DATABASE_URL: str = ""
-    ADMIN_DATABASE_URL: Optional[str] = None
-    USER_DATABASE_URL: Optional[str] = None
     # Optional app signing secret (also check INTERNAL_API_SECRET for weakness)
     SECRET_KEY: str = ""
     
@@ -141,6 +133,11 @@ class Settings(BaseSettings):
 
     # Admin chatbot performance (speed without losing accuracy)
     ADMIN_FAST_MODEL: str = "claude-haiku-4-5"  # classifier + guardrail judge
+    # Cheap write-intent classifier. Off, or a parser failure, falls back to the regex rules.
+    ADMIN_SMART_INTENT_ENABLED: bool = True
+    ADMIN_SMART_INTENT_PER_MINUTE: int = 20
+    ADMIN_SMART_INTENT_TIMEOUT_SEC: float = 5.0
+    ADMIN_SMART_INTENT_MIN_CONFIDENCE: float = 0.6
     ADMIN_MAIN_MODEL: str = ""  # empty → use ANTHROPIC_MODEL; set e.g. claude-sonnet-4-5 via env
     ADMIN_HELPER_TIMEOUT: float = 30.0
     ADMIN_MAIN_TIMEOUT: float = 60.0
@@ -190,16 +187,22 @@ class Settings(BaseSettings):
 
     # Lead/audit permanent writes (separate from chat memory which is always Firestore when sync is on)
     ENABLE_LEAD_SAVING: bool = False
-    ENABLE_CHAT_LOGGING: bool = False  # legacy flag — chat memory uses Firestore via ENABLE_FIRESTORE_SYNC
+    ENABLE_CHAT_LOGGING: bool = False  # legacy flag - public visitor chat_query_logs
     # Persistent chat log for administrators (Firestore `chat_logs`); needs Firestore to be configured
     ENABLE_CHAT_LOG_STORE: bool = True
     # Approved answer corrections are given for matching (even reworded) questions
     ENABLE_ANSWER_CORRECTIONS: bool = True
-    # The scope forbids permanent deletes: DELETE archives a listing. This opt-in exists only for maintenance on staging.
-    ALLOW_PERMANENT_DELETE: bool = False
     CORRECTION_MATCH_THRESHOLD: float = 0.88
     EMBEDDING_MODEL: str = "text-embedding-3-small"
     ENABLE_AUDIT_LOGGING: bool = True
+    ADMIN_CHAT_LOGGING: bool = True
+    CHAT_LOG_RETENTION_DAYS: int = 180
+    CHAT_LOG_MASK_PII: bool = True
+
+    # Local development only: accept "dev-token-<email>" and the bare X-Staff-Email header. Never in production.
+    ALLOW_INSECURE_DEV_AUTH: bool = False
+    # The scope forbids permanent deletes: DELETE archives a listing. This opt-in exists only for maintenance on staging.
+    ALLOW_HARD_DELETE: bool = False
 
     # Action Confirmation & Security
     ACTION_EXPIRATION_MINUTES: int = 30
@@ -256,6 +259,31 @@ class Settings(BaseSettings):
     # Super-admin instruction store. "user" is the public bot's Firestore project.
     INSTRUCTIONS_FIRESTORE_TARGET: str = "user"
 
+    # Runtime environment. ENV wins when set; otherwise ENVIRONMENT is used.
+    ENV: str = ""
+    # Comma-separated browser origins. Empty means localhost only in development/test.
+    CORS_ALLOWED_ORIGINS: str = ""
+    # Production hides /docs unless this is true.
+    ENABLE_API_DOCS: bool = False
+    # Honour X-Forwarded-For. Railway sits behind a proxy, so set this true there.
+    TRUST_PROXY_HEADERS: bool = False
+    # Dev/test only. Ignored when the runtime environment is production.
+    EXPOSE_RESET_TOKEN_IN_RESPONSE: bool = False
+
+    # Sliding-window limits. Windows are seconds.
+    RATE_LIMIT_LOGIN_ATTEMPTS: int = 10
+    RATE_LIMIT_LOGIN_WINDOW_SEC: int = 900
+    RATE_LIMIT_RESET_ATTEMPTS: int = 5
+    RATE_LIMIT_RESET_WINDOW_SEC: int = 3600
+    RATE_LIMIT_PUBLIC_CHAT: int = 60
+    RATE_LIMIT_PUBLIC_CHAT_WINDOW_SEC: int = 60
+    RATE_LIMIT_ADMIN_CHAT: int = 30
+    RATE_LIMIT_ADMIN_CHAT_WINDOW_SEC: int = 60
+    RATE_LIMIT_ADMIN_WRITE: int = 30
+    RATE_LIMIT_ADMIN_WRITE_WINDOW_SEC: int = 60
+    RATE_LIMIT_IMPORT_AND_SUPERADMIN: int = 20
+    RATE_LIMIT_IMPORT_WINDOW_SEC: int = 60
+
     # Google Workspace Integrations (OAuth2, Maps, SMTP)
     GOOGLE_CLIENT_ID: str = ""
     GOOGLE_CLIENT_SECRET: str = ""
@@ -305,12 +333,6 @@ class Settings(BaseSettings):
     USER_FIREBASE_SERVICE_ACCOUNT_KEY: Optional[str] = None
     USER_FIREBASE_CREDENTIALS_PATH: Optional[str] = None
     USER_ENABLE_FIRESTORE_SYNC: Optional[bool] = None
-
-    def get_admin_db_url(self) -> str:
-        return self.ADMIN_DATABASE_URL or self.DATABASE_URL
-
-    def get_user_db_url(self) -> str:
-        return self.USER_DATABASE_URL or self.DATABASE_URL
 
     def get_admin_firestore_project_id(self) -> str:
         return self.ADMIN_FIRESTORE_PROJECT_ID or self.FIRESTORE_PROJECT_ID or "varsovia-8c135"
@@ -365,17 +387,6 @@ class Settings(BaseSettings):
 
 
 
-    @field_validator("DATABASE_URL", "ADMIN_DATABASE_URL", "USER_DATABASE_URL", mode="before")
-    def assemble_db_url(cls, v: Optional[str]) -> Optional[str]:
-        if isinstance(v, str):
-            if v.startswith("postgres://"):
-                return v.replace("postgres://", "postgresql+psycopg2://", 1)
-            elif v.startswith("postgresql://") and not v.startswith("postgresql+"):
-                return v.replace("postgresql://", "postgresql+psycopg2://", 1)
-            elif v.startswith("postgresql+psycopg://"):
-                return v.replace("postgresql+psycopg://", "postgresql+psycopg2://", 1)
-        return v
-
     @field_validator("ALLOWED_ORIGINS", mode="before")
     def assemble_cors_origins(cls, v: Union[str, List[str]]) -> List[str]:
         if isinstance(v, str) and not v.startswith("["):
@@ -399,6 +410,44 @@ class Settings(BaseSettings):
 settings = Settings()
 
 
+def runtime_env() -> str:
+    """ENV when set, otherwise ENVIRONMENT. Lowercased."""
+    explicit = (getattr(settings, "ENV", None) or "").strip().lower()
+    if explicit:
+        return explicit
+    return (getattr(settings, "ENVIRONMENT", None) or "development").strip().lower()
+
+
+def is_production_env() -> bool:
+    return runtime_env() in ("production", "prod")
+
+
+def cors_allowed_origins() -> list:
+    """Explicit allow-list. Empty CORS_ALLOWED_ORIGINS yields localhost only outside production."""
+    raw = (getattr(settings, "CORS_ALLOWED_ORIGINS", None) or "").strip()
+    if raw:
+        return [item.strip() for item in raw.split(",") if item.strip() and item.strip() != "*"]
+    if is_production_env():
+        return []
+    env = runtime_env()
+    if env in ("development", "dev", "test", "testing") or is_test_environment():
+        return [
+            "http://localhost:3000",
+            "http://localhost:5173",
+            "http://localhost:8000",
+            "http://127.0.0.1:3000",
+            "http://127.0.0.1:5173",
+            "http://127.0.0.1:8000",
+        ]
+    return []
+
+
+def cors_allow_credentials() -> bool:
+    """Credentials are sent only with an explicit non-wildcard list."""
+    origins = cors_allowed_origins()
+    return bool(origins) and "*" not in origins
+
+
 def is_test_environment() -> bool:
     """True when running under pytest or ENVIRONMENT=test/testing."""
     env = (os.environ.get("ENVIRONMENT") or getattr(settings, "ENVIRONMENT", "") or "").lower()
@@ -409,35 +458,6 @@ def is_test_environment() -> bool:
     if "pytest" in sys.modules:
         return True
     return False
-
-
-def _database_url_is_configured(url: Optional[str]) -> bool:
-    u = (url or "").strip()
-    if not u:
-        return False
-    # Reject empty-ish / placeholder-only values
-    if u in (_DATABASE_URL_PLACEHOLDER, "postgresql://USER:PASSWORD@127.0.0.1:5432/tajlandia_db"):
-        return False
-    if "USER:PASSWORD@" in u or "user:password@" in u.lower():
-        return False
-    if u.rstrip("/").endswith("://") or u in ("postgresql://", "postgresql+psycopg2://"):
-        return False
-    return True
-
-
-def assert_database_configured_or_exit() -> None:
-    """
-    Fail fast at startup when DATABASE_URL is missing in a non-test environment.
-    Tests must supply DATABASE_URL via conftest / env — never from a real password default.
-    """
-    if is_test_environment():
-        return
-    if _database_url_is_configured(settings.DATABASE_URL):
-        return
-    raise RuntimeError(
-        "DATABASE_URL is not configured. Set DATABASE_URL in the environment or .env file "
-        "(do not embed real passwords in code). Refusing to start."
-    )
 
 
 def assert_secrets_configured_or_exit() -> None:
@@ -454,14 +474,16 @@ def assert_secrets_configured_or_exit() -> None:
             "INTERNAL_API_SECRET is missing, a known default, or shorter than 16 characters. "
             "Set a long random value in the environment. Refusing to start."
         )
-
-
 def log_config_warnings() -> None:
     """
     Emit WARNING logs once at startup for risky/off flags. Never logs secret values.
     """
     if not getattr(settings, "ENABLE_AUDIT_LOGGING", False):
         logger.warning("Admin audit logging is OFF")
+        if is_production_env():
+            logger.warning(
+                "ENABLE_AUDIT_LOGGING is False while ENV=production — admin actions will not be audited"
+            )
     if not getattr(settings, "ENABLE_LEAD_SAVING", False):
         logger.warning("Lead saving is OFF")
 
@@ -548,12 +570,47 @@ def get_admin_config_status() -> Dict[str, Any]:
     else:
         report_storage_label = "ephemeral"
 
+    audit_on = bool(getattr(settings, "ENABLE_AUDIT_LOGGING", True))
+    lead_on = bool(getattr(settings, "ENABLE_LEAD_SAVING", False))
+    chat_on = bool(getattr(settings, "ENABLE_CHAT_LOGGING", False))
+    admin_chat_on = bool(getattr(settings, "ADMIN_CHAT_LOGGING", True))
+    retention = int(getattr(settings, "CHAT_LOG_RETENTION_DAYS", 180) or 180)
+    mask_pii = bool(getattr(settings, "CHAT_LOG_MASK_PII", True))
     return {
-        "audit_logging": bool(getattr(settings, "ENABLE_AUDIT_LOGGING", False)),
-        "lead_saving": bool(getattr(settings, "ENABLE_LEAD_SAVING", False)),
+        "audit_logging": audit_on,
+        "lead_saving": lead_on,
+        "chat_logging": chat_on,
+        "admin_chat_logging": admin_chat_on,
+        "chat_log_retention_days": retention,
+        "chat_log_mask_pii": mask_pii,
+        "flags": {
+            "ENABLE_AUDIT_LOGGING": {
+                "value": audit_on,
+                "what_it_does": "Writes who/what/when for admin actions to the audit log.",
+            },
+            "ENABLE_CHAT_LOGGING": {
+                "value": chat_on,
+                "what_it_does": "Allows the public chatbot to write visitor turns to chat_query_logs.",
+            },
+            "ENABLE_LEAD_SAVING": {
+                "value": lead_on,
+                "what_it_does": "Saves visitor lead captures from the public chatbot.",
+            },
+            "ADMIN_CHAT_LOGGING": {
+                "value": admin_chat_on,
+                "what_it_does": "Writes each admin chat turn to admin_chat_logs in Firestore.",
+            },
+            "CHAT_LOG_RETENTION_DAYS": {
+                "value": retention,
+                "what_it_does": "Age in days after which purge-chat-logs may delete log rows.",
+            },
+            "CHAT_LOG_MASK_PII": {
+                "value": mask_pii,
+                "what_it_does": "Masks emails and phone numbers in admin chat log text.",
+            },
+        },
         "firestore_project_shared": not bool(admin_fs),
         "google_redirect_host": redirect_host,
-        "database_configured": _database_url_is_configured(settings.DATABASE_URL),
         "report_storage": report_storage_label,
         "ingest_allowed_domains": _csv_setting("INGEST_ALLOWED_DOMAINS"),
         "ingest_blocked_domains": _csv_setting("INGEST_BLOCKED_DOMAINS"),

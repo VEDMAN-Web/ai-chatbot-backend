@@ -10,7 +10,6 @@ import logging
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-from sqlalchemy.orm import Session
 
 from app.services.admin_property_fields import (
     UNREADABLE,
@@ -77,13 +76,13 @@ def _coerce_price_number(val: Any) -> Optional[float]:
 
 
 def read_stored_property_fields(
-    db: Optional[Session],
+    db: Optional[Any],
     property_id: str,
     field_keys: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """
     Read current values under CANONICAL names via resolve_existing_property
-    (Postgres first, then Firestore). Same source at proposal and confirm.
+    (Firestore). Same source at proposal and confirm.
     """
     raw_keys = list(field_keys or _TRACKED_FOR_DIFF)
     keys: List[str] = []
@@ -102,25 +101,7 @@ def read_stored_property_fields(
     readable: Dict[str, bool] = {}
 
     source, record = resolve_existing_property(db, property_id)
-    if source == "postgres" and record is not None:
-        pg_vals = read_pg_canonical(record, keys)
-        for k, v in pg_vals.items():
-            out[k] = v
-            readable[k] = True
-        if not out.get("property_name") and getattr(record, "property_name", None):
-            out["property_name"] = record.property_name
-            readable["property_name"] = True
-        out["property_id"] = getattr(record, "property_id", property_id) or property_id
-        out["_resolve_source"] = "postgres"
-        # Fill gaps from Firestore when available
-        fs_source, fs_rec = resolve_existing_property(None, str(out["property_id"]))
-        if fs_source == "firestore" and isinstance(fs_rec, dict):
-            for k in keys:
-                if k not in out or out.get(k) is None or out.get(k) == "":
-                    if fs_rec.get(k) is not None and fs_rec.get(k) != "":
-                        out[k] = fs_rec[k]
-                        readable[k] = True
-    elif source == "firestore" and isinstance(record, dict):
+    if source == "firestore" and isinstance(record, dict):
         out["property_id"] = record.get("property_id") or record.get("_firestore_doc_id") or property_id
         out["_resolve_source"] = "firestore"
         for k in keys:
@@ -246,8 +227,10 @@ def format_single_diff_markdown(
                 cur_s = "(unreadable at proposal)"
             else:
                 cur_s = _norm(cur) or "—"
+            from app.services.admin_chat_quality import human_field_label
+
             lines.append(
-                f"| `{r['field']}` | {cur_s} | {_norm(r['new']) or '—'} |"
+                f"| {human_field_label(str(r['field']))} | {cur_s} | {_norm(r['new']) or '—'} |"
             )
     return "\n".join(lines)
 
@@ -278,7 +261,9 @@ def format_batch_diff_markdown(
         bits = []
         for r in rows[:4]:
             cur = "(unreadable)" if r.get("current") == UNREADABLE else _norm(r["current"])
-            bits.append(f"`{r['field']}` {cur} → {_norm(r['new'])}")
+            from app.services.admin_chat_quality import human_field_label
+
+            bits.append(f"{human_field_label(str(r['field']))} {cur} → {_norm(r['new'])}")
         lines.append(f"- `{pid}` **{name}**: " + "; ".join(bits))
     remaining = n - len(shown)
     if remaining > 0:
@@ -347,7 +332,7 @@ def assess_risky_changes(
 
 
 def verify_diff_still_current(
-    db: Optional[Session],
+    db: Optional[Any],
     change_diff: Dict[str, Any],
 ) -> Tuple[bool, List[str]]:
     """
@@ -418,7 +403,7 @@ def verify_diff_still_current(
 
 
 def build_single_listing_change_diff(
-    db: Optional[Session],
+    db: Optional[Any],
     property_id: str,
     proposed_fields: Dict[str, Any],
     mode: str = "update",
@@ -429,7 +414,7 @@ def build_single_listing_change_diff(
     )
     # If the listing exists in either store, always treat as update for diff purposes
     resolve_source = current.get("_resolve_source")
-    if resolve_source in ("postgres", "firestore"):
+    if resolve_source == "firestore":
         mode = "update"
 
     allow_web = "websites" in (proposed_fields or {})
@@ -523,7 +508,7 @@ def build_single_listing_change_diff(
 
 
 def build_batch_change_diff(
-    db: Optional[Session],
+    db: Optional[Any],
     operation_type: str,
     items: List[Dict[str, Any]],
     update_fields: Optional[Dict[str, Any]] = None,
@@ -615,10 +600,19 @@ def substitute_real_pending_id(text: Optional[str], real_id: Optional[str]) -> s
 
 def format_provenance_table(rows: List[Dict[str, Any]]) -> str:
     """Markdown table Field | Value | Source for an ingest draft. Does not write anything."""
+    from app.services.admin_chat_quality import human_field_label
+
     lines = ["| Field | Value | Source |", "| --- | --- | --- |"]
+    seen: Dict[str, int] = {}
     for row in rows or []:
-        field = str(row.get("field") or "").replace("|", "/")
+        field = human_field_label(str(row.get("field") or "")).replace("|", "/")
         value = str(row.get("value") if row.get("value") not in (None, "") else "—").replace("|", "/")
         source = str(row.get("source") or "").replace("|", "/")
+        if field in seen and value not in {"", "—"}:
+            previous = lines[seen[field]]
+            if "THB" in value or (previous.endswith("| — |") or "| — |" in previous):
+                lines[seen[field]] = f"| {field} | {value} | {source} |"
+            continue
+        seen[field] = len(lines)
         lines.append(f"| {field} | {value} | {source} |")
     return "\n".join(lines)

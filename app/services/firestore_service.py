@@ -340,6 +340,12 @@ def normalize_firestore_project(doc_id: str, data: Dict[str, Any]) -> Dict[str, 
     else:
         country_id = str(country_raw) if country_raw else "Thailand"
 
+    place_name = ""
+    for place_key in ("province", "city", "district", "area", "location"):
+        place_val = data.get(place_key)
+        if isinstance(place_val, str) and place_val.strip():
+            place_name = place_val.strip()
+            break
     location_str = shorten_location(
         district=city_id,
         city=city_id,
@@ -358,24 +364,42 @@ def normalize_firestore_project(doc_id: str, data: Dict[str, Any]) -> Dict[str, 
     if not images:
         images = ["https://images.unsplash.com/photo-1580587771525-78b9dba3b914?auto=format&fit=crop&w=1200&q=80"]
 
-    # Bedrooms & Area
+    # Bedrooms & Area. Never invent a 1-4 range when the document has no bedroom values.
+    from app.services.admin_property_fields import format_bedrooms_label
     layouts = data.get("layouts") or []
-    bedrooms_str = ""  # unknown unless the listing has layout data: never invent a bedroom count
+    layout_min = None
+    layout_max = None
     if layouts and isinstance(layouts, list):
         bed_nums = [l.get("bedrooms") for l in layouts if isinstance(l, dict) and l.get("bedrooms") is not None]
         if bed_nums:
-            min_b, max_b = min(bed_nums), max(bed_nums)
-            bedrooms_str = f"{min_b}-{max_b} Beds" if min_b != max_b else f"{min_b} Beds"
-    if not bedrooms_str:
-        raw_bed = data.get("bedrooms") or data.get("bedrooms_display") or data.get("bedroom")
-        if raw_bed and str(raw_bed).strip():
-            bedrooms_str = str(raw_bed).strip()
-        else:
-            full_title = f"{data.get('title', '')} {data.get('name', '')} {data.get('property_name', '')}"
-            bhk_m = re.search(r"\b(\d+)\s*(?:bhk|bedroom|bed|br)\b", full_title, re.IGNORECASE)
-            if bhk_m:
-                b_num = bhk_m.group(1)
-                bedrooms_str = f"{b_num} Beds"
+            layout_min, layout_max = min(bed_nums), max(bed_nums)
+    bedrooms_min = data.get("bedrooms_min") if data.get("bedrooms_min") is not None else data.get("bedroomsMin")
+    bedrooms_max = data.get("bedrooms_max") if data.get("bedrooms_max") is not None else data.get("bedroomsMax")
+    if bedrooms_min is None and isinstance(data.get("bedrooms"), (int, float)):
+        bedrooms_min = data.get("bedrooms")
+    if layout_min is not None and bedrooms_min is None:
+        bedrooms_min = layout_min
+    if layout_max is not None and bedrooms_max is None:
+        bedrooms_max = layout_max
+    if isinstance(data.get("status"), str) and data.get("status").strip():
+        status_value = data.get("status").strip()
+    elif isinstance(data.get("completionStatus"), str) and data.get("completionStatus").strip():
+        status_value = data.get("completionStatus").strip()
+    elif "isActive" in data:
+        status_value = "Available" if data.get("isActive") else "Sold Out"
+    else:
+        status_value = "Available"
+    bedrooms_str = format_bedrooms_label(
+        bedrooms_min=bedrooms_min,
+        bedrooms_max=bedrooms_max,
+        bedrooms_display=data.get("bedrooms_display") or data.get("bedroomsDisplay"),
+        bedrooms=data.get("bedrooms"),
+    )
+    # Public cards: unknown beds stay empty (never a placeholder) and use the "N Beds" wording.
+    if bedrooms_str.strip().lower() == "beds not listed":
+        bedrooms_str = ""
+    else:
+        bedrooms_str = re.sub(r"\bbeds?\b", lambda m: "Beds" if m.group(0).lower() == "beds" else "Bed", bedrooms_str, flags=re.I)
 
     area_from = data.get("areaFrom")
     area_to = data.get("areaTo")
@@ -466,14 +490,16 @@ def normalize_firestore_project(doc_id: str, data: Dict[str, Any]) -> Dict[str, 
         "price_thb_max": to_thb(price_num_max, currency),
         "currency": currency,
         "bedrooms": bedrooms_str,
+        "bedrooms_min": bedrooms_min,
+        "bedrooms_max": bedrooms_max,
         "area": area_str,
-        "location": location_str,
+        "location": place_name or location_str,
         "address": address,
         "district": city_id,
-        "province": country_id,
+        "province": place_name or country_id,
         "latitude": lat,
         "longitude": lng,
-        "status": data.get("completionStatus") or ("Available" if data.get("isActive", True) else "Sold Out"),
+        "status": status_value,
         "has_pool": False,
         "beach_access": False,
         "images": images,
@@ -482,6 +508,11 @@ def normalize_firestore_project(doc_id: str, data: Dict[str, Any]) -> Dict[str, 
         "amenities": amenities,
         "tags": tags,
         "expected_roi": data.get("expectedROI") or data.get("rentalYield"),
+        "developer_name": next(
+            (str(v).strip() for v in (data.get("developer_name"), data.get("developerName"), data.get("developer"))
+             if isinstance(v, str) and v.strip()),
+            None,
+        ),
         "description": desc_str,
         "websites": websites_list,
         "is_public": data.get("isActive", True),
@@ -883,10 +914,14 @@ def score_property_relevance(
 
 
 def get_firestore_properties_count(target: str = "user") -> int:
-    """Returns the total number of property projects in Firestore 'projects' collection."""
+    """Count projects with the same collection scan the rest of the app uses.
+
+    Aggregation is tried first. If that API is missing, a plain stream count is used.
+    Raises RuntimeError instead of pretending the collection is empty.
+    """
     client = get_firestore_client(target=target)
     if not client:
-        return 0
+        raise RuntimeError("Firestore count is unavailable")
     try:
         count_query = client.collection("projects").count()
         results = count_query.get()
@@ -894,11 +929,28 @@ def get_firestore_properties_count(target: str = "user") -> int:
     except Exception as e:
         logger.debug(f"Firestore aggregation count query fallback: {e}")
         try:
-            docs = list(client.collection("projects").select([]).stream())
+            docs = list(client.collection("projects").stream())
             return len(docs)
         except Exception as e2:
             logger.warning(f"Error counting Firestore properties: {e2}")
-            return 0
+            raise RuntimeError("Firestore count is unavailable") from e2
+
+
+def _norm_store_value(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(int(value))
+    text = str(value).strip().lower().replace(",", "")
+    digits = re.sub(r"[^\d.]", "", text)
+    if digits and re.fullmatch(r"\d+(?:\.\d+)?", digits) and not re.search(r"[a-z]", text.replace("thb", "").replace("baht", "")):
+        try:
+            return str(int(float(digits)))
+        except ValueError:
+            pass
+    return re.sub(r"\s+", " ", text)
 
 
 def get_property_by_id_from_firestore(
@@ -1427,7 +1479,8 @@ def save_or_update_property_firestore(
     fields: Dict[str, Any],
     images: Optional[List[str]] = None,
     cover_image: Optional[str] = None,
-    target: str = "admin"
+    target: str = "admin",
+    image_mode: str = "append",
 ) -> bool:
     """
     Creates or updates a property project in Cloud Firestore `projects` collection.
@@ -1503,6 +1556,10 @@ def save_or_update_property_firestore(
         if fields.get("description"):
             update_payload["description"] = fields.get("description")
 
+        # Import provenance (source URL, guessed fields) — Firestore is the only store now
+        if isinstance(fields.get("raw_metadata"), dict) and fields["raw_metadata"]:
+            update_payload["raw_metadata"] = fields["raw_metadata"]
+
         # Pool & Amenities
         if fields.get("has_pool") is not None:
             amenities = list(existing_data.get("amenities") or [])
@@ -1520,21 +1577,37 @@ def save_or_update_property_firestore(
                 update_payload["domains"] = norm_ws
                 update_payload["siteOrigin"] = norm_ws[0]
 
-        # Images
-        final_images = list(existing_data.get("images") or [])
-        if images:
-            for img in images:
-                if img and str(img).strip() and str(img).strip() not in final_images:
-                    final_images.append(str(img).strip())
+        # Images. "replace" writes the given list exactly, including an empty list.
+        if image_mode == "replace":
+            final_images = []
+            for img in images or []:
+                clean = str(img).strip() if img else ""
+                if clean and clean not in final_images:
+                    final_images.append(clean)
             update_payload["images"] = final_images
-
-        if cover_image:
-            update_payload["coverImage"] = str(cover_image).strip()
-            if str(cover_image).strip() not in final_images:
-                final_images.insert(0, str(cover_image).strip())
+            if cover_image:
+                cover = str(cover_image).strip()
+                update_payload["coverImage"] = cover
+                if cover and cover not in final_images:
+                    final_images.insert(0, cover)
+                    update_payload["images"] = final_images
+            else:
+                update_payload["coverImage"] = ""
+        else:
+            final_images = list(existing_data.get("images") or [])
+            if images:
+                for img in images:
+                    if img and str(img).strip() and str(img).strip() not in final_images:
+                        final_images.append(str(img).strip())
                 update_payload["images"] = final_images
-        elif final_images and not existing_data.get("coverImage"):
-            update_payload["coverImage"] = final_images[0]
+
+            if cover_image:
+                update_payload["coverImage"] = str(cover_image).strip()
+                if str(cover_image).strip() not in final_images:
+                    final_images.insert(0, str(cover_image).strip())
+                    update_payload["images"] = final_images
+            elif final_images and not existing_data.get("coverImage"):
+                update_payload["coverImage"] = final_images[0]
 
         doc_ref.set(update_payload, merge=True)
         logger.info(f"Successfully saved/updated property '{clean_id}' in Firestore 'projects'.")
@@ -1591,6 +1664,47 @@ def delete_property_firestore(
         return False
 
 
+
+
+# ==============================================================================
+# 1b. Properties catalog version (Stage F1)
+# ==============================================================================
+
+def bump_properties_version(target: str = "user") -> Optional[int]:
+    """
+    Increment meta/properties_version = {version:int, updated_at}.
+    Call after every property create/update/archive/undo and image add/replace/cover/remove.
+    Returns the new version, or None when Firestore is unavailable.
+    """
+    client = get_firestore_client(target=target)
+    if not client:
+        logger.warning("bump_properties_version: Firestore client unavailable")
+        return None
+    try:
+        ref = client.collection("meta").document("properties_version")
+        now_iso = datetime.now(timezone.utc).isoformat()
+        if hasattr(client, "run_transaction"):
+            def _txn(txn):
+                snap = txn.get(ref)
+                data = {}
+                if hasattr(snap, "to_dict"):
+                    if getattr(snap, "exists", True):
+                        data = snap.to_dict() or {}
+                elif isinstance(snap, dict):
+                    data = snap
+                current = int(data.get("version") or 0)
+                nxt = current + 1
+                txn.set(ref, {"version": nxt, "updated_at": now_iso}, merge=True)
+                return nxt
+            return client.run_transaction(_txn)
+        snap = ref.get()
+        data = snap.to_dict() if getattr(snap, "exists", False) else {}
+        nxt = int((data or {}).get("version") or 0) + 1
+        ref.set({"version": nxt, "updated_at": now_iso}, merge=True)
+        return nxt
+    except Exception as e:
+        logger.warning("bump_properties_version failed: %s", e)
+        return None
 
 
 # ==============================================================================
@@ -1786,7 +1900,7 @@ def get_audit_logs_from_firestore(
 # ==============================================================================
 
 class FirestoreConversation:
-    """Wrapper that mimics SQLAlchemy Conversation object so existing code works seamlessly."""
+    """Wrapper that mimics the old Conversation object so existing code works seamlessly."""
     def __init__(self, doc_id: str, data: Dict[str, Any]):
         self.id = doc_id
         self.session_id = data.get("sessionId") or doc_id
@@ -1849,7 +1963,7 @@ def get_or_create_conversation_firestore(
 ) -> FirestoreConversation:
     """
     Retrieves or creates a conversation in Firestore `conversations`.
-    Stores full messageHistory + preferences (property_context). No PostgreSQL.
+    Stores full messageHistory + preferences (property_context).
 
     Existing docs are rebound to the request site_origin so multi-site session
     reuse cannot keep a stale brand / advisor email.
@@ -2015,7 +2129,7 @@ def append_conversation_turn_firestore(
 
     conversation.updated_at = timestamp
 
-    # Write FULL history + preferences to Firestore (no Postgres)
+    # Write FULL history + preferences to Firestore
     sid = getattr(conversation, "session_id", None)
     agent_type = getattr(conversation, "agent_type", "public")
     client = get_firestore_client(target="admin" if agent_type == "admin" else "user")

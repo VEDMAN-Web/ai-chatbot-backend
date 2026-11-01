@@ -13,6 +13,17 @@ from app.services.firestore_auth_service import (
 
 client = TestClient(app)
 
+ADMIN_EMAIL = "admin@tajlandia.com"
+ADMIN_PASSWORD = "Admin@123456"
+
+
+@pytest.fixture(autouse=True)
+def seeded_super_admin():
+    add_or_update_admin_in_firestore(
+        email=ADMIN_EMAIL, password=ADMIN_PASSWORD, role="super_admin", name="Admin"
+    )
+    yield
+
 
 def _emailed_style_token(email: str) -> str:
     """The token the server emails: bound to the account's current password hash (never returned by the API)."""
@@ -21,104 +32,65 @@ def _emailed_style_token(email: str) -> str:
 
 
 def test_forgot_password_generates_token_and_rejects_invalid_email():
-    """forgot-password answers the same for known and unknown emails and never returns the token (it is emailed)."""
-    # 1. Non-existent email -> same generic 200 (no account enumeration)
-    resp = client.post(
-        "/api/v1/auth/forgot-password",
-        json={"email": f"nonexistent_{uuid.uuid4().hex[:8]}@tajlandia.com"}
-    )
-    assert resp.status_code == 200
-    assert resp.json()["reset_token"] is None
+    """Known and unknown emails share one response. The token is only on the test hook."""
+    from app.services.firestore_auth_service import get_test_reset_token
 
-    # 2. Existing admin -> 200, token NOT in the response
-    resp = client.post(
-        "/api/v1/auth/forgot-password",
-        json={"email": "admin@tajlandia.com"}
-    )
-    assert resp.status_code == 200
-    data = resp.json()
-    assert data["success"] is True
-    assert data["reset_token"] is None
-    assert data["email"] == "admin@tajlandia.com"
-    assert data["expires_in"] == 1800
+    unknown = f"nonexistent_{uuid.uuid4().hex[:8]}@tajlandia.com"
+    known = ADMIN_EMAIL
 
-    # A token minted the way the server mints the emailed one is cryptographically valid
-    from app.api.v1.auth import _current_password_hash
-    token = _emailed_style_token("admin@tajlandia.com")
-    verified_email = verify_password_reset_token(
-        token, expected_email="admin@tajlandia.com",
-        current_password_hash=_current_password_hash("admin@tajlandia.com", None),
-    )
-    assert verified_email == "admin@tajlandia.com"
+    unknown_resp = client.post("/api/v1/auth/forgot-password", json={"email": unknown})
+    known_resp = client.post("/api/v1/auth/forgot-password", json={"email": known})
+
+    assert unknown_resp.status_code == known_resp.status_code == 200
+    assert unknown_resp.json() == known_resp.json()
+    assert "reset_token" not in known_resp.json()
+    token = get_test_reset_token(known)
+    assert token
+    assert verify_password_reset_token(token, expected_email=known) == known
 
 
 def test_reset_password_flow_and_tamper_rejection():
-    """
-    Tests the reset-password endpoint using a dedicated test admin account,
-    verifying tamper rejection and successful password reset.
-    """
+    """Reset-password endpoint: tamper rejection, short password rejection, and a real reset."""
+    from app.services.firestore_auth_service import get_test_reset_token
+
     test_email = f"test_reset_{uuid.uuid4().hex[:6]}@tajlandia.com"
     init_pass = "InitialPass123!"
     new_pass = "BrandNewPass456!"
+    add_or_update_admin_in_firestore(email=test_email, password=init_pass, role="employee", name="Reset Test")
 
-    # Create test admin
-    add_or_update_admin_in_firestore(
-        email=test_email,
-        password=init_pass,
-        role="employee",
-        name="Reset Test User"
-    )
-
-    # 1. Request reset token
-    forgot_resp = client.post(
-        "/api/v1/auth/forgot-password",
-        json={"email": test_email}
-    )
+    forgot_resp = client.post("/api/v1/auth/forgot-password", json={"email": test_email})
     assert forgot_resp.status_code == 200
-    assert forgot_resp.json()["reset_token"] is None  # delivered by email only
-    reset_token = _emailed_style_token(test_email)
+    assert "reset_token" not in forgot_resp.json()
+    reset_token = get_test_reset_token(test_email)
+    assert reset_token
 
-    # 2. Attempt reset with tampered/invalid token -> 400
     bad_resp = client.post(
         "/api/v1/auth/reset-password",
-        json={
-            "email": test_email,
-            "reset_token": "tampered_fake_token_abc123",
-            "new_password": new_pass
-        }
+        json={"email": test_email, "reset_token": "tampered_fake_token_abc123", "new_password": new_pass},
     )
     assert bad_resp.status_code == 400
 
-    # 3. Attempt reset with too short password -> 422 or 400
     short_resp = client.post(
         "/api/v1/auth/reset-password",
-        json={
-            "email": test_email,
-            "reset_token": reset_token,
-            "new_password": "123"
-        }
+        json={"email": test_email, "reset_token": reset_token, "new_password": "123"},
     )
     assert short_resp.status_code in [400, 422]
 
-    # 4. Successful reset with valid token
     ok_resp = client.post(
         "/api/v1/auth/reset-password",
-        json={
-            "email": test_email,
-            "reset_token": reset_token,
-            "new_password": new_pass
-        }
+        json={"email": test_email, "reset_token": reset_token, "new_password": new_pass},
     )
     assert ok_resp.status_code == 200
     assert ok_resp.json()["success"] is True
 
-    # 5. Verify login succeeds with new password
-    login_resp = client.post(
-        "/api/v1/auth/login",
-        json={"email": test_email, "password": new_pass}
+    assert client.post("/api/v1/auth/login", json={"email": test_email, "password": init_pass}).status_code == 401
+    assert client.post("/api/v1/auth/login", json={"email": test_email, "password": new_pass}).status_code == 200
+    # the token is single-use
+    again = client.post(
+        "/api/v1/auth/reset-password",
+        json={"email": test_email, "reset_token": reset_token, "new_password": "AnotherPass789!"},
     )
-    assert login_resp.status_code == 200
-    assert "access_token" in login_resp.json()
+    assert again.status_code == 400
 
 
 def test_change_password_endpoint():
@@ -174,7 +146,7 @@ def test_admin_register_endpoint():
     # Log in as super_admin
     login_resp = client.post(
         "/api/v1/auth/login",
-        json={"email": "admin@tajlandia.com", "password": settings.ADMIN_PASSWORD}
+        json={"email": "admin@tajlandia.com", "password": ADMIN_PASSWORD}
     )
     assert login_resp.status_code == 200
     token = login_resp.json()["access_token"]
@@ -217,7 +189,7 @@ def test_admin_activity_logs_api():
     # Log in as admin
     login_resp = client.post(
         "/api/v1/auth/login",
-        json={"email": "admin@tajlandia.com", "password": settings.ADMIN_PASSWORD}
+        json={"email": "admin@tajlandia.com", "password": ADMIN_PASSWORD}
     )
     assert login_resp.status_code == 200
     headers = {"Authorization": f"Bearer {login_resp.json()['access_token']}"}
@@ -244,7 +216,7 @@ def test_data_change_history_api():
     """Verifies the GET /api/v1/admin/data-history endpoint."""
     login_resp = client.post(
         "/api/v1/auth/login",
-        json={"email": "admin@tajlandia.com", "password": settings.ADMIN_PASSWORD}
+        json={"email": "admin@tajlandia.com", "password": ADMIN_PASSWORD}
     )
     assert login_resp.status_code == 200
     headers = {"Authorization": f"Bearer {login_resp.json()['access_token']}"}

@@ -150,6 +150,7 @@ def test_name_index_failed_refresh_keeps_entries():
     assert idx._entries[0].doc_id == "abc"
 
 
+@pytest.mark.skip(reason="rp-user-fix switched the public chatbot from OpenAI to Claude; this tests the old OpenAI client helper. Replace with a Claude-client equivalent.")
 def test_openai_timeout_and_retries_applied_to_client(monkeypatch):
     monkeypatch.setattr("app.core.config.settings.OPENAI_TIMEOUT", 25.0)
     monkeypatch.setattr("app.core.config.settings.OPENAI_MAX_RETRIES", 1)
@@ -171,6 +172,7 @@ def test_openai_timeout_and_retries_applied_to_client(monkeypatch):
         assert svc.max_retries == 1
 
 
+@pytest.mark.skip(reason="rp-user-fix switched the public chatbot from OpenAI to Claude; this tests the old OpenAI client helper. Replace with a Claude-client equivalent.")
 def test_safe_openai_create_sets_timeout(monkeypatch):
     monkeypatch.setattr("app.core.config.settings.OPENAI_TIMEOUT", 25.0)
     from app.services.public_agent import _safe_openai_create

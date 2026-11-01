@@ -11,7 +11,7 @@ import pytest
 
 from app.core.config import settings
 from app.services import drive_formats as F
-import test_drive_ingest_helpers as fx  # noqa: E402  (tests/ is on sys.path under pytest)
+from tests import test_drive_ingest_helpers as fx  # noqa: E402  (tests/ is on sys.path under pytest)
 
 
 def _run(data: bytes, fmt: str, ocr=None) -> F.ExtractionResult:

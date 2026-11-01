@@ -28,7 +28,8 @@ def test_suggestions_merged_once():
         "1) C"
     )
     out = append_followup_suggestions(text, ["X", "Y"], language="en")
-    assert out.count("Suggestions (do not run") == 1
+    assert out.lower().count("suggestions") == 1
+    assert "do not run an action" not in out.lower()
     assert "1) X" in out
 
 
@@ -101,7 +102,7 @@ def test_reply_id_equals_db_id_on_stale_repropose():
         },
     ):
         out = action_service.confirm_and_execute_action(
-            db=MagicMock(), pending_action_id=str(old_id), authenticated_staff=staff
+            db=MagicMock(), pending_action_id=str(old_id), authenticated_staff=staff, confirmation_token=action.confirmation_token
         )
 
     assert out["pending_action_id"] == str(new_id)

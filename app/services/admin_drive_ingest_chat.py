@@ -186,7 +186,7 @@ def _stage_approval(db: Any, conv: Any, message: str, staff: Any, job: Dict[str,
     if len(summary) > 20:
         lines.append(f"- … and {len(summary) - 20} more")
     lines.append("")
-    lines.append("Each listing is written to Postgres and Firestore with a 6-day undo snapshot and an audit log entry. "
+    lines.append("Each listing is written to Firestore with a 6-day undo snapshot and an audit log entry. "
                  f"⚠️ **Awaiting confirmation** (ID: `{action.id}`). Reply **confirm** to save, or **cancel**.")
     reply = "\n".join(lines)
     _say(db, conv, message, reply)

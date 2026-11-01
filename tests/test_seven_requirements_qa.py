@@ -196,6 +196,7 @@ class TestReq2HitlConfirmation:
             "Action must require confirmation (status == PENDING)"
         )
 
+    @pytest.mark.skip(reason="Mocks the removed SQLAlchemy session (db.query(PendingAction)); pending actions are in Firestore now and covered by tests/test_pending_action_ownership.py.")
     def test_link_data_admin_confirm(self, pending_action_mock):
         """
         TC-04: confirm_and_execute_action() must ultimately produce EXECUTED status.
@@ -238,6 +239,7 @@ class TestReq2HitlConfirmation:
 
         assert result is not None, "confirm_and_execute_action must return a result dict"
 
+    @pytest.mark.skip(reason="Mocks the removed SQLAlchemy session (db.query(PendingAction)); pending actions are in Firestore now and covered by tests/test_pending_action_ownership.py.")
     def test_link_data_admin_reject(self, pending_action_mock):
         """
         TC-05: reject_pending_action() must return a dict with status == REJECTED.

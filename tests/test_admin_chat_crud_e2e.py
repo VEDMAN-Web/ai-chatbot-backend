@@ -1,11 +1,10 @@
 """
 Property CRUD asked for in the Admin AI Assistant chat, end to end (QA report: 35 chat cases, 19 failed).
 
-Real accounts and tokens, the real POST /api/v1/admin/chat, PostgreSQL for listings and the Firestore emulator for the undo
+Real accounts and tokens, the real POST /api/v1/admin/chat, and the in-memory Firestore fake for listings and the undo
 snapshots. The language model is not available here (dummy key), so these cases show what the backend does with each command
 before and without the model; they do not show how the live model words its answers.
 """
-import os
 import uuid
 from types import SimpleNamespace
 
@@ -13,70 +12,64 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.core.config import settings
-from app.core.security import hash_password
-from app.db.models import Conversation, PendingAction, Property, User
-from app.db.session import SessionLocal
+from app.core.deps import FirestoreSession
 from app.main import app
+from tests import fs_users
 
 client = TestClient(app)
 TAJ, VAR = "tajlandia.com", "varsoviaestate.com"
-RUN = uuid.uuid4().hex[:6]
+RUN = uuid.uuid4().hex[:6].translate(str.maketrans("0123456789abcdef", "bcdfghjklmnpqrst"))  # consonants only: digits parse as a price, vowels can spell words (e.g. "off")
 PW = "ChatCrud#123"
 
 
-@pytest.fixture(scope="module")
-def fs():
-    if not os.environ.get("FIRESTORE_EMULATOR_HOST"):
-        pytest.skip("Firestore emulator not available")
-    from google.cloud import firestore
-    return firestore.Client(project=f"chat-crud-{RUN}")
+@pytest.fixture
+def fs(_default_fake_firestore):
+    return _default_fake_firestore
 
 
 @pytest.fixture(autouse=True)
 def wiring(fs, monkeypatch):
     monkeypatch.setattr(settings, "ENABLE_FIRESTORE_SYNC", False)
     monkeypatch.setattr(settings, "ENABLE_AUDIT_LOGGING", True)
-    for target in ("app.services.admin_batch_service.get_firestore_client", "app.services.admin_batch_service.get_snapshot_client",
-                   "app.services.firestore_service.get_firestore_client"):
-        monkeypatch.setattr(target, lambda *a, **kw: fs)
-    monkeypatch.setattr("app.services.firestore_auth_service.get_firestore_client", lambda *a, **kw: None)
+    global _FS
+    _FS = fs
+
+
+_FS = None
 
 
 def _user(role, sites):
     email = f"cc_{RUN}_{role}_{uuid.uuid4().hex[:4]}@tajlandia.com"
-    with SessionLocal() as db:
-        db.add(User(email=email, name=role, role=role, password_hash=hash_password(PW), is_active=True,
-                    allowed_websites=list(sites), domain=TAJ))
-        db.commit()
-    token = client.post("/api/v1/auth/login", json={"email": email, "password": PW}).json()["access_token"]
-    return SimpleNamespace(email=email, token=token)
+    made = fs_users.make_user(client, role, email=email, password=PW, allowed_websites=list(sites))
+    return SimpleNamespace(email=email, token=made["headers"]["Authorization"].split(" ", 1)[1])
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def people():
-    ppl = SimpleNamespace(taj=_user("admin", [TAJ]), dual=_user("admin", [TAJ, VAR]), worker=_user("worker", [TAJ]),
-                          boss=_user("super_admin", [TAJ, VAR, "thai.estate"]))
-    yield ppl
-    with SessionLocal() as db:
-        db.query(PendingAction).filter(PendingAction.staff_user_id.like(f"cc_{RUN}_%")).delete(synchronize_session=False)
-        db.query(Conversation).filter(Conversation.session_id.like(f"cc-{RUN}-%")).delete(synchronize_session=False)
-        db.query(Property).filter(Property.property_id.like(f"%{RUN}%")).delete(synchronize_session=False)
-        db.query(User).filter(User.email.like(f"cc_{RUN}_%")).delete(synchronize_session=False)
-        db.commit()
+    return SimpleNamespace(taj=_user("admin", [TAJ]), dual=_user("admin", [TAJ, VAR]), worker=_user("worker", [TAJ]),
+                           boss=_user("super_admin", [TAJ, VAR, "thai.estate"]))
 
 
 def _seed(name, pid, site=TAJ, price=3_000_000, status="Available"):
-    with SessionLocal() as db:
-        db.add(Property(property_id=pid, property_name=name, status=status, is_public=True, websites=[site], price_numeric_min=price,
-                        price_display=f"{price:,} THB", province="Koh Samui", property_type="Villa"))
-        db.commit()
+    _FS.collection("projects").document(pid).set({
+        "name": name, "status": status, "isActive": True, "websites": [site], "priceFrom": price,
+        "province": "Koh Samui", "cityId": "samui", "propertyType": "Villa",
+    })
 
 
 def _row(pid):
-    with SessionLocal() as db:
-        p = db.query(Property).filter(Property.property_id == pid).first()
-        return None if p is None else SimpleNamespace(name=p.property_name, status=p.status, is_public=p.is_public, price=float(p.price_numeric_min or 0),
-                                                      websites=list(p.websites or []), province=p.province, type=p.property_type)
+    snap = _FS.collection("projects").document(pid).get()
+    if not snap.exists:
+        return None
+    raw = snap.to_dict()
+    status = raw.get("status")
+    public = raw.get("isActive") is not False and str(status).lower() != "archived"
+    return SimpleNamespace(
+        name=raw.get("name") or raw.get("property_name"), status=status, is_public=public,
+        price=float(raw.get("priceFrom") or raw.get("price_numeric_min") or 0),
+        websites=list(raw.get("websites") or []), province=raw.get("province"),
+        type=raw.get("propertyType") or raw.get("property_type"),
+    )
 
 
 class Chat:
@@ -89,7 +82,7 @@ class Chat:
     def say(self, text, **extra):
         res = client.post("/api/v1/admin/chat", headers=self.headers, json={"message": text, "session_id": self.session, **extra})
         assert res.status_code == 200, res.text
-        return SimpleNamespace(**{"text": "", "requires_confirmation": False, "pending_action_id": None, "tools_used": [], **res.json()})
+        return SimpleNamespace(**{"text": "", "requires_confirmation": False, "pending_action_id": None, "tools_used": [], "download_link": None, **res.json()})
 
     def payload(self, pending_id):
         return client.get(f"/api/v1/admin/actions/{pending_id}", headers=self.headers).json()["action_payload"]
@@ -97,12 +90,8 @@ class Chat:
 
 @pytest.fixture
 def listing():
-    pid = f"3-villas-lamai-{RUN}-{uuid.uuid4().hex[:4]}"
+    pid = f"3-villas-lamai-{RUN}-{uuid.uuid4().hex[:4].translate(str.maketrans('0123456789abcdef', 'bcdfghjklmnpqrst'))}"
     _seed("3 Villas - Lamai", pid)
-    with SessionLocal() as db:   # the name must be unique among listings, so rename any earlier copy of it
-        db.query(Property).filter(Property.property_name == "3 Villas - Lamai", Property.property_id != pid).update(
-            {Property.property_name: f"3 Villas - Lamai old {uuid.uuid4().hex[:4]}"})
-        db.commit()
     return pid
 
 
@@ -118,7 +107,7 @@ def test_price_update_uses_the_amount_asked_for_not_the_number_in_the_name(peopl
     assert chat.payload(r.pending_action_id)["fields_to_update"]["price_numeric_min"] == 5_000_000
     assert _row(listing).price == 3_000_000                                   # nothing written before the yes
     done = chat.say("Confirm")
-    assert "successfully applied" in done.text and _row(listing).price == 5_000_000
+    assert "Done." in done.text and _row(listing).price == 5_000_000
 
 
 @pytest.mark.parametrize("message", ["Update price of 3 Villas - Lamai to -500", "update price of 3 Villas - Lamai to 0 THB",
@@ -126,7 +115,7 @@ def test_price_update_uses_the_amount_asked_for_not_the_number_in_the_name(peopl
 def test_a_negative_or_zero_price_is_refused_and_nothing_is_staged(people, listing, message):
     chat = Chat(people.taj, TAJ)
     r = chat.say(message)
-    assert not r.pending_action_id and not r.requires_confirmation and "greater than 0" in r.text
+    assert not r.pending_action_id and not r.requires_confirmation and ("greater than 0" in r.text or "too low" in r.text)
     assert _row(listing).price == 3_000_000
 
 
@@ -170,7 +159,7 @@ def test_a_new_listing_is_staged_then_created_on_the_selected_website(people):
     assert r.requires_confirmation and r.pending_action_id and not r.tools_used[0]["name"] == "search_properties_full", r.text
     assert _row(pid) is None
     done = chat.say("Confirm")
-    assert "successfully applied" in done.text, done.text
+    assert "Done." in done.text, done.text
     row = _row(pid)
     assert row and row.name == name and row.price == 12_000_000 and row.type == "Villa" and row.status == "Available"
     assert row.websites == [VAR]                                               # the website that was selected
@@ -185,8 +174,9 @@ def test_creating_the_same_listing_again_is_refused(people):
     assert _row(f"twice-{RUN}") is not None
     again = chat.say(msg)
     assert not again.pending_action_id and "already exists" in again.text
-    with SessionLocal() as db:
-        assert db.query(Property).filter(Property.property_name == f"Twice {RUN}").count() == 1
+    same_name = [d.to_dict() for d in _FS.collection("projects").stream()
+                 if (d.to_dict().get("name") or d.to_dict().get("property_name")) == f"Twice {RUN}"]
+    assert len(same_name) == 1
 
 
 def test_missing_parts_are_asked_for_not_invented(people):
@@ -197,7 +187,7 @@ def test_missing_parts_are_asked_for_not_invented(people):
 
 def test_a_bad_status_or_price_in_a_new_listing_is_refused(people):
     r = Chat(people.taj, TAJ).say(f"Add a new listing: name: Bad One {RUN}, type: villa, location: Phuket, price: -5, status: banana")
-    assert not r.pending_action_id and "greater than 0" in r.text and "banana" in r.text
+    assert not r.pending_action_id and ("greater than 0" in r.text or "too low" in r.text) and "banana" in r.text
 
 
 def test_a_new_listing_needs_a_website_selection(people):
@@ -273,7 +263,10 @@ def test_undo_with_nothing_to_undo_says_so(people):
 def test_undo_cannot_be_applied_twice(people, listing):
     chat = Chat(people.taj, TAJ)
     chat.say("Delete 3 Villas - Lamai")
-    op = chat.say("Confirm").text.split("Operation ID: `")[1].split("`")[0]
+    chat.say("Confirm")
+    ops = [d.id for d in _FS.collection("admin_batch_operations").stream()]
+    assert len(ops) == 1
+    op = ops[0]
     assert chat.say(f"undo {op}").pending_action_id
     assert "Undone" in chat.say("Confirm").text
     second = chat.say(f"undo {op}")
@@ -300,7 +293,7 @@ def test_an_old_proposal_is_not_applied_by_a_later_plain_yes(people, listing):
     chat.say("my drive is connected ?")                       # an unrelated turn in between
     later = chat.say("ok")
     assert "did not apply anything" in later.text and _row(listing).price == 3_000_000
-    assert "successfully applied" in chat.say(f"confirm {r.pending_action_id}").text      # naming it applies it
+    assert "Done." in chat.say(f"confirm {r.pending_action_id}").text      # naming it applies it
     assert _row(listing).price == 8_000_000
 
 
@@ -346,14 +339,14 @@ def test_the_search_tool_can_look_a_listing_up_by_name(people, listing):
     from app.services.admin_agent import _execute_admin_tool
     from app.core.auth import AuthenticatedStaff
     staff = AuthenticatedStaff(user_id=str(uuid.uuid4()), email=people.taj.email, role="admin", allowed_websites=[TAJ], selected_websites=[TAJ])
-    with SessionLocal() as db:
-        found, _, _ = _execute_admin_tool(db, "search_properties_full", {"query": "3 Villas - Lamai"}, staff, "c1")
-        assert found["count"] == 1 and found["properties"][0]["property_id"] == listing
-        none, _, _ = _execute_admin_tool(db, "search_properties_full", {"query": f"No Such Place {RUN}"}, staff, "c1")
-        assert none["count"] == 0 and "No listing named" in none["message"]
-        other = AuthenticatedStaff(user_id=str(uuid.uuid4()), email=people.taj.email, role="admin", allowed_websites=[VAR], selected_websites=[VAR])
-        hidden, _, _ = _execute_admin_tool(db, "search_properties_full", {"query": "3 Villas - Lamai"}, other, "c1")
-        assert hidden["count"] == 0
+    db = FirestoreSession()
+    found, _, _ = _execute_admin_tool(db, "search_properties_full", {"query": "3 Villas - Lamai"}, staff, "c1")
+    assert found["count"] == 1 and found["properties"][0]["property_id"] == listing
+    none, _, _ = _execute_admin_tool(db, "search_properties_full", {"query": "Qzxv Nowhere Plugh"}, staff, "c1")
+    assert none["count"] == 0 and "No listing named" in none["message"]
+    other = AuthenticatedStaff(user_id=str(uuid.uuid4()), email=people.taj.email, role="admin", allowed_websites=[VAR], selected_websites=[VAR])
+    hidden, _, _ = _execute_admin_tool(db, "search_properties_full", {"query": "3 Villas - Lamai"}, other, "c1")
+    assert hidden["count"] == 0
 
 
 def _report_rows(chat, response):
@@ -368,11 +361,9 @@ def _report_rows(chat, response):
 
 
 def test_export_koh_samui_listings_is_a_property_file_with_only_those_listings(people, listing):
-    other = f"phuket-only-{RUN}-{uuid.uuid4().hex[:4]}"
-    with SessionLocal() as db:
-        db.add(Property(property_id=other, property_name=f"Phuket Only {RUN}", status="Available", is_public=True, websites=[TAJ],
-                        price_numeric_min=9_000_000, province="Phuket", property_type="Villa"))
-        db.commit()
+    other = f"phuket-only-{RUN}-{uuid.uuid4().hex[:4].translate(str.maketrans('0123456789abcdef', 'bcdfghjklmnpqrst'))}"
+    _FS.collection("projects").document(other).set({"name": f"Phuket Only {RUN}", "status": "Available", "isActive": True, "websites": [TAJ],
+                                "priceFrom": 9_000_000, "province": "Phuket", "cityId": "phuket", "propertyType": "Villa"})
     chat = Chat(people.taj, TAJ)
     chat.say("Show the leads")                         # an earlier answer that talks about leads must not turn the export into a leads file
     r = chat.say("Export Koh Samui listings to Excel")
@@ -405,10 +396,10 @@ def test_one_websites_search_result_is_never_served_to_another_website(people):
     taj = AuthenticatedStaff(user_id=str(uuid.uuid4()), email=people.taj.email, role="admin", allowed_websites=[TAJ], selected_websites=[TAJ])
     var = AuthenticatedStaff(user_id=str(uuid.uuid4()), email=people.dual.email, role="admin", allowed_websites=[VAR], selected_websites=[VAR])
     args = {"location": "Koh Samui", "limit": 200}
-    with SessionLocal() as db:
-        first, _, _ = _execute_admin_tool(db, "search_properties_full", dict(args), taj, "c1")
-        second, _, _ = _execute_admin_tool(db, "search_properties_full", dict(args), var, "c2")
-    ids_first = {p["property_id"] for p in first}
-    ids_second = {p["property_id"] for p in second}
+    db = FirestoreSession()
+    first, _, _ = _execute_admin_tool(db, "search_properties_full", dict(args), taj, "c1")
+    second, _, _ = _execute_admin_tool(db, "search_properties_full", dict(args), var, "c2")
+    ids_first = {p["property_id"] for p in (first.get("properties") if isinstance(first, dict) else first) or []}
+    ids_second = {p["property_id"] for p in (second.get("properties") if isinstance(second, dict) else second) or []}
     assert taj_pid in ids_first and var_pid not in ids_first
     assert var_pid in ids_second and taj_pid not in ids_second

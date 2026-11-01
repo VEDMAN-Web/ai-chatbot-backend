@@ -8,9 +8,9 @@ Flow
      (default 10) by a background runner: download -> verify signature -> format-specific extraction -> property drafts.
   3. Drafts are normalised to the listing schema with per-field evidence, source reference and confidence. Missing
      values stay missing. Drafts are compared with each other (duplicates/conflicts across files and formats) and with
-     the existing Postgres and Firestore listings (create / update / skip / manual review).
+     the existing Firestore listings (create / update / skip / manual review).
   4. Nothing is written to the property stores until an authorised admin approves drafts explicitly. Approval writes
-     through save_ingested_listing (the same REST create/update path: validation, Postgres + Firestore sync, 6-day undo
+     through save_ingested_listing (the same REST create/update path: validation, Firestore sync, 6-day undo
      snapshot, audit log). Every approved draft keeps its undo operation id; a job can be rolled back.
 
 Retry re-processes only failed files. Resume continues a job after a restart. Job creation is idempotent per
@@ -754,8 +754,8 @@ def _run_job_safe(job_id: str, db: Any = None) -> None:
 
 def _open_db():
     try:
-        from app.db.session import SessionLocal
-        return SessionLocal()
+        from app.core.deps import FirestoreSession
+        return FirestoreSession()
     except Exception:
         return None
 
@@ -1978,26 +1978,8 @@ _COMPARE_FIELDS = ("property_name", "project_name", "property_type", "status", "
 
 
 def existing_index(db: Any) -> Dict[str, Dict[str, Dict[str, Any]]]:
-    """Existing listings keyed by id, name slug and ingest source URL (Postgres first, then Firestore)."""
+    """Existing listings keyed by id, name slug and ingest source URL (from Firestore)."""
     idx: Dict[str, Dict[str, Dict[str, Any]]] = {"id": {}, "slug": {}, "source": {}}
-    from app.services.action_service import _is_real_db_session
-
-    if _is_real_db_session(db):
-        try:
-            from app.db.models import Property
-            for row in db.query(Property).all():
-                values = {f: getattr(row, f, None) for f in _COMPARE_FIELDS if hasattr(row, f)}
-                entry = {"property_id": row.property_id, "name": row.property_name or row.property_id, "store": "Postgres",
-                         "values": values}
-                idx["id"][str(row.property_id).lower()] = entry
-                if row.property_name:
-                    idx["slug"].setdefault(_slug(row.property_name), entry)
-                meta = row.raw_metadata if isinstance(row.raw_metadata, dict) else {}
-                src = (meta.get("ingest") or {}).get("source_url") if isinstance(meta.get("ingest"), dict) else None
-                if src:
-                    idx["source"][src] = entry
-        except Exception as exc:
-            logger.warning("Postgres listing scan for duplicates failed: %s", type(exc).__name__)
     try:
         from app.services.firestore_service import get_firestore_client
         client = get_firestore_client(target="admin")
@@ -2009,7 +1991,7 @@ def existing_index(db: Any) -> Dict[str, Dict[str, Dict[str, Any]]]:
                     label = label.get("en") or next(iter(label.values()), snap.id)
                 key = str(snap.id).lower()
                 if key in idx["id"]:
-                    idx["id"][key]["store"] = "Postgres + Firestore"
+                    idx["id"][key]["store"] = "Firestore"
                     continue
                 entry = {"property_id": snap.id, "name": str(label), "store": "Firestore", "values": {
                     "property_name": str(label),
@@ -2246,7 +2228,7 @@ _APPROVE_LOCK = threading.Lock()
 
 def approve_drafts(db: Any, staff: Any, job_id: str, draft_ids: List[str], *, confirm: bool) -> Dict[str, Any]:
     """
-    Write approved drafts to Postgres + Firestore through save_ingested_listing (validation, undo snapshot, audit).
+    Write approved drafts to Firestore through save_ingested_listing (validation, undo snapshot, audit).
     Requires confirm=True. Re-approving an approved draft returns its saved result (idempotent).
     """
     require_ingest_role(staff)

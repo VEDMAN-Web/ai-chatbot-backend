@@ -4,7 +4,6 @@ import json
 import logging
 from typing import Dict, Any, List, Optional
 from datetime import datetime, timezone
-from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.auth import AuthenticatedStaff
@@ -52,6 +51,58 @@ _CONFIRM_FORBIDDEN_EXTRA = {
 _NEGATION_MARKERS = (
     "don't", "dont", "do not", "never", "nie ", "nie,", "ไม่",
 )
+
+
+def _token_from_tool_results(tool_results: Any) -> Optional[str]:
+    for item in tool_results or []:
+        if not isinstance(item, dict):
+            continue
+        if item.get("confirmation_token"):
+            return str(item["confirmation_token"])
+        nested = item.get("result") if isinstance(item.get("result"), dict) else None
+        if nested and nested.get("confirmation_token"):
+            return str(nested["confirmation_token"])
+    return None
+
+
+def _expose_confirmation_token(db: Any, staff: Any, res: Any) -> Any:
+    if not isinstance(res, dict) or not res.get("requires_confirmation") or not res.get("pending_action_id"):
+        return res
+    if res.get("confirmation_token"):
+        return res
+    try:
+        from app.services.action_service import get_pending_action
+        action = get_pending_action(db, str(res["pending_action_id"]))
+    except Exception:
+        return res
+    role = (getattr(staff, "role", None) or "").strip().lower()
+    actor = (getattr(staff, "email", None) or "").strip().lower()
+    proposer = (getattr(action, "staff_user_id", None) or "").strip().lower()
+    if role == "super_admin" or (actor and actor == proposer):
+        res["confirmation_token"] = action.confirmation_token
+    return res
+
+
+def _session_confirmation_token(action: Any, conv: Any, staff: Any) -> Optional[str]:
+    """
+    Use the stored token only when this authenticated session owns the proposal.
+    The token is never guessed. A mismatch returns None so the caller refuses.
+    """
+    if action is None or staff is None:
+        return None
+    role = (getattr(staff, "role", None) or "").strip().lower()
+    actor = (getattr(staff, "email", None) or "").strip().lower()
+    proposer = (getattr(action, "staff_user_id", None) or "").strip().lower()
+    action_conv = str(getattr(action, "conversation_id", "") or "")
+    conv_id = str(getattr(conv, "id", "") or "")
+    same_conversation = bool(action_conv) and action_conv == conv_id
+    same_staff = bool(proposer) and actor == proposer
+    if not same_conversation:
+        return None
+    if role != "super_admin" and not same_staff:
+        return None
+    token = (getattr(action, "confirmation_token", None) or "").strip()
+    return token or None
 
 
 def is_strict_confirm_message(message: Optional[str]) -> bool:
@@ -154,18 +205,88 @@ def summarize_untrusted_document(text: str, filename: Optional[str] = None) -> D
     }
 
 
+def _is_dossier_flow_continuation(message: Optional[str]) -> bool:
+    """True when a waiting dossier turn should consume the message (not greet)."""
+    if not message:
+        return False
+    m = message.strip().lower()
+    if not m:
+        return False
+    if re.search(r"\b(cancel|never\s*mind|abort|stop)\b", m):
+        return True
+    if any(
+        p in m
+        for p in (
+            "assume the rest",
+            "fetch from db",
+            "make everything myself",
+            "make everything yourself",
+            "use defaults",
+            "with defaults",
+            "continue with defaults",
+            "pobierz z bazy",
+            "dobierz z bazy",
+            "details out of 7",
+            "out of 7",
+        )
+    ):
+        return True
+    # Client name / budget style answers (currency or named person + number)
+    if re.search(r"\b(budget|client|name|thb|usd|eur|mln|million|mln)\b", m):
+        return True
+    if re.search(r"\d[\d\s.,]{2,}", m) and len(m.split()) <= 12:
+        return True
+    if re.search(r"\b(for\s+)?(client|klient)\b", m):
+        return True
+    return False
+
+
+def _is_dossier_smalltalk(message: Optional[str]) -> bool:
+    """Greetings / thanks / unrelated short chat while a dossier prompt is open."""
+    if not message:
+        return False
+    m = re.sub(r"\s+", " ", message.strip().lower())
+    if not m:
+        return False
+    if _is_dossier_flow_continuation(m):
+        return False
+    if re.match(
+        r"^(hi|hello|hey|thanks|thank you|thx|ok|okay|cool|great|hi there|"
+        r"dzień dobry|czesc|cześć|dzięki|dziekuje|dziękuję)[\s!.?]*$",
+        m,
+    ):
+        return True
+    # Short unrelated questions without dossier signals
+    if len(m) < 80 and not any(
+        w in m for w in ("dossier", "portfolio", "offer", "client", "budget", "template")
+    ):
+        if m.endswith("?") or m.split()[0] in ("what", "who", "how", "when", "where", "why"):
+            return True
+    return False
+
+
 def refuse_secret_or_prompt_reveal(message: Optional[str]) -> bool:
-    """True when staff asks to print/reveal API keys or the system prompt."""
+    """True when staff asks to print/reveal API keys, secrets, or configuration."""
     if not message:
         return False
     m = message.strip().lower()
     if re.search(
         r"(?:print|show|reveal|dump|give|output|display)\s+(?:your\s+|the\s+|my\s+)?"
-        r"(?:api\s*key|secret|token|password|system\s+prompt|hidden\s+rules?|prompt)",
+        r"(?:api\s*keys?|secret|token|password|system\s+prompt|hidden\s+rules?|prompt)",
         m,
     ):
         return True
-    if "api key" in m and any(w in m for w in ("print", "show", "reveal", "dump")):
+    if re.search(r"\b(?:database_url|db_url|connection\s*string)\b", m):
+        return True
+    if re.search(
+        r"(?:what\s+is|what's|whats|show|print|reveal|dump|give\s+me|tell\s+me).{0,40}"
+        r"(?:database_url|db_url|api\s*keys?|secret|token|password|config(?:uration)?)",
+        m,
+    ):
+        return True
+    if "api key" in m and any(w in m for w in ("print", "show", "reveal", "dump", "what")):
+        return True
+    if "api keys" in m:
         return True
     if "system prompt" in m and any(w in m for w in ("print", "show", "reveal", "dump", "your")):
         return True
@@ -255,7 +376,7 @@ def is_strict_reject_message(message: Optional[str]) -> bool:
 
 
 def _resolve_batch_targets(
-    db: Session,
+    db: Any,
     property_ids: Optional[List[str]],
     update_fields: Optional[Dict[str, Any]] = None,
     operation_type: str = "delete",
@@ -297,7 +418,7 @@ def _resolve_batch_targets(
             unresolved.append(q)
             continue
 
-        # Direct id / Firestore / SQL fallback when index missed an explicit doc id
+        # Direct id / Firestore fallback when index missed an explicit doc id
         if not resolved_id:
             try:
                 from app.services.firestore_service import get_firestore_client
@@ -322,30 +443,6 @@ def _resolve_batch_targets(
                         }
             except Exception as e:
                 logger.debug(f"Batch target resolve (firestore) skipped for '{q}': {e}")
-        if not resolved_id and db is not None:
-            try:
-                from app.db.models import Property
-                prop = (
-                    db.query(Property)
-                    .filter(Property.property_id == q)
-                    .first()
-                )
-                if prop:
-                    resolved_id = prop.property_id
-                    name = (
-                        getattr(prop, "property_name", None)
-                        or getattr(prop, "title", None)
-                        or resolved_id
-                    )
-                    current = {
-                        "status": getattr(prop, "status", None),
-                        "price": getattr(prop, "price_display", None)
-                        or getattr(prop, "price_numeric_min", None),
-                        "location": getattr(prop, "location", None),
-                    }
-            except Exception as e:
-                logger.debug(f"Batch target resolve (sql) skipped for '{q}': {e}")
-
         if not resolved_id:
             unresolved.append(q)
             if not clarification:
@@ -354,22 +451,6 @@ def _resolve_batch_targets(
                     f"I will not invent an id or propose a change."
                 )
             continue
-
-        # Enrich current from store when name-index resolved without snapshot
-        if not current and db is not None:
-            try:
-                from app.db.models import Property
-                prop = db.query(Property).filter(Property.property_id == resolved_id).first()
-                if prop:
-                    name = name or getattr(prop, "property_name", None) or resolved_id
-                    current = {
-                        "status": getattr(prop, "status", None),
-                        "price": getattr(prop, "price_display", None)
-                        or getattr(prop, "price_numeric_min", None),
-                        "location": getattr(prop, "location", None),
-                    }
-            except Exception:
-                pass
 
         change: Dict[str, Any] = {"operation": operation_type}
         if operation_type == "update" and up:
@@ -454,16 +535,16 @@ CLAUDE_ADMIN_TOOLS = [
     },
     {
         "name": "create_or_update_listing",
-        "description": "Proposes creating or updating property data in PostgreSQL and Cloud Firestore. DOES NOT execute immediately; stages a pending action requiring employee confirmation. Supports setting property info (title, price, location, bedrooms, pool) and adding property image URLs.",
+        "description": "Proposes creating or updating property data in Cloud Firestore. DOES NOT execute immediately; stages a pending action requiring employee confirmation. Supports setting property info (title, price, location, bedrooms, pool) and adding property image URLs.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "property_id": {"type": "string", "description": "Property identifier"},
+                "property_id": {"type": "string", "description": "Existing property identifier. Leave empty when creating a new listing: the system generates the id from the property name."},
                 "fields_to_update": {"type": "object", "description": "Dictionary of fields to update"},
                 "images": {"type": "array", "items": {"type": "string"}, "description": "List of property image URLs"},
                 "cover_image": {"type": "string", "description": "Cover image URL"}
             },
-            "required": ["property_id", "fields_to_update"]
+            "required": ["fields_to_update"]
         }
     },
     {
@@ -607,7 +688,7 @@ CLAUDE_ADMIN_TOOLS = [
         "name": "execute_batch_property_action",
         "description": (
             "PROPOSE ONLY a bulk property operation (delete, update, or create). "
-            "Never mutates Firestore/SQL directly. Builds an itemised preview and stages a PendingAction; "
+            "Never mutates Firestore directly. Builds an itemised preview and stages a PendingAction; "
             "staff must confirm item-by-item / via confirm_and_execute_action before any write."
         ),
         "input_schema": {
@@ -641,7 +722,7 @@ CLAUDE_ADMIN_TOOLS = [
     },
     {
         "name": "get_database_inventory_stats",
-        "description": "Retrieves the authoritative total property count and complete breakdown of all properties across the entire database (Cloud Firestore live projects catalog and PostgreSQL). Use this tool whenever asked how many total properties are in the database, overall inventory size, or catalog overview.",
+        "description": "Retrieves the authoritative total property count and complete breakdown of all properties across the entire database (Cloud Firestore live projects catalog). Use this tool whenever asked how many total properties are in the database, overall inventory size, or catalog overview.",
         "input_schema": {
             "type": "object",
             "properties": {}
@@ -708,7 +789,7 @@ When authorized staff asks you to create, prepare, or generate a portfolio PDF, 
 PROPERTY DELETIONS & BATCH ACTIONS PROTOCOL (PROPOSE → CONFIRM ONLY — NEVER INSTANT MUTATE):
 When an authorized admin asks to delete, remove, create, or modify a property (e.g., "9D Cozy Villas okay delete this", "remove 9D Cozy Villas", "delete property X", "update price on …"):
 1. DO NOT ask for a Property ID if they already gave a clear name. Accept the name/id and resolve it against the catalog.
-2. Invoke `execute_batch_property_action` to PROPOSE the change only. That tool stages a PendingAction and returns `requires_confirmation=True`. It MUST NEVER mutate Firestore/SQL itself.
+2. Invoke `execute_batch_property_action` to PROPOSE the change only. That tool stages a PendingAction and returns `requires_confirmation=True`. It MUST NEVER mutate Firestore itself.
 3. Always propose first. Never claim you executed a delete/update/create. Never promise instant removal from the live database. Staff must confirm via the confirm button / explicit short confirmation before any write applies through `confirm_and_execute_action`.
 4. If TWO OR MORE properties match an ambiguous name, list them (id + name + key current values) and ask which one(s) — do not guess.
 5. After a successful staff confirmation (not before), you may report that the listed items were applied, share the Operation ID, and note the 6-day undo snapshot window.
@@ -1079,7 +1160,7 @@ def _attach_timing_debug(res: Dict[str, Any], timer: Any) -> Dict[str, Any]:
 
 
 def try_admin_fast_path(
-    db: Session,
+    db: Any,
     conv: Any,
     message: str,
     staff_user: AuthenticatedStaff,
@@ -1122,8 +1203,9 @@ def try_admin_fast_path(
             lines = [
                 ("Pending actions:" if language != "pl" else "Akcje oczekujące:")
             ]
+            from app.services.admin_chat_quality import human_tool_label
             for pa in open_pending[:5]:
-                lines.append(f"- `{pa.id}` — `{pa.tool_name}`")
+                lines.append(f"- {human_tool_label(pa.tool_name)} ({pa.id})")
             if len(open_pending) > 5:
                 lines.append("Show the next 5?")
             text = "\n".join(lines)
@@ -1193,7 +1275,8 @@ def try_admin_fast_path(
             )
             timer.skipped.append("fast_path:inventory")
         stats = t_res if isinstance(t_res, dict) else {}
-        total = stats.get("authoritative_total_properties") or stats.get("firestore_live_projects_count") or 0
+        from app.services.admin_chat_quality import format_inventory_reply
+        total_sentence = format_inventory_reply(stats, language)
         by_loc = stats.get("location_breakdown") or {}
         # Location-specific ask (checks all locations dynamically with Thai city fallback)
         loc_hit = None
@@ -1210,28 +1293,10 @@ def try_admin_fast_path(
                     break
         if loc_hit is not None:
             n = by_loc.get(loc_hit, 0)
-            text = (
-                f"**{n}** properties in **{loc_hit}** (from live inventory).\n"
-                f"Portfolio total: **{total}**."
-                if language != "pl"
-                else f"**{n}** nieruchomości w **{loc_hit}**.\nŁącznie w bazie: **{total}**."
-            )
+            place = loc_hit[:1].upper() + loc_hit[1:] if loc_hit else loc_hit
+            text = f"You have {n} properties in {place}. {total_sentence}"
         else:
-            text = build_deterministic_reply_from_tools(
-                [{"name": "get_database_inventory_stats", "result": stats}],
-                language=language,
-                user_message=message,
-            )
-            if not text or len(text) < 20:
-                loc_summary = " · ".join(
-                    f"{k} ({v})" for k, v in sorted(by_loc.items(), key=lambda x: -x[1])[:5]
-                ) or "—"
-                text = (
-                    f"**{total}** properties in the live database.\n"
-                    f"- 📍 Locations: {loc_summary}"
-                    if language != "pl"
-                    else f"**{total}** nieruchomości w bazie.\n- 📍 Lokalizacje: {loc_summary}"
-                )
+            text = total_sentence
         append_conversation_turn(
             db, conv, message, text,
             tool_calls=[{"name": "get_database_inventory_stats", "args": {}}],
@@ -1253,7 +1318,7 @@ def try_admin_fast_path(
     return None
 
 
-def _handle_admin_greeting(db: Session, conv: Any, message: str, language: str = "en") -> Dict[str, Any]:
+def _handle_admin_greeting(db: Any, conv: Any, message: str, language: str = "en") -> Dict[str, Any]:
     """Warmly greets authorized staff or answers capabilities — no LLM call."""
     from app.services.admin_reply_helpers import is_capabilities_question
 
@@ -1330,19 +1395,22 @@ def _handle_admin_greeting(db: Session, conv: Any, message: str, language: str =
 
 
 def process_admin_chat(
-    db: Session,
+    db: Any,
     session_id: str,
     message: Optional[str] = None,
     staff_user: Optional[AuthenticatedStaff] = None,
     site_origin: str = "admin",
     requested_language: Optional[str] = "en",
     action: Optional[str] = None,
-    pending_action_id: Optional[str] = None
+    pending_action_id: Optional[str] = None,
+    confirmation_token: Optional[str] = None,
+    attached_images: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Run one admin chat turn, then remember whether this turn proposed a change (see _remember_proposal)."""
     result = _process_admin_chat_inner(
         db=db, session_id=session_id, message=message, staff_user=staff_user, site_origin=site_origin,
         requested_language=requested_language, action=action, pending_action_id=pending_action_id,
+        confirmation_token=confirmation_token, attached_images=attached_images,
     )
     _remember_proposal(session_id, result)
     if result.get("text"):
@@ -1378,14 +1446,16 @@ def _remember_proposal(session_id, result) -> None:
 
 
 def _process_admin_chat_inner(
-    db: Session,
+    db: Any,
     session_id: str,
     message: Optional[str] = None,
     staff_user: Optional[AuthenticatedStaff] = None,
     site_origin: str = "admin",
     requested_language: Optional[str] = "en",
     action: Optional[str] = None,
-    pending_action_id: Optional[str] = None
+    pending_action_id: Optional[str] = None,
+    confirmation_token: Optional[str] = None,
+    attached_images: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """
     Main processing entrypoint for Admin / Internal AI Agent.
@@ -1450,7 +1520,6 @@ def _process_admin_chat_inner(
         }
 
     # 2.5 Action Intent & Confirmation/Rejection Decision Engine (strict parse — B5/B7)
-    from app.db.models import PendingAction
     from app.services.action_service import (
         ACTION_STATUS_PENDING,
         confirm_and_execute_action,
@@ -1460,17 +1529,11 @@ def _process_admin_chat_inner(
 
     msg_low = clean_message.lower()
 
-    # Guard: refuse API key / system prompt reveal (C1)
+    # Guard: refuse API key / config / system prompt reveal (C1)
     if refuse_secret_or_prompt_reveal(clean_message):
         refuse_sec = (
-            "I cannot print API keys or the system prompt. "
-            "That request is refused for security reasons."
+            "I cannot share keys, passwords, tokens, DATABASE_URL, or the system prompt."
         )
-        if active_lang == "pl":
-            refuse_sec = (
-                "Nie mogę ujawnić kluczy API ani promptu systemowego. "
-                "Ta prośba jest odrzucona ze względów bezpieczeństwa."
-            )
         refuse_sec = redact_admin_sensitive_output(refuse_sec)
         append_conversation_turn(db, conv, clean_message, refuse_sec)
         return {
@@ -1568,26 +1631,10 @@ def _process_admin_chat_inner(
 
     if db is not None:
         try:
-            open_pending = (
-                db.query(PendingAction)
-                .filter(
-                    PendingAction.conversation_id == str(conv.id),
-                    PendingAction.status == ACTION_STATUS_PENDING,
-                )
-                .order_by(PendingAction.created_at.desc())
-                .all()
+            from app.repositories import pending_actions_repo
+            open_pending = pending_actions_repo.list_open_pending(
+                db, str(conv.id), limit=10
             ) or []
-            # Lazy-expire any stale PENDING so they never appear in notes/cards
-            refreshed = []
-            for pa in open_pending:
-                try:
-                    refreshed.append(get_pending_action(db, str(pa.id)))
-                except Exception:
-                    refreshed.append(pa)
-            open_pending = [
-                pa for pa in refreshed
-                if getattr(pa, "status", None) == ACTION_STATUS_PENDING
-            ]
         except Exception:
             open_pending = []
 
@@ -1607,7 +1654,7 @@ def _process_admin_chat_inner(
             return drive_ingest_turn
 
     # URL import is chat-only: a pasted link or an edit of that draft never reaches other write tools.
-    if clean_message and staff_user is not None:
+    if clean_message and staff_user is not None and not attached_images:
         from app.services.property_web_ingest import try_handle_property_url_turn
         ingest_turn = try_handle_property_url_turn(
             db, conv, clean_message, staff_user, active_lang, open_pending
@@ -1615,100 +1662,23 @@ def _process_admin_chat_inner(
         if ingest_turn is not None:
             return ingest_turn
 
-    # Requirement 7: Admin Direct Teaching & Persistent Rule Ingestion
-    if clean_message and staff_user is not None:
-        from app.services.admin_teaching_service import (
-            is_teaching_intent,
-            extract_teaching_content,
-            stage_knowledge_entry,
-            activate_knowledge_entry,
-        )
-        conv_prefs = dict(conv.preferences or {})
-        pending_teach_id = conv_prefs.get('pending_teach_entry_id')
-        is_conf = is_strict_confirm_message(clean_message) or action == 'confirm'
-        is_rej = is_strict_reject_message(clean_message) or action == 'reject'
-        if pending_teach_id and is_conf and not is_rej:
-            activate_knowledge_entry(pending_teach_id, staff_user)
-            conv_prefs.pop('pending_teach_entry_id', None)
-            conv_prefs.pop('pending_teach_subject', None)
-            conv.preferences = conv_prefs
-            if db is not None:
-                try:
-                    db.commit()
-                except Exception:
-                    pass
-            confirm_reply = (
-                'Understood Admin. Rule activated across all future public and admin answers.\n'
-                f'- **Status:** Active\n'
-                f'- **ID:** `{pending_teach_id}`'
-            )
-            append_conversation_turn(db, conv, clean_message, confirm_reply)
-            return {
-                'type': 'text',
-                'text': confirm_reply,
-                'session_id': conv.session_id,
-                'conversation_id': str(conv.id),
-                'requires_confirmation': False,
-                'pending_action_id': None,
-                'action_status': 'executed',
-                'tools_used': [],
-                'download_link': None,
-                'language': active_lang,
-            }
-        elif pending_teach_id and is_rej:
-            conv_prefs.pop('pending_teach_entry_id', None)
-            conv_prefs.pop('pending_teach_subject', None)
-            conv.preferences = conv_prefs
-            if db is not None:
-                try:
-                    db.commit()
-                except Exception:
-                    pass
-            reject_reply = 'Teaching command discarded. No rule was activated.'
-            append_conversation_turn(db, conv, clean_message, reject_reply)
-            return {
-                'type': 'text',
-                'text': reject_reply,
-                'session_id': conv.session_id,
-                'conversation_id': str(conv.id),
-                'requires_confirmation': False,
-                'pending_action_id': None,
-                'action_status': 'rejected',
-                'tools_used': [],
-                'download_link': None,
-                'language': active_lang,
-            }
-        elif is_teaching_intent(clean_message):
-            extracted = extract_teaching_content(clean_message)
-            staged = stage_knowledge_entry(
-                db=db,
-                rule_text=extracted['rule_text'],
-                subject=extracted['subject'],
-                staff_user=staff_user,
-                conversation_id=str(conv.id),
-            )
-            conv_prefs['pending_teach_entry_id'] = staged['entry_id']
-            conv_prefs['pending_teach_subject'] = staged['subject']
-            conv.preferences = conv_prefs
-            if db is not None:
-                try:
-                    db.commit()
-                except Exception:
-                    pass
-            reply_text = staged['preview_message']
-            append_conversation_turn(db, conv, clean_message, reply_text)
-            return {
-                'type': 'action_proposal',
-                'text': reply_text,
-                'session_id': conv.session_id,
-                'conversation_id': str(conv.id),
-                'requires_confirmation': True,
-                'pending_action_id': staged['entry_id'],
-                'action_status': 'proposed',
-                'tools_used': [],
-                'download_link': None,
-                'language': active_lang,
-            }
+    if clean_message and action not in ("confirm", "reject"):
+        from app.services.admin_turn_rules import safety_refusal_text
+        refused = safety_refusal_text(clean_message)
+        if refused:
+            append_conversation_turn(db, conv, clean_message, refused)
+            return _attach_timing_debug({
+                "type": "text",
+                "text": refused,
+                "session_id": conv.session_id,
+                "conversation_id": str(conv.id),
+                "requires_confirmation": False,
+                "pending_action_id": None,
+                "action_status": None,
+                "tools_used": [],
+                "download_link": None,
+                "language": active_lang,
+            }, timer)
 
     # Explicit UI button/parameter OR short free-text only — never substring matches in long messages
     has_confirm_intent = (action == "confirm") or bool(_named_confirm) or (
@@ -1729,8 +1699,9 @@ def _process_admin_chat_inner(
         and len(open_pending) > 1
     ):
         lines = []
+        from app.services.admin_chat_quality import human_tool_label
         for pa in open_pending:
-            lines.append(f"- `{pa.id}` — tool `{pa.tool_name}`")
+            lines.append(f"- {human_tool_label(pa.tool_name)} ({pa.id})")
         which_text = (
             "You have several pending actions waiting. Which one should I confirm?\n"
             + "\n".join(lines)
@@ -1777,6 +1748,24 @@ def _process_admin_chat_inner(
                 "requires_confirmation": True, "pending_action_id": str(target_action.id), "action_status": "pending",
                 "tools_used": [], "download_link": None, "language": active_lang,
             }
+    # Confirm / yes with nothing pending — never fall through to property search
+    if has_confirm_intent and not has_reject_intent and not target_action:
+        nothing_text = "There is nothing waiting for confirmation right now."
+        if active_lang == "pl":
+            nothing_text = "Nie ma teraz nic oczekującego na potwierdzenie."
+        append_conversation_turn(db, conv, clean_message or "yes", nothing_text)
+        return _attach_timing_debug({
+            "type": "text",
+            "text": nothing_text,
+            "session_id": conv.session_id,
+            "conversation_id": str(conv.id),
+            "requires_confirmation": False,
+            "pending_action_id": None,
+            "action_status": None,
+            "tools_used": [],
+            "download_link": None,
+            "language": active_lang,
+        }, timer)
 
     # A. Execute Confirmation
     if target_action and has_confirm_intent and not has_reject_intent:
@@ -1821,10 +1810,35 @@ def _process_admin_chat_inner(
                 }
 
         try:
+            typed_token = confirmation_token
+            if not typed_token and clean_message:
+                token_match = re.search(r"\bact_[A-Za-z0-9]+\b", clean_message)
+                if token_match:
+                    typed_token = token_match.group(0)
+            if not typed_token:
+                typed_token = _session_confirmation_token(target_action, conv, staff_user)
+            if not typed_token:
+                refused = (
+                    "I cannot confirm that action. It belongs to a different conversation or a different staff member. Nothing was executed."
+                )
+                append_conversation_turn(db, conv, clean_message or "Confirm", refused)
+                return _attach_timing_debug({
+                    "type": "text",
+                    "text": refused,
+                    "session_id": conv.session_id,
+                    "conversation_id": str(conv.id),
+                    "requires_confirmation": True,
+                    "pending_action_id": str(target_action.id),
+                    "action_status": "pending",
+                    "tools_used": [],
+                    "download_link": None,
+                    "language": active_lang,
+                }, timer)
             exec_res = confirm_and_execute_action(
                 db=db,
                 pending_action_id=str(target_action.id),
-                authenticated_staff=staff_user
+                authenticated_staff=staff_user,
+                confirmation_token=typed_token,
             )
             # Stale Current values: refuse apply, show fresh proposal
             if isinstance(exec_res, dict) and exec_res.get("status") == "STALE_REFUSED":
@@ -1946,32 +1960,72 @@ def _process_admin_chat_inner(
                     audit_line = "- **Audit logging is disabled**\n"
                 else:
                     audit_line = ""
+                from app.services.admin_chat_quality import (
+                    audit_note_for_reply,
+                    describe_store_check,
+                    format_saved_listing_reply,
+                )
+                price_row = None
+                diff_rows = []
+                change_diff = payload.get("change_diff") if isinstance(payload.get("change_diff"), dict) else {}
+                if isinstance(change_diff.get("rows"), list):
+                    diff_rows = change_diff["rows"]
+                for row in diff_rows:
+                    if isinstance(row, dict) and row.get("field") in {"price_numeric_min", "price_display", "price"}:
+                        price_row = row
+                        break
+                new_value = None
+                old_value = None
+                if price_row:
+                    new_value = price_row.get("new") or price_row.get("after")
+                    old_value = price_row.get("current") or price_row.get("before")
+                if new_value in (None, ""):
+                    fields = payload.get("fields") or payload.get("fields_to_update") or {}
+                    if isinstance(fields, dict):
+                        new_value = fields.get("price_display") or fields.get("price_numeric_min")
+                fs_state = "unavailable"
+                try:
+                    from app.services.firestore_service import get_property_by_id_from_firestore
+                    found_fs = get_property_by_id_from_firestore(str(pid), target="admin")
+                    fs_state = "saved" if found_fs else "missing"
+                except Exception:
+                    fs_state = "unavailable"
+                store_line = describe_store_check(fs_state)
+                note = audit_note_for_reply(
+                    role=getattr(staff_user, "role", None),
+                    message=clean_message,
+                    audit_disabled=audit_disabled,
+                )
+                reply_text = format_saved_listing_reply(
+                    title=str(title),
+                    new_value=None if new_value in (None, "") else str(new_value),
+                    old_value=None if old_value in (None, "") else str(old_value),
+                    store_line=store_line,
+                    undo=bool(op_id),
+                    audit_note=note,
+                )
                 if active_lang == "pl":
                     reply_text = (
-                        f"✅ **Oferta nieruchomości pomyślnie zaktualizowana w bazie danych!**\n\n"
-                        f"- **ID nieruchomości**: `{pid}`\n"
-                        f"- **Tytuł**: **{title}**\n"
-                        f"- **Tryb operacji**: `[{op_mode} SUCCESS]`\n"
-                        f"- **Narzędzie**: `{tool_label}`\n"
-                        f"- **Status oferty**: `{status_val}`\n"
-                        f"{audit_line}"
-                        f"{f'- **Operation ID**: `{op_id}`' if op_id else ''}\n\n"
-                        f"Wszystkie parametry zostały pomyślnie zapisane."
-                        f"{verify_line}{undo_line}"
+                        f"Gotowe. {title} jest zapisane. Sprawdziłem bazę i zmiana jest zapisana."
+                        + (" Możesz cofnąć przez 6 dni, mówiąc 'cofnij'." if op_id else "")
                     )
+            elif target_action.tool_name == "manage_property_images":
+                raw_res = raw_exec if isinstance(raw_exec, dict) else {}
+                payload = target_action.action_payload or {}
+                title = raw_res.get("title") or payload.get("property_name") or "The property"
+                count = int(raw_res.get("image_count") or 0)
+                count_text = "1 image" if count == 1 else f"{count} images"
+                if active_lang == "pl":
+                    reply_text = f"Gotowe. {title} ma teraz {count_text}. Sprawdziłem bazę i zmiana jest zapisana."
+                    if op_id:
+                        reply_text += " Możesz cofnąć przez 6 dni, mówiąc 'cofnij'."
                 else:
                     reply_text = (
-                        f"✅ **Property listing successfully applied to database!**\n\n"
-                        f"- **Property ID**: `{pid}`\n"
-                        f"- **Title**: **{title}**\n"
-                        f"- **Operation Mode**: `[{op_mode} SUCCESS]`\n"
-                        f"- **Tool**: `{tool_label}`\n"
-                        f"- **Listing Status**: `{status_val}`\n"
-                        f"{audit_line}"
-                        f"{f'- **Operation ID**: `{op_id}`' if op_id else ''}\n\n"
-                        f"All specifications are saved, and the search index cache has been refreshed."
-                        f"{verify_line}{undo_line}"
+                        f"Done. {title} now has {count_text}. "
+                        "I checked the database and the change is saved."
                     )
+                    if op_id:
+                        reply_text += " You can undo this for 6 days by saying 'undo'."
                 if raw_res.get("firestore_synced") is False:
                     reply_text += (
                         "\n\n\u26a0\ufe0f **Saved in the database, but the Firestore sync failed**, so the Admin Panel list may not show this "
@@ -2005,23 +2059,17 @@ def _process_admin_chat_inner(
                 else:
                     detail = f"event `{payload.get('title')}` at `{payload.get('start_time')}`"
                 if active_lang == "pl":
-                    reply_text = (
-                        f"✅ **Akcja `{target_action.tool_name}` wykonana.** ({detail})\n\n"
-                        f"Tej akcji nie można cofnąć (email/kalendarz nie mają okna undo)."
-                    )
+                    reply_text = f"Gotowe. {detail}. Tej akcji nie można cofnąć."
                 else:
-                    reply_text = (
-                        f"✅ **Action `{target_action.tool_name}` completed.** ({detail})\n\n"
-                        f"This action cannot be undone (email/calendar actions are not undoable)."
-                    )
+                    reply_text = f"Done. {detail}. This action cannot be undone."
             elif active_lang == "pl":
-                reply_text = f"✅ **Akcja zatwierdzona i wykonana pomyślnie!**\n\nOperacja `{target_action.tool_name}` została zapisana w bazie danych.\n\nSzczegóły: {json.dumps(target_action.action_payload, ensure_ascii=False)}"
+                reply_text = "Gotowe. Zmiana jest zapisana. Sprawdziłem bazę."
                 if op_id:
-                    reply_text += f"\n\nMożesz cofnąć tę operację przez 6 dni: operation `{op_id}`."
+                    reply_text += " Możesz cofnąć przez 6 dni, mówiąc 'cofnij'."
             else:
-                reply_text = f"✅ **Action confirmed and executed successfully!**\n\nThe proposed `{target_action.tool_name}` has been applied to the database.\n\nPayload: {json.dumps(target_action.action_payload)}"
+                reply_text = "Done. The change is saved. I checked the database and the change is saved."
                 if op_id:
-                    reply_text += f"\n\nYou can undo this for 6 days: operation `{op_id}`."
+                    reply_text += " You can undo this for 6 days by saying 'undo'."
 
             reply_text = redact_admin_sensitive_output(reply_text)
             append_conversation_turn(
@@ -2045,13 +2093,22 @@ def _process_admin_chat_inner(
                 "requires_confirmation": False,
                 "pending_action_id": str(target_action.id),
                 "action_status": "executed",
+                "operation_id": op_id,
                 "execution_result": exec_res,
                 "tools_used": [{"tool": target_action.tool_name, "status": "executed"}],
                 "download_link": None,
                 "language": active_lang
             }, timer)
         except Exception as e:
-            err_text = f"Failed to execute action: {str(e)}"
+            from fastapi import HTTPException as _HTTPException
+            from app.services.audit_service import AUDIT_WRITE_FAILED_MSG
+            detail = getattr(e, "detail", None)
+            if isinstance(e, _HTTPException) and detail:
+                err_text = str(detail)
+            elif AUDIT_WRITE_FAILED_MSG.lower() in str(e).lower():
+                err_text = AUDIT_WRITE_FAILED_MSG
+            else:
+                err_text = f"Failed to execute action: {str(e)}"
             append_conversation_turn(db, conv, clean_message or "Confirm", err_text)
             return _attach_timing_debug({
                 "type": "text",
@@ -2075,10 +2132,12 @@ def _process_admin_chat_inner(
                 authenticated_staff=staff_user,
                 reason=clean_message or "Admin cancelled action via unified chat API"
             )
+            from app.services.admin_chat_quality import human_tool_label
+            label = human_tool_label(target_action.tool_name).lower()
             if active_lang == "pl":
-                reply_text = f"❌ **Propozycja akcji anulowana.**\n\nOperacja `{target_action.tool_name}` została odrzucona. Żadne zmiany nie zostały wprowadzone do bazy danych."
+                reply_text = f"Anulowano: {label}. Nic nie zostało zmienione."
             else:
-                reply_text = f"❌ **Action proposal cancelled.**\n\nThe proposed `{target_action.tool_name}` was rejected. No changes have been made to the database."
+                reply_text = f"The {label} was cancelled. Nothing was changed."
 
             append_conversation_turn(
                 db=db,
@@ -2159,10 +2218,22 @@ def _process_admin_chat_inner(
     is_portfolio_followup_waiting = (
         ("1. **Client Name**" in last_assistant_turn or "1. **Imię i nazwisko klienta**" in last_assistant_turn) or
         ("Templates 1 to 7" in last_assistant_turn or "Warianty 1-7" in last_assistant_turn) or
-        ("fetch them from the database & make everything myself" in last_assistant_turn or "pobrać je z bazy danych i dobrać resztę" in last_assistant_turn)
+        ("fetch them from the database & make everything myself" in last_assistant_turn or "pobrać je z bazy danych i dobrać resztę" in last_assistant_turn) or
+        ("still need client details before I generate that offer dossier" in last_assistant_turn)
     )
     # Create / archive / undo / add-a-lead commands are understood first, so the leads and search shortcuts below never take them
     _crud_intent = _detect_crud_intent(clean_message)
+    if _crud_intent == "delete":
+        # "remove photo 2 from <villa>" is an image change, never a listing archive: the image rules handle it.
+        from app.services.admin_image_commands import (
+            _IMAGE_WORD, _URL_RE, looks_like_image_command, parse_image_command,
+        )
+        if (
+            parse_image_command(clean_message) is not None
+            or looks_like_image_command(clean_message)
+            or _IMAGE_WORD.search(_URL_RE.sub(" ", clean_message))
+        ):
+            _crud_intent = None
     if _crud_intent and staff_user is not None:
         _crud_reply = _handle_crud_intent(db, conv, clean_message, _crud_intent, staff_user, active_lang)
         if _crud_reply is not None:
@@ -2191,7 +2262,39 @@ def _process_admin_chat_inner(
             'language': active_lang,
         }, timer)
 
-    if not is_undo_request(clean_message) and not is_portfolio_followup_waiting:
+    # Small talk must not keep the dossier prompt looping — only name/budget /
+    # "assume the rest" / "cancel" continue or end that flow.
+    block_fast_for_dossier = (
+        is_portfolio_followup_waiting and _is_dossier_flow_continuation(clean_message)
+    )
+    draft_reminder = ""
+    if open_pending and not has_confirm_intent and not has_reject_intent:
+        from app.services.admin_chat_quality import draft_still_open_note, open_work_label
+        draft_reminder = draft_still_open_note(open_work_label(open_pending[0]))
+
+    from app.services.admin_chat_quality import try_direct_property_answer
+    direct = try_direct_property_answer(db, clean_message)
+    if direct is not None:
+        direct_text = direct.get("text") or ""
+        if draft_reminder and "still open" not in direct_text.lower():
+            direct_text = direct_text.rstrip() + "\n\n" + draft_reminder
+        append_conversation_turn(db, conv, clean_message, direct_text)
+        return _attach_timing_debug({
+            "type": "text",
+            "text": direct_text,
+            "session_id": conv.session_id,
+            "conversation_id": str(conv.id),
+            "requires_confirmation": False,
+            "pending_action_id": str(open_pending[0].id) if open_pending else None,
+            "action_status": "pending" if open_pending else None,
+            "tools_used": direct.get("tools_used") or [],
+            "download_link": None,
+            "suggestions": [],
+            "direct_answer": True,
+            "language": active_lang,
+        }, timer)
+
+    if not is_undo_request(clean_message) and not block_fast_for_dossier:
         fast_res = try_admin_fast_path(
             db, conv, clean_message, staff_user,
             language=active_lang,
@@ -2199,43 +2302,37 @@ def _process_admin_chat_inner(
             timer=timer,
         )
         if fast_res is not None:
+            if draft_reminder and "still open" not in (fast_res.get("text") or "").lower():
+                fast_res["text"] = ((fast_res.get("text") or "").rstrip() + "\n\n" + draft_reminder).strip()
+            from app.services.admin_chat_quality import scrub_user_reply
+            fast_res["text"] = scrub_user_reply(fast_res.get("text"))
+            fast_res["suggestions"] = [] if fast_res.get("direct_answer") else fast_res.get("suggestions") or []
             return _attach_timing_debug(fast_res, timer)
 
-    _is_report_followup = any(
-        p in clean_message.lower()
-        for p in (
-            "that report again", "same report", "previous report", "the report again",
-            "download that report", "send that report again", "generate report",
-            "download report", "ten raport", "poprzedni raport", "ten sam raport",
+    if staff_user is not None and action not in ("confirm", "reject") and (clean_message or attached_images):
+        from app.services.admin_turn_rules import try_rule_based_write
+        ruled = try_rule_based_write(
+            db, conv, clean_message, staff_user, active_lang, attached_images=attached_images
         )
-    ) or ("report" in clean_message.lower() and any(w in clean_message.lower() for w in ("again", "download", "generate", "export", "pdf")))
+        if ruled is not None:
+            if draft_reminder and "still open" not in (ruled.get("text") or "").lower():
+                ruled["text"] = ((ruled.get("text") or "").rstrip() + "\n\n" + draft_reminder).strip()
+            from app.services.admin_chat_quality import scrub_user_reply
+            ruled["text"] = scrub_user_reply(ruled.get("text"))
+            append_conversation_turn(db, conv, clean_message, ruled.get("text") or "")
+            return _attach_timing_debug(ruled, timer)
 
-    if is_off_topic_query(clean_message) and not _is_report_followup and not _WORKSPACE_WORDS.search(clean_message):
-        if active_lang == "pl":
-            off_reply = (
-                "Jako wewnetrzny asystent AI Tajlandia specjalizuje sie wylacznie w zarzadzaniu i analizie bazy nieruchomosci w Tajlandii (Phuket, Koh Samui, Koh Phangan, Bangkok). "
-                "Nie obsluguje zapytan ogolnych ani tematow niezwiazanych z naszym portfolio. "
-                "W czym moge Ci pomoc w zakresie nieruchomosci, leadow lub specyfikacji technicznych?"
-            )
-        else:
-            off_reply = (
-                "As the Tajlandia Internal AI Assistant, I specialize exclusively in managing and querying our Thailand real estate portfolio (Phuket, Koh Samui, Koh Phangan, Bangkok). "
-                "I do not process general off-topic requests. "
-                "How may I assist you with our properties, buyer leads, or technical dossiers today?"
-            )
-        append_conversation_turn(db, conv, clean_message, off_reply)
-        return _attach_timing_debug({
-            "type": "text",
-            "text": off_reply,
-            "session_id": conv.session_id,
-            "conversation_id": str(conv.id),
-            "requires_confirmation": False,
-            "pending_action_id": None,
-            "action_status": None,
-            "tools_used": [],
-            "download_link": None,
-            "language": active_lang
-        }, timer)
+    # 3b. Admin-taught answer for admin-bot FAQs (near-exact match only; rules above always win)
+    if staff_user is not None and action not in ("confirm", "reject") and clean_message and not attached_images:
+        try:
+            from app.services.taught_answers import find_match as _find_taught_answer
+            _taught = _find_taught_answer(clean_message, language=active_lang, audience="admin")
+        except Exception:
+            _taught = None
+        if _taught:
+            from app.services.admin_turn_rules import _text as _taught_text
+            append_conversation_turn(db, conv, clean_message, _taught["answer"])
+            return _attach_timing_debug(_taught_text(conv, _taught["answer"]), timer)
 
     # 4. AI Model Intent Classification & Safety Evaluation
     client = None
@@ -2322,10 +2419,14 @@ def _process_admin_chat_inner(
     # URL import previews keep their Field | Value | Source table.
     if isinstance(res, dict) and res.get("text") and not res.get("confirm_via_chat_only"):
         res["text"] = ensure_structured_admin_response(res["text"], language=active_lang)
-        tips = contextual_followup_suggestions(
-            res.get("tools_used") or [],
-            language=active_lang,
-        )
+        from app.services.admin_chat_quality import suggestions_allowed
+        tips = []
+        if suggestions_allowed(res):
+            tips = contextual_followup_suggestions(
+                res.get("tools_used") or [],
+                language=active_lang,
+                limit=2,
+            )
         if tips and "Suggestions" not in (res.get("text") or "") and "Sugestie" not in (res.get("text") or ""):
             res["text"] = append_followup_suggestions(res["text"], tips, language=active_lang)
             res["suggestions"] = tips
@@ -2357,6 +2458,10 @@ def _process_admin_chat_inner(
         if res.get("pending_action_id") and res.get("requires_confirmation"):
             remember_admin_session_fact(conv, pending_action_id=str(res["pending_action_id"]))
         res["text"] = redact_admin_sensitive_output(res["text"])
+        if draft_reminder and "still open" not in (res.get("text") or "").lower():
+            res["text"] = ((res.get("text") or "").rstrip() + "\n\n" + draft_reminder).strip()
+        from app.services.admin_chat_quality import scrub_user_reply
+        res["text"] = scrub_user_reply(res.get("text"))
     return _attach_timing_debug(res, timer)
 
 
@@ -2378,7 +2483,7 @@ def _sanitize_tool_result_for_llm(obj: Any) -> Any:
 
 
 def _call_anthropic_claude(
-    db: Session,
+    db: Any,
     conv: Any,
     message: str,
     staff_user: AuthenticatedStaff,
@@ -2723,6 +2828,7 @@ def _call_anthropic_claude(
                 "conversation_id": str(conv.id),
                 "requires_confirmation": True,
                 "pending_action_id": pending_action_id,
+                "confirmation_token": _token_from_tool_results(tool_results),
                 "action_status": "awaiting_confirmation",
                 "tools_used": tool_calls,
                 "language": language
@@ -3027,7 +3133,7 @@ def _call_anthropic_claude(
 
 
 def _run_deterministic_admin(
-    db: Session,
+    db: Any,
     conv: Any,
     message: str,
     staff_user: AuthenticatedStaff,
@@ -3077,8 +3183,9 @@ def _run_deterministic_admin(
     bed_match = re.search(r'(\d+)\s*[-]?\s*(?:bedroom|bed(?:rooms?)?|br\b)', msg_lower)
     bedrooms = int(bed_match.group(1)) if bed_match else None
 
-    price_match = re.search(r'(?:under|below|max|less than|poniżej)\s+(\d+(?:\.\d+)?)\s*(?:million|m\b|mln|mil)', msg_lower)
-    max_price_val = float(price_match.group(1)) * 1_000_000 if price_match else None
+    price_match = re.search(r'(?:under|below|max|less than|poniżej)\s+(.+)', msg_lower)
+    from app.services.admin_property_fields import parse_money
+    max_price_val = parse_money(price_match.group(1)) if price_match else None
 
     has_pool = True if any(w in msg_lower for w in ["pool", "swimming", "basen"]) else None
 
@@ -3345,10 +3452,28 @@ def _run_deterministic_admin(
                     "action_status": "invalid_value", "tools_used": [], "language": language,
                 }
         price_num = parse_relative_price_change(message, _stored_price)
+        price_details = None
         if price_num is None:
             price_num = _price_read.value
+        if price_num is not None and any(word in msg_lower for word in ("price", "cena")):
+            from app.services.admin_property_fields import price_sanity_message
+            refusal = price_sanity_message(price_num, _stored_price)
+            if refusal:
+                append_conversation_turn(db, conv, message, refusal)
+                return {
+                    "type": "text",
+                    "text": refusal,
+                    "session_id": conv.session_id,
+                    "conversation_id": str(conv.id),
+                    "requires_confirmation": False,
+                    "pending_action_id": None,
+                    "action_status": None,
+                    "tools_used": [],
+                    "language": language,
+                }
         if price_num is not None:
-            price_masked = f"{price_num:,.0f} THB"
+            from app.services.admin_property_fields import money_phrase
+            price_masked = money_phrase(price_num, price_details)
         else:
             price_masked = None
 
@@ -3676,8 +3801,8 @@ def _run_deterministic_admin(
         "google drive status", "connect google", "podłącz google", "podlacz google",
         "status google", "połączenie z google", "polaczenie z google"
     ]):
-        from app.db.models import User
-        target_u = db.query(User).filter(User.email.ilike(staff_user.email)).first()
+        from app.repositories import users_repo
+        target_u = users_repo.get_by_email(db, staff_user.email)
         gw_data = (target_u.preferences or {}).get("google_workspace") if target_u else None
         is_conn = bool(gw_data and gw_data.get("connected") and gw_data.get("refresh_token"))
         google_mail = gw_data.get("google_email") if gw_data else None
@@ -3716,14 +3841,25 @@ def _run_deterministic_admin(
                     f"Once authorized, your private Google Drive and Calendar will be active."
                 )
 
-    # E. Generate Client Offer Dossier / Portfolio PDF (8-Page Multi-Property Investor Proposal)
+    # E0 / E. Brochure (single property) + Client Offer Dossier / Portfolio PDF
+    is_brochure_request = (
+        ("brochure" in msg_lower or "broszura" in msg_lower)
+        and not any(k in msg_lower for k in ("dossier", "portfolio", "offer for", "client offer"))
+        and (
+            any(w in msg_lower for w in (
+                "give", "get", "generate", "create", "make", "download", "send",
+                "daj", "wygeneruj", "pobierz", "for", "of", "about", "dla",
+            ))
+            or msg_lower.strip().startswith("brochure")
+        )
+    )
     PORTFOLIO_TRIGGERS = [
         "portfolio pdf", "offer pdf", "oferta pdf", "ofertę pdf", "oferte pdf",
         "investor offer", "client offer", "clint offer", "clinet offer", "oferta dla", "dla dariusza", "dla klienta", "propozycja dla",
         "ofertowy pdf", "wygeneruj ofertę", "wygeneruj oferte", "generate offer", "create offer",
         "investor proposal", "make a portfolio", "create portfolio", "prepare portfolio",
         "wygeneruj portfolio", "stwórz portfolio", "przygotuj portfolio", "client portfolio", "investor portfolio",
-        "offer for", "dossier for", "dossier dla"
+        "offer for", "dossier for", "dossier dla", "offer dossier", "generate offer dossier",
     ]
     has_portfolio_intent = any(k in msg_lower for k in PORTFOLIO_TRIGGERS) or (
         ("portfolio" in msg_lower or (("client" in msg_lower or "clint" in msg_lower) and ("offer" in msg_lower or "proposal" in msg_lower or "dossier" in msg_lower))) and
@@ -3741,7 +3877,8 @@ def _run_deterministic_admin(
     is_explicit_answer = any(p in msg_lower for p in [
         "details out of 7", "out of 7", "assume the rest", "assume the rest of the details",
         "fetch from db", "make everything myself", "make everything yourself",
-        "carry on", "pobierz z bazy", "dobierz z bazy", "resztę dobierz", "reszte dobierz"
+        "carry on", "pobierz z bazy", "dobierz z bazy", "resztę dobierz", "reszte dobierz",
+        "use defaults", "with defaults", "continue with defaults", "go ahead",
     ])
 
     # Guard: Inventory queries or negative feedback must never trigger portfolio generation
@@ -3749,17 +3886,133 @@ def _run_deterministic_admin(
         has_portfolio_intent = False
         is_answering_portfolio = False
         is_explicit_answer = False
+        is_brochure_request = False
 
-    if has_portfolio_intent or is_answering_portfolio or is_explicit_answer:
+    if is_brochure_request and not has_portfolio_intent and not is_answering_portfolio:
+        # Single-property brochure — never fall through to a property list
+        brochure_pid = prop_id
+        brochure_name = None
+        name_m = re.search(
+            r"(?:brochure|broszura)\s+(?:for|of|about|dla|o)\s+(.+)$",
+            message.strip(),
+            re.I,
+        )
+        if name_m:
+            brochure_name = name_m.group(1).strip(" .,;:'\"")
+        if not brochure_pid and brochure_name:
+            from app.services.admin_property_resolver import resolve_admin_property_name
+            resolved = resolve_admin_property_name(
+                brochure_name, language=language, already_extracted=True
+            )
+            if resolved.kind == "resolved" and resolved.property_id:
+                brochure_pid = resolved.property_id
+                brochure_name = resolved.official_name or brochure_name
+            elif resolved.kind == "ambiguous":
+                response_text = resolved.message or (
+                    "Which property did you mean for the brochure? Please pick one name."
+                )
+                brochure_pid = None
+            else:
+                response_text = (
+                    f"I couldn't find a property matching `{brochure_name}`. "
+                    "Name a real listing and I will generate its brochure."
+                )
+                brochure_pid = None
+        elif not brochure_pid:
+            response_text = (
+                "Which property should I generate the brochure for? "
+                "Name the listing (e.g. `give me the brochure for Isla Kata`)."
+            )
+
+        if brochure_pid:
+            t_res, _, _ = _execute_admin_tool(
+                db,
+                "generate_property_brochure",
+                {"property_id": brochure_pid, "language": language},
+                staff_user,
+                str(conv.id),
+            )
+            tool_calls.append({"name": "generate_property_brochure", "args": {"property_id": brochure_pid}})
+            tool_results.append(t_res)
+            if isinstance(t_res, dict) and (t_res.get("file_url") or t_res.get("success")):
+                fname = t_res.get("filename") or "brochure.pdf"
+                furl = t_res.get("file_url") or t_res.get("download_url") or "#"
+                label = t_res.get("property_name") or brochure_name or brochure_pid
+                response_text = (
+                    t_res.get("message")
+                    or format_report_ready_message(
+                        filename=str(fname),
+                        format_type="pdf",
+                        language=language,
+                        storage_ok=bool(t_res.get("storage_ok", True)) and bool(furl and furl != "#"),
+                    )
+                )
+                if label and label not in (response_text or ""):
+                    response_text = f"Brochure for **{label}** is ready.\n\n{response_text}"
+            else:
+                err = (t_res or {}).get("error") or (t_res or {}).get("message") or "generation failed"
+                response_text = (
+                    f"I could not generate the brochure for `{brochure_name or brochure_pid}`: {err}"
+                )
+
+    elif has_portfolio_intent or is_answering_portfolio or is_explicit_answer:
+        # Pre-detect core details so a fully specified first message generates immediately
+        from app.services.admin_property_fields import describe_money as _pre_money
+        _money = _pre_money(message)
+        _pre_client = bool(re.search(
+            r"(?:client(?:\s*name)?(?:\s*is|\s*:)?|dla klienta)\s+([A-ZĄĆĘŁŃÓŚŹŻa-ząćęłńóśźż]+(?:\s+[A-ZĄĆĘŁŃÓŚŹŻa-ząćęłńóśźż]+)?)",
+            message,
+            re.I,
+        )) or any(n in msg_lower for n in ("dariusz", "alexander", "michael"))
+        _pre_budget = bool(
+            (_money and (_money.get("multiplier") or _money.get("thb", 0) >= 100_000))
+            or max_price_val
+            or re.search(r"\bbudget\b.{0,20}\d", msg_lower)
+        )
+        _pre_prop = bool(re.search(r"PROP-[A-Z0-9]+-[0-9]+", message, re.I))
+        if not _pre_prop:
+            _pm = re.search(
+                r"(?:dossier|offer|portfolio)\s+for\s+(.+?)\s+for\s+client",
+                message,
+                re.I,
+            )
+            if _pm:
+                try:
+                    from app.services.admin_property_resolver import resolve_admin_property_name as _rpn
+                    _rr = _rpn(_pm.group(1).strip(), language=language, already_extracted=True)
+                    _pre_prop = _rr.kind == "resolved"
+                except Exception:
+                    _pre_prop = bool(_pm.group(1).strip())
+
         # Check if we should ask clarifying questions first (Turn 1)
         should_ask_questions = not (is_answering_portfolio or is_explicit_answer)
         if any(w in msg_lower for w in ["immediately", "without asking", "natychmiast", "bez pytania"]):
             should_ask_questions = False
+        # Client + budget present → generate now (defaults for brand/template/goal)
+        if _pre_client and _pre_budget:
+            should_ask_questions = False
 
         if should_ask_questions:
-            # Turn 1: Ask the 7 clarifying questions warmly
             staff_name = _get_staff_display_name(staff_user, raw_user_message or message)
-            if language == "pl":
+            missing_core = []
+            if not _pre_client:
+                missing_core.append("**Client Name**" if language != "pl" else "**Imię klienta**")
+            if not _pre_budget:
+                missing_core.append("**Target Budget**" if language != "pl" else "**Budżet**")
+            # Partial details: ask only for what is still missing (not the full 7)
+            if missing_core and (_pre_client or _pre_budget or _pre_prop):
+                if language == "pl":
+                    response_text = (
+                        f"Mogę wygenerować dossier, gdy podasz: {', '.join(missing_core)}. "
+                        f"Albo napisz **'dobierz resztę'**, a użyję domyślnych wartości."
+                    )
+                else:
+                    response_text = (
+                        f"I can generate that offer dossier once I have: {' and '.join(missing_core)}. "
+                        f"Or say **'assume the rest'** to continue with defaults."
+                    )
+            elif language == "pl":
+                # Turn 1: Ask the 7 clarifying questions warmly
                 response_text = (
                     f"Oczywiście **{staff_name}**, chętnie przygotuję portfolio ofertowe PDF dla Twojego klienta! 🌟\n\n"
                     f"Zanim rozpocznę generowanie, czy możesz podać poniższe szczegóły, czy mam pobrać je z bazy danych i dobrać resztę automatycznie?\n\n"
@@ -3791,9 +4044,13 @@ def _run_deterministic_admin(
             combined_text = f"{prev_user_turn} {message}".strip()
             comb_lower = combined_text.lower()
 
-            # 1. Client Name
+            # 1. Client Name (prefer "for client X" / "client name X" over bare "for <property>")
             client_name_provided = False
-            c_match = re.search(r'(?:client(?:\s*name)?(?:\s*is|\s*:)?|dla|for)\s+([A-ZĄĆĘŁŃÓŚŹŻa-ząćęłńóśźż]+(?:\s+[A-ZĄĆĘŁŃÓŚŹŻa-ząćęłńóśźż]+)?)', message, re.IGNORECASE)
+            c_match = re.search(
+                r'(?:client(?:\s*name)?(?:\s*is|\s*:)?|dla klienta)\s+([A-ZĄĆĘŁŃÓŚŹŻa-ząćęłńóśźż]+(?:\s+[A-ZĄĆĘŁŃÓŚŹŻa-ząćęłńóśźż]+)?)',
+                message,
+                re.IGNORECASE,
+            )
             if c_match:
                 client_name = c_match.group(1).strip().title()
                 client_name_provided = True
@@ -3815,24 +4072,44 @@ def _run_deterministic_admin(
                     client_name = "Alexander Smith" if language != "pl" else "Dariusz Kowalski"
                     client_name_provided = False
 
+            default_client = "Alexander Smith" if language != "pl" else "Dariusz Kowalski"
+            subject_match = re.search(r"(?:dossier|offer|portfolio)\s+for\s+(.+)$", prev_user_turn or "", re.I)
+            subject_name = subject_match.group(1).strip(" .") if subject_match else ""
+            property_names = set()
+            try:
+                from app.repositories import properties_store as _ps
+                property_rows = _ps.list_rows(db)
+                if isinstance(property_rows, list):
+                    property_names = {
+                        str(getattr(row, "property_name", "") or "").strip().lower()
+                        for row in property_rows
+                    }
+            except Exception:
+                property_names = set()
+            if subject_name:
+                property_names.add(subject_name.lower())
+            if client_name.strip().lower() in property_names:
+                client_name = default_client
+                client_name_provided = False
+
             # 2. Budget
             budget_provided = False
-            b_match = re.search(r'(\d+(?:\s*\d+)*(?:\.\d+)?)\s*(?:million|m\b|mln|mil|thb|baht)', message, re.IGNORECASE)
-            if b_match or max_price_val:
-                if max_price_val:
-                    budget_str = f"{int(max_price_val):,} THB".replace(",", " ")
-                elif "28" in msg_lower:
-                    budget_str = "28 000 000 THB"
-                elif "30" in msg_lower:
-                    budget_str = "30 000 000 THB"
-                elif "35" in msg_lower:
-                    budget_str = "35 000 000 THB"
-                else:
-                    b_num = re.sub(r'[^\d]', '', b_match.group(1))
-                    if len(b_num) <= 3:
-                        budget_str = f"{int(b_num) * 1_000_000:,} THB".replace(",", " ")
-                    else:
-                        budget_str = f"{int(b_num):,} THB".replace(",", " ")
+            from app.services.admin_property_fields import describe_money
+            budget_details = describe_money(message)
+            if budget_details and (budget_details.get("multiplier") or budget_details["thb"] >= 100_000):
+                budget_str = f"{int(round(budget_details['thb'])):,} THB".replace(",", " ")
+                budget_provided = True
+            elif max_price_val:
+                budget_str = f"{int(max_price_val):,} THB".replace(",", " ")
+                budget_provided = True
+            elif "28" in msg_lower:
+                budget_str = "28 000 000 THB"
+                budget_provided = True
+            elif "30" in msg_lower:
+                budget_str = "30 000 000 THB"
+                budget_provided = True
+            elif "35" in msg_lower:
+                budget_str = "35 000 000 THB"
                 budget_provided = True
             else:
                 if "28" in prev_user_turn:
@@ -3878,6 +4155,24 @@ def _run_deterministic_admin(
             else:
                 property_ids = None
                 props_provided = False
+                name_m = re.search(
+                    r"(?:dossier|offer|portfolio)\s+for\s+(.+?)(?:\s+for\s+client|\s+budget\b|$)",
+                    message,
+                    re.I,
+                )
+                if name_m:
+                    cand = name_m.group(1).strip(" .,;:'\"")
+                    if cand and "client" not in cand.lower():
+                        try:
+                            from app.services.admin_property_resolver import resolve_admin_property_name
+                            resolved = resolve_admin_property_name(
+                                cand, language=language, already_extracted=True
+                            )
+                            if resolved.kind == "resolved" and resolved.property_id:
+                                property_ids = [resolved.property_id]
+                                props_provided = True
+                        except Exception:
+                            pass
 
             # 5. Template Variant (1-7) — explicit number, else stable hash of property id(s)
             from app.services.admin_reply_helpers import choose_dossier_template_variant
@@ -3926,6 +4221,16 @@ def _run_deterministic_admin(
             else:
                 lang_val = language
 
+            language_given = any(word in msg_lower for word in ("polish", "polski", "po polsku", "english", "angielski", "po angielsku"))
+            supplied_details = any((
+                client_name_provided,
+                budget_provided,
+                brand_provided,
+                props_provided,
+                tmpl_provided,
+                goal_provided,
+                language_given,
+            ))
             offer_args = {
                 "client_name": client_name,
                 "budget": budget_str,
@@ -3935,51 +4240,71 @@ def _run_deterministic_admin(
                 "template_variant": tmpl_variant,
                 "language": lang_val
             }
-            t_res, _, _ = _execute_admin_tool(db, "generate_client_offer_dossier", offer_args, staff_user, str(conv.id))
-            tool_calls.append({"name": "generate_client_offer_dossier", "args": offer_args})
-            tool_results.append(t_res)
-
-            fname = t_res.get("filename", "tajlandia_offer.pdf")
-            furl = t_res.get("file_url", "#")
-            tmpl_name = t_res.get("template_used", f"Szablon {tmpl_variant}")
-            props_inc = ", ".join(t_res.get("properties_included", []))
-
-            if lang_val == "pl":
-                badge_u = "*(Podane przez Ciebie)*"
-                badge_a = "*(Domyślne udokumentowane / z bazy)*"
-                badge_r = "*(Domyślne udokumentowane)*"
-                response_text = (
-                    f"✅ **Wygenerowano 8-stronicowe Dossier Ofertowe dla Klienta: {client_name}!**\n\n"
-                    f"Podsumowanie konfiguracji:\n"
-                    f"- **Klient**: `{client_name}` {badge_u if client_name_provided else badge_a}\n"
-                    f"- **Budżet inwestora**: `{budget_str}` {badge_u if budget_provided else badge_a}\n"
-                    f"- **Szablon graficzny**: `{tmpl_name}` {badge_u if tmpl_provided else badge_r}\n"
-                    f"- **Branding i logo**: `{brand_val.upper()}` {badge_u if brand_provided else badge_a}\n"
-                    f"- **Strategia inwestycyjna**: `{goal_val}` {badge_u if goal_provided else badge_a}\n"
-                    f"- **Nieruchomości**: `{props_inc}` {badge_u if props_provided else '*(Wyselekcjonowane z bazy danych)*'}\n"
-                    f"- **Język dokumentu**: `{lang_val.upper()}`\n"
-                    f"- **Układ**: `8 stron` (Okładka, Strategia, 4x Karty Willi/Kondominium, Tabela Zwrotu ROI, 3 Kroki Zakupu)\n\n"
-                    f"👉 **[🔗 Kliknij tutaj, aby pobrać Ofertę PDF dla Klienta]({furl})**\n\n"
-                    f"Dokument został wygenerowany z czystymi wektorami bez nakładających się napisów i jest gotowy do wysłania inwestorowi pocztą e-mail lub prezentacji na spotkaniu!"
-                )
+            if not is_explicit_answer and not supplied_details:
+                # Hello / thanks / unrelated chat: do not re-prompt dossier details.
+                if _is_dossier_smalltalk(message):
+                    return None
+                if re.search(r"\b(cancel|never\s*mind|abort)\b", msg_lower):
+                    response_text = (
+                        "Cancelled. I will not generate that offer dossier."
+                    )
+                    t_res = None
+                else:
+                    response_text = (
+                        "I still need client details before I generate that offer dossier. "
+                        "Send the client name and budget, or say 'assume the rest' to continue with defaults. "
+                        "I have not generated it.\n\n"
+                        "1. **Client Name** is still missing. "
+                        "You can also say 'fetch them from the database & make everything myself'."
+                    )
+                    t_res = None
             else:
-                badge_u = "*(Specified by you)*"
-                badge_a = "*(Documented default / fetched from DB)*"
-                badge_r = "*(Documented default)*"
-                response_text = (
-                    f"✅ **Generated 8-Page Client Investor Portfolio Dossier for: {client_name}!**\n\n"
-                    f"Here is your customized portfolio summary:\n"
-                    f"- **Client Name**: `{client_name}` {badge_u if client_name_provided else badge_a}\n"
-                    f"- **Investor Budget**: `{budget_str}` {badge_u if budget_provided else badge_a}\n"
-                    f"- **Design Theme**: `{tmpl_name}` {badge_u if tmpl_provided else badge_r}\n"
-                    f"- **Agency Branding**: `{brand_val.upper()}` {badge_u if brand_provided else badge_a}\n"
-                    f"- **Investment Strategy**: `{goal_val}` {badge_u if goal_provided else badge_a}\n"
-                    f"- **Properties Included**: `{props_inc}` {badge_u if props_provided else '*(Curated luxury options from DB)*'}\n"
-                    f"- **Document Language**: `{lang_val.upper()}`\n"
-                    f"- **Page Count**: `8 pages` (Cover, Executive Strategy, 4x Property Showcases, Multi-Year ROI Analysis, 3-Step Buying Guide)\n\n"
-                    f"👉 **[🔗 Click here to Download Client Offer PDF]({furl})**\n\n"
-                    f"The bespoke presentation has been rendered with high-res photos and clean typography, ready for client delivery or private viewing discussions!"
-                )
+                t_res, _, _ = _execute_admin_tool(db, "generate_client_offer_dossier", offer_args, staff_user, str(conv.id))
+                tool_calls.append({"name": "generate_client_offer_dossier", "args": offer_args})
+                tool_results.append(t_res)
+
+            if t_res is not None:
+                fname = t_res.get("filename", "tajlandia_offer.pdf")
+                furl = t_res.get("file_url", "#")
+                tmpl_name = t_res.get("template_used", f"Szablon {tmpl_variant}")
+                props_inc = ", ".join(t_res.get("properties_included", []))
+
+                if lang_val == "pl":
+                    badge_u = "*(Podane przez Ciebie)*"
+                    badge_a = "*(Domyślne udokumentowane / z bazy)*"
+                    badge_r = "*(Domyślne udokumentowane)*"
+                    response_text = (
+                        f"✅ **Wygenerowano 8-stronicowe Dossier Ofertowe dla Klienta: {client_name}!**\n\n"
+                        f"Podsumowanie konfiguracji:\n"
+                        f"- **Klient**: `{client_name}` {badge_u if client_name_provided else badge_a}\n"
+                        f"- **Budżet inwestora**: `{budget_str}` {badge_u if budget_provided else badge_a}\n"
+                        f"- **Szablon graficzny**: `{tmpl_name}` {badge_u if tmpl_provided else badge_r}\n"
+                        f"- **Branding i logo**: `{brand_val.upper()}` {badge_u if brand_provided else badge_a}\n"
+                        f"- **Strategia inwestycyjna**: `{goal_val}` {badge_u if goal_provided else badge_a}\n"
+                        f"- **Nieruchomości**: `{props_inc}` {badge_u if props_provided else '*(Wyselekcjonowane z bazy danych)*'}\n"
+                        f"- **Język dokumentu**: `{lang_val.upper()}`\n"
+                        f"- **Układ**: `8 stron` (Okładka, Strategia, 4x Karty Willi/Kondominium, Tabela Zwrotu ROI, 3 Kroki Zakupu)\n\n"
+                        f"👉 **[🔗 Kliknij tutaj, aby pobrać Ofertę PDF dla Klienta]({furl})**\n\n"
+                        f"Dokument został wygenerowany z czystymi wektorami bez nakładających się napisów i jest gotowy do wysłania inwestorowi pocztą e-mail lub prezentacji na spotkaniu!"
+                    )
+                else:
+                    badge_u = "*(Specified by you)*"
+                    badge_a = "*(Documented default / fetched from DB)*"
+                    badge_r = "*(Documented default)*"
+                    response_text = (
+                        f"✅ **Generated 8-Page Client Investor Portfolio Dossier for: {client_name}!**\n\n"
+                        f"Here is your customized portfolio summary:\n"
+                        f"- **Client Name**: `{client_name}` {badge_u if client_name_provided else badge_a}\n"
+                        f"- **Investor Budget**: `{budget_str}` {badge_u if budget_provided else badge_a}\n"
+                        f"- **Design Theme**: `{tmpl_name}` {badge_u if tmpl_provided else badge_r}\n"
+                        f"- **Agency Branding**: `{brand_val.upper()}` {badge_u if brand_provided else badge_a}\n"
+                        f"- **Investment Strategy**: `{goal_val}` {badge_u if goal_provided else badge_a}\n"
+                        f"- **Properties Included**: `{props_inc}` {badge_u if props_provided else '*(Curated luxury options from DB)*'}\n"
+                        f"- **Document Language**: `{lang_val.upper()}`\n"
+                        f"- **Page Count**: `8 pages` (Cover, Executive Strategy, 4x Property Showcases, Multi-Year ROI Analysis, 3-Step Buying Guide)\n\n"
+                        f"👉 **[🔗 Click here to Download Client Offer PDF]({furl})**\n\n"
+                        f"The bespoke presentation has been rendered with high-res photos and clean typography, ready for client delivery or private viewing discussions!"
+                    )
 
     # F0. "That report again" — re-link if still stored, otherwise regenerate
     elif not is_negative_report_inquiry and any(
@@ -4233,8 +4558,11 @@ def _run_deterministic_admin(
         requires_confirmation = False
         pending_action_id = None
 
-    # FIX 12 — Image analysis graceful fallback
-    elif any(k in msg_lower for k in ["image", "photo", "picture", "analyze image", "look at", "visual"]):
+    # FIX 12 — Image analysis graceful fallback. Image add/replace/cover/remove is handled earlier.
+    elif (
+        any(k in msg_lower for k in ["analyze", "analyse", "vision", "look at", "describe"])
+        and any(k in msg_lower for k in ["image", "photo", "picture", "visual"])
+    ):
         if language == "pl":
             response_text = (
                 "Analiza obrazow przez Vision API nie jest jeszcze podlaczona do panelu administracyjnego.\n\n"
@@ -4478,17 +4806,6 @@ def _run_deterministic_admin(
         tool_results.append(t_res_all)
 
         stats = t_res_all or {}
-        total = stats.get("authoritative_total_properties", 0)
-        by_loc = stats.get("location_breakdown", {})
-        by_type = stats.get("property_type_breakdown", {})
-        by_status = stats.get("status_breakdown", {})
-        amenities = stats.get("amenities_breakdown", {})
-        price_range = stats.get("price_range_thb", {})
-
-        loc_summary = " · ".join(f"{k} ({v})" for k, v in sorted(by_loc.items(), key=lambda x: -x[1])[:5])
-        type_summary = " · ".join(f"{k} ({v})" for k, v in by_type.items())
-        status_summary = " · ".join(f"{k} ({v})" for k, v in by_status.items()) if by_status else "Ready & Pre-sale"
-        price_str = f"From {price_range.get('min', 'On request')} to {price_range.get('max', 'On request')}"
 
         # Segment query handling if max_price, location, or bedrooms were specified
         filtered_count = None
@@ -4510,66 +4827,21 @@ def _run_deterministic_admin(
                     p_name = p.get("property_name") or p.get("title") or p.get("property_id")
                     p_price = float(p.get("price_numeric_min") or 0)
                     p_loc = p.get("location") or "Thailand"
-                    p_beds = p.get("bedrooms_display") or p.get("bedrooms") or ""
-                    p_beds_str = f" | {p_beds} beds" if p_beds else ""
-                    filtered_examples.append(f"- **{p_name}** (`{p.get('property_id')}`): **{p_price:,.0f} THB**{p_beds_str} 📍 {p_loc}")
+                    from app.services.admin_list_display import bedrooms_display_value
+                    from app.services.admin_property_fields import format_place_name
+                    p_beds = bedrooms_display_value(p)
+                    p_beds_str = "" if p_beds == "beds not listed" else f" | {p_beds}"
+                    filtered_examples.append(
+                        f"- **{p_name}** ({p.get('property_id')}): **{p_price:,.0f} THB**{p_beds_str} | {format_place_name(p_loc)}"
+                    )
 
-        if language == "pl":
-            prefix = ""
-            if filtered_count is not None:
-                crit_parts = []
-                if max_price_val:
-                    crit_parts.append(f"poniżej {max_price_val/1_000_000:,.0f} mln THB")
-                if loc:
-                    crit_parts.append(f"w rejonie {loc}")
-                if bedrooms:
-                    crit_parts.append(f"{bedrooms} sypialni")
-                crit_desc = ", ".join(crit_parts)
-                prefix = (
-                    f"🎯 **Wynik zapytania segmentowego:**\n"
-                    f"W naszym portfolio znajduje się obecnie **{filtered_count}** zweryfikowanych nieruchomości spełniających kryteria ({crit_desc}).\n\n"
-                    + (("**Przykładowe oferty z tego segmentu:**\n" + "\n".join(filtered_examples) + "\n\n") if filtered_examples else "")
-                )
-            response_text = (
-                prefix +
-                f"📊 **Podsumowanie bazy nieruchomości Tajlandia AI**\n\n"
-                f"- 🏢 **Łączna liczba nieruchomości w bazie:** **{total}** (Pełna autorytatywna baza danych Cloud Firestore i PostgreSQL)\n"
-                f"- 🏡 **Typy nieruchomości:** {type_summary}\n"
-                f"- 📍 **Główne lokalizacje:** {loc_summary}\n"
-                f"- 🏗️ **Status inwestycji:** {status_summary}\n"
-                f"- 💰 **Zakres cenowy:** {price_str}\n"
-                f"- 🏊 **Prywatny basen:** {amenities.get('private_pool', 'Dostępne w portfolio')}\n"
-                f"- 🏖️ **Dostęp do plaży:** {amenities.get('beach_access', 'Dostępne w portfolio')}\n\n"
-                f"Czy chcesz, abym przefiltrował nieruchomości według konkretnej lokalizacji (np. Phuket, Koh Samui, Bangkok), budżetu lub liczby sypialni?"
-            )
-        else:
-            prefix = ""
-            if filtered_count is not None:
-                crit_parts = []
-                if max_price_val:
-                    crit_parts.append(f"under {max_price_val/1_000_000:,.0f}M THB")
-                if loc:
-                    crit_parts.append(f"in {loc}")
-                if bedrooms:
-                    crit_parts.append(f"{bedrooms} bedrooms")
-                crit_desc = ", ".join(crit_parts)
-                prefix = (
-                    f"🎯 **Target Segment Count:**\n"
-                    f"We currently have **{filtered_count}** verified properties in our portfolio matching your criteria ({crit_desc}).\n\n"
-                    + (("**Sample listings from this segment:**\n" + "\n".join(filtered_examples) + "\n\n") if filtered_examples else "")
-                )
-            response_text = (
-                prefix +
-                f"📊 **Tajlandia Property Inventory Summary**\n\n"
-                f"- 🏢 **Total properties in database:** **{total}** (Authoritative portfolio across Cloud Firestore & PostgreSQL)\n"
-                f"- 🏡 **Property types:** {type_summary}\n"
-                f"- 📍 **Top locations:** {loc_summary}\n"
-                f"- 🏗️ **Development status:** {status_summary}\n"
-                f"- 💰 **Price range:** {price_str}\n"
-                f"- 🏊 **Private pool:** {amenities.get('private_pool', 'Available in portfolio')}\n"
-                f"- 🏖️ **Beach access:** {amenities.get('beach_access', 'Available in portfolio')}\n\n"
-                f"Would you like me to filter properties by a specific location (e.g. Phuket, Koh Samui, Bangkok), budget, or bedroom count?"
-            )
+        from app.services.admin_chat_quality import format_inventory_reply as _inventory_sentence
+        _prefix = ""
+        if filtered_count is not None:
+            _prefix = f"Found {filtered_count} matching properties.\n"
+            if filtered_examples:
+                _prefix += "\n".join(filtered_examples) + "\n"
+        response_text = (_prefix + _inventory_sentence(stats, language)).strip()
 
     # H. Contextual Reference Follow-up
     elif any(tr in msg_lower for tr in ["give me that", "that one", "first one", "second one", "that lead", "more details"]):
@@ -4673,11 +4945,14 @@ def _run_deterministic_admin(
             for p in (t_res or [])[:10]:
                 p_id = p.get("property_id") or p.get("id") or "N/A"
                 p_name = p.get("property_name") or p.get("name") or p.get("title") or "Property"
-                p_loc = p.get("location") or "Thailand"
-                p_beds = p.get("bedrooms_display") or (f"{p.get('bedrooms')} bed" if p.get("bedrooms") else "N/A")
+                from app.services.admin_list_display import bedrooms_display_value
+                from app.services.admin_property_fields import format_place_name
+                place = p.get("province") or p.get("location") or ""
+                p_loc = format_place_name(place) or "Thailand"
+                p_beds = bedrooms_display_value(p)
                 p_price = p.get("price_display") or p.get("price") or "Price on request"
                 prop_lines.append(
-                    f"- **{p_id}** — {p_name} | {p_loc} | {p_beds} | {p_price}"
+                    f"- **{p_name}** ({p_id}) | {p_loc} | {p_beds} | {p_price}"
                 )
             response_text = "\n".join(prop_lines)
 
@@ -4776,9 +5051,11 @@ def _clean_property_for_admin_tool(fp: Dict[str, Any]) -> Dict[str, Any]:
             price_display = f"from {float(p_min) / 1_000_000:.2f} million THB"
         else:
             price_display = "Price on request"
-    bedrooms_display = fp.get("bedrooms_display") or (f"{fp.get('bedrooms')} bed" if fp.get("bedrooms") else "N/A")
+    from app.services.admin_chat_quality import listing_bed_label
+    from app.services.admin_property_fields import format_place_name
+    bedrooms_display = listing_bed_label(fp)
+    place = format_place_name(fp.get("province") or fp.get("location") or "") or "Thailand"
     area_display = fp.get("area_display") or (f"{fp.get('area')} sqm" if fp.get("area") else "N/A")
-    location = fp.get("location") or "Thailand"
     status = fp.get("status") or "Available"
 
     return {
@@ -4787,10 +5064,13 @@ def _clean_property_for_admin_tool(fp: Dict[str, Any]) -> Dict[str, Any]:
         "name": name,
         "property_type": fp.get("property_type") or "Villa / Condo",
         "status": status,
-        "location": location,
+        "location": place,
+        "province": fp.get("province") or place,
         "price_display": price_display,
         "price": price_display,
         "price_numeric_min": fp.get("price_numeric_min"),
+        "bedrooms_min": fp.get("bedrooms_min") or fp.get("bedroomsMin"),
+        "bedrooms_max": fp.get("bedrooms_max") or fp.get("bedroomsMax"),
         "bedrooms_display": bedrooms_display,
         "bedrooms": bedrooms_display,
         "bathrooms": fp.get("bathrooms", 0),
@@ -4805,7 +5085,12 @@ def _clean_property_for_admin_tool(fp: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _prop_to_dict(p: Any) -> Dict[str, Any]:
-    loc = f"{p.district or ''}, {p.province or ''}".strip(", ") or "Thailand"
+    from app.services.admin_chat_quality import listing_bed_label
+    from app.services.admin_property_fields import format_place_name
+    loc = format_place_name(getattr(p, "province", None) or "") or (
+        f"{p.district or ''}, {p.province or ''}".strip(", ") or "Thailand"
+    )
+    bed_label = listing_bed_label(p)
     area_d = re.sub(r"^0\s*[-–]\s*", "", p.area_display or "") if p.area_display else "N/A"
     p_price = p.price_display or "Price on request"
     if ".xx" in str(p_price):
@@ -4821,11 +5106,14 @@ def _prop_to_dict(p: Any) -> Dict[str, Any]:
         "property_type": p.property_type,
         "status": p.status,
         "location": loc,
+        "province": getattr(p, "province", None),
         "price_display": p_price,
         "price": p_price,
         "price_numeric_min": float(p.price_numeric_min) if p.price_numeric_min else None,
-        "bedrooms_display": p.bedrooms_display,
-        "bedrooms": p.bedrooms_display,
+        "bedrooms_min": getattr(p, "bedrooms_min", None),
+        "bedrooms_max": getattr(p, "bedrooms_max", None),
+        "bedrooms_display": bed_label,
+        "bedrooms": bed_label,
         "bathrooms": p.bathrooms,
         "area_display": area_d,
         "area": area_d,
@@ -5032,7 +5320,7 @@ def _workspace_status_reply(status: Dict[str, Any], language: str) -> str:
 
 
 def _execute_admin_tool(
-    db: Session,
+    db: Any,
     tool_name: str,
     tool_args: Dict[str, Any],
     staff_user: AuthenticatedStaff,
@@ -5078,7 +5366,7 @@ def _execute_admin_tool(
 
 
 def _execute_admin_tool_uncached(
-    db: Session,
+    db: Any,
     tool_name: str,
     tool_args: Dict[str, Any],
     staff_user: AuthenticatedStaff,
@@ -5118,26 +5406,11 @@ def _execute_admin_tool_uncached(
                 limit=tool_args.get("limit", 10)
             )
             if fs_props:
+                from app.services.admin_list_display import overlay_missing_bedrooms
+                overlay_missing_bedrooms(db, fs_props)
                 res = [_clean_property_for_admin_tool(fp) for fp in fs_props]
         except Exception as e:
             logger.warning(f"Error querying Firestore in search_properties_full: {e}")
-
-        # Fallback only if Firestore returned no properties (e.g. offline unit testing without GCP credentials)
-        if not res and db is not None:
-            params = PropertyFilterParams(
-                location=tool_args.get("location"),
-                property_type=tool_args.get("property_type"),
-                min_price=tool_args.get("min_price"),
-                max_price=tool_args.get("max_price"),
-                bedrooms=tool_args.get("bedrooms"),
-                has_pool=tool_args.get("has_pool"),
-                required_amenities=_amenities if _amenities else None,
-                status=tool_args.get("status"),
-                limit=tool_args.get("limit", 10),
-                websites=selected_websites
-            )
-            props = search_properties_safe(db, params)
-            res = [_prop_to_dict(p) for p in props]
 
         record_audit_log(
             db=db,
@@ -5151,19 +5424,14 @@ def _execute_admin_tool_uncached(
 
     # 1.5 Read Tool: get_database_inventory_stats
     elif tool_name == "get_database_inventory_stats":
-        fs_count = 0
+        fs_count = None
+        fs_unavailable = False
         try:
             from app.services.firestore_service import get_firestore_properties_count
             fs_count = get_firestore_properties_count(target="admin")
         except Exception as e:
-            logger.warning(f"Error getting Firestore properties count in admin tool: {e}")
-
-        pg_count = 0
-        try:
-            from app.db.models import Property
-            pg_count = db.query(Property).count()
-        except Exception:
-            pass
+            fs_unavailable = True
+            logger.warning(f"Firestore property count is unavailable: {e}")
 
         props_sample = []
         try:
@@ -5206,13 +5474,16 @@ def _execute_admin_tool_uncached(
             if p.get("price_numeric_min"):
                 prices.append(p["price_numeric_min"])
 
-        total_count = fs_count if fs_count > 0 else (pg_count or len(props_sample))
+        if fs_unavailable or fs_count is None:
+            total_count = len(props_sample)
+        else:
+            total_count = fs_count
 
         res = {
             "authoritative_total_properties": total_count,
-            "firestore_live_projects_count": fs_count,
-            "postgresql_listings_count": pg_count,
-            "is_complete_database_count": True,
+            "firestore_live_projects_count": 0 if fs_count is None else fs_count,
+            "firestore_count_unavailable": fs_unavailable,
+            "is_complete_database_count": not fs_unavailable,
             "notes": "This is the authoritative total property count of the entire database. It is NOT capped or truncated by search limits.",
             "location_breakdown": by_location,
             "property_type_breakdown": by_type,
@@ -5326,7 +5597,7 @@ def _execute_admin_tool_uncached(
     # 5. Read Tool: get_buyer_leads
     elif tool_name == "get_buyer_leads":
         from datetime import datetime, timezone, timedelta
-        from app.db.models import Lead
+        from app.repositories import leads_read_repo
         from app.services.admin_reply_helpers import (
             format_leads_date_window,
             format_leads_zero_with_offer,
@@ -5349,6 +5620,7 @@ def _execute_admin_tool_uncached(
         limit = int(tool_args.get("limit") or 10)
         calendar_week = bool(tool_args.get("calendar_week"))
         all_time = (not calendar_week) and (days is None or days <= 0)
+        site_filter = tool_args.get("site") or tool_args.get("website")
 
         now = datetime.now(timezone.utc)
         window_start = None
@@ -5360,11 +5632,7 @@ def _execute_admin_tool_uncached(
             days = max(1, (window_end.date() - window_start.date()).days + 1)
             all_time = False
         elif all_time:
-            # Soft cap when table is large: last 180 days still labeled as all-time store scan
-            try:
-                total_rows = int(db.query(Lead).count() or 0)
-            except (TypeError, ValueError):
-                total_rows = 0
+            total_rows = leads_read_repo.count_leads(db)
             if total_rows > 500:
                 window_start = now - timedelta(days=ALL_TIME_LEADS_SOFT_CAP_DAYS)
                 all_time = False
@@ -5375,31 +5643,24 @@ def _execute_admin_tool_uncached(
         else:
             window_start = now - timedelta(days=max(1, int(days)))
 
-        query = db.query(Lead)
-        if min_sc:
-            query = query.filter(Lead.lead_score >= min_sc)
-        if st:
-            query = query.filter(Lead.status == st)
-        if window_start is not None:
-            try:
-                query = query.filter(Lead.created_at >= window_start.replace(tzinfo=None))
-            except Exception:
-                try:
-                    query = query.filter(Lead.created_at >= window_start)
-                except Exception:
-                    pass
-
-        # Newest first for all-time; score then date when filtered
-        if all_time or days == 0:
-            leads = query.order_by(Lead.created_at.desc(), Lead.lead_score.desc()).limit(limit).all()
-        else:
-            leads = query.order_by(Lead.lead_score.desc(), Lead.created_at.desc()).limit(limit).all()
-
-        # Total matching the window (not just the page limit)
-        try:
-            total_matching = int(query.count() or 0)
-        except (TypeError, ValueError):
-            total_matching = len(leads)
+        order = "newest" if (all_time or days == 0) else "score"
+        leads = leads_read_repo.query_leads(
+            db,
+            window_start=window_start,
+            status=st,
+            min_score=min_sc,
+            site=site_filter,
+            limit=max(limit, 50),
+            order=order,
+        )
+        total_matching = leads_read_repo.count_leads(
+            db,
+            window_start=window_start,
+            status=st,
+            min_score=min_sc,
+            site=site_filter,
+        )
+        leads = leads[:limit]
 
         window_label = format_leads_date_window(
             days=days,
@@ -5411,8 +5672,7 @@ def _execute_admin_tool_uncached(
         )
 
         lead_saving_on = bool(getattr(settings, "ENABLE_LEAD_SAVING", False))
-        # Most recent lead overall (for empty-window offer + lead-saving note)
-        most_recent = db.query(Lead).order_by(Lead.created_at.desc()).first()
+        most_recent = leads_read_repo.most_recent_lead(db)
         most_recent_date = None
         most_recent_days_ago = None
         if most_recent and getattr(most_recent, "created_at", None):
@@ -5437,13 +5697,13 @@ def _execute_admin_tool_uncached(
             if not all_time:
                 try:
                     w_start = now - timedelta(days=wider_days)
-                    wq = db.query(Lead)
-                    if min_sc:
-                        wq = wq.filter(Lead.lead_score >= min_sc)
-                    if st:
-                        wq = wq.filter(Lead.status == st)
-                    wq = wq.filter(Lead.created_at >= w_start.replace(tzinfo=None))
-                    wider_count = wq.count()
+                    wider_count = leads_read_repo.count_leads(
+                        db,
+                        window_start=w_start,
+                        status=st,
+                        min_score=min_sc,
+                        site=site_filter,
+                    )
                 except Exception:
                     wider_count = 0
             msg = format_leads_zero_with_offer(
@@ -5525,8 +5785,8 @@ def _execute_admin_tool_uncached(
 
     # 6. Read Tool: check_google_workspace_status
     elif tool_name == "check_google_workspace_status":
-        from app.db.models import User
-        target_u = db.query(User).filter(User.email.ilike(staff_email)).first()
+        from app.repositories import users_repo
+        target_u = users_repo.get_by_email(db, staff_email)
         gw_data = (target_u.preferences or {}).get("google_workspace") if target_u else None
         is_conn = bool(gw_data and gw_data.get("connected") and gw_data.get("refresh_token"))
         google_mail = gw_data.get("google_email") if gw_data else None
@@ -5591,6 +5851,45 @@ def _execute_admin_tool_uncached(
                 "success": False,
                 "error": str(e),
                 "message": f"Nie udało się wygenerować dossier PDF: {str(e)}"
+            }, False, None
+
+    elif tool_name == "generate_property_brochure":
+        try:
+            from app.services.brochure_service import generate_and_upload_brochure
+            pid = tool_args.get("property_id") or ""
+            lang = tool_args.get("language") or "en"
+            res = generate_and_upload_brochure(
+                db=db,
+                property_id=str(pid),
+                site_origin="admin",
+                language=lang,
+                client_name=tool_args.get("client_name"),
+            )
+            record_audit_log(
+                db=db,
+                staff_user_id=staff_email,
+                tool_name="generate_property_brochure",
+                tool_arguments=tool_args,
+                status="SUCCESS",
+                conversation_id=conversation_id,
+            )
+            if isinstance(res, dict):
+                res.setdefault("success", True)
+            return res, False, None
+        except Exception as e:
+            logger.error(f"Error generating property brochure: {e}", exc_info=True)
+            record_audit_log(
+                db=db,
+                staff_user_id=staff_email,
+                tool_name="generate_property_brochure",
+                tool_arguments=tool_args,
+                status="FAILED",
+                conversation_id=conversation_id,
+            )
+            return {
+                "success": False,
+                "error": str(e),
+                "message": f"Could not generate brochure: {e}",
             }, False, None
 
     elif tool_name == "ingest_property_from_url":
@@ -5745,19 +6044,12 @@ def _execute_admin_tool_uncached(
         target_pid = tool_args.get("property_id")
         selected_websites = getattr(staff_user, "selected_websites", None)
         resolve_source, resolved = resolve_existing_property(db, str(target_pid or ""))
-        prop = resolved if resolve_source == "postgres" else None
-        if prop and selected_websites and not property_belongs_to_websites(prop, selected_websites):
-            return {
-                "status": "FORBIDDEN",
-                "message": f"Access denied: Property '{target_pid}' does not belong to your currently selected website(s): {selected_websites}."
-            }, False, None
+        prop = None
 
         # Canonical id from resolver (Firestore doc id)
         if resolve_source == "firestore" and isinstance(resolved, dict):
             target_pid = resolved.get("property_id") or resolved.get("_firestore_doc_id") or target_pid
             tool_args["property_id"] = target_pid
-        elif prop is not None:
-            target_pid = getattr(prop, "property_id", target_pid)
 
         raw_fields = dict(tool_args.get("fields_to_update") or tool_args.get("fields") or {})
         explicit_websites = "websites" in raw_fields or "selected_websites" in raw_fields
@@ -5786,7 +6078,18 @@ def _execute_admin_tool_uncached(
                     ),
                 }, False, None
 
-        # Exists in PG or Firestore → always update (never create-required fields)
+        # A new listing needs no id from the admin: build it from the name.
+        if not str(target_pid or "").strip() and not resolve_source:
+            new_name = raw_fields.get("property_name") or raw_fields.get("title") or raw_fields.get("name")
+            if isinstance(new_name, str) and new_name.strip():
+                from app.services.action_service import generate_property_id
+
+                target_pid = generate_property_id(db, new_name)
+                tool_args["property_id"] = target_pid
+                tool_args["mode"] = "create"
+                tool_args["id_generated"] = True
+
+        # Exists in Firestore → always update (never create-required fields)
         if resolve_source:
             mode = "update"
             tool_args["mode"] = "update"
@@ -6103,3 +6406,49 @@ def _execute_admin_tool_uncached(
 
     else:
         raise ValueError(f"Unknown admin tool: {tool_name}")
+
+
+_process_admin_chat_impl = process_admin_chat
+
+
+def process_admin_chat(*args, **kwargs):
+    """Attach the stored confirmation token for the proposer or a super admin."""
+    import time as _time
+
+    started = _time.monotonic()
+    res = _process_admin_chat_impl(*args, **kwargs)
+    db = kwargs.get("db", args[0] if args else None)
+    staff = kwargs.get("staff_user", args[3] if len(args) > 3 else None)
+    res = _expose_confirmation_token(db, staff, res)
+    if isinstance(res, dict) and res.get("text"):
+        from app.services.admin_chat_quality import scrub_user_reply
+        res["text"] = scrub_user_reply(res.get("text"))
+    try:
+        from app.services.admin_logs_service import log_admin_chat_turn
+
+        message = kwargs.get("message", args[2] if len(args) > 2 else None)
+        session_id = kwargs.get("session_id", args[1] if len(args) > 1 else None)
+        site_origin = kwargs.get("site_origin", args[4] if len(args) > 4 else None)
+        language = kwargs.get("requested_language", args[5] if len(args) > 5 else None)
+        turn_index = 0
+        try:
+            history = getattr(kwargs.get("conv", None), "message_history", None)
+            if isinstance(history, list):
+                turn_index = len(history)
+        except Exception:
+            turn_index = 0
+        if isinstance(res, dict):
+            log_admin_chat_turn(
+                session_id=session_id,
+                conversation_id=res.get("conversation_id"),
+                staff=staff,
+                site_origin=site_origin,
+                user_message=message,
+                reply=res,
+                language=language or res.get("language"),
+                latency_ms=int((_time.monotonic() - started) * 1000),
+                turn_index=turn_index,
+            )
+    except Exception:
+        pass
+    return res

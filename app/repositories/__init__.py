@@ -1,0 +1,1 @@
+"""Admin data repositories (Firestore)."""

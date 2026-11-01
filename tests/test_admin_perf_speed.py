@@ -258,6 +258,9 @@ def test_cache_cleared_after_confirmed_write(staff, monkeypatch):
         id="pa-write-1",
         tool_name="create_or_update_listing",
         status="PENDING",
+        conversation_id=str(conv.id),
+        staff_user_id=staff.email,
+        confirmation_token="act_cachetoken",
         action_payload={"property_id": "pirak", "fields": {"price_numeric_min": 5_000_000}},
     )
     monkeypatch.setattr(

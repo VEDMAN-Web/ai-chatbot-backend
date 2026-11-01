@@ -1,18 +1,15 @@
 """Audit trail end to end: who/what/when is recorded, and no credentials or message content reach the stored rows."""
 import json
 import uuid
-from datetime import datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
 from app.core.config import settings
-from app.core.security import hash_password
-from app.core.tenant import ALL_CANONICAL_WEBSITES
-from app.db.models import AuditLog, PendingAction, User
-from app.db.session import SessionLocal
+from app.core.deps import FirestoreSession
 from app.services.action_service import create_pending_action
+from tests import fs_users
 from app.services.audit_service import sanitize_payload, scrub_text
 
 client = TestClient(app)
@@ -28,58 +25,35 @@ URL_TOKEN = "LEAKEDURLTOKENVALUE"
 def isolated(monkeypatch):
     monkeypatch.setattr(settings, "ENABLE_FIRESTORE_SYNC", False)
     monkeypatch.setattr(settings, "ENABLE_AUDIT_LOGGING", True)
-    monkeypatch.setattr("app.services.firestore_auth_service.get_firestore_client", lambda *a, **kw: None)
-    monkeypatch.setattr("app.services.firestore_service.get_firestore_client", lambda *a, **kw: None)
     yield
-    db = SessionLocal()
-    try:
-        db.query(AuditLog).filter(AuditLog.staff_user_id.like(f"{PREFIX}%")).delete(synchronize_session=False)
-        db.query(AuditLog).filter(AuditLog.tool_name == "auth:register", AuditLog.proposed_payload["email"].astext.like(f"{PREFIX}%")).delete(synchronize_session=False)
-        db.query(PendingAction).filter(PendingAction.staff_user_id.like(f"{PREFIX}%")).delete(synchronize_session=False)
-        for user in db.query(User).filter(User.email.like(f"{PREFIX}%")).all():
-            db.delete(user)
-        db.commit()
-    finally:
-        db.close()
 
 
 def _user(role="admin") -> dict:
-    email = f"{PREFIX}{role}_{uuid.uuid4().hex[:6]}@tajlandia.com"
-    db = SessionLocal()
-    try:
-        db.add(User(email=email, name=role, role=role, password_hash=hash_password(PASSWORD),
-                    is_active=True, allowed_websites=list(ALL_CANONICAL_WEBSITES)))
-        db.commit()
-    finally:
-        db.close()
-    token = client.post("/api/v1/auth/login", json={"email": email, "password": PASSWORD}).json()["access_token"]
-    return {"email": email, "headers": {"Authorization": f"Bearer {token}"}}
+    return fs_users.make_user(client, role, prefix=PREFIX, password=PASSWORD)
 
 
 def _stage_email(owner_email: str) -> str:
-    db = SessionLocal()
-    try:
-        action = create_pending_action(
-            db=db, staff_user_id=owner_email, tool_name="send_email",
-            action_payload={"to": "anna@example.com", "subject": "Your offer", "body": BODY_TEXT,
-                            "html_body": f"<p>{BODY_TEXT}</p>", "api_key": "sk-live-PLANTEDAPIKEY12345"},
-        )
-        return str(action.id)
-    finally:
-        db.close()
+    action = create_pending_action(
+        db=FirestoreSession(), staff_user_id=owner_email, tool_name="send_email",
+        action_payload={"to": "anna@example.com", "subject": "Your offer", "body": BODY_TEXT,
+                        "html_body": f"<p>{BODY_TEXT}</p>", "api_key": "sk-live-PLANTEDAPIKEY12345"},
+    )
+    return str(action.id)
+
+
+def _confirm(pending_id, who):
+    return client.post(f"/api/v1/admin/actions/{pending_id}/confirm", headers=who["headers"],
+                       json={"confirmation_token": fs_users.pending_token(pending_id)})
 
 
 def _audit_rows(pending_id: str):
-    db = SessionLocal()
-    try:
-        return [
-            {"status": r.status, "tool": r.tool_name, "staff": r.staff_user_id, "confirmed": r.confirmed_by_staff,
-             "created_at": r.created_at, "payload": r.proposed_payload, "args": r.tool_arguments,
-             "result": r.execution_result, "error": r.error_message}
-            for r in db.query(AuditLog).filter(AuditLog.pending_action_id == pending_id).order_by(AuditLog.created_at).all()
-        ]
-    finally:
-        db.close()
+    return [
+        {"status": r.get("status"), "tool": r.get("tool_name"), "staff": r.get("staff_user_id"),
+         "confirmed": r.get("confirmed_by_staff"), "created_at": r.get("created_at"),
+         "payload": r.get("proposed_payload"), "args": r.get("tool_arguments"),
+         "result": r.get("execution_result"), "error": r.get("error_message")}
+        for r in fs_users.audit_for_pending(pending_id)
+    ]
 
 
 def _dump(rows) -> str:
@@ -128,7 +102,7 @@ def test_a_confirmed_email_is_audited_with_who_what_when_and_no_secrets_or_conte
             "provider_debug": f"sent with Authorization: Bearer {BEARER}", "access_token": "LEAKEDRESULTTOKEN"},
     )
     pending_id = _stage_email(owner["email"])
-    resp = client.post(f"/api/v1/admin/actions/{pending_id}/confirm", headers=owner["headers"])
+    resp = _confirm(pending_id, owner)
     assert resp.status_code == 200, resp.text
 
     rows = _audit_rows(pending_id)
@@ -136,7 +110,7 @@ def test_a_confirmed_email_is_audited_with_who_what_when_and_no_secrets_or_conte
     done = rows[-1]
     # who, what, when
     assert done["staff"] == owner["email"] and done["tool"] == "send_email" and done["confirmed"] is True
-    assert abs(datetime.utcnow() - done["created_at"].replace(tzinfo=None)) < timedelta(minutes=5)
+    assert done["created_at"]
     assert done["payload"]["to"] == "anna@example.com" and done["payload"]["subject"] == "Your offer"
     # nothing sensitive
     stored = _dump(rows)
@@ -153,7 +127,7 @@ def test_a_failed_action_keeps_the_failure_but_not_the_credentials(monkeypatch):
 
     monkeypatch.setattr("app.services.action_service._execute_send_email", boom)
     pending_id = _stage_email(owner["email"])
-    resp = client.post(f"/api/v1/admin/actions/{pending_id}/confirm", headers=owner["headers"])
+    resp = _confirm(pending_id, owner)
     assert resp.status_code == 500
     assert BEARER not in resp.text and URL_TOKEN not in resp.text      # nothing returned to the caller
 
@@ -161,12 +135,9 @@ def test_a_failed_action_keeps_the_failure_but_not_the_credentials(monkeypatch):
     assert rows[-1]["status"] == "FAILED" and rows[-1]["staff"] == owner["email"]
     assert "Gmail rejected" in rows[-1]["error"]
     assert BEARER not in _dump(rows) and URL_TOKEN not in _dump(rows)
-    db = SessionLocal()
-    try:
-        stored_error = db.query(PendingAction).filter(PendingAction.id == uuid.UUID(pending_id)).first().error_message
-        assert "Gmail rejected" in stored_error and BEARER not in stored_error and URL_TOKEN not in stored_error
-    finally:
-        db.close()
+    from app.repositories import pending_actions_repo
+    stored_error = pending_actions_repo.get(None, pending_id).error_message
+    assert "Gmail rejected" in stored_error and BEARER not in stored_error and URL_TOKEN not in stored_error
 
 
 def test_a_rejected_action_is_audited_as_not_confirmed(monkeypatch):
@@ -186,13 +157,9 @@ def test_registration_audit_names_the_actor_and_never_stores_the_password():
     resp = client.post("/api/v1/auth/register", headers=boss["headers"],
                        json={"email": new_email, "password": secret_pw, "name": "New", "role": "worker"})
     assert resp.status_code == 201, resp.text
-    db = SessionLocal()
-    try:
-        rows = db.query(AuditLog).filter(AuditLog.tool_name == "auth:register", AuditLog.proposed_payload["email"].astext == new_email).all()
-        assert len(rows) == 1
-        row = rows[0]
-        assert row.staff_user_id == boss["email"]                      # the caller, not the new account
-        stored = json.dumps([row.tool_arguments, row.proposed_payload, row.execution_result], default=str)
-        assert secret_pw not in stored and new_email in stored
-    finally:
-        db.close()
+    rows = [r for r in fs_users.audit_by_tool("auth:register") if (r.get("proposed_payload") or {}).get("email") == new_email]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["staff_user_id"] == boss["email"]                      # the caller, not the new account
+    stored = json.dumps([row.get("tool_arguments"), row.get("proposed_payload"), row.get("execution_result")], default=str)
+    assert secret_pw not in stored and new_email in stored

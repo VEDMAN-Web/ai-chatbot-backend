@@ -2,7 +2,7 @@
 Conversation memory for the public/admin chatbots.
 
 ALL history, preferences, and property_context are stored in Cloud Firestore.
-PostgreSQL is NOT used for chat memory (admin RBAC / pending actions still use SQL elsewhere).
+Chat memory lives in Firestore.
 """
 
 from typing import Optional, List, Dict, Any
@@ -87,7 +87,7 @@ def get_or_create_conversation(
         except Exception as e:
             logger.error(f"Firestore get_or_create_conversation failed: {e}")
 
-    # 3. Ephemeral fallback only if Firestore is unavailable (not written to Postgres)
+    # 3. Ephemeral fallback only if Firestore is unavailable 
     if conversation is None:
         from app.services.firestore_service import FirestoreConversation
 
@@ -150,7 +150,7 @@ def append_conversation_turn(
 ):
     """
     Append a turn and persist history + preferences (including property_context) to Firestore.
-    Does not write chat memory to PostgreSQL.
+    Chat memory is stored in Firestore only.
     """
     from app.core.config import settings
     from app.services.firestore_service import append_conversation_turn_firestore
@@ -257,7 +257,7 @@ def persist_conversation_preferences(conversation) -> None:
     """
     Persist preferences (including session_message_count) without appending a chat turn.
     Updates the in-process cache and merges into Firestore when sync is enabled.
-    Does not write to PostgreSQL.
+    
     """
     if conversation is None:
         return

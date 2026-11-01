@@ -6,12 +6,10 @@ from typing import Dict, Any, Optional, List, Generator
 from fastapi import APIRouter, Depends, HTTPException, Query, status, UploadFile, File, Form, Request
 from fastapi.responses import FileResponse, StreamingResponse, RedirectResponse, Response
 from pydantic import BaseModel, Field
-from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
 
-from app.db.session import get_db
-from app.db.models import Conversation, Property
+from app.core.deps import get_db
 from app.core.config import settings
 from app.core.auth import (
     AuthenticatedStaff,
@@ -48,6 +46,12 @@ class AdminChatRequest(BaseModel):
     language: Optional[str] = Field("en", description="Language code for conversation ('en' or 'pl'). Default is 'en'", example="en")
     action: Optional[str] = Field(None, description="Direct action trigger ('confirm' or 'reject')", example="confirm")
     pending_action_id: Optional[str] = Field(None, description="Target action ID to confirm or reject", example="act_550e8400-...")
+    confirmation_token: Optional[str] = Field(None, description="Required when action is confirm")
+    attached_images: Optional[List[str]] = Field(
+        None,
+        max_length=10,
+        description="Image URLs already uploaded by this admin chat. They are not attached until the change is confirmed.",
+    )
 
 
 class AdminChatResponse(BaseModel):
@@ -81,7 +85,7 @@ def _sse_pack(event: str, data: Dict[str, Any]) -> str:
 _ADMIN_OWNER_KEY = "owner_user_id"
 
 
-def _claim_admin_conversation(db: Session, session_id: str, staff: AuthenticatedStaff):
+def _claim_admin_conversation(db: Any, session_id: str, staff: AuthenticatedStaff):
     """
     Admin chat session ids are chosen by the client, so a conversation must belong to the staff member using it.
     Without this, any staff member (workers included) could read - or continue - another person's admin chat by
@@ -106,9 +110,10 @@ def _claim_admin_conversation(db: Session, session_id: str, staff: Authenticated
 @router.post("/chat", response_model=None)
 def admin_chat_endpoint(
     req: AdminChatRequest,
+    request: Request,
     stream: bool = Query(False, description="If true, return Server-Sent Events (status then final verified text)"),
     staff: AuthenticatedStaff = Depends(require_admin_or_employee_with_sites),
-    db: Session = Depends(get_db)
+    db: Any = Depends(get_db)
 ):
     """
     Authenticated Admin / Internal Team AI Agent unified endpoint.
@@ -120,8 +125,27 @@ def admin_chat_endpoint(
     With ?stream=true: SSE — status events while working, then a final
     verified text event (never streams unverified claim text mid-flight).
     """
+    from app.core.rate_limit import enforce_rate_limit
+
     user_msg = (req.message or "").strip()
-    if not user_msg and not req.action:
+    enforce_rate_limit(
+        request,
+        scope="admin_chat",
+        identities=[staff.email],
+        limit=int(settings.RATE_LIMIT_ADMIN_CHAT),
+        window_seconds=int(settings.RATE_LIMIT_ADMIN_CHAT_WINDOW_SEC),
+        message="Too many admin chat requests. Try again later.",
+    )
+    if "http://" in user_msg.lower() or "https://" in user_msg.lower():
+        enforce_rate_limit(
+            request,
+            scope="url_import",
+            identities=[staff.email],
+            limit=int(settings.RATE_LIMIT_IMPORT_AND_SUPERADMIN),
+            window_seconds=int(settings.RATE_LIMIT_IMPORT_WINDOW_SEC),
+            message="Too many URL import requests. Try again later.",
+        )
+    if not user_msg and not req.action and not req.attached_images:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Please provide a chat message or specify an action ('confirm'/'reject')."
@@ -151,7 +175,9 @@ def admin_chat_endpoint(
             site_origin=active_origin,
             requested_language=req.language,
             action=req.action,
-            pending_action_id=req.pending_action_id
+            pending_action_id=req.pending_action_id,
+            confirmation_token=req.confirmation_token,
+            attached_images=list(req.attached_images or []) or None,
         )
 
     if not stream:
@@ -173,6 +199,7 @@ def admin_chat_endpoint(
             "conversation_id": res.get("conversation_id"),
             "requires_confirmation": bool(res.get("requires_confirmation")),
             "pending_action_id": res.get("pending_action_id"),
+            "confirmation_token": res.get("confirmation_token"),
             "action_status": res.get("action_status"),
             "tools_used": res.get("tools_used") or [],
             "download_link": res.get("download_link"),
@@ -191,7 +218,7 @@ def admin_chat_endpoint(
 def get_admin_history_endpoint(
     session_id: str,
     staff: AuthenticatedStaff = Depends(require_admin_or_employee),
-    db: Session = Depends(get_db)
+    db: Any = Depends(get_db)
 ):
     """
     Retrieves full admin multi-turn conversation history from Firestore.
@@ -217,7 +244,7 @@ def get_admin_history_endpoint(
 def inspect_pending_action_endpoint(
     pending_action_id: str,
     staff: AuthenticatedStaff = Depends(require_admin_or_employee),
-    db: Session = Depends(get_db)
+    db: Any = Depends(get_db)
 ):
     """Retrieves current status and payload details of a staged pending action."""
     action = get_pending_action(db, pending_action_id)
@@ -237,18 +264,63 @@ def inspect_pending_action_endpoint(
     }
 
 
-# 4. Pending Action Confirmation & Execution
+@router.post("/property-images/upload")
+def upload_property_images_endpoint(
+    request: Request,
+    files: Optional[List[UploadFile]] = File(None),
+    staff: AuthenticatedStaff = Depends(require_admin_or_employee),
+):
+    """
+    Store 1 to 10 property images. This does not attach them to a listing.
+    The admin chat command proposes that change, and confirm writes it.
+    """
+    _limit_admin_write(request, staff)
+    from app.services.admin_image_storage import store_uploads
+
+    stored = store_uploads(list(files or []))
+    return {"files": stored}
+
+
+@router.get("/property-images/files/{filename}")
+def serve_property_image_endpoint(filename: str):
+    """Public image URL used by the admin chat and the public chatbot."""
+    from fastapi.responses import Response
+
+    from app.services.admin_image_storage import load_property_image
+
+    try:
+        content, media = load_property_image(filename)
+    except FileNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Image not found.")
+    return Response(content=content, media_type=media)
+
+
+def _limit_admin_write(request: Optional[Request], staff: AuthenticatedStaff) -> None:
+    from app.core.rate_limit import enforce_rate_limit
+
+    enforce_rate_limit(
+        request,
+        scope="admin_write",
+        identities=[getattr(staff, "email", None)],
+        limit=int(settings.RATE_LIMIT_ADMIN_WRITE),
+        window_seconds=int(settings.RATE_LIMIT_ADMIN_WRITE_WINDOW_SEC),
+        message="Too many admin write requests. Try again later.",
+    )
+
+
 @router.post("/actions/{pending_action_id}/confirm")
 def confirm_pending_action_endpoint(
     pending_action_id: str,
+    request: Request,
     body: Optional[ActionConfirmRequest] = None,
     staff: AuthenticatedStaff = Depends(require_admin_or_employee),
-    db: Session = Depends(get_db)
+    db: Any = Depends(get_db),
 ):
     """
     Explicit Two-Step Confirmation endpoint for write actions.
     Validates token, server-side expiration, and permissions, then executes the action.
     """
+    _limit_admin_write(request, staff)
     token = body.confirmation_token if body else None
     return confirm_and_execute_action(
         db=db,
@@ -264,7 +336,7 @@ def reject_pending_action_endpoint(
     pending_action_id: str,
     body: Optional[ActionRejectRequest] = None,
     staff: AuthenticatedStaff = Depends(require_admin_or_employee),
-    db: Session = Depends(get_db)
+    db: Any = Depends(get_db)
 ):
     """Rejects a staged pending action and logs the rejection in audit logs."""
     reason = body.reason if body else None
@@ -420,7 +492,7 @@ async def propose_batch_file_endpoint(
     file: UploadFile = File(..., description="Uploaded Excel (.xlsx/.xls), CSV, PDF, or Word (.docx) file containing property list"),
     action: str = Form(..., description="Action to perform on target properties: 'delete', 'update', or 'create'"),
     staff: AuthenticatedStaff = Depends(require_admin_or_super_admin_with_sites),
-    db: Session = Depends(get_db)
+    db: Any = Depends(get_db)
 ):
     """
     Parses the uploaded file and STAGES the bulk change as a pending action with a preview of every row.
@@ -447,6 +519,20 @@ async def propose_batch_file_endpoint(
 
     filename = os.path.basename(file.filename or "") or "uploaded_file"
     try:
+        # Add/Create from an offer-style document: show a preview and wait for the admin's confirmation.
+        if operation in ("create", "write"):
+            from app.services.admin_offer_import import OFFER_EXTENSIONS, stage_document_import
+
+            staged = stage_document_import(db, staff, content, filename)
+            if staged is not None:
+                return staged
+            if filename.lower().rsplit(".", 1)[-1] in OFFER_EXTENSIONS:
+                # A PDF/Word/text file that is not a property list: say so instead of treating every line as a property row.
+                raise BatchOperationError(
+                    "I could not find any property sections in this document, so nothing was created. "
+                    "For Add/Create upload a CSV or Excel file with the columns name, property_type, province, "
+                    "price and status, or an offer with one section per property (title, location, price in THB, status)."
+                )
         with tempfile.TemporaryDirectory() as tmp_dir:
             path = os.path.join(tmp_dir, filename)
             with open(path, "wb") as fh:
@@ -470,13 +556,15 @@ async def propose_batch_file_endpoint(
 @router.post("/operations/{operation_id}/undo")
 def undo_batch_operation_endpoint(
     operation_id: str,
+    request: Request,
     staff: AuthenticatedStaff = Depends(require_admin_or_super_admin_with_sites),
-    db: Session = Depends(get_db)
+    db: Any = Depends(get_db),
 ):
     """
     Instantly rolls back a previous batch operation within its 6-day retention window.
     Restores the exact document states from the saved snapshot.
     """
+    _limit_admin_write(request, staff)
     from app.services.admin_batch_service import (
         undo_batch_property_operation,
         BatchOperationError,
@@ -833,7 +921,7 @@ def list_admin_properties_endpoint(
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     staff: AuthenticatedStaff = Depends(require_admin_or_employee_with_sites),
-    db: Session = Depends(get_db)
+    db: Any = Depends(get_db)
 ):
     """
     Fetches property listings strictly scoped to the staff member's currently selected websites.
@@ -886,50 +974,12 @@ def list_admin_properties_endpoint(
             "selected_websites": staff.selected_websites,
             "properties": fs_output
         }
-
-    # Fallback to local SQL database if Firestore returned nothing (e.g. offline unit testing)
-    params = PropertyFilterParams(
-        location=location,
-        property_type=property_type,
-        min_price=min_price,
-        max_price=max_price,
-        bedrooms=bedrooms,
-        has_pool=has_pool,
-        status=status,
-        websites=staff.selected_websites,
-        limit=limit,
-        offset=offset,
-        is_public=None
-    )
-    results = search_properties_safe(db, params)
-    output = []
-    for p in results:
-        img_list = [getattr(img, "image_url", img) for img in p.images] if p.images else []
-        output.append({
-            "property_id": p.property_id,
-            "property_name": p.property_name,
-            "project_name": p.project_name,
-            "property_type": p.property_type,
-            "status": p.status,
-            "province": p.province,
-            "district": p.district,
-            "area": p.area,
-            "price_display": p.price_display,
-            "bedrooms": p.bedrooms_display,
-            "has_pool": p.has_pool,
-            # Unassigned legacy properties are served under tajlandia.com (see build_property_query /
-            # property_belongs_to_websites); report that here too so the list never claims a property
-            # belongs to "no site" while actually returning it under a selected one.
-            "websites": list(p.websites) if p.websites else ["tajlandia.com"],
-            "images": img_list,
-            "is_public": p.is_public
-        })
     return {
-        "count": len(output),
+        "count": 0,
         "offset": offset,
         "limit": limit,
         "selected_websites": staff.selected_websites,
-        "properties": output
+        "properties": []
     }
 
 
@@ -938,10 +988,10 @@ def get_admin_property_endpoint(
     property_id: str,
     include_archived: bool = Query(False, description="Admin / super admin only: also return a soft-deleted (archived) listing."),
     staff: AuthenticatedStaff = Depends(require_admin_or_employee_with_sites),
-    db: Session = Depends(get_db)
+    db: Any = Depends(get_db)
 ):
     """
-    Retrieves a single property listing from Cloud Firestore (primary) or local DB.
+    Retrieves a single property listing from Cloud Firestore.
     Strictly verifies that the property belongs to the staff member's currently selected websites.
     Archived (soft-deleted) listings return 404 unless an admin passes include_archived=true.
     """
@@ -964,19 +1014,7 @@ def get_admin_property_endpoint(
     except Exception:
         fs_prop = None
 
-    prop = None
-    if not fs_prop and db is not None:
-        prop = db.query(Property).filter(Property.property_id == property_id).first()
-        if prop is not None and not include_archived:
-            try:
-                raw = get_raw_property_document(property_id, target="admin")
-            except Exception:
-                raw = None
-            # Firestore is authoritative: an archived doc hides a stale SQL row too.
-            if is_soft_deleted_record(prop) or (raw is not None and is_soft_deleted_record(raw)):
-                prop = None
-
-    target_obj = fs_prop or prop
+    target_obj = fs_prop
     if not target_obj:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -1029,107 +1067,30 @@ def get_admin_property_endpoint(
             "is_public": fs_prop.get("is_public", True)
         }
 
-    images_urls = [getattr(img, "image_url", img) for img in prop.images] if prop.images else []
-    return {
-        "found": True,
-        "property_id": prop.property_id,
-        "property_name": prop.property_name,
-        "project_name": prop.project_name,
-        "project_name_pl": getattr(prop, "project_name_pl", None),
-        "project_name_en": getattr(prop, "project_name_en", None) or prop.property_name,
-        "slug_pl": getattr(prop, "slug_pl", None),
-        "slug_en": getattr(prop, "slug_en", None),
-        "subtitle_pl": getattr(prop, "subtitle_pl", None),
-        "subtitle_en": getattr(prop, "subtitle_en", None),
-        "property_type": prop.property_type,
-        "status": prop.status,
-        "completion_status": getattr(prop, "completion_status", None) or prop.status,
-        "completion_date": getattr(prop, "completion_date", None),
-        "location": {
-            "country": prop.country,
-            "city": getattr(prop, "city", None) or prop.province,
-            "province": prop.province,
-            "district": prop.district,
-            "area": prop.area,
-            "address": prop.address,
-            "address_en": getattr(prop, "address_en", None) or prop.address,
-            "address_pl": getattr(prop, "address_pl", None),
-            "search_location": getattr(prop, "search_location", None),
-            "neighborhood_lifestyle": getattr(prop, "neighborhood_lifestyle", None),
-            "latitude": prop.latitude,
-            "longitude": prop.longitude,
-        },
-        "pricing": {
-            "display": prop.price_display,
-            "price_from": float(prop.price_numeric_min) if prop.price_numeric_min is not None else None,
-            "price_to": float(prop.price_numeric_max) if prop.price_numeric_max is not None else None,
-            "numeric_min": float(prop.price_numeric_min) if prop.price_numeric_min is not None else None,
-            "numeric_max": float(prop.price_numeric_max) if prop.price_numeric_max is not None else None,
-            "currency": prop.currency,
-            "expected_roi": getattr(prop, "expected_roi", None),
-            "rental_yield": getattr(prop, "rental_yield", None),
-        },
-        "details": {
-            "bedrooms": prop.bedrooms_display,
-            "bathrooms": prop.bathrooms,
-            "area": prop.area_display,
-            "total_units": getattr(prop, "units", None),
-            "available_units": getattr(prop, "available_units", None),
-            "area_from_sqm": float(prop.area_sqm_min) if getattr(prop, "area_sqm_min", None) is not None else None,
-            "area_to_sqm": float(prop.area_sqm_max) if getattr(prop, "area_sqm_max", None) is not None else None,
-        },
-        "descriptions": {
-            "short_description_pl": getattr(prop, "short_description_pl", None),
-            "full_description_pl": getattr(prop, "description_pl", None),
-            "short_description_en": getattr(prop, "short_description_en", None),
-            "full_description_en": getattr(prop, "description_en", None) or prop.description,
-        },
-        "media": images_urls,
-        "images": images_urls,
-        "video_url": getattr(prop, "video_url", None),
-        "layouts": getattr(prop, "layouts", []) or [],
-        "seo": {
-            "seo_title_pl": getattr(prop, "seo_title_pl", None),
-            "seo_title_en": getattr(prop, "seo_title_en", None),
-            "seo_description_pl": getattr(prop, "seo_description_pl", None),
-            "seo_description_en": getattr(prop, "seo_description_en", None),
-        },
-        "publish": {
-            "active": prop.is_public,
-            "featured": getattr(prop, "is_featured", False),
-            "top_list": getattr(prop, "is_top_list", False),
-        },
-        "amenities": prop.amenities,
-        "tags": getattr(prop, "tags", []) or [],
-        "websites": prop.websites or [],
-        "is_public": prop.is_public
-    }
 
-
-def _property_scope_target(property_id: str, db: Session):
-    """Raw Firestore document or SQL row used for existence and website checks."""
+def _property_scope_target(property_id: str, db: Any):
+    """Raw Firestore document used for existence and website checks (None when missing)."""
     from app.services.firestore_service import get_raw_property_document
-    raw = None
     try:
-        raw = get_raw_property_document(property_id, target="admin")
+        return get_raw_property_document(property_id, target="admin")
     except Exception:
-        raw = None
-    prop = db.query(Property).filter(Property.property_id == property_id).first() if db is not None else None
-    return raw, prop
+        return None
 
 
 @router.post("/properties", status_code=status.HTTP_201_CREATED)
 def create_property_endpoint(
     req: PropertyCreateRequest,
+    request: Request,
     overwrite: Optional[bool] = Query(None, description="Not supported. Use PUT to update an existing property."),
     allow_without_undo: bool = Query(False, description="Admin only: write even if the undo snapshot cannot be saved."),
     staff: AuthenticatedStaff = Depends(require_admin_or_super_admin_with_sites),
-    db: Session = Depends(get_db)
+    db: Any = Depends(get_db),
 ):
     """
-    Create a property in Postgres and Firestore after validation.
+    Create a property in Firestore after validation.
     Workers are read-only. A duplicate id or name returns 409.
     """
+    _limit_admin_write(request, staff)
     import uuid
     from app.services.action_service import rest_create_property
 
@@ -1205,49 +1166,22 @@ def create_property_endpoint(
     )
 
 
-@router.get("/properties/{property_id}/consistency")
-def property_consistency_endpoint(
-    property_id: str,
-    staff: AuthenticatedStaff = Depends(require_admin_or_super_admin_with_sites),
-    db: Session = Depends(get_db),
-):
-    """Admin-only comparison of the Firestore document and the Postgres row."""
-    from app.services.action_service import rest_property_consistency
-
-    raw, prop = _property_scope_target(property_id, db)
-    target_obj = raw or prop
-    if not target_obj:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Property with ID '{property_id}' not found.",
-        )
-    if not property_belongs_to_websites(target_obj, staff.selected_websites):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=(
-                f"Access denied: Property '{property_id}' does not belong to your currently selected website(s) "
-                f"{staff.selected_websites}."
-            ),
-        )
-    return rest_property_consistency(db, property_id)
-
-
 @router.put("/properties/{property_id}")
 def update_property_endpoint(
     property_id: str,
     req: PropertyUpdateRequest,
+    request: Request,
     allow_without_undo: bool = Query(False),
     staff: AuthenticatedStaff = Depends(require_admin_or_super_admin_with_sites),
-    db: Session = Depends(get_db)
+    db: Any = Depends(get_db),
 ):
     """
-    Update a property that already exists in Firestore, Postgres, or both.
-    A Postgres-only row is not given a nameless Firestore stub.
+    Update a property that already exists in Firestore.
     """
+    _limit_admin_write(request, staff)
     from app.services.action_service import rest_update_property
 
-    raw, prop = _property_scope_target(property_id, db)
-    target_obj = raw or prop
+    target_obj = _property_scope_target(property_id, db)
     if not target_obj:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -1329,6 +1263,7 @@ def update_property_endpoint(
 @router.delete("/properties/{property_id}")
 def delete_property_endpoint(
     property_id: str,
+    request: Request,
     hard_delete: bool = False,
     confirm_property_id: Optional[str] = Query(
         None,
@@ -1336,16 +1271,27 @@ def delete_property_endpoint(
     ),
     allow_without_undo: bool = Query(False),
     staff: AuthenticatedStaff = Depends(require_admin_or_super_admin_with_sites),
-    db: Session = Depends(get_db)
+    db: Any = Depends(get_db),
 ):
     """
     Soft-delete (archive) a property, or permanently delete it when hard_delete=true
     and confirm_property_id matches the property id.
     """
+    _limit_admin_write(request, staff)
     from app.services.action_service import rest_delete_property
+    if hard_delete:
+        if (staff.role or "").lower() != "super_admin":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Permanent delete is restricted to super admins. Use archive instead.",
+            )
+        if not getattr(settings, "ALLOW_HARD_DELETE", False):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Permanent delete is disabled on this environment (ALLOW_HARD_DELETE is off).",
+            )
 
-    raw, prop = _property_scope_target(property_id, db)
-    target_obj = raw or prop
+    target_obj = _property_scope_target(property_id, db)
     if not target_obj:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -1371,6 +1317,93 @@ def delete_property_endpoint(
 
 
 # ==============================================================================
+# Taught answers (Module 2): FAQ answers the public bot serves before any model call
+# ==============================================================================
+
+class TaughtAnswerCreate(BaseModel):
+    question: str
+    answer: str
+    variants: List[str] = Field(default_factory=list)
+    sites: List[str] = Field(default_factory=list, description="Empty = all websites")
+    language: str = "any"
+    audience: str = Field("public", description="public | admin | both")
+
+
+class TaughtAnswerUpdate(BaseModel):
+    question: Optional[str] = None
+    answer: Optional[str] = None
+    variants: Optional[List[str]] = None
+    sites: Optional[List[str]] = None
+    language: Optional[str] = None
+    audience: Optional[str] = None
+    status: Optional[str] = None
+
+
+def _taught_call(fn, *args, **kwargs):
+    from app.services.taught_answers import TaughtAnswerError
+
+    try:
+        return fn(*args, **kwargs)
+    except TaughtAnswerError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+    except KeyError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Taught answer not found.")
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc))
+
+
+@router.get("/taught-answers", tags=["Taught Answers"])
+def list_taught_answers_endpoint(
+    status_filter: Optional[str] = Query(None, alias="status"),
+    staff: AuthenticatedStaff = Depends(require_admin_or_super_admin_with_sites),
+):
+    from app.services import taught_answers
+
+    return {"items": _taught_call(taught_answers.list_answers, status=status_filter)}
+
+
+@router.post("/taught-answers", status_code=status.HTTP_201_CREATED, tags=["Taught Answers"])
+def create_taught_answer_endpoint(
+    body: TaughtAnswerCreate,
+    staff: AuthenticatedStaff = Depends(require_admin_or_super_admin_with_sites),
+):
+    from app.services import taught_answers
+
+    return _taught_call(
+        taught_answers.create,
+        question=body.question, answer=body.answer, variants=body.variants,
+        sites=body.sites, language=body.language, audience=body.audience, created_by=staff.email,
+    )
+
+
+@router.put("/taught-answers/{answer_id}", tags=["Taught Answers"])
+def update_taught_answer_endpoint(
+    answer_id: str,
+    body: TaughtAnswerUpdate,
+    staff: AuthenticatedStaff = Depends(require_admin_or_super_admin_with_sites),
+):
+    from app.services import taught_answers
+
+    return _taught_call(
+        taught_answers.update, answer_id,
+        question=body.question, answer=body.answer, variants=body.variants,
+        sites=body.sites, language=body.language, audience=body.audience, status=body.status,
+        updated_by=staff.email,
+    )
+
+
+@router.delete("/taught-answers/{answer_id}", tags=["Taught Answers"])
+def archive_taught_answer_endpoint(
+    answer_id: str,
+    staff: AuthenticatedStaff = Depends(require_admin_or_super_admin_with_sites),
+):
+    """Archive (never hard delete) so the answer and its history stay recoverable."""
+    from app.services import taught_answers
+
+    return _taught_call(taught_answers.archive, answer_id, updated_by=staff.email)
+
+
+# ==============================================================================
 # 9. Admin Activity Logs & Data History Endpoints
 # ==============================================================================
 
@@ -1383,14 +1416,14 @@ def get_admin_activity_logs_endpoint(
     end_date: Optional[datetime] = Query(None, description="Filter logs up to date (ISO format)"),
     limit: int = Query(50, ge=1, le=500, description="Page limit"),
     offset: int = Query(0, ge=0, description="Offset for pagination"),
-    source: str = Query("all", description="'postgres', 'firestore', or 'all'"),
-    staff: AuthenticatedStaff = Depends(require_admin_or_super_admin),
-    db: Session = Depends(get_db)
+    source: str = Query("all", description="'firestore' or 'all'"),
+    staff: AuthenticatedStaff = Depends(require_admin_or_employee),
+    db: Any = Depends(get_db)
 ):
     """
     Returns full administrative activity logs.
     Includes tool executions, staff chat sessions, database mutations, and auth actions.
-    Aggregates from PostgreSQL and Cloud Firestore.
+    Reads from Cloud Firestore.
     """
     from app.services.audit_service import query_admin_activity_logs
 
@@ -1414,8 +1447,8 @@ def get_data_change_history_endpoint(
     updated_by: Optional[str] = Query(None, description="Filter by admin email/ID who performed the update"),
     limit: int = Query(50, ge=1, le=500, description="Page limit"),
     offset: int = Query(0, ge=0, description="Offset for pagination"),
-    staff: AuthenticatedStaff = Depends(require_admin_or_super_admin),
-    db: Session = Depends(get_db)
+    staff: AuthenticatedStaff = Depends(require_admin_or_employee),
+    db: Any = Depends(get_db)
 ):
     """
     Returns chronological history of who updated which data across the platform.
@@ -1472,7 +1505,7 @@ def admin_brochure_preview(
     lang: str = Query("en", description="Language: en, pl, or th"),
     site_origin: Optional[str] = Query(None, description="Tenant site origin"),
     staff: AuthenticatedStaff = Depends(require_admin_or_employee),
-    db: Session = Depends(get_db),
+    db: Any = Depends(get_db),
 ):
     """
     Admin-only design preview: return a single-property brochure PDF for a chosen theme.
@@ -1549,7 +1582,7 @@ class AdminCorrectionCreateRequest(BaseModel):
 def create_admin_correction(
     body: AdminCorrectionCreateRequest,
     staff: AuthenticatedStaff = Depends(require_admin_or_super_admin),
-    db: Session = Depends(get_db)
+    db: Any = Depends(get_db)
 ):
     """
     Create a new answer correction directly (without going through a chat log remark).

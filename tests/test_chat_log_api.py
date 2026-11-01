@@ -12,9 +12,7 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.core.config import settings
-from app.core.security import hash_password
-from app.db.models import User
-from app.db.session import SessionLocal
+from tests.fs_users import make_user
 from app.services import chat_log_service as logs
 
 client = TestClient(app)
@@ -37,31 +35,15 @@ def fs(monkeypatch):
     monkeypatch.setattr(settings, "ENABLE_CHAT_LOG_STORE", True)
     monkeypatch.setattr(settings, "ENABLE_FIRESTORE_SYNC", False)
     monkeypatch.setattr(logs, "_client", lambda: firestore_client)
-    for target in ("app.services.firestore_auth_service.get_firestore_client", "app.services.firestore_service.get_firestore_client"):
-        monkeypatch.setattr(target, lambda *a, **kw: None)
     yield firestore_client
     firestore_client.recursive_delete(firestore_client.collection(logs.LOGS))
-    db = SessionLocal()
-    try:
-        for user in db.query(User).filter(User.email.like(f"{PREFIX}%")).all():
-            db.delete(user)
-        db.commit()
-    finally:
-        db.close()
 
 
 def _staff(role, websites):
-    email = f"{PREFIX}{role}_{uuid.uuid4().hex[:6]}@tajlandia.com"
-    db = SessionLocal()
-    try:
-        row = User(email=email, name=role, role=role, password_hash=hash_password(PASSWORD), is_active=True, allowed_websites=websites)
-        db.add(row)
-        db.commit()
-        uid = str(row.id)
-    finally:
-        db.close()
-    token = client.post("/api/v1/auth/login", json={"email": email, "password": PASSWORD}).json()["access_token"]
-    return {"id": uid, "email": email, "role": role, "headers": {"Authorization": f"Bearer {token}"}}
+    from app.repositories import users_repo
+    made = make_user(client, role, PREFIX, allowed_websites=websites, password=PASSWORD)
+    uid = str(users_repo.get_by_email(None, made["email"]).id)
+    return {"id": uid, "email": made["email"], "role": role, "headers": made["headers"]}
 
 
 def _log(monkeypatch, agent, session, site, day, question, answer, actor=None, **kw):

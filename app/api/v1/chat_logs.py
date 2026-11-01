@@ -2,11 +2,10 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Callable, List, Optional
+from typing import Any, Callable, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
-from sqlalchemy.orm import Session
 
 from app.core.auth import AuthenticatedStaff
 from app.core.permissions import (
@@ -18,7 +17,7 @@ from app.core.permissions import (
     require_permission,
 )
 from app.core.tenant import normalize_website_domain
-from app.db.session import get_db
+from app.core.deps import get_db
 from app.services import chat_log_query as query
 from app.services import chat_log_remarks as remarks
 from app.services.audit_service import AuditUnavailable
@@ -194,19 +193,19 @@ def correction_revisions(correction_id: str, staff: AuthenticatedStaff = Depends
 
 
 @router.post("/corrections/{correction_id}/approve")
-def approve_correction(correction_id: str, body: Optional[Decision] = None, staff: AuthenticatedStaff = Depends(_can_approve), db: Session = Depends(get_db)):
+def approve_correction(correction_id: str, body: Optional[Decision] = None, staff: AuthenticatedStaff = Depends(_can_approve), db: Any = Depends(get_db)):
     note = body.note if body else None
     return _run(lambda: remarks.decide_correction(db, staff, correction_id, "approve", note))
 
 
 @router.post("/corrections/{correction_id}/reject")
-def reject_correction(correction_id: str, body: Optional[Decision] = None, staff: AuthenticatedStaff = Depends(_can_approve), db: Session = Depends(get_db)):
+def reject_correction(correction_id: str, body: Optional[Decision] = None, staff: AuthenticatedStaff = Depends(_can_approve), db: Any = Depends(get_db)):
     note = body.note if body else None
     return _run(lambda: remarks.decide_correction(db, staff, correction_id, "reject", note))
 
 
 @router.post("/corrections/{correction_id}/deactivate")
-def deactivate_correction(correction_id: str, body: Optional[Decision] = None, staff: AuthenticatedStaff = Depends(_can_approve), db: Session = Depends(get_db)):
+def deactivate_correction(correction_id: str, body: Optional[Decision] = None, staff: AuthenticatedStaff = Depends(_can_approve), db: Any = Depends(get_db)):
     note = body.note if body else None
     return _run(lambda: remarks.decide_correction(db, staff, correction_id, "deactivate", note))
 

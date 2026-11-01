@@ -120,7 +120,7 @@ import logging
 from datetime import datetime
 from decimal import Decimal
 from typing import Dict, Any, List, Optional, Tuple
-from sqlalchemy.orm import Session
+from openai import OpenAI
 import anthropic
 def extract_anthropic_text(response: Any) -> str:
     if not hasattr(response, 'content') or not response.content:
@@ -150,7 +150,6 @@ def _safe_anthropic_create(client: Any, **kwargs) -> Any:
         call_kwargs['timeout'] = _anthropic_timeout_sec()
     return client.messages.create(**call_kwargs)
 from app.core.config import settings
-from app.db.models import Property, Conversation
 from app.services.property_search import (
     PropertyFilterParams, search_properties_safe, get_property_by_id, get_property_by_name,
     to_compact_projection, get_properties_by_ids
@@ -440,7 +439,7 @@ def _build_add_to_calendar_url(
     return f"https://calendar.google.com/calendar/render?{urllib.parse.urlencode(params)}"
 
 
-def format_property_card(p: Property) -> Dict[str, Any]:
+def format_property_card(p: Any) -> Dict[str, Any]:
     """Formats a Property ORM object into the frontend-expected card structure with Maps and Calendar integration."""
     img_urls = [img.image_url for img in p.images] if p.images else []
     
@@ -1124,7 +1123,7 @@ def lookup_property_by_slug_or_name(token: str) -> Optional[Dict[str, Any]]:
 
 
 def resolve_empty_search_after_seen_exclusion(
-    db: Session,
+    db: Any,
     params: PropertyFilterParams,
     seen_ids: List[str],
     *,
@@ -1172,13 +1171,13 @@ def resolve_empty_search_after_seen_exclusion(
 
 
 def search_properties_unified(
-    db: Session,
+    db: Any,
     params: PropertyFilterParams,
     limit: Optional[int] = None,
     exclude_property_ids: Optional[List[str]] = None
 ) -> List[Dict[str, Any]]:
     """
-    Unified property search engine that combines local PostgreSQL database records
+    Unified property search engine that combines Firestore records
     with live Cloud Firestore records (from projects collection).
     Excludes any property IDs already recommended in this chat session to prevent duplicate suggestions.
     """
@@ -1231,20 +1230,6 @@ def search_properties_unified(
                         cards.append(c)
         except Exception as e:
             logger.warning(f"Error querying Firestore properties in search_properties_unified: {e}")
-
-    # 2. Local database fallback (only if Firestore client is completely unavailable/uninitialized, e.g. offline testing)
-    if not cards and db is not None:
-        try:
-            from app.services.firestore_service import get_firestore_client
-            if not get_firestore_client("user"):
-                db_props = search_properties_safe(db, params)
-                for p in db_props:
-                    pid = str(p.property_id or "").strip().lower()
-                    pname = str(p.property_name or "").strip().lower()
-                    if pid not in exclude_set and pname not in exclude_set:
-                        cards.append(format_property_card(p))
-        except Exception as e:
-            logger.warning(f"Error querying local database properties in search_properties_unified: {e}")
 
     return cards[:lim]
 
@@ -1977,6 +1962,11 @@ def is_off_topic_query(message: str, lenient: bool = False) -> bool:
     if has_random_noun:
         return True
 
+    # "Do you have X?" / "Does X have a gym?" is a listing-availability or amenity question about a name that may
+    # not exist. It is NOT off-topic: the property lookup then answers honestly ("not found").
+    if re.match(r"^(do|does|did|is|are|can)\s+(you|we|they)\s+have\b", msg) or re.match(r"^does\s+\S.*\s+(have|offer|include)\b", msg):
+        return False
+
     # Safe real-estate follow-ups even without explicit Thailand keywords
     # (session context / deterministic intent will resolve the property)
     re_followup_ok = [
@@ -2595,8 +2585,8 @@ class PublicAgentService:
 
     def execute_tool(
         self,
-        db: Session,
-        conversation: Conversation,
+        db: Any,
+        conversation: Any,
         tool_name: str,
         args: Dict[str, Any]
     ) -> (Dict[str, Any], List[Dict[str, Any]], bool):
@@ -2813,7 +2803,7 @@ class PublicAgentService:
                         "detail_page_url": fs_prop.get("detail_page_url")
                     }, matched_cards, False
 
-            # 2. Fallback: Local SQL Database
+            # 2. Fallback
             prop = get_property_by_id(db, pid) if (db and pid) else None
             if not prop and args.get("property_name") and db:
                 prop = get_property_by_name(db, args["property_name"])
@@ -3139,8 +3129,8 @@ class PublicAgentService:
 
     def run_conversation(
         self,
-        db: Session,
-        conversation: Conversation,
+        db: Any,
+        conversation: Any,
         user_message: str,
         requested_language: Optional[str] = None
     ) -> Dict[str, Any]:
@@ -3174,8 +3164,8 @@ class PublicAgentService:
 
     def _answer_from_approved_correction(
         self,
-        db: Session,
-        conversation: Conversation,
+        db: Any,
+        conversation: Any,
         user_message: str,
         requested_language: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
@@ -3217,8 +3207,8 @@ class PublicAgentService:
 
     def _run_conversation_internal(
         self,
-        db: Session,
-        conversation: Conversation,
+        db: Any,
+        conversation: Any,
         user_message: str,
         requested_language: Optional[str] = None
     ) -> Dict[str, Any]:
@@ -3319,6 +3309,45 @@ class PublicAgentService:
                     session_id=conversation.session_id,
                     conversation_id=str(conversation.id),
                     intent="prompt_injection_refused",
+                    model="deterministic",
+                    latency_sec=round(time.time() - start_time, 3),
+                ),
+                db=db,
+            )
+            return {
+                "type": "text",
+                "text": reply_text,
+                "properties": [],
+                "quick_replies": self._generate_quick_replies(user_message, [], language=active_lang),
+                "lead_captured": False,
+                "preferences": conversation.preferences or {},
+                "session_id": conversation.session_id,
+                "conversation_id": str(conversation.id),
+                "language": active_lang,
+            }
+
+        # 1a2. Admin-taught FAQ answer (near-exact match only, vetted by grounding policy)
+        try:
+            from app.services.taught_answers import find_match as _find_taught_answer
+            _taught = _find_taught_answer(
+                user_message, site_origin=conversation.site_origin, language=active_lang
+            )
+        except Exception:
+            _taught = None
+        if _taught:
+            reply_text = _taught["answer"]
+            append_conversation_turn(
+                db=db,
+                conversation=conversation,
+                user_message=user_message,
+                assistant_message=reply_text,
+            )
+            token_tracker.log_turn(
+                TurnTokenMetrics(
+                    request_id=f"req_{uuid.uuid4().hex[:8]}",
+                    session_id=conversation.session_id,
+                    conversation_id=str(conversation.id),
+                    intent="taught_answer",
                     model="deterministic",
                     latency_sec=round(time.time() - start_time, 3),
                 ),
@@ -3725,7 +3754,7 @@ class PublicAgentService:
 
     def _sync_pending_name_candidates_from_last_search(
         self,
-        conversation: Conversation,
+        conversation: Any,
         asked_name: Optional[str] = None,
         candidates: Optional[List[Dict[str, Any]]] = None,
         tool_results: Optional[List[Any]] = None,
@@ -3754,14 +3783,14 @@ class PublicAgentService:
             candidates=cands,
         )
 
-    def _clear_pending_name_candidates(self, conversation: Conversation) -> None:
+    def _clear_pending_name_candidates(self, conversation: Any) -> None:
         from app.services.name_confirmation import clear_pending_name_candidates
         conversation.preferences = clear_pending_name_candidates(conversation.preferences)
 
     def _maybe_resolve_pending_name_candidates(
         self,
-        db: Session,
-        conversation: Conversation,
+        db: Any,
+        conversation: Any,
         user_message: str,
         start_time: float,
         language: str = "en",
@@ -3837,8 +3866,8 @@ class PublicAgentService:
 
     def _handle_lead_capture(
         self,
-        db: Session,
-        conversation: Conversation,
+        db: Any,
+        conversation: Any,
         args: Dict[str, Any],
         user_message: str,
         start_time: float,
@@ -3860,7 +3889,7 @@ class PublicAgentService:
         wants_specs = bool(args.get("wants_specs"))
         target_label = self._resolve_lead_target_label(args.get("target_ref"))
 
-        # Fast in-session upsert for lead_id in the reply; durable SQL is backgrounded.
+        # Fast in-session upsert for lead_id in the reply; durable Firestore write is backgrounded.
         try:
             lead = record_or_update_lead(
                 db=None,
@@ -4121,8 +4150,8 @@ class PublicAgentService:
 
     def _handle_show_more(
         self,
-        db: Session,
-        conversation: Conversation,
+        db: Any,
+        conversation: Any,
         args: Dict[str, Any],
         user_message: str,
         start_time: float,
@@ -4388,8 +4417,8 @@ class PublicAgentService:
 
     def _handle_property_details(
         self,
-        db: Session,
-        conversation: Conversation,
+        db: Any,
+        conversation: Any,
         args: Dict[str, Any],
         user_message: str,
         start_time: float,
@@ -5100,8 +5129,8 @@ class PublicAgentService:
 
     def _handle_property_comparison(
         self,
-        db: Session,
-        conversation: Conversation,
+        db: Any,
+        conversation: Any,
         args: Dict[str, Any],
         user_message: str,
         start_time: float,
@@ -5275,8 +5304,8 @@ class PublicAgentService:
 
     def _handle_brochure_request(
         self,
-        db: Session,
-        conversation: Conversation,
+        db: Any,
+        conversation: Any,
         args: Dict[str, Any],
         user_message: str,
         start_time: float,
@@ -5309,7 +5338,12 @@ class PublicAgentService:
 
         # 1. Always prioritize any property explicitly named or referenced in the user's current message
         u_clean = user_message.lower()
-        all_props = db.query(Property).all() if db is not None else []
+        try:
+            from app.repositories import properties_store
+
+            all_props = properties_store.public_rows(db)
+        except Exception:
+            all_props = []
         explicit_prop_id = None
         common_words = {'residence', 'residences', 'villa', 'villas', 'condo', 'condominium', 'waterfront', 'lake', 'phase', 'park', 'hill', 'hills', 'view', 'beach', 'project'}
 
@@ -5467,17 +5501,13 @@ class PublicAgentService:
         from app.core.tenant import resolve_tenant
         tenant = resolve_tenant(conversation.site_origin)
 
-        prop = None
-        try:
-            if db is not None:
-                prop = db.query(Property).filter(Property.property_id == prop_id.upper()).first()
-        except Exception:
-            prop = None
-        p_name = prop.property_name if prop else prop_id
-        pref_loc = f"{prop.district}, {prop.province}" if prop and prop.district else (prop.province if prop else None)
-        pref_type = prop.property_type if prop else None
+        p_name = prop_id
+        pref_loc = None
+        pref_type = None
         fs_found = False
-        if not prop and getattr(settings, "ENABLE_FIRESTORE_SYNC", True):
+        fs_checked = False
+        if getattr(settings, "ENABLE_FIRESTORE_SYNC", True):
+            fs_checked = True
             try:
                 from app.services.firestore_service import get_property_by_id_from_firestore
                 fs_card = get_property_by_id_from_firestore(str(prop_id).strip())
@@ -5490,7 +5520,7 @@ class PublicAgentService:
                 pass
 
         # A search sentence ("all Phuket listings under 10M") is not a property id.
-        if prop is None and not fs_found:
+        if fs_checked and not fs_found:
             reply_text = clarification_msgs.get(language, clarification_msgs["en"])
             append_conversation_turn(
                 db=db, conversation=conversation, user_message=user_message, assistant_message=reply_text
@@ -5620,8 +5650,8 @@ class PublicAgentService:
 
     def _handle_refine_filter(
         self,
-        db: Session,
-        conversation: Conversation,
+        db: Any,
+        conversation: Any,
         refinements: Dict[str, Any],
         user_message: str,
         start_time: float,
@@ -5863,8 +5893,8 @@ class PublicAgentService:
 
     def _handle_property_search(
         self,
-        db: Session,
-        conversation: Conversation,
+        db: Any,
+        conversation: Any,
         user_message: str,
         start_time: float,
         language: str = "en"
@@ -6455,8 +6485,8 @@ class PublicAgentService:
 
     def _handle_general_question(
         self,
-        db: Session,
-        conversation: Conversation,
+        db: Any,
+        conversation: Any,
         user_message: str,
         start_time: float,
         language: str = "en"
@@ -6608,8 +6638,8 @@ class PublicAgentService:
 
     def _handle_cannot_email_or_calendar(
         self,
-        db: Session,
-        conversation: Conversation,
+        db: Any,
+        conversation: Any,
         user_message: str,
         start_time: float,
         language: str = "en",
@@ -6680,8 +6710,8 @@ class PublicAgentService:
 
     def _handle_greeting(
         self,
-        db: Session,
-        conversation: Conversation,
+        db: Any,
+        conversation: Any,
         user_message: str,
         language: str = "en"
     ) -> Dict[str, Any]:
@@ -6704,16 +6734,6 @@ class PublicAgentService:
         if clean_msg in ["hi", "hello", "hey", "cześć", "czesc", "dzień dobry", "dzien dobry", "witaj", "witam"]:
             safe_prefs = {}
             conversation.preferences = {}
-            if hasattr(conversation, "__table__"):
-                try:
-                    from sqlalchemy.orm.attributes import flag_modified
-                    flag_modified(conversation, "preferences")
-                    db.commit()
-                except Exception:
-                    try:
-                        db.rollback()
-                    except Exception:
-                        pass
 
         return {
             "type": "text",
@@ -6729,8 +6749,8 @@ class PublicAgentService:
 
     def _call_openai(
         self,
-        db: Session,
-        conversation: Conversation,
+        db: Any,
+        conversation: Any,
         user_message: str,
         raw_user_message: Optional[str] = None,
         start_time: Optional[float] = None,
@@ -7082,8 +7102,8 @@ class PublicAgentService:
 
     def _run_deterministic_retrieval(
         self,
-        db: Session,
-        conversation: Conversation,
+        db: Any,
+        conversation: Any,
         user_message: str,
         raw_user_message: Optional[str] = None,
         start_time: Optional[float] = None,

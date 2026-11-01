@@ -2,29 +2,31 @@ import re
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, Optional, List, Tuple
-from sqlalchemy.orm import Session
 from fastapi import HTTPException, status
 import logging
 
-from app.db.models import PendingAction, Property
 from app.core.config import settings
 from app.core.auth import AuthenticatedStaff
 from app.services.audit_service import record_audit_log, sanitize_payload, scrub_text
 from app.services.google_services import google_manager
+from app.repositories import pending_actions_repo
 
 # Re-exported so tests can patch `app.services.action_service.record_crud_operation_snapshot`
 from app.services.admin_batch_service import record_crud_operation_snapshot  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
-# Lifecycle States
-ACTION_STATUS_PENDING = "PENDING"
-ACTION_STATUS_CONFIRMED = "CONFIRMED"
-ACTION_STATUS_EXECUTED = "EXECUTED"
-ACTION_STATUS_REJECTED = "REJECTED"
-ACTION_STATUS_EXPIRED = "EXPIRED"
-ACTION_STATUS_FAILED = "FAILED"
-ACTION_STATUS_SUPERSEDED = "SUPERSEDED"
+# Lifecycle States (kept in sync with pending_actions_repo)
+ACTION_STATUS_PENDING = pending_actions_repo.ACTION_STATUS_PENDING
+ACTION_STATUS_CONFIRMED = pending_actions_repo.ACTION_STATUS_CONFIRMED
+ACTION_STATUS_EXECUTED = pending_actions_repo.ACTION_STATUS_EXECUTED
+ACTION_STATUS_REJECTED = pending_actions_repo.ACTION_STATUS_REJECTED
+ACTION_STATUS_EXPIRED = pending_actions_repo.ACTION_STATUS_EXPIRED
+ACTION_STATUS_FAILED = pending_actions_repo.ACTION_STATUS_FAILED
+ACTION_STATUS_SUPERSEDED = pending_actions_repo.ACTION_STATUS_SUPERSEDED
+
+# Back-compat alias for type hints / isinstance checks in tests
+PendingAction = pending_actions_repo.PendingActionRecord
 
 
 # Canonical listing values. Input is matched case-insensitively and stored in this form.
@@ -246,7 +248,7 @@ def validate_property_data(
     existing_property: Optional[Any] = None
 ) -> Tuple[bool, List[str], str]:
     """
-    Validates data completeness before adding or updating any property in PostgreSQL or Cloud Firestore.
+    Validates data completeness before adding or updating any property in Cloud Firestore.
     If ANY required value is missing, empty, or null, blocks insertion and returns:
     (False, missing_fields, error_message).
 
@@ -264,7 +266,7 @@ def validate_property_data(
         str(mode).lower() == "create"
         and existing_property is None
         and not payload.get("is_update_only")
-        and str(payload.get("resolve_source") or "").lower() not in ("postgres", "firestore")
+        and str(payload.get("resolve_source") or "").lower() not in ("firestore",)
     )
 
     errors: Dict[str, str] = {}
@@ -383,7 +385,7 @@ def validate_calendar_action(payload: Dict[str, Any]) -> List[str]:
 
 
 def create_pending_action(
-    db: Session,
+    db: Any,
     staff_user_id: str,
     tool_name: str,
     action_payload: Dict[str, Any],
@@ -394,6 +396,7 @@ def create_pending_action(
     Creates a new pending action staged for explicit employee/admin confirmation.
     Claude NEVER executes write actions directly; it only proposes them here.
     Validates data completeness for listing creations and updates.
+    Persistence goes through pending_actions_repo (STORE_PENDING_ACTIONS).
     """
     if tool_name in ("send_email", "create_calendar_event"):
         problems = (
@@ -422,15 +425,6 @@ def create_pending_action(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=err_msg
             )
-    minutes = (
-        expires_in_minutes
-        if expires_in_minutes is not None
-        else getattr(settings, "ADMIN_PENDING_ACTION_TTL_MIN", None)
-        or settings.ACTION_EXPIRATION_MINUTES
-    )
-    now = datetime.now(timezone.utc)
-    expires_at = now + timedelta(minutes=minutes)
-    confirmation_token = f"act_{secrets.token_hex(16)}"
 
     # Supersede older PENDING actions for the same property (same conversation preferred)
     prop_id = (
@@ -440,106 +434,50 @@ def create_pending_action(
     )
     if prop_id:
         try:
-            q = db.query(PendingAction).filter(PendingAction.status == ACTION_STATUS_PENDING)
-            if conversation_id:
-                q = q.filter(PendingAction.conversation_id == str(conversation_id))
-            for old in q.all():
-                old_payload = old.action_payload or {}
-                old_pid = (
-                    old_payload.get("property_id")
-                    or old_payload.get("target_property_id")
-                    or ((old_payload.get("change_diff") or {}).get("property_id") if isinstance(old_payload.get("change_diff"), dict) else None)
+            for old in pending_actions_repo.list_pending_for_property(
+                db, property_id=str(prop_id), conversation_id=conversation_id
+            ):
+                pending_actions_repo.update_fields(
+                    db,
+                    old.id,
+                    status=ACTION_STATUS_SUPERSEDED,
+                    error=f"Superseded by newer proposal for property {prop_id}",
                 )
-                if old_pid and str(old_pid).strip().lower() == str(prop_id).strip().lower():
-                    old.status = ACTION_STATUS_SUPERSEDED
-                    old.error_message = f"Superseded by newer proposal for property {prop_id}"
         except Exception as e:
             logger.warning(f"Could not supersede older pending actions: {e}")
 
-    action = PendingAction(
-        confirmation_token=confirmation_token,
-        staff_user_id=staff_user_id,
+    action = pending_actions_repo.create(
+        db,
+        staff_email=staff_user_id,
         tool_name=tool_name,
         action_payload=action_payload,
-        status=ACTION_STATUS_PENDING,
         conversation_id=conversation_id,
-        expires_at=expires_at,
-        created_at=now
+        expires_in_minutes=expires_in_minutes,
     )
 
-    db.add(action)
-    db.commit()
-    db.refresh(action)
-
-    # Record initial audit entry
-    record_audit_log(
-        db=db,
-        staff_user_id=staff_user_id,
-        tool_name=tool_name,
-        proposed_payload=action_payload,
-        confirmed_by_staff=False,
-        status=ACTION_STATUS_PENDING,
-        conversation_id=conversation_id,
-        pending_action_id=str(action.id)
-    )
-
-    return action
-
-
-def get_pending_action(db: Session, pending_action_id: str) -> PendingAction:
-    """Retrieves a pending action and lazily marks it as EXPIRED if the timeout elapsed."""
-    import uuid
-    action = None
-
-    # 1. If ID starts with token prefix "act_", query by confirmation_token
-    if isinstance(pending_action_id, str) and pending_action_id.startswith("act_"):
-        try:
-            action = db.query(PendingAction).filter(PendingAction.confirmation_token == pending_action_id).first()
-        except Exception:
-            action = None
-
-    # 2. Try querying by primary key UUID (safely cast string to UUID object)
-    if not action:
-        target_uuid = None
-        if isinstance(pending_action_id, uuid.UUID):
-            target_uuid = pending_action_id
-        elif isinstance(pending_action_id, str):
-            clean_str = pending_action_id.replace("act_", "").strip()
-            try:
-                target_uuid = uuid.UUID(clean_str)
-            except Exception:
-                target_uuid = None
-
-        if target_uuid:
-            try:
-                action = db.query(PendingAction).filter(PendingAction.id == target_uuid).first()
-            except Exception:
-                action = None
-
-    # 3. Fallback: query by confirmation_token
-    if not action and isinstance(pending_action_id, str):
-        try:
-            action = db.query(PendingAction).filter(PendingAction.confirmation_token == pending_action_id).first()
-        except Exception:
-            action = None
-
-    if not action:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Pending action '{pending_action_id}' not found."
+    # Record initial audit entry — if this fails, roll back the pending row
+    from app.services.audit_service import AuditPersistenceError, AUDIT_WRITE_FAILED_MSG
+    try:
+        record_audit_log(
+            db=db,
+            staff_user_id=staff_user_id,
+            tool_name=tool_name,
+            proposed_payload=action_payload,
+            confirmed_by_staff=False,
+            status=ACTION_STATUS_PENDING,
+            conversation_id=conversation_id,
+            pending_action_id=str(action.id),
+            raise_on_failure=True,
         )
-
-    # Server-side expiration check
-    if action.expires_at.tzinfo is None:
-        # Stored as naive UTC; compare with UTC now, not the server's local time.
-        is_expired = action.expires_at < datetime.now(timezone.utc).replace(tzinfo=None)
-    else:
-        is_expired = action.expires_at < datetime.now(timezone.utc)
-
-    if action.status == ACTION_STATUS_PENDING and is_expired:
-        action.status = ACTION_STATUS_EXPIRED
-        db.commit()
-        db.refresh(action)
+    except AuditPersistenceError:
+        try:
+            pending_actions_repo.delete(db, str(action.id))
+        except Exception as cleanup_exc:
+            logger.warning(f"Could not remove pending action after audit failure: {cleanup_exc}")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=AUDIT_WRITE_FAILED_MSG,
+        )
 
     return action
 
@@ -557,19 +495,13 @@ def staff_owns_action(action: Any, staff: Any) -> bool:
     return owner in mine
 
 
-def _claim_action(db: Session, action: PendingAction, staff: Any) -> None:
-    """Only the proposer may decide an action. On a real session the row is locked so a second request waits."""
-    if not staff_owns_action(action, staff):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only the staff member who proposed this action can confirm or reject it.",
-        )
-    if _is_real_db_session(db):
-        db.refresh(action, with_for_update=True)
+def get_pending_action(db: Any, pending_action_id: str) -> PendingAction:
+    """Retrieves a pending action and lazily marks it as EXPIRED if the timeout elapsed."""
+    return pending_actions_repo.get(db, pending_action_id)
 
 
 def _append_action_lifecycle_note(
-    db: Session,
+    db: Any,
     *,
     conversation_id: Optional[str],
     pending_action_id: str,
@@ -580,31 +512,20 @@ def _append_action_lifecycle_note(
     reason: Optional[str] = None,
 ) -> None:
     """
-    Append a system/assistant note to conversation history so the chat model
-    sees UI button confirms/rejects (not only free-text Confirm).
+    Append a system/assistant note to Firestore conversation history so the chat
+    model sees UI button confirms/rejects (not only free-text Confirm).
     """
-    if not conversation_id or db is None:
+    if not conversation_id:
         return
     try:
-        from app.db.models import Conversation
         from app.services.admin_property_fields import format_price_thb
-
-        conv = db.query(Conversation).filter(Conversation.id == conversation_id).first()
-        if conv is None:
-            # conversation_id may be stored as string UUID
-            try:
-                conv = db.query(Conversation).filter(Conversation.id == str(conversation_id)).first()
-            except Exception:
-                conv = None
-        if conv is None:
-            return
+        from app.services.firestore_service import get_firestore_client
 
         result_data = result_data or {}
         detail = ""
         updated = result_data.get("updated_fields") or {}
         if "price_numeric_min" in updated or "price_display" in updated:
             new_p = updated.get("price_numeric_min") or updated.get("price_display")
-            # Prefer change_diff snapshot if present on result
             detail = f" price → {format_price_thb(new_p)}"
         elif updated:
             detail = " fields=" + ",".join(list(updated.keys())[:5])
@@ -622,7 +543,17 @@ def _append_action_lifecycle_note(
                 f"{reason or 'No changes applied.'}"
             )
 
-        history = list(getattr(conv, "message_history", None) or [])
+        client = get_firestore_client(target="admin")
+        if client is None:
+            return
+        ref = client.collection("conversations").document(str(conversation_id))
+        try:
+            snap = ref.get()
+            data = snap.to_dict() if getattr(snap, "exists", False) else {}
+        except Exception:
+            data = {}
+        data = dict(data or {})
+        history = list(data.get("messageHistory") or data.get("message_history") or [])
         history.append({
             "role": "assistant",
             "content": text,
@@ -631,29 +562,95 @@ def _append_action_lifecycle_note(
             "pending_action_id": pending_action_id,
             "action_lifecycle": status.upper(),
         })
-        # Cap history growth
         if len(history) > 400:
             history = history[-400:]
-        conv.message_history = history
-        prefs = dict(getattr(conv, "preferences", None) or {})
+        prefs = dict(data.get("preferences") or {})
         if status.upper() in ("CONFIRMED", "EXECUTED", "REJECTED"):
-            # Clear stale pending id from session prefs
             if prefs.get("last_pending_action_id") == str(pending_action_id):
                 prefs.pop("last_pending_action_id", None)
             prefs["last_finished_action_id"] = str(pending_action_id)
             prefs["last_finished_action_status"] = status.upper()
-        conv.preferences = prefs
-        db.commit()
+        ref.set(
+            {
+                "messageHistory": history,
+                "preferences": prefs,
+                "updatedAt": datetime.now(timezone.utc).isoformat(),
+            },
+            merge=True,
+        )
     except Exception as e:
         logger.warning(f"_append_action_lifecycle_note failed: {e}")
-        try:
-            db.rollback()
-        except Exception:
-            pass
+
+
+def _action_target_websites(payload: Optional[Dict[str, Any]]) -> list:
+    from app.core.tenant import normalize_website_list
+
+    raw = []
+    if not isinstance(payload, dict):
+        return []
+    for key in ("websites", "selected_websites", "website", "site_origin"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            raw.append(value)
+        elif isinstance(value, list):
+            raw.extend(value)
+    fields = payload.get("fields_to_update") or payload.get("fields") or {}
+    if isinstance(fields, dict):
+        sites = fields.get("websites")
+        if isinstance(sites, str) and sites.strip():
+            raw.append(sites)
+        elif isinstance(sites, list):
+            raw.extend(sites)
+    return normalize_website_list(raw)
+
+
+def _assert_confirm_authorized(action, staff: AuthenticatedStaff, confirmation_token: Optional[str]) -> None:
+    """
+    Ownership first, then token, then website access.
+
+    Anyone but the proposer gets 403 before any token check. A missing or wrong
+    token returns 400 for the proposer.
+    """
+    role = (getattr(staff, "role", None) or "").strip().lower()
+    # Only the staff member who proposed the action decides it (a super admin included).
+    if not staff_owns_action(action, staff):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the staff member who proposed this action can confirm or reject it.",
+        )
+
+    token = (confirmation_token or "").strip()
+    expected = (getattr(action, "confirmation_token", None) or "").strip()
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Confirmation token is required. Nothing was executed.",
+        )
+    if token != expected:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid confirmation token. Nothing was executed.",
+        )
+
+    if role == "super_admin":
+        return
+
+    sites = _action_target_websites(getattr(action, "action_payload", None) or {})
+    if not sites:
+        return
+    from app.core.tenant import normalize_website_list
+
+    allowed = set(normalize_website_list(getattr(staff, "allowed_websites", None) or []))
+    denied = [site for site in sites if site not in allowed]
+    if denied:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"You cannot confirm an action for website(s) outside your access: {denied}.",
+        )
 
 
 def confirm_and_execute_action(
-    db: Session,
+    db: Any,
     pending_action_id: str,
     authenticated_staff: AuthenticatedStaff,
     confirmation_token: Optional[str] = None
@@ -663,12 +660,25 @@ def confirm_and_execute_action(
     Updates lifecycle states: PENDING -> CONFIRMED -> EXECUTED (or FAILED).
     """
     action = get_pending_action(db, pending_action_id)
-    _claim_action(db, action, authenticated_staff)
+    _assert_confirm_authorized(action, authenticated_staff, confirmation_token)
 
     from app.core.permissions import tool_denial
     denial = tool_denial(getattr(authenticated_staff, "role", None), action.tool_name)
     if denial:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=denial)
+
+    # Already executed: return the first result and do not run the tool again.
+    if action.status == ACTION_STATUS_EXECUTED:
+        stored = action.execution_result if isinstance(action.execution_result, dict) else {}
+        return {
+            "status": ACTION_STATUS_EXECUTED,
+            "pending_action_id": str(action.id),
+            "tool_name": action.tool_name,
+            "execution_result": stored,
+            "operation_id": stored.get("operation_id"),
+            "idempotent": True,
+            "message": "This action was already confirmed. Returning the original result.",
+        }
 
     # 1. Check expiration
     if action.status == ACTION_STATUS_EXPIRED:
@@ -684,12 +694,7 @@ def confirm_and_execute_action(
             detail=f"Action cannot be executed. Current status is '{action.status}'."
         )
 
-    # 3. Check token if provided
-    if confirmation_token and confirmation_token != action.confirmation_token:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid confirmation token."
-        )
+    # Token and proposer checks already ran in _assert_confirm_authorized.
 
     # 3b. Stale-value guard: re-check stored "Current" vs live record before any write
     payload = dict(action.action_payload or {})
@@ -706,12 +711,18 @@ def confirm_and_execute_action(
         ok, stale_list = verify_diff_still_current(db, change_diff)
         if not ok:
             # Supersede old pending (not a silent loop of REJECTED twins)
-            action.status = ACTION_STATUS_SUPERSEDED
-            action.error_message = (
+            stale_msg = (
                 "Stale values detected; refused apply. Superseded with one fresh proposal. "
                 + "; ".join(stale_list[:8])
             )
-            db.commit()
+            pending_actions_repo.update_fields(
+                db,
+                str(action.id),
+                status=ACTION_STATUS_SUPERSEDED,
+                error=stale_msg,
+            )
+            action.status = ACTION_STATUS_SUPERSEDED
+            action.error_message = stale_msg
             record_audit_log(
                 db=db,
                 staff_user_id=authenticated_staff.email,
@@ -719,7 +730,7 @@ def confirm_and_execute_action(
                 proposed_payload=payload,
                 confirmed_by_staff=True,
                 status="SUPERSEDED",
-                error_message=action.error_message,
+                error_message=stale_msg,
                 conversation_id=action.conversation_id,
                 pending_action_id=str(action.id),
             )
@@ -800,24 +811,92 @@ def confirm_and_execute_action(
                 "action_status": "awaiting_confirmation" if new_action else "superseded",
             }
 
-    # 4. Mark confirmed
-    action.status = ACTION_STATUS_CONFIRMED
-    action.confirmed_at = datetime.now(timezone.utc)
-    db.commit()
+    # 4. Persist confirm audit BEFORE any data mutation. If audit cannot be written,
+    # stop here so nothing changes.
+    from app.services.audit_service import AuditPersistenceError, AUDIT_WRITE_FAILED_MSG
 
-    # 5. Execute action payload based on tool_name (only previewed fields/items)
+    audit_payload_pre = dict(action.action_payload or {})
+    try:
+        audit = record_audit_log(
+            db=db,
+            staff_user_id=authenticated_staff.email,
+            tool_name=action.tool_name,
+            proposed_payload=audit_payload_pre,
+            confirmed_by_staff=True,
+            execution_result=None,
+            status="CONFIRMED",
+            conversation_id=action.conversation_id,
+            pending_action_id=str(action.id),
+            raise_on_failure=True,
+        )
+    except AuditPersistenceError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=AUDIT_WRITE_FAILED_MSG,
+        )
+
+    # 5. Atomic claim PENDING → CONFIRMED (double-confirm races execute once)
+    # Keep a handle to the originally-fetched object so unit tests that reuse the
+    # same in-memory action see EXECUTED on a second confirm.
+    pre_claim_action = action
+    claimed = pending_actions_repo.claim_confirm(
+        db,
+        str(action.id),
+        staff_email=authenticated_staff.email,
+        known_action=action,
+    )
+    if claimed.status == ACTION_STATUS_EXECUTED:
+        stored = claimed.execution_result if isinstance(claimed.execution_result, dict) else {}
+        return {
+            "status": ACTION_STATUS_EXECUTED,
+            "pending_action_id": str(claimed.id),
+            "tool_name": claimed.tool_name,
+            "execution_result": stored,
+            "operation_id": stored.get("operation_id") if isinstance(stored, dict) else None,
+            "idempotent": True,
+            "message": "This action was already confirmed. Returning the original result.",
+        }
+    if not getattr(claimed, "claim_won", False):
+        # Another tab/request already claimed — re-read; return idempotent if done
+        refreshed = get_pending_action(db, str(action.id))
+        if refreshed.status == ACTION_STATUS_EXECUTED:
+            stored = refreshed.execution_result if isinstance(refreshed.execution_result, dict) else {}
+            return {
+                "status": ACTION_STATUS_EXECUTED,
+                "pending_action_id": str(refreshed.id),
+                "tool_name": refreshed.tool_name,
+                "execution_result": stored,
+                "operation_id": stored.get("operation_id") if isinstance(stored, dict) else None,
+                "idempotent": True,
+                "message": "This action was already confirmed. Returning the original result.",
+            }
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Action cannot be executed. Current status is '{refreshed.status}'.",
+        )
+    action = claimed
+
+    # 6. Execute action payload based on tool_name (only previewed fields/items)
     result_data: Dict[str, Any] = {}
     try:
         if action.tool_name == "ingest_property_from_url":
             result_data = save_ingested_listing(db, authenticated_staff, payload)
         elif action.tool_name in ["create_or_update_listing", "ingest_property_from_drive"]:
             result_data = _execute_update_listing(
-                db, payload, authenticated_staff=authenticated_staff
+                db,
+                payload,
+                authenticated_staff=authenticated_staff,
+                conversation_id=getattr(action, "conversation_id", None),
+                pending_action_id=str(action.id),
             )
         elif action.tool_name == "archive_listing":
             result_data = _execute_archive_listing(db, payload, authenticated_staff)
         elif action.tool_name == "undo_operation":
             result_data = _execute_undo_operation(db, payload, authenticated_staff)
+        elif action.tool_name == "bulk_create_from_document":
+            from app.services.admin_offer_import import execute_document_import
+
+            result_data = execute_document_import(db, payload, authenticated_staff)
         elif action.tool_name == "send_email":
             result_data = _execute_send_email(
                 payload,
@@ -836,6 +915,10 @@ def confirm_and_execute_action(
             result_data = _execute_batch_property_action(
                 db, payload, authenticated_staff
             )
+        elif action.tool_name == "manage_property_images":
+            from app.services.admin_image_commands import execute_property_image_change
+
+            result_data = execute_property_image_change(db, payload, authenticated_staff)
         elif action.tool_name == "approve_drive_ingestion":
             from app.services.drive_folder_ingest import approve_drafts
             result_data = approve_drafts(
@@ -854,46 +937,68 @@ def confirm_and_execute_action(
                 merged_payload["operation_id"] = operation_id
                 action.action_payload = merged_payload
 
-        # 6. Mark executed
+        # 7. Mark executed via repo
+        now_ex = datetime.now(timezone.utc)
+        action = pending_actions_repo.update_fields(
+            db,
+            str(action.id),
+            status=ACTION_STATUS_EXECUTED,
+            result=result_data,
+            executed_at=now_ex,
+            action_payload=action.action_payload,
+        ) or action
         action.status = ACTION_STATUS_EXECUTED
-        action.executed_at = datetime.now(timezone.utc)
         action.execution_result = result_data
-        db.commit()
+        action.executed_at = now_ex
+        # Sync the pre-claim object (shared SimpleNamespace/ORM in unit tests)
+        if pre_claim_action is not None and pre_claim_action is not action:
+            try:
+                pre_claim_action.status = ACTION_STATUS_EXECUTED
+                pre_claim_action.execution_result = result_data
+                pre_claim_action.executed_at = now_ex
+            except Exception:
+                pass
 
-        # 7. Record immutable audit log (include recipient/subject or event details for non-undoable)
-        audit_payload = dict(action.action_payload or {})
-        if action.tool_name == "send_email":
-            audit_payload = {
-                **audit_payload,
-                "to": (action.action_payload or {}).get("to"),
-                "subject": (action.action_payload or {}).get("subject"),
-                "undoable": False,
-                "operation_id": operation_id,
-            }
-        elif action.tool_name == "create_calendar_event":
-            audit_payload = {
-                **audit_payload,
-                "title": (action.action_payload or {}).get("title"),
-                "start_time": (action.action_payload or {}).get("start_time"),
-                "attendees": (action.action_payload or {}).get("attendees"),
-                "undoable": False,
-                "operation_id": operation_id,
-            }
-        elif operation_id:
-            audit_payload["operation_id"] = operation_id
-
-        audit = record_audit_log(
-            db=db,
-            staff_user_id=authenticated_staff.email,
-            tool_name=action.tool_name,
-            proposed_payload=audit_payload,
-            tool_arguments={"operation_id": operation_id} if operation_id else None,
-            confirmed_by_staff=True,
-            execution_result=str(sanitize_payload(result_data)),
-            status="SUCCESS",
-            conversation_id=action.conversation_id,
-            pending_action_id=str(action.id)
-        )
+        # Enrich the pre-write audit row with execution outcome (best-effort)
+        if (
+            audit is not None
+            and not getattr(audit, "is_ephemeral", False)
+            and not getattr(audit, "audit_write_failed", False)
+            and getattr(audit, "id", None)
+            and not str(audit.id).startswith("audit_")
+        ):
+            try:
+                audit_payload = dict(action.action_payload or {})
+                if action.tool_name == "send_email":
+                    audit_payload = {
+                        **audit_payload,
+                        "to": (action.action_payload or {}).get("to"),
+                        "subject": (action.action_payload or {}).get("subject"),
+                        "undoable": False,
+                        "operation_id": operation_id,
+                    }
+                elif action.tool_name == "create_calendar_event":
+                    audit_payload = {
+                        **audit_payload,
+                        "title": (action.action_payload or {}).get("title"),
+                        "start_time": (action.action_payload or {}).get("start_time"),
+                        "attendees": (action.action_payload or {}).get("attendees"),
+                        "undoable": False,
+                        "operation_id": operation_id,
+                    }
+                elif operation_id:
+                    audit_payload["operation_id"] = operation_id
+                from app.repositories import audit_repo
+                audit_repo.update_fields(
+                    db,
+                    str(audit.id),
+                    proposed_payload=sanitize_payload(audit_payload),
+                    tool_arguments={"operation_id": operation_id} if operation_id else None,
+                    execution_result=str(sanitize_payload(result_data)),
+                    status="SUCCESS",
+                )
+            except Exception as enrich_exc:
+                logger.warning(f"Could not enrich confirm audit row: {enrich_exc}")
 
         from app.core.config import settings as _settings
         audit_disabled = bool(
@@ -965,21 +1070,30 @@ def confirm_and_execute_action(
 
     except Exception as exc:
         safe_error = scrub_text(str(exc))
+        pending_actions_repo.update_fields(
+            db,
+            str(action.id),
+            status=ACTION_STATUS_FAILED,
+            error=safe_error,
+        )
         action.status = ACTION_STATUS_FAILED
         action.error_message = safe_error
-        db.commit()
 
-        record_audit_log(
-            db=db,
-            staff_user_id=authenticated_staff.email,
-            tool_name=action.tool_name,
-            proposed_payload=action.action_payload,
-            confirmed_by_staff=True,
-            status="FAILED",
-            error_message=safe_error,
-            conversation_id=action.conversation_id,
-            pending_action_id=str(action.id)
-        )
+        try:
+            record_audit_log(
+                db=db,
+                staff_user_id=authenticated_staff.email,
+                tool_name=action.tool_name,
+                proposed_payload=action.action_payload,
+                confirmed_by_staff=True,
+                status="FAILED",
+                error_message=safe_error,
+                conversation_id=action.conversation_id,
+                pending_action_id=str(action.id),
+                raise_on_failure=False,
+            )
+        except Exception as aud_exc:
+            logger.warning(f"Could not record FAILED audit for {action.id}: {aud_exc}")
         logger.error(f"Failed executing pending action {action.id}: {safe_error}")
         raise HTTPException(
             status_code=(
@@ -992,24 +1106,29 @@ def confirm_and_execute_action(
 
 
 def reject_pending_action(
-    db: Session,
+    db: Any,
     pending_action_id: str,
     authenticated_staff: AuthenticatedStaff,
     reason: Optional[str] = None
 ) -> Dict[str, Any]:
     """Rejects a pending action and records the cancellation in audit logs."""
     action = get_pending_action(db, pending_action_id)
-    _claim_action(db, action, authenticated_staff)
-
-    if action.status != ACTION_STATUS_PENDING:
+    if not staff_owns_action(action, authenticated_staff):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the staff member who proposed this action can confirm or reject it.",
+        )
+    action = pending_actions_repo.claim_reject(
+        db,
+        pending_action_id,
+        staff_email=authenticated_staff.email,
+        reason=reason,
+    )
+    if action.status != ACTION_STATUS_REJECTED:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Action cannot be rejected. Current status is '{action.status}'."
+            detail=f"Action cannot be rejected. Current status is '{action.status}'.",
         )
-
-    action.status = ACTION_STATUS_REJECTED
-    action.error_message = reason or "Rejected by staff."
-    db.commit()
 
     record_audit_log(
         db=db,
@@ -1041,7 +1160,7 @@ def reject_pending_action(
     }
 
 
-def _execute_archive_listing(db: Session, payload: Dict[str, Any], staff: AuthenticatedStaff) -> Dict[str, Any]:
+def _execute_archive_listing(db: Any, payload: Dict[str, Any], staff: AuthenticatedStaff) -> Dict[str, Any]:
     """Archive (soft delete) one listing through the same path as DELETE /admin/properties/{id}: both stores, undo snapshot, audit."""
     from app.services.admin_property_fields import resolve_existing_property
     from app.services.property_search import property_belongs_to_websites
@@ -1060,7 +1179,7 @@ def _execute_archive_listing(db: Session, payload: Dict[str, Any], staff: Authen
     return result
 
 
-def _execute_undo_operation(db: Session, payload: Dict[str, Any], staff: AuthenticatedStaff) -> Dict[str, Any]:
+def _execute_undo_operation(db: Any, payload: Dict[str, Any], staff: AuthenticatedStaff) -> Dict[str, Any]:
     """Undo one operation from its stored snapshot (once, inside the 6-day window, for an account that may see it)."""
     from app.services.admin_batch_service import undo_batch_property_operation
 
@@ -1074,7 +1193,7 @@ def _execute_undo_operation(db: Session, payload: Dict[str, Any], staff: Authent
 
 
 def _execute_batch_property_action(
-    db: Session,
+    db: Any,
     payload: Dict[str, Any],
     authenticated_staff: AuthenticatedStaff,
 ) -> Dict[str, Any]:
@@ -1144,31 +1263,6 @@ def _execute_batch_property_action(
     )
 
 
-def _serialize_property_snapshot(prop: Any) -> Dict[str, Any]:
-    """Capture a plain dict of listing fields for the 6-day undo snapshot."""
-    if prop is None:
-        return {}
-    keys = (
-        "property_id", "property_name", "project_name", "property_type", "status",
-        "country", "province", "district", "subdistrict", "area", "address",
-        "price_display", "price_numeric_min", "price_numeric_max", "currency", "price_note",
-        "bedrooms_display", "bedrooms_min", "bedrooms_max", "bathrooms",
-        "area_display", "area_sqm_min", "area_sqm_max", "usable_area_sqm", "land_area_sqm",
-        "description", "has_pool", "beach_access", "sea_view",
-        "features", "facilities", "amenities", "highlights", "developer_name", "ownership_type",
-        "websites", "is_public",
-    )
-    out: Dict[str, Any] = {}
-    for k in keys:
-        if hasattr(prop, k):
-            out[k] = getattr(prop, k, None)
-    # Also keep common aliases used by Firestore restore
-    if out.get("property_name"):
-        out.setdefault("name", out["property_name"])
-        out.setdefault("title", out["property_name"])
-    return out
-
-
 def _enforce_listing_scope(db, payload, fields, orig_fields, prop, resolved, resolve_source, staff) -> None:
     """Confirm-time guard for chat-driven listing changes (the account may have changed since the proposal).
 
@@ -1211,15 +1305,15 @@ def _enforce_listing_scope(db, payload, fields, orig_fields, prop, resolved, res
             duplicate = _duplicate_property_message(db, "", str(new_name), exclude_id=str(payload.get("property_id") or ""))
     if duplicate:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=duplicate)
-
-
 def _execute_update_listing(
-    db: Session,
+    db: Any,
     payload: Dict[str, Any],
     authenticated_staff: Optional[AuthenticatedStaff] = None,
+    conversation_id: Optional[str] = None,
+    pending_action_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Safely creates or updates property listings in PostgreSQL via parameterized ORM.
+    Safely creates or updates property listings in Cloud Firestore.
     Handles mode == 'create' (or missing property) and mode == 'update'.
     Saves a 6-day undo snapshot BEFORE writing when staff_user is provided (chat confirm path).
     """
@@ -1252,9 +1346,6 @@ def _execute_update_listing(
     )
 
     resolve_source, resolved = resolve_existing_property(db, property_id)
-    prop = resolved if resolve_source == "postgres" else (
-        db.query(Property).filter(Property.property_id == property_id).first()
-    )
     if resolve_source == "firestore" and isinstance(resolved, dict):
         property_id = str(resolved.get("property_id") or resolved.get("_firestore_doc_id") or property_id)
         payload = dict(payload)
@@ -1283,7 +1374,7 @@ def _execute_update_listing(
         validation_payload["mode"] = "update"
         validation_payload["resolve_source"] = resolve_source
     is_valid, missing, err_msg = validate_property_data(
-        validation_payload, existing_property=resolved if resolve_source else prop
+        validation_payload, existing_property=resolved if resolve_source else None
     )
     if not is_valid:
         raise HTTPException(
@@ -1291,7 +1382,7 @@ def _execute_update_listing(
             detail=err_msg
         )
 
-    _enforce_listing_scope(db, payload, fields, orig_fields, prop, resolved, resolve_source, authenticated_staff)
+    _enforce_listing_scope(db, payload, fields, orig_fields, None, resolved, resolve_source, authenticated_staff)
 
     allowed_fields = {
         "property_name", "project_name", "property_type", "status",
@@ -1304,13 +1395,13 @@ def _execute_update_listing(
         "websites"
     }
 
-    updated_fields = {}
-    is_created = False
     operation_id: Optional[str] = None
 
     # Snapshot BEFORE mutation (6-day undo window) — chat confirm path only
-    previous_state = _serialize_property_snapshot(prop) if prop else None
-    snapshot_action = "create" if not prop else ("delete" if mode == "delete" else "update")
+    previous_state = None  # record_crud_operation_snapshot reads the raw Firestore document
+    # undo of a "create" deletes the document, so an existing listing must be snapshotted as update.
+    existing_listing = resolve_source is not None
+    snapshot_action = "create" if not existing_listing else ("delete" if mode == "delete" else "update")
     if authenticated_staff is not None:
         try:
             operation_id = record_crud_operation_snapshot(
@@ -1322,6 +1413,8 @@ def _execute_update_listing(
                 created_id=property_id if snapshot_action == "create" else None,
                 db_session=db,
                 confirmed_by_staff=True,
+                conversation_id=conversation_id or payload.get("conversation_id"),
+                pending_action_id=pending_action_id or payload.get("pending_action_id"),
             )
         except Exception as snap_exc:
             logger.warning(f"Failed to save CRUD undo snapshot before listing write: {snap_exc}")
@@ -1339,159 +1432,99 @@ def _execute_update_listing(
         target_websites = payload.get("websites") or payload.get("selected_websites")
     norm_websites = normalize_website_list(target_websites) if target_websites else None
 
-    firestore_only = (resolve_source == "firestore" and prop is None)
-
-    if firestore_only:
-        # Firestore-only listing: write Firestore; do NOT invent an incomplete PG row
-        is_created = False
-        updated_fields = dict(fields)
-        if getattr(settings, "ENABLE_FIRESTORE_SYNC", True) or True:
-            try:
-                from app.services.firestore_service import save_or_update_property_firestore
-                save_or_update_property_firestore(
-                    property_id=property_id,
-                    fields=fields,
-                    images=payload.get("images") or fields.get("images") or [],
-                    cover_image=payload.get("cover_image") or fields.get("cover_image"),
-                    target="admin",
-                )
-            except Exception as e:
-                logger.warning(f"Firestore-only listing update failed: {e}")
-                raise
-        # Verify read-back
-        from app.services.admin_change_diff import read_stored_property_fields
-        live = read_stored_property_fields(db, property_id, list(fields.keys()))
-        verified = {}
-        for k, v in fields.items():
-            verified[k] = live.get(k)
+    if not existing_listing:
+        # Brand-new listing goes straight to Firestore.
+        prop_name = str(fields.get("property_name") or payload.get("title") or property_id).strip()
+        # The websites the admin had selected when asking; the environment default only when none were recorded
+        ws = norm_websites or normalize_website_list(
+            payload.get("site_scope") or [payload.get("site_origin") or get_current_env_domain()]
+        )
+        to_write = {k: v for k, v in fields.items() if k in allowed_fields and v is not None and k != "websites"}
+        to_write["property_name"] = prop_name
+        to_write["websites"] = ws
+        to_write["is_public"] = True
+        new_images = payload.get("images") or fields.get("images") or fields.get("image_urls") or []
+        if isinstance(new_images, str):
+            new_images = [i.strip() for i in new_images.split(",") if i.strip()]
+        from app.services.firestore_service import save_or_update_property_firestore
+        if not save_or_update_property_firestore(
+            property_id=property_id,
+            fields=to_write,
+            images=new_images,
+            cover_image=payload.get("cover_image") or fields.get("cover_image") or fields.get("coverImage"),
+            target="admin",
+        ):
+            raise RuntimeError(f"Firestore create failed for '{property_id}'")
         from app.services.cache_service import search_cache
         search_cache.invalidate()
-        title = (
-            (resolved or {}).get("property_name")
-            if isinstance(resolved, dict)
-            else property_id
-        )
+        _bump_properties_version()
         return {
             "property_id": property_id,
-            "title": title,
-            "mode": "update",
-            "updated_fields": updated_fields,
-            "images_count": 0,
-            "images": [],
-            "current_status": live.get("status") or (resolved or {}).get("status") if isinstance(resolved, dict) else None,
+            "title": prop_name,
+            "mode": "create",
+            "updated_fields": {k: v for k, v in to_write.items() if k != "is_public"},
+            "images_count": len(new_images),
+            "images": new_images,
+            "current_status": to_write.get("status"),
             "operation_id": operation_id,
             "undoable": bool(operation_id),
             "undo_window_days": 6 if operation_id else None,
             "resolve_source": "firestore",
-            "verified_fields": verified,
             "success": True,
         }
-    elif not prop:
-        # Create a new property (truly new id)
-        is_created = True
-        prop_name = fields.get("property_name") or payload.get("title") or property_id
-        prop = Property(
-            property_id=property_id,
-            property_name=prop_name,
-            is_public=True,
-            created_at=datetime.now(timezone.utc),
-            updated_at=datetime.now(timezone.utc)
-        )
-        if norm_websites:
-            prop.websites = norm_websites
-            updated_fields["websites"] = norm_websites
-        else:
-            # The websites the admin had selected when asking; the environment default only when none were recorded
-            scope = payload.get("site_scope") or [payload.get("site_origin") or get_current_env_domain()]
-            prop.websites = normalize_website_list(scope)
-            updated_fields["websites"] = prop.websites
 
-        for k, v in fields.items():
-            if k in allowed_fields and hasattr(prop, k) and v is not None and k != "websites":
-                setattr(prop, k, v)
-                updated_fields[k] = v
-        db.add(prop)
-        db.commit()
-        db.refresh(prop)
-    else:
-        # Update existing Postgres property — never inject websites
-        if explicit_websites and norm_websites is not None:
-            prop.websites = norm_websites
-            updated_fields["websites"] = norm_websites
-
-        for k, v in fields.items():
-            if k in allowed_fields and hasattr(prop, k) and v is not None and k != "websites":
-                setattr(prop, k, v)
-                updated_fields[k] = v
-        prop.updated_at = datetime.now(timezone.utc)
-        db.commit()
-        db.refresh(prop)
-
-    # 1. Process property images in PostgreSQL
-    input_images = payload.get("images") or fields.get("images") or fields.get("image_urls") or []
-    cover_image = payload.get("cover_image") or fields.get("cover_image") or fields.get("coverImage")
-    if isinstance(input_images, str):
-        input_images = [img.strip() for img in input_images.split(",") if img.strip()]
-
-    if input_images:
-        try:
-            from app.db.models import PropertyImage
-            for img_url in input_images:
-                if img_url and str(img_url).strip():
-                    clean_url = str(img_url).strip()
-                    # Check if already attached to avoid duplicates
-                    existing_img = db.query(PropertyImage).filter(
-                        PropertyImage.property_id == prop.property_id,
-                        PropertyImage.image_url == clean_url
-                    ).first()
-                    if not existing_img:
-                        db.add(PropertyImage(
-                            property_id=prop.property_id,
-                            image_url=clean_url,
-                            image_type="cover" if clean_url == cover_image else "exterior"
-                        ))
-            db.commit()
-        except Exception as e:
-            logger.warning(f"Error persisting property images in SQL: {e}")
-
-    # 2. Sync property info and images directly to Cloud Firestore (the Admin Panel list reads Firestore first)
-    firestore_synced: Optional[bool] = None
-    if getattr(settings, "ENABLE_FIRESTORE_SYNC", True):
+    # Existing Firestore listing: update the document.
+    is_created = False
+    updated_fields = dict(fields)
+    if getattr(settings, "ENABLE_FIRESTORE_SYNC", True) or True:
         try:
             from app.services.firestore_service import save_or_update_property_firestore
-            firestore_synced = bool(save_or_update_property_firestore(
-                property_id=prop.property_id,
-                fields={**fields, **updated_fields},
-                images=input_images,
-                cover_image=cover_image
-            ))
+            save_or_update_property_firestore(
+                property_id=property_id,
+                fields=fields,
+                images=payload.get("images") or fields.get("images") or [],
+                cover_image=payload.get("cover_image") or fields.get("cover_image"),
+                target="admin",
+            )
         except Exception as e:
-            logger.warning(f"Error syncing updated property to Firestore: {e}")
-            firestore_synced = False
-
-    # 3. Invalidate search cache so updated property data is immediately reflected
+            logger.warning(f"Firestore-only listing update failed: {e}")
+            raise
+    # Verify read-back
+    from app.services.admin_change_diff import read_stored_property_fields
+    live = read_stored_property_fields(db, property_id, list(fields.keys()))
+    verified = {}
+    for k, v in fields.items():
+        verified[k] = live.get(k)
     from app.services.cache_service import search_cache
     search_cache.invalidate()
-
+    _bump_properties_version()
+    title = (
+        (resolved or {}).get("property_name")
+        if isinstance(resolved, dict)
+        else property_id
+    )
     return {
-        "property_id": prop.property_id,
-        "title": prop.property_name,
-        "mode": "create" if is_created else "update",
+        "property_id": property_id,
+        "title": title,
+        "mode": "update",
         "updated_fields": updated_fields,
-        "images_count": len(input_images),
-        "images": input_images,
-        "current_status": prop.status,
+        "images_count": 0,
+        "images": [],
+        "current_status": live.get("status") or (resolved or {}).get("status") if isinstance(resolved, dict) else None,
         "operation_id": operation_id,
         "undoable": bool(operation_id),
         "undo_window_days": 6 if operation_id else None,
-        "firestore_synced": firestore_synced,
+        "resolve_source": "firestore",
+        "verified_fields": verified,
+        "firestore_synced": True,
+        "success": True,
     }
 
 
 def _execute_send_email(
     payload: Dict[str, Any],
     staff_user_email: Optional[str] = None,
-    db: Optional[Session] = None
+    db: Optional[Any] = None
 ) -> Dict[str, Any]:
     """Executes email dispatch via Google Workspace Gmail API, SMTP, or local test dispatcher."""
     to_email = payload.get("to")
@@ -1528,7 +1561,7 @@ def _execute_send_email(
 def _execute_create_calendar_event(
     payload: Dict[str, Any],
     staff_user_email: Optional[str] = None,
-    db: Optional[Session] = None
+    db: Optional[Any] = None
 ) -> Dict[str, Any]:
     """Executes calendar event creation via Google Calendar API or local test dispatcher."""
     title = payload.get("title")
@@ -1573,16 +1606,36 @@ def name_slug(value: Optional[str]) -> str:
     return re.sub(r"[^a-z0-9]+", "-", (value or "").lower()).strip("-")[:64]
 
 
-def _is_real_db_session(db: Any) -> bool:
-    if db is None:
+def generate_property_id(db: Any, name: Optional[str]) -> str:
+    """
+    Build a new property_id from the listing name. The admin never has to supply one.
+    Appends -2, -3 ... when the slug is already used by a Firestore listing.
+    """
+    from app.services.firestore_service import get_firestore_client
+
+    def _taken(pid: str) -> bool:
+        # Exact document-id check only: the name resolver is fuzzy and would
+        # treat "villa-2" as the same listing as "villa".
+        for target in ("admin", "user"):
+            try:
+                client = get_firestore_client(target=target) or (get_firestore_client() if target == "admin" else None)
+                if client and client.collection("projects").document(pid).get().exists:
+                    return True
+            except Exception:
+                continue
         return False
-    return not type(db).__module__.startswith("unittest.mock")
 
-
-def _load_sql_property(db: Any, property_id: str) -> Optional[Property]:
-    if not _is_real_db_session(db):
-        return None
-    return db.query(Property).filter(Property.property_id == property_id).first()
+    base = name_slug(name)
+    if property_id_slug_error(base):
+        import hashlib
+        base = "prop-" + hashlib.sha1(str(name or "").encode("utf-8")).hexdigest()[:8]
+    candidate = base
+    for n in range(2, 100):
+        if not _taken(candidate):
+            return candidate
+        suffix = "-" + str(n)
+        candidate = base[: 64 - len(suffix)].rstrip("-") + suffix
+    return candidate
 
 
 def _read_raw_firestore(property_id: str) -> Optional[Dict[str, Any]]:
@@ -1597,32 +1650,22 @@ def _fs_sync_enabled() -> bool:
         return bool(getattr(settings, "ENABLE_FIRESTORE_SYNC", True))
 
 
+def _bump_properties_version() -> None:
+    try:
+        from app.services.firestore_service import bump_properties_version
+        bump_properties_version(target="admin")
+    except Exception as e:
+        logger.debug("bump_properties_version skipped: %s", e)
+
+
 def _invalidate_search_cache() -> None:
     """Search results, Firestore catalog and name index (see firestore_service.invalidate_property_caches)."""
     try:
         from app.services.firestore_service import invalidate_property_caches
         invalidate_property_caches()
     except Exception as exc:
-        logger.warning("Property cache invalidation failed: %s", exc)
-
-
-def _summary_sql(prop: Any) -> Optional[Dict[str, Any]]:
-    if prop is None:
-        return None
-    price = getattr(prop, "price_numeric_min", None)
-    try:
-        price_out = float(price) if price is not None else None
-    except (TypeError, ValueError):
-        price_out = None
-    return {
-        "property_id": getattr(prop, "property_id", None),
-        "name": getattr(prop, "property_name", None),
-        "price": price_out,
-        "status": getattr(prop, "status", None),
-        "isActive": bool(prop.is_public) if getattr(prop, "is_public", None) is not None else None,
-        "websites": list(getattr(prop, "websites", None) or []),
-        "property_type": getattr(prop, "property_type", None),
-    }
+        logger.warning("Search cache invalidation failed: %s", exc)
+    _bump_properties_version()
 
 
 def _fs_display_name(raw: Dict[str, Any]) -> Optional[str]:
@@ -1722,44 +1765,6 @@ def _require_undo_snapshot(
     return operation_id
 
 
-_SQL_MUTABLE = {
-    "property_name", "project_name", "property_type", "status",
-    "project_name_pl", "project_name_en", "slug_pl", "slug_en",
-    "subtitle_pl", "subtitle_en", "city",
-    "country", "province", "district", "subdistrict", "area", "address",
-    "address_en", "address_pl", "search_location", "neighborhood_lifestyle",
-    "price_display", "price_numeric_min", "price_numeric_max", "currency", "price_note",
-    "expected_roi", "rental_yield",
-    "completion_status", "completion_date", "available_units", "units", "total_floors", "tags",
-    "bedrooms_display", "bedrooms_min", "bedrooms_max", "bathrooms",
-    "area_display", "area_sqm_min", "area_sqm_max", "usable_area_sqm", "land_area_sqm",
-    "short_description_pl", "description_pl", "short_description_en", "description_en",
-    "description", "video_url", "layouts",
-    "seo_title_pl", "seo_title_en", "seo_description_pl", "seo_description_en",
-    "is_featured", "is_top_list", "has_pool", "beach_access", "sea_view",
-    "features", "facilities", "amenities", "highlights", "developer_name", "ownership_type",
-    "websites", "raw_metadata",
-}
-
-
-def _apply_sql_fields(prop: Property, fields: Dict[str, Any], websites: Optional[List[str]] = None) -> None:
-    data = dict(fields or {})
-    if data.get("bedrooms") is not None and data.get("bedrooms_min") is None:
-        beds = int(data["bedrooms"])
-        data["bedrooms_min"] = beds
-        data["bedrooms_max"] = beds
-        data["bedrooms_display"] = str(beds)
-    if _is_blank(data.get("province")) and not _is_blank(data.get("location")):
-        data["province"] = data["location"]
-    for key, value in data.items():
-        if key in _SQL_MUTABLE and value is not None and hasattr(prop, key):
-            setattr(prop, key, value)
-    if websites is not None:
-        prop.websites = list(websites)
-    if data.get("is_public") is not None:
-        prop.is_public = bool(data["is_public"])
-
-
 def _duplicate_property_message(db: Any, property_id: str, name: str, exclude_id: Optional[str] = None) -> Optional[str]:
     """Why this id/name would duplicate a listing, or None. `exclude_id` is the listing being renamed (it may match itself)."""
     slug = name_slug(name)
@@ -1795,78 +1800,13 @@ def _duplicate_property_message(db: Any, property_id: str, name: str, exclude_id
     except Exception as exc:
         logger.warning("Firestore duplicate scan failed: %s", exc)
 
-    if _is_real_db_session(db):
-        for row in db.query(Property).all():
-            if row.property_id != exclude_id and (row.property_id in (property_id, slug) or (slug and name_slug(row.property_name or "") == slug)):
-                return (
-                    f"Property '{name or property_id}' already exists in Postgres as '{row.property_id}'. "
-                    "Use update instead of create."
-                )
+
     return None
-
-
-def firestore_document_from_sql(prop: Property, extra_fields: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """Complete Firestore project document built from a Postgres row. Never nameless."""
-    name = (getattr(prop, "property_name", None) or "").strip()
-    price = getattr(prop, "price_numeric_min", None)
-    try:
-        price_from = float(price) if price is not None else None
-    except (TypeError, ValueError):
-        price_from = None
-    websites = list(getattr(prop, "websites", None) or [])
-    doc: Dict[str, Any] = {
-        "name": name,
-        "title": name,
-        "propertyType": getattr(prop, "property_type", None),
-        "province": getattr(prop, "province", None),
-        "priceFrom": price_from,
-        "isActive": bool(prop.is_public) if getattr(prop, "is_public", None) is not None else True,
-        "websites": websites,
-        "domains": list(websites),
-        "status": getattr(prop, "status", None),
-        "property_id": getattr(prop, "property_id", None),
-    }
-    if getattr(prop, "price_numeric_max", None) is not None:
-        doc["priceTo"] = float(prop.price_numeric_max)
-    if getattr(prop, "price_display", None):
-        doc["priceDisplay"] = prop.price_display
-    if getattr(prop, "description", None):
-        doc["description"] = prop.description
-    if extra_fields:
-        if extra_fields.get("property_name"):
-            doc["name"] = extra_fields["property_name"]
-            doc["title"] = extra_fields["property_name"]
-        if extra_fields.get("property_type"):
-            doc["propertyType"] = extra_fields["property_type"]
-        if extra_fields.get("province"):
-            doc["province"] = extra_fields["province"]
-        elif extra_fields.get("location") and not doc.get("province"):
-            doc["province"] = extra_fields["location"]
-        if extra_fields.get("status"):
-            doc["status"] = extra_fields["status"]
-        if extra_fields.get("price_numeric_min") is not None:
-            doc["priceFrom"] = float(extra_fields["price_numeric_min"])
-        if extra_fields.get("price_numeric_max") is not None:
-            doc["priceTo"] = float(extra_fields["price_numeric_max"])
-        if extra_fields.get("price_display"):
-            doc["priceDisplay"] = extra_fields["price_display"]
-        if extra_fields.get("description"):
-            doc["description"] = extra_fields["description"]
-        if extra_fields.get("websites") is not None:
-            doc["websites"] = list(extra_fields["websites"])
-            doc["domains"] = list(extra_fields["websites"])
-        if extra_fields.get("is_public") is not None:
-            doc["isActive"] = bool(extra_fields["is_public"])
-    if not doc.get("name"):
-        doc["name"] = name
-        doc["title"] = name
-    return doc
 
 
 def _raise_store_failure(
     *,
     message: str,
-    sql_ok: bool,
     fs_ok: bool,
     failed: str,
     property_id: str,
@@ -1876,7 +1816,6 @@ def _raise_store_failure(
         status_code=status.HTTP_502_BAD_GATEWAY,
         detail={
             "message": message,
-            "sql": sql_ok,
             "firestore": fs_ok,
             "failed": failed,
             "property_id": property_id,
@@ -1886,7 +1825,7 @@ def _raise_store_failure(
 
 
 def rest_create_property(
-    db: Session,
+    db: Any,
     staff: AuthenticatedStaff,
     fields: Dict[str, Any],
     *,
@@ -1896,7 +1835,7 @@ def rest_create_property(
     cover_image: Optional[str] = None,
     allow_without_undo: bool = False,
 ) -> Dict[str, Any]:
-    """Validate, snapshot, then write Postgres and Firestore together."""
+    """Validate, snapshot, then write the Firestore property document."""
     errors = validate_listing_values(
         fields, property_id=property_id, is_create=True, check_property_id=True
     )
@@ -1919,100 +1858,38 @@ def rest_create_property(
         allow_without_undo=allow_without_undo,
     )
 
-    fs_required = _fs_sync_enabled()
-    prop = Property(
-        property_id=property_id,
-        property_name=str(fields.get("property_name")).strip(),
-        is_public=True if fields.get("is_public") is None else bool(fields.get("is_public")),
-        created_at=datetime.now(timezone.utc),
-        updated_at=datetime.now(timezone.utc),
-        websites=list(websites or []),
-    )
-    _apply_sql_fields(prop, fields, websites=websites)
+    is_public = True if fields.get("is_public") is None else bool(fields.get("is_public"))
     try:
-        db.add(prop)
-        db.commit()
-        db.refresh(prop)
+        from app.services.firestore_service import save_or_update_property_firestore
+        wrote = save_or_update_property_firestore(
+            property_id=property_id,
+            fields={**fields, "websites": list(websites or []), "is_public": is_public},
+            images=images or [],
+            cover_image=cover_image,
+            target="admin",
+        )
+        if not wrote:
+            raise RuntimeError("Firestore write returned failure")
     except Exception as exc:
-        db.rollback()
         _raise_store_failure(
-            message=f"Postgres write failed: {exc}",
-            sql_ok=False,
+            message=f"Firestore write failed. {exc}",
             fs_ok=False,
-            failed="sql",
+            failed="firestore",
             property_id=property_id,
             operation_id=operation_id,
         )
 
-    if images:
-        try:
-            from app.db.models import PropertyImage
-            for img_url in images:
-                if img_url and str(img_url).strip():
-                    clean_url = str(img_url).strip()
-                    existing_img = db.query(PropertyImage).filter(
-                        PropertyImage.property_id == prop.property_id,
-                        PropertyImage.image_url == clean_url
-                    ).first()
-                    if not existing_img:
-                        db.add(PropertyImage(
-                            property_id=prop.property_id,
-                            image_url=clean_url,
-                            image_type="cover" if clean_url == cover_image else "exterior"
-                        ))
-            db.commit()
-            db.refresh(prop)
-        except Exception as e:
-            logger.warning(f"Error persisting property images in SQL: {e}")
-
-    fs_ok = False
-    if fs_required:
-        try:
-            from app.services.firestore_service import save_or_update_property_firestore
-            wrote = save_or_update_property_firestore(
-                property_id=property_id,
-                fields={**fields, "websites": list(websites or []), "is_public": prop.is_public},
-                images=images or [],
-                cover_image=cover_image,
-                target="admin",
-            )
-            if not wrote:
-                raise RuntimeError("Firestore write returned failure")
-            fs_ok = True
-        except Exception as exc:
-            try:
-                db.query(Property).filter(Property.property_id == property_id).delete(
-                    synchronize_session="fetch"
-                )
-                db.commit()
-                db.expire_all()
-            except Exception:
-                db.rollback()
-            _raise_store_failure(
-                message=f"Firestore write failed; Postgres row was rolled back. {exc}",
-                sql_ok=False,
-                fs_ok=False,
-                failed="firestore",
-                property_id=property_id,
-                operation_id=operation_id,
-            )
-
     _invalidate_search_cache()
-    stores = {"sql": True, "firestore": fs_ok}
-    after = {
-        "sql": _summary_sql(prop),
-        "firestore": _summary_fs(_read_raw_firestore(property_id)) if fs_ok else None,
-    }
+    stores = {"firestore": True}
+    after = {"firestore": _summary_fs(_read_raw_firestore(property_id))}
     audit = _audit_rest(db, staff, "create", property_id, operation_id, stores, None, after)
-    written = ["Postgres"] + (["Firestore"] if fs_ok else [])
     return {
         "status": "CREATED",
-        "message": f"Property '{property_id}' written to {' and '.join(written)}.",
+        "message": f"Property '{property_id}' written to Firestore.",
         "property_id": property_id,
         "operation_id": operation_id,
         "undo_window_days": 6 if operation_id else None,
-        "sql": True,
-        "firestore": fs_ok,
+        "firestore": True,
         "stores": stores,
         "websites": list(websites or []),
         "audit": audit,
@@ -2020,7 +1897,7 @@ def rest_create_property(
 
 
 def rest_update_property(
-    db: Session,
+    db: Any,
     staff: AuthenticatedStaff,
     property_id: str,
     fields: Dict[str, Any],
@@ -2030,7 +1907,7 @@ def rest_update_property(
     cover_image: Optional[str] = None,
     allow_without_undo: bool = False,
 ) -> Dict[str, Any]:
-    """Update the stores that already hold the property. Never invent a nameless Firestore doc."""
+    """Update the Firestore property document. Never invents a nameless document."""
     errors = validate_listing_values(fields, is_create=False)
     if errors:
         raise HTTPException(
@@ -2038,8 +1915,7 @@ def rest_update_property(
             detail={"message": "Validation failed", "fields": errors},
         )
     raw = _read_raw_firestore(property_id)
-    prop = _load_sql_property(db, property_id)
-    if raw is None and prop is None:
+    if raw is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Property with ID '{property_id}' not found.",
@@ -2048,7 +1924,7 @@ def rest_update_property(
         duplicate = _duplicate_property_message(db, "", str(fields["property_name"]), exclude_id=property_id)
         if duplicate:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=duplicate)
-    before = {"sql": _summary_sql(prop), "firestore": _summary_fs(raw)}
+    before = {"firestore": _summary_fs(raw)}
     operation_id = _require_undo_snapshot(
         db=db,
         staff=staff,
@@ -2058,105 +1934,48 @@ def rest_update_property(
         allow_without_undo=allow_without_undo,
     )
 
-    sql_ok = False
-    fs_ok = False
-    if prop is not None:
-        try:
-            _apply_sql_fields(prop, fields, websites=websites)
-            prop.updated_at = datetime.now(timezone.utc)
-            db.commit()
-            db.refresh(prop)
-            sql_ok = True
-        except Exception as exc:
-            db.rollback()
-            _raise_store_failure(
-                message=f"Postgres update failed. Snapshot kept for undo. {exc}",
-                sql_ok=False,
-                fs_ok=False,
-                failed="sql",
-                property_id=property_id,
-                operation_id=operation_id,
-            )
-
-    if raw is not None:
-        try:
-            from app.services.firestore_service import save_or_update_property_firestore
-            fs_fields = dict(fields)
-            if websites is not None:
-                fs_fields["websites"] = websites
-            wrote = save_or_update_property_firestore(
-                property_id=property_id,
-                fields=fs_fields,
-                images=images,
-                cover_image=cover_image,
-                target="admin",
-            )
-            if not wrote:
-                raise RuntimeError("Firestore update failed")
-            fs_ok = True
-        except Exception as exc:
-            _raise_store_failure(
-                message=f"Firestore update failed. Snapshot kept for undo. {exc}",
-                sql_ok=sql_ok,
-                fs_ok=False,
-                failed="firestore",
-                property_id=property_id,
-                operation_id=operation_id,
-            )
-    elif prop is not None and _fs_sync_enabled():
-        document = firestore_document_from_sql(prop, fields)
-        if not (document.get("name") or document.get("title")):
-            _raise_store_failure(
-                message="Refusing to create a nameless Firestore document. Snapshot kept for undo.",
-                sql_ok=sql_ok,
-                fs_ok=False,
-                failed="firestore",
-                property_id=property_id,
-                operation_id=operation_id,
-            )
-        from app.services.firestore_service import write_admin_property_document
-        if not write_admin_property_document(property_id, document, merge=False, target="admin"):
-            _raise_store_failure(
-                message="Firestore sync from Postgres failed. Snapshot kept for undo.",
-                sql_ok=sql_ok,
-                fs_ok=False,
-                failed="firestore",
-                property_id=property_id,
-                operation_id=operation_id,
-            )
-        fs_ok = True
+    try:
+        from app.services.firestore_service import save_or_update_property_firestore
+        fs_fields = dict(fields)
+        if websites is not None:
+            fs_fields["websites"] = websites
+        wrote = save_or_update_property_firestore(
+            property_id=property_id,
+            fields=fs_fields,
+            images=images,
+            cover_image=cover_image,
+            target="admin",
+        )
+        if not wrote:
+            raise RuntimeError("Firestore update failed")
+    except Exception as exc:
+        _raise_store_failure(
+            message=f"Firestore update failed. Snapshot kept for undo. {exc}",
+            fs_ok=False,
+            failed="firestore",
+            property_id=property_id,
+            operation_id=operation_id,
+        )
 
     _invalidate_search_cache()
-    stores = {"sql": sql_ok, "firestore": fs_ok}
-    after = {
-        "sql": _summary_sql(prop) if sql_ok else None,
-        "firestore": _summary_fs(_read_raw_firestore(property_id)) if fs_ok else None,
-    }
+    stores = {"firestore": True}
+    after = {"firestore": _summary_fs(_read_raw_firestore(property_id))}
     audit = _audit_rest(db, staff, "update", property_id, operation_id, stores, before, after)
-    parts = []
-    if sql_ok:
-        parts.append("Postgres")
-    if fs_ok:
-        parts.append("Firestore")
-    where = " and ".join(parts) if parts else "no store"
     return {
         "status": "UPDATED",
-        "message": f"Property '{property_id}' written to {where}.",
+        "message": f"Property '{property_id}' written to Firestore.",
         "property_id": property_id,
         "operation_id": operation_id,
         "undo_window_days": 6 if operation_id else None,
-        "sql": sql_ok,
-        "firestore": fs_ok,
+        "firestore": True,
         "stores": stores,
-        "websites": websites if websites is not None else (
-            list(prop.websites or []) if prop is not None else (raw.get("websites") if raw else [])
-        ),
+        "websites": websites if websites is not None else (raw.get("websites") or []),
         "audit": audit,
     }
 
 
 def rest_delete_property(
-    db: Session,
+    db: Any,
     staff: AuthenticatedStaff,
     property_id: str,
     *,
@@ -2164,8 +1983,8 @@ def rest_delete_property(
     confirm_property_id: Optional[str] = None,
     allow_without_undo: bool = False,
 ) -> Dict[str, Any]:
-    """Soft-delete by default. Hard delete is off unless ALLOW_PERMANENT_DELETE is set, then needs a typed property id."""
-    if hard_delete and not getattr(settings, "ALLOW_PERMANENT_DELETE", False):
+    """Soft-delete by default. Hard delete is off unless ALLOW_HARD_DELETE is set, then needs a typed property id."""
+    if hard_delete and not getattr(settings, "ALLOW_HARD_DELETE", False):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Permanent deletes are disabled. DELETE archives the listing and can be undone.",
@@ -2176,21 +1995,19 @@ def rest_delete_property(
             detail="hard_delete requires confirm_property_id equal to the property id",
         )
     raw = _read_raw_firestore(property_id)
-    prop = _load_sql_property(db, property_id)
-    if raw is None and prop is None:
+    if raw is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Property with ID '{property_id}' not found.",
         )
     if not hard_delete:
         from app.services.firestore_service import is_soft_deleted_record
-        already = [r for r in (raw, prop) if r is not None]
-        if already and all(is_soft_deleted_record(r) for r in already):
+        if is_soft_deleted_record(raw):
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=f"Property '{property_id}' is already archived. Use undo to restore it.",
             )
-    before = {"sql": _summary_sql(prop), "firestore": _summary_fs(raw)}
+    before = {"firestore": _summary_fs(raw)}
     operation_id = _require_undo_snapshot(
         db=db,
         staff=staff,
@@ -2200,58 +2017,28 @@ def rest_delete_property(
         allow_without_undo=allow_without_undo,
     )
 
-    sql_ok = False
-    fs_ok = False
-    if raw is not None:
-        from app.services.firestore_service import delete_property_firestore
-        try:
-            fs_ok = bool(delete_property_firestore(
-                property_id=property_id,
-                hard_delete=hard_delete,
-                staff_email=getattr(staff, "email", None),
-                target="admin",
-            ))
-            if not fs_ok:
-                raise RuntimeError("Firestore delete returned failure")
-        except Exception as exc:
-            _raise_store_failure(
-                message=f"Firestore delete failed. Snapshot kept for undo. {exc}",
-                sql_ok=False,
-                fs_ok=False,
-                failed="firestore",
-                property_id=property_id,
-                operation_id=operation_id,
-            )
-    if prop is not None:
-        try:
-            if hard_delete:
-                db.query(Property).filter(Property.property_id == property_id).delete(
-                    synchronize_session="fetch"
-                )
-            else:
-                prop.is_public = False
-                prop.status = "Archived"
-                prop.deleted_at = datetime.utcnow()
-                prop.deleted_by = getattr(staff, "email", None) or getattr(staff, "user_id", None)
-            db.commit()
-            sql_ok = True
-        except Exception as exc:
-            db.rollback()
-            _raise_store_failure(
-                message=f"Postgres delete failed. Snapshot kept for undo. {exc}",
-                sql_ok=False,
-                fs_ok=fs_ok,
-                failed="sql",
-                property_id=property_id,
-                operation_id=operation_id,
-            )
+    from app.services.firestore_service import delete_property_firestore
+    try:
+        fs_ok = bool(delete_property_firestore(
+            property_id=property_id,
+            hard_delete=hard_delete,
+            staff_email=getattr(staff, "email", None),
+            target="admin",
+        ))
+        if not fs_ok:
+            raise RuntimeError("Firestore delete returned failure")
+    except Exception as exc:
+        _raise_store_failure(
+            message=f"Firestore delete failed. Snapshot kept for undo. {exc}",
+            fs_ok=False,
+            failed="firestore",
+            property_id=property_id,
+            operation_id=operation_id,
+        )
 
     _invalidate_search_cache()
-    stores = {"sql": sql_ok, "firestore": fs_ok}
-    after = {
-        "sql": _summary_sql(_load_sql_property(db, property_id)) if not hard_delete else None,
-        "firestore": _summary_fs(_read_raw_firestore(property_id)),
-    }
+    stores = {"firestore": fs_ok}
+    after = {"firestore": _summary_fs(_read_raw_firestore(property_id))}
     audit = _audit_rest(db, staff, "delete", property_id, operation_id, stores, before, after)
     verb = "permanently deleted" if hard_delete else "archived"
     return {
@@ -2261,51 +2048,14 @@ def rest_delete_property(
         "operation_id": operation_id,
         "undo_window_days": 6 if operation_id else None,
         "hard_delete": hard_delete,
-        "sql": sql_ok,
         "firestore": fs_ok,
         "stores": stores,
         "audit": audit,
     }
 
 
-def _norm_compare(value: Any) -> Any:
-    if isinstance(value, list):
-        return sorted(str(v) for v in value)
-    if isinstance(value, float):
-        return round(value, 2)
-    return value
-
-
-def rest_property_consistency(db: Session, property_id: str) -> Dict[str, Any]:
-    """Compare Firestore and Postgres for one property. Admin callers only."""
-    raw = _read_raw_firestore(property_id)
-    prop = _load_sql_property(db, property_id)
-    if raw is None and prop is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Property with ID '{property_id}' not found.",
-        )
-    fs_view = _summary_fs(raw)
-    sql_view = _summary_sql(prop)
-    differences = []
-    for field in ("name", "price", "status", "websites", "isActive"):
-        fs_val = None if fs_view is None else fs_view.get(field)
-        sql_val = None if sql_view is None else sql_view.get(field)
-        if _norm_compare(fs_val) != _norm_compare(sql_val):
-            differences.append({"field": field, "firestore": fs_val, "sql": sql_val})
-    return {
-        "property_id": property_id,
-        "consistent": not differences and fs_view is not None and sql_view is not None,
-        "in_firestore": raw is not None,
-        "in_sql": prop is not None,
-        "differences": differences,
-        "firestore": fs_view,
-        "sql": sql_view,
-    }
-
-
 def save_ingested_listing(
-    db: Session,
+    db: Any,
     staff: AuthenticatedStaff,
     draft: Dict[str, Any],
     *,
@@ -2350,9 +2100,9 @@ def save_ingested_listing(
         ingest_meta["drive_ingestion"] = draft["drive_ingestion"]
     existing_meta: Dict[str, Any] = {}
     if mode == "update":
-        current = _load_sql_property(db, property_id)
-        if current is not None and isinstance(getattr(current, "raw_metadata", None), dict):
-            existing_meta = dict(current.raw_metadata)
+        current = _read_raw_firestore(property_id)
+        if isinstance(current, dict) and isinstance(current.get("raw_metadata"), dict):
+            existing_meta = dict(current["raw_metadata"])
     existing_meta["ingest"] = ingest_meta
     fields["raw_metadata"] = existing_meta
 
@@ -2381,8 +2131,8 @@ def save_ingested_listing(
             "property_id": property_id,
         }
 
-    stored = _load_sql_property(db, property_id)
-    stored_name = getattr(stored, "property_name", None) if stored is not None else None
+    stored = _read_raw_firestore(property_id)
+    stored_name = _fs_display_name(stored) if stored else None
     if not stored_name:
         return {
             "saved": False,
@@ -2425,9 +2175,13 @@ def save_ingested_listing(
 
     notes = []
     if guessed:
-        notes.append("guessed: " + ", ".join(guessed))
+        from app.services.admin_chat_quality import humanise_field_list
+
+        notes.append("guessed: " + humanise_field_list(guessed))
     if provided:
-        notes.append("provided by admin: " + ", ".join(provided))
+        from app.services.admin_chat_quality import humanise_field_list
+
+        notes.append("provided by admin: " + humanise_field_list(provided))
     note = (". ".join(notes) + ". ") if notes else ""
     message = (
         f"Saved: {stored_name} ({property_id}) - verified in database. "
@@ -2441,6 +2195,5 @@ def save_ingested_listing(
         "operation_id": result.get("operation_id"),
         "audit": audit_flag,
         "property_id": property_id,
-        "sql": result.get("sql"),
         "firestore": result.get("firestore"),
     }

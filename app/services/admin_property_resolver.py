@@ -310,11 +310,6 @@ def resolve_admin_property_name(
             message=format_which_one(cands, language=language),
         )
 
-    # Not in the name index: a listing stored only in PostgreSQL is still a real listing (exact id or name)
-    sql_hit = _postgres_exact_match(db, phrase)
-    if sql_hit is not None:
-        return sql_hit
-
     # No candidates — try to surface 3 closest via a looser scan of the index
     suggestions = list(mr.suggestions or [])
     if not suggestions:
@@ -327,29 +322,6 @@ def resolve_admin_property_name(
         reason=mr.reason or "no_match",
         message=format_not_found(phrase, suggestions, language=language),
     )
-
-
-def _postgres_exact_match(db: Any, phrase: str) -> Optional[AdminNameResolution]:
-    if db is None or not phrase:
-        return None
-    try:
-        from sqlalchemy import func
-        from app.db.models import Property
-
-        wanted = phrase.strip().lower()
-        rows = db.query(Property).filter(
-            (func.lower(Property.property_name) == wanted) | (Property.property_id == wanted.replace(" ", "-"))
-        ).all()
-    except Exception:
-        return None
-    if len(rows) == 1:
-        return AdminNameResolution(kind="resolved", query=phrase, property_id=rows[0].property_id,
-                                   official_name=rows[0].property_name, reason="postgres_exact")
-    if len(rows) > 1:
-        cands = [{"id": r.property_id, "name": r.property_name} for r in rows[:5]]
-        return AdminNameResolution(kind="ambiguous", query=phrase, candidates=cands, reason="postgres_exact_multi",
-                                   message=format_which_one(cands))
-    return None
 
 
 def _closest_display_names(phrase: str, limit: int = 3) -> List[str]:

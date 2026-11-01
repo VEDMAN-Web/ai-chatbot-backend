@@ -6,6 +6,7 @@ config-status storage mode, and chat honesty about reports.
 from __future__ import annotations
 
 import inspect
+import os
 import time
 from datetime import datetime, timezone, timedelta
 from unittest.mock import MagicMock, patch
@@ -140,6 +141,41 @@ def test_missing_report_clear_404_message():
     with pytest.raises(rs.ReportNotFoundError) as ei:
         load_report_bytes("tajlandia_report_missing.pdf", storage=store)
     assert "no longer available" in str(ei.value).lower() or "not found" in str(ei.value).lower()
+
+
+def test_missing_boto3_falls_back_to_local_provider(tmp_path, monkeypatch):
+    """S3 env is set, but boto3 cannot be imported: the report still lands on local disk."""
+    import builtins
+
+    monkeypatch.setenv("AWS_S3_BUCKET", "configured-bucket")
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "test-key")
+    monkeypatch.setattr(rs.settings, "REPORT_STORAGE_DIR", str(tmp_path / "reports"))
+    rs.S3StorageProvider.reset_boto3_probe()
+
+    real_import = builtins.__import__
+
+    def _block_boto3(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "boto3" or name.startswith("boto3."):
+            raise ImportError("boto3 missing for test")
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", _block_boto3)
+
+    query = MagicMock()
+    query.count.return_value = 0
+    query.order_by.return_value.limit.return_value.all.return_value = []
+    db = MagicMock()
+    db.query.return_value = query
+
+    result = rs.generate_report(db, "csv", report_type="leads", days=0, created_by="admin@test.com")
+    assert result["storage_ok"] is True
+    assert result["storage"] == "local"
+    assert "temporary storage" in (result.get("message") or "").lower()
+    assert isinstance(rs.get_storage_provider(), rs.LocalStorageProvider)
+    saved = os.path.join(str(tmp_path / "reports"), result["filename"])
+    assert os.path.isfile(saved)
+
+    rs.S3StorageProvider.reset_boto3_probe()
 
 
 def test_s3_failure_no_silent_fallback(monkeypatch):

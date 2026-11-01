@@ -10,10 +10,9 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from sqlalchemy.orm import Session
 
 from app.core.auth import AuthenticatedStaff, require_admin_or_super_admin_with_sites
-from app.db.session import get_db
+from app.core.deps import get_db
 from app.services import drive_folder_ingest as ingest
 from app.services import drive_formats as fmts
 
@@ -91,7 +90,7 @@ def create_ingestion_job(
     body: CreateJobRequest,
     idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key"),
     staff: AuthenticatedStaff = Depends(require_admin_or_super_admin_with_sites),
-    db: Session = Depends(get_db),
+    db: Any = Depends(get_db),
 ):
     """Validate the folder, discover files and start processing in the background. Returns counts by format."""
     try:
@@ -180,7 +179,7 @@ def retry_ingestion_job(
     job_id: str,
     body: Optional[RetryRequest] = None,
     staff: AuthenticatedStaff = Depends(require_admin_or_super_admin_with_sites),
-    db: Session = Depends(get_db),
+    db: Any = Depends(get_db),
 ):
     """Re-process failed files only. Completed files are not reprocessed."""
     try:
@@ -194,7 +193,7 @@ def retry_ingestion_job(
 def resume_ingestion_job(
     job_id: str,
     staff: AuthenticatedStaff = Depends(require_admin_or_super_admin_with_sites),
-    db: Session = Depends(get_db),
+    db: Any = Depends(get_db),
 ):
     try:
         res = ingest.resume_job(db, staff, job_id)
@@ -207,7 +206,7 @@ def resume_ingestion_job(
 def cancel_ingestion_job(
     job_id: str,
     staff: AuthenticatedStaff = Depends(require_admin_or_super_admin_with_sites),
-    db: Session = Depends(get_db),
+    db: Any = Depends(get_db),
 ):
     try:
         return ingest.job_view(ingest.cancel_job(db, staff, job_id))
@@ -259,7 +258,7 @@ def update_ingestion_draft(
     draft_id: str,
     body: DraftUpdateRequest,
     staff: AuthenticatedStaff = Depends(require_admin_or_super_admin_with_sites),
-    db: Session = Depends(get_db),
+    db: Any = Depends(get_db),
 ):
     try:
         draft = ingest.update_draft(db, staff, job_id, draft_id, fields=body.fields, action=body.action,
@@ -274,9 +273,9 @@ def approve_ingestion_drafts(
     job_id: str,
     body: ApproveRequest,
     staff: AuthenticatedStaff = Depends(require_admin_or_super_admin_with_sites),
-    db: Session = Depends(get_db),
+    db: Any = Depends(get_db),
 ):
-    """Write the selected drafts to Postgres and Firestore (validation, undo snapshot and audit log per listing)."""
+    """Write the selected drafts to Firestore (validation, undo snapshot and audit log per listing)."""
     try:
         ingest.load_job(job_id, staff)
         ids = list(body.draft_ids or [])
@@ -292,7 +291,7 @@ def rollback_ingestion_job(
     job_id: str,
     body: RollbackRequest,
     staff: AuthenticatedStaff = Depends(require_admin_or_super_admin_with_sites),
-    db: Session = Depends(get_db),
+    db: Any = Depends(get_db),
 ):
     """Undo every listing this job saved, using the existing 6-day undo snapshots."""
     try:

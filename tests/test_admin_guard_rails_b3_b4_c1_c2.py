@@ -216,7 +216,7 @@ def test_send_email_workspace_disconnected_did_not_complete(staff):
 
         try:
             result = asvc.confirm_and_execute_action(
-                db=monkey_db, pending_action_id=str(pending.id), authenticated_staff=staff
+                db=monkey_db, pending_action_id=str(pending.id), authenticated_staff=staff, confirmation_token=pending.confirmation_token
             )
             er = result.get("execution_result") or {}
             assert er.get("delivered") is False or er.get("is_mock") is True

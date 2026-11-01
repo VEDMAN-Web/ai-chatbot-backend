@@ -21,9 +21,7 @@ from typing import Optional, List, Dict, Any, Union
 from reportlab.pdfgen import canvas
 from reportlab.lib import colors
 from reportlab.lib.utils import ImageReader
-from sqlalchemy.orm import Session
 
-from app.db.models import Property, PropertyImage
 from app.core.tenant import resolve_tenant
 from app.services.report_service import default_storage_provider
 from app.services.offer_dossier_service import (
@@ -106,24 +104,11 @@ def _firestore_card_to_brochure_prop(card: Dict[str, Any]) -> SimpleNamespace:
     )
 
 
-def _load_property_for_brochure(db: Session, property_id: str) -> Any:
+def _load_property_for_brochure(db: Any, property_id: str) -> Any:
     """
-    Load property for brochure: PostgreSQL first, then Firestore (read-only).
-    Raises ValueError if missing from both.
+    Load property for brochure from Firestore (read-only).
+    Raises ValueError if missing.
     """
-    prop = None
-    if db is not None:
-        try:
-            prop = db.query(Property).filter(Property.property_id == property_id.upper()).first()
-            if not prop:
-                prop = db.query(Property).filter(Property.property_id.ilike(property_id.strip())).first()
-        except Exception as e:
-            logger.warning(f"PostgreSQL brochure lookup failed for '{property_id}': {e}")
-            prop = None
-
-    if prop:
-        return prop
-
     try:
         from app.services.firestore_service import get_property_by_id_from_firestore
         fs_card = get_property_by_id_from_firestore(str(property_id).strip())
@@ -174,7 +159,7 @@ def _write_brochure_copy_timed(data: Any, language: str) -> tuple:
 
 
 def _generate_html_brochure_pdf(
-    db: Session,
+    db: Any,
     property_id: str,
     site_origin: Optional[str] = None,
     language: str = "en",
@@ -248,9 +233,12 @@ def _generate_html_brochure_pdf(
     rand = secrets.token_hex(3)
     out_filename = f"brochure_{safe_pid}_t{theme_id}_{rand}.pdf"
 
-    saved_url = default_storage_provider.save_file(
-        filename=out_filename,
-        content=pdf_bytes,
+    from app.services.report_service import TEMPORARY_STORAGE_NOTE, save_bytes_with_fallback
+
+    saved_url, temporary_storage = save_bytes_with_fallback(
+        default_storage_provider,
+        out_filename,
+        pdf_bytes,
         content_type="application/pdf",
     )
     logger.info(
@@ -273,11 +261,12 @@ def _generate_html_brochure_pdf(
         "brochure_copy_source": source,
         "theme_id": theme_id,
         "theme_name": theme_spec.name,
+        "message": TEMPORARY_STORAGE_NOTE if temporary_storage else "",
     }
 
 
 def generate_single_property_brochure_pdf(
-    db: Session,
+    db: Any,
     property_id: str,
     site_origin: Optional[str] = None,
     language: str = "en",
@@ -328,7 +317,7 @@ def generate_single_property_brochure_pdf(
 
 
 def _generate_reportlab_brochure_pdf(
-    db: Session,
+    db: Any,
     property_id: str,
     site_origin: Optional[str] = None,
     language: str = "en",
@@ -342,7 +331,7 @@ def _generate_reportlab_brochure_pdf(
     brand = tenant.brand_name
     lang = language if language in ["en", "pl", "th"] else "en"
 
-    # 1. Fetch Property (PostgreSQL, then Firestore)
+    # 1. Fetch Property (Firestore)
     prop = _load_property_for_brochure(db, property_id)
 
     # 2. Select Theme (default to Variant 2 - Modern Slate / Tajlandia AI / Varsovia)
@@ -970,10 +959,13 @@ def _generate_reportlab_brochure_pdf(
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     out_filename = f"{tenant.brand_name.replace(' ', '_')}_Property_{clean_pname}_{ts}.pdf"
 
-    saved_url = default_storage_provider.save_file(
-        filename=out_filename,
-        content=pdf_bytes,
-        content_type="application/pdf"
+    from app.services.report_service import TEMPORARY_STORAGE_NOTE, save_bytes_with_fallback
+
+    saved_url, temporary_storage = save_bytes_with_fallback(
+        default_storage_provider,
+        out_filename,
+        pdf_bytes,
+        content_type="application/pdf",
     )
 
     logger.info(f"Generated 8-page luxury property brochure: {out_filename} ({len(pdf_bytes)} bytes) stored at {saved_url}")
@@ -989,11 +981,12 @@ def _generate_reportlab_brochure_pdf(
         "pdf_bytes": pdf_bytes,
         "file_size_bytes": len(pdf_bytes),
         "engine": "reportlab",
+        "message": TEMPORARY_STORAGE_NOTE if temporary_storage else "",
     }
 
 
 def generate_property_brochure(
-    db: Session,
+    db: Any,
     property_id: str,
     site_origin: Optional[str] = None,
     language: str = "en",
@@ -1013,7 +1006,7 @@ def generate_property_brochure(
 
 
 def generate_and_upload_brochure(
-    db: Session,
+    db: Any,
     property_id: str,
     site_origin: Optional[str] = None,
     language: str = "en",
@@ -1033,7 +1026,7 @@ def generate_and_upload_brochure(
 
 
 def generate_property_shortlist_pdf(
-    db: Session,
+    db: Any,
     property_ids: List[str],
     site_origin: Optional[str] = None,
     language: str = "en",

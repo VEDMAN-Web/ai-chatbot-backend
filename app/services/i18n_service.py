@@ -882,7 +882,7 @@ def get_admin_system_prompt(language: str = "en") -> str:
 
 กฎความปลอดภัยที่สำคัญ:
 1. การตรวจสอบความสมบูรณ์ของข้อมูล (DATA COMPLETENESS VALIDATION):
-   - เมื่อทีมงานขอเพิ่มหรือแก้ไขข้อมูลอสังหาริมทรัพย์ในฐานข้อมูล: หากมีข้อมูลสำคัญใดขาดหายไปหรือเป็น null (เช่น property_id, property_name, property_type, location, price, bedrooms, status) **ห้ามบันทึกหรือเสนอแก้ไขลงในฐานข้อมูลเด็ดขาด**
+   - เมื่อทีมงานขอเพิ่มหรือแก้ไขข้อมูลอสังหาริมทรัพย์ในฐานข้อมูล: หากมีข้อมูลสำคัญใดขาดหายไปหรือเป็น null (เช่น property_name, property_type, location, price, status; bedrooms เป็นข้อมูลเสริม; ห้ามขอ property_id จากทีมงานเมื่อสร้างรายการใหม่ ระบบสร้างให้จากชื่อ) **ห้ามบันทึกหรือเสนอแก้ไขลงในฐานข้อมูลเด็ดขาด**
    - ให้แจ้งทีมงานทันทีว่า: "Without proper information I am not able to complete this task. The following required value(s) are missing or null: [ระบุฟิลด์ที่ขาด]. Please provide these details so I can proceed."
    - จะบันทึกหรือแก้ไขลงฐานข้อมูลได้ก็ต่อเมื่อทีมงานระบุข้อมูลที่ถูกต้องและครบถ้วนเท่านั้น
 2. การยืนยันสองขั้นตอน (TWO-STEP CONFIRMATION): ห้ามดำเนินการบันทึก/แก้ไขข้อมูลจริงโดยตรง ต้องสร้างข้อเสนอ (Proposal) ให้ทีมงานอนุมัติก่อนเสมอ
@@ -905,7 +905,7 @@ KOMUNIKACJA I TON:
 
 ŚCIŚLE PRZESTRZEGAJ ZASAD BEZPIECZEŃSTWA:
 1. WALIDACJA KOMPLETNOŚCI DANYCH NIERUCHOMOŚCI (DATA COMPLETENESS VALIDATION):
-   - Gdy pracownik prosi o dodanie lub aktualizację nieruchomości w bazie danych: jeśli JAKAKOLWIEK wymagana wartość brakuje lub jest null (np. property_id, property_name, property_type, location, price, bedrooms, status), **NIE DODAWAJ ANI NIE AKTUALIZUJ JEJ W BAZIE DANYCH!**
+   - Gdy pracownik prosi o dodanie lub aktualizację nieruchomości w bazie danych: jeśli JAKAKOLWIEK wymagana wartość brakuje lub jest null (np. property_name, property_type, location, price, status; sypialnie są opcjonalne; NIGDY nie proś o property_id przy tworzeniu nowej oferty, system generuje je z nazwy), **NIE DODAWAJ ANI NIE AKTUALIZUJ JEJ W BAZIE DANYCH!**
    - Poproś pracownika o podanie tej konkretnej brakującej wartości i odpowiedz:
      "Without proper information I am not able to complete this task. The following required value(s) are missing or null: [lista brakujących pól]. Please provide these details so I can proceed."
    - Dopiero gdy pracownik poda prawidłowe, kompletne wartości, możesz zapisać lub zaktualizować dane w bazie.
@@ -967,7 +967,7 @@ TONE & COLLABORATIVE PERSONA:
 CRITICAL SECURITY & DATA INTEGRITY RULES:
 1. DATA COMPLETENESS VALIDATION (MANDATORY FOR ADDING OR UPDATING PROPERTIES/DATA):
    - Whenever authorized staff asks you to create or update any property or data in the database:
-   - If ANY required value is missing, null, or empty (e.g. property_id, property_name, property_type, location/province, price, bedrooms, status), you MUST NOT stage or call the tool to add/update this into the production database!
+   - If ANY required value is missing, null, or empty (e.g. property_name, property_type, location/province, price, status; bedrooms are optional). NEVER ask staff for a property_id when creating a new listing: the system generates it from the property name, you MUST NOT stage or call the tool to add/update this into the production database!
    - You MUST ask the staff member to provide that specific missing value, and say:
      "Without proper information I am not able to complete this task. The following required value(s) are missing or null: [missing fields]. Please provide these details so I can proceed."
    - Only once the user provides complete, proper, and valid values should you proceed to stage or execute the update/create action.

@@ -28,15 +28,9 @@ git push origin main
 
 ---
 
-## Step 2: Add PostgreSQL Database (1-Click)
+## Step 2: Firestore
 
-1. In your Railway project view, click the **"+ Create"** or **"+ New"** button in the top right.
-2. Select **"Database"** $\rightarrow$ **"Add PostgreSQL"**.
-3. Railway will provision a private PostgreSQL instance.
-4. **Link the database**:
-   * Click on your Web Service card $\rightarrow$ Go to the **"Variables"** tab.
-   * Click **"+ New Variable"** $\rightarrow$ **"Add Reference"** $\rightarrow$ Select `DATABASE_URL` from the PostgreSQL service.
-   *(Railway will automatically inject the database connection string into your web application!)*
+The app uses Cloud Firestore only. No SQL database is needed. Set the `ADMIN_FIREBASE_*` and `USER_FIREBASE_*` variables from your Firebase service account.
 
 ---
 
@@ -83,10 +77,8 @@ GOOGLE_REDIRECT_URI=https://${{RAILWAY_PUBLIC_DOMAIN}}/api/v1/auth/google/callba
 
 ### What Railway Does Automatically on Startup:
 1. Builds the application using `railway.json` and `Dockerfile`.
-2. Runs `alembic upgrade head` $\rightarrow$ initializes all PostgreSQL database tables.
-3. Runs `python scripts/ingest_properties.py` $\rightarrow$ automatically seeds all 10 verified luxury Thailand properties, image galleries, and private technical specifications into PostgreSQL.
-4. Starts Uvicorn listening on Railway's dynamic `${PORT}`.
-5. Verifies health status via `GET /health`.
+2. Starts Uvicorn listening on Railway's dynamic `${PORT}`.
+3. Verifies health status via `GET /health`.
 
 ---
 

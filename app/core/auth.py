@@ -1,12 +1,13 @@
+from typing import Any
 from datetime import datetime
 from typing import List, Optional, Dict
 from fastapi import Depends, HTTPException, Security, status, Request
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials, APIKeyHeader
 from pydantic import BaseModel, Field
-from sqlalchemy.orm import Session
 
-from app.db.session import get_db
-from app.db.models import User, UserSession
+from app.core.deps import get_db
+from app.repositories import users_repo
+from app.core.config import settings
 from app.core.tenant import (
     get_user_domain_key,
     get_current_env_domain,
@@ -17,6 +18,8 @@ from app.core.tenant import (
 )
 
 security_bearer = HTTPBearer(auto_error=False)
+header_staff_email = APIKeyHeader(name="X-Staff-Email", auto_error=False)
+header_staff_token = APIKeyHeader(name="X-Staff-Token", auto_error=False)
 
 
 def get_role_permissions(role: Optional[str]) -> Dict[str, bool]:
@@ -86,7 +89,7 @@ class AuthenticatedStaff(BaseModel):
         from_attributes = True
 
 
-def resolve_user_allowed_websites(user: Optional[User], role: Optional[str]) -> List[str]:
+def resolve_user_allowed_websites(user: Optional[object], role: Optional[str]) -> List[str]:
     """
     Resolves the list of canonical website domains a user is authorized to access.
     Super Admins have universal access to all 3 sites by default.
@@ -119,28 +122,60 @@ def resolve_user_allowed_websites(user: Optional[User], role: Optional[str]) -> 
     return [get_current_env_domain()]
 
 
+def _insecure_dev_auth_allowed() -> bool:
+    """
+    "dev-token-<email>" bearer tokens and the bare X-Staff-Email header skip the password check.
+    They exist only for local development and are never accepted in production.
+    """
+    if str(getattr(settings, "ENV", "") or getattr(settings, "ENVIRONMENT", "")).strip().lower() in {"production", "prod"}:
+        return False
+    return bool(getattr(settings, "ALLOW_INSECURE_DEV_AUTH", False))
+
+
+def _guard_store(fn):
+    """Run a user-store call. A missing store is a 503, never a silent success."""
+    try:
+        return fn()
+    except HTTPException:
+        raise
+    except RuntimeError as e:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Authentication store is temporarily unavailable. Please try again shortly.",
+        ) from e
+
+
+def _load_session(db, token: str):
+    return _guard_store(lambda: users_repo.get_session_by_token(db, token))
+
+
+def _load_user_by_id(db, user_id):
+    return _guard_store(lambda: users_repo.get_by_id(db, user_id))
+
+
 def get_current_user_from_db(
-    db: Session = Depends(get_db),
+    db: Any = Depends(get_db),
     bearer_creds: Optional[HTTPAuthorizationCredentials] = Security(security_bearer),
+    staff_email_hdr: Optional[str] = Security(header_staff_email),
+    staff_token_hdr: Optional[str] = Security(header_staff_token),
 ) -> AuthenticatedStaff:
     """
     Backend-verified authentication dependency.
-    Identity and role are ALWAYS resolved from PostgreSQL database (UserSession or users table).
+    Identity and role are ALWAYS resolved from the user store (users_repo), never from client input.
     Never trusts client-supplied role or staff_id fields.
     """
     if bearer_creds and bearer_creds.credentials:
         token = bearer_creds.credentials.strip()
 
-        # 1. Check if token exists in UserSession table
-        existing_session = db.query(UserSession).filter(UserSession.token == token).first()
+        # 1. Check if token exists in the session store (users_repo: Firestore by default)
+        existing_session = _load_session(db, token)
         if existing_session:
-            user = db.query(User).filter(User.id == existing_session.user_id).first()
+            user = _load_user_by_id(db, existing_session.user_id)
             user_status = (getattr(user, "status", None) or ("active" if getattr(user, "is_active", True) else "blocked")).strip().lower()
             if not user or not getattr(user, "is_active", True) or user_status != "active":
-                # Instantly terminate session in database
+                # Instantly terminate session
                 if existing_session.revoked_at is None:
-                    existing_session.revoked_at = datetime.utcnow()
-                    db.commit()
+                    users_repo.revoke_session(db, existing_session)
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail=f"User account is {user_status or 'inactive'}. All active sessions have been terminated. Access denied."
@@ -148,13 +183,13 @@ def get_current_user_from_db(
             if existing_session.revoked_at is not None:
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Session has been revoked or logged out.",
+                    detail="Any has been revoked or logged out.",
                     headers={"WWW-Authenticate": "Bearer"}
                 )
             if existing_session.expires_at <= datetime.utcnow():
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Session has expired. Please log in again.",
+                    detail="Any has expired. Please log in again.",
                     headers={"WWW-Authenticate": "Bearer"}
                 )
             resolved_role = user.role or "worker"
@@ -175,18 +210,58 @@ def get_current_user_from_db(
                 selected_websites=list(allowed_sites)
             )
 
-        # Only a server-issued session token authenticates staff. Header-only, dev-token and
-        # shared-secret logins were removed: they let a caller act as any staff member.
+        # 2. Local development only: "dev-token-<email>" is accepted when ALLOW_INSECURE_DEV_AUTH is on
+        # (off by default, never in production). No other token - including a shared secret - authenticates staff.
+        if token.startswith("dev-token-") and _insecure_dev_auth_allowed():
+            resolved_email = token.replace("dev-token-", "").strip().lower()
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid or unrecognized authentication token.",
+                headers={"WWW-Authenticate": "Bearer"}
+            )
+
+    elif staff_email_hdr and _insecure_dev_auth_allowed():
+        resolved_email = staff_email_hdr.strip().lower()
+    else:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or unrecognized authentication token.",
             headers={"WWW-Authenticate": "Bearer"}
         )
 
-    raise HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Authentication required. Please provide a valid Authorization Bearer token.",
-        headers={"WWW-Authenticate": "Bearer"}
+    # Verify user and role dynamically from the user store (Firestore admin_authentication by default)
+    user = _guard_store(lambda: users_repo.get_by_email(db, resolved_email))
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"User account '{resolved_email}' does not exist in database.",
+            headers={"WWW-Authenticate": "Bearer"}
+        )
+
+    user_status = getattr(user, "status", None) or ("blocked" if not getattr(user, "is_active", True) else "active")
+    if not getattr(user, "is_active", True) or user_status == "blocked":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Account is blocked. Access denied."
+        )
+
+    resolved_role = user.role or "worker"
+    resolved_domain = getattr(user, "domain", None) or (user.preferences.get("domain") if isinstance(user.preferences, dict) else None) or get_current_env_domain()
+    resolved_domain_key = get_user_domain_key(user, resolved_domain)
+    allowed_sites = resolve_user_allowed_websites(user, resolved_role)
+    return AuthenticatedStaff(
+        user_id=str(user.id),
+        email=user.email,
+        name=user.name or user.email,
+        role=resolved_role,
+        domain=resolved_domain,
+        domain_key=resolved_domain_key,
+        status=user_status,
+        permissions=get_role_permissions(resolved_role),
+        allowed_websites=allowed_sites,
+        selected_websites=list(allowed_sites)
     )
 
 
