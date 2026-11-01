@@ -194,18 +194,21 @@ def correction_revisions(correction_id: str, staff: AuthenticatedStaff = Depends
 
 
 @router.post("/corrections/{correction_id}/approve")
-def approve_correction(correction_id: str, body: Decision = Decision(), staff: AuthenticatedStaff = Depends(_can_approve), db: Session = Depends(get_db)):
-    return _run(lambda: remarks.decide_correction(db, staff, correction_id, "approve", body.note))
+def approve_correction(correction_id: str, body: Optional[Decision] = None, staff: AuthenticatedStaff = Depends(_can_approve), db: Session = Depends(get_db)):
+    note = body.note if body else None
+    return _run(lambda: remarks.decide_correction(db, staff, correction_id, "approve", note))
 
 
 @router.post("/corrections/{correction_id}/reject")
-def reject_correction(correction_id: str, body: Decision = Decision(), staff: AuthenticatedStaff = Depends(_can_approve), db: Session = Depends(get_db)):
-    return _run(lambda: remarks.decide_correction(db, staff, correction_id, "reject", body.note))
+def reject_correction(correction_id: str, body: Optional[Decision] = None, staff: AuthenticatedStaff = Depends(_can_approve), db: Session = Depends(get_db)):
+    note = body.note if body else None
+    return _run(lambda: remarks.decide_correction(db, staff, correction_id, "reject", note))
 
 
 @router.post("/corrections/{correction_id}/deactivate")
-def deactivate_correction(correction_id: str, body: Decision = Decision(), staff: AuthenticatedStaff = Depends(_can_approve), db: Session = Depends(get_db)):
-    return _run(lambda: remarks.decide_correction(db, staff, correction_id, "deactivate", body.note))
+def deactivate_correction(correction_id: str, body: Optional[Decision] = None, staff: AuthenticatedStaff = Depends(_can_approve), db: Session = Depends(get_db)):
+    note = body.note if body else None
+    return _run(lambda: remarks.decide_correction(db, staff, correction_id, "deactivate", note))
 
 
 # ---- user feedback (thumbs up / down) -------------------------------------------------------
@@ -247,6 +250,28 @@ def submit_user_feedback(
             .document(message_seq)
         )
         msg_snap = msg_ref.get()
+        if not msg_snap.exists and message_seq.isdigit():
+            alt_ref = (
+                client.collection("chat_logs")
+                .document(conversation_id)
+                .collection("messages")
+                .document(f"m{int(message_seq):06d}")
+            )
+            alt_snap = alt_ref.get()
+            if alt_snap.exists:
+                msg_ref = alt_ref
+                msg_snap = alt_snap
+        elif not msg_snap.exists and message_seq.startswith("m") and message_seq[1:].isdigit():
+            alt_ref = (
+                client.collection("chat_logs")
+                .document(conversation_id)
+                .collection("messages")
+                .document(str(int(message_seq[1:])))
+            )
+            alt_snap = alt_ref.get()
+            if alt_snap.exists:
+                msg_ref = alt_ref
+                msg_snap = alt_snap
         if not msg_snap.exists:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
                                 detail="Message not found.")

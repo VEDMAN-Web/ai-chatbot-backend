@@ -1345,6 +1345,16 @@ def process_admin_chat(
         requested_language=requested_language, action=action, pending_action_id=pending_action_id,
     )
     _remember_proposal(session_id, result)
+    if result.get("text"):
+        from app.services.response_refurbisher import refurbish_response
+        role = getattr(staff_user, "role", "admin") or "admin"
+        lang = result.get("language") or requested_language or "en"
+        result["text"] = refurbish_response(
+            result["text"],
+            role=role,
+            language=lang,
+            context={"session_id": session_id, "site_origin": site_origin}
+        )
     return result
 
 

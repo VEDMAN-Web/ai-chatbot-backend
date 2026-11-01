@@ -500,7 +500,7 @@ def generate_offer_dossier_pdf(
             p = None
             if get_property_by_id:
                 try:
-                    p = get_property_by_id(db, pid_clean)
+                    p = get_property_by_id(db, pid_clean, staff=True)
                 except Exception:
                     p = None
             if p is None and db is not None:

@@ -52,6 +52,64 @@ class FirestoreDatabaseError(Exception):
     pass
 
 
+# ------------------------------------------------------------------------------
+# Authoritative active-record rules (soft delete)
+# ------------------------------------------------------------------------------
+# A listing is soft-deleted ("archived") when an admin deletes it: the record stays, flagged with
+# isActive False + _deletedAt/_deletedBy (Firestore) or status "Archived" + deleted_at/deleted_by (SQL).
+# An unpublished draft is isActive/is_public False without a deletion marker.
+#   * Public visitors may only ever see published, non-deleted listings.
+#   * Staff may see drafts, but a deleted listing is hidden unless they explicitly ask for archived records.
+_DELETED_STATUSES = {"archived", "deleted"}
+
+
+def _record_get(record: Any, key: str) -> Any:
+    if isinstance(record, dict):
+        return record.get(key)
+    getter = getattr(record, "get", None)
+    if callable(getter) and not hasattr(record, "__table__"):
+        try:
+            return getter(key)
+        except Exception:
+            pass
+    return getattr(record, key, None)
+
+
+def is_soft_deleted_record(record: Any) -> bool:
+    """True for an archived listing: raw Firestore doc, normalised card, SQL row or adapter."""
+    if record is None:
+        return False
+    for key in ("_deletedAt", "deleted_at"):
+        if _record_get(record, key):
+            return True
+    raw = _record_get(record, "raw_firestore_data")
+    if isinstance(raw, dict) and raw.get("_deletedAt"):
+        return True
+    status_val = _record_get(record, "status")
+    return isinstance(status_val, str) and status_val.strip().lower() in _DELETED_STATUSES
+
+
+def is_publicly_visible_record(record: Any) -> bool:
+    """True only for a published, non-deleted listing (what a public visitor or the public bot may see)."""
+    if record is None or is_soft_deleted_record(record):
+        return False
+    for key in ("isActive", "is_public"):
+        val = _record_get(record, key)
+        if val is False:
+            return False
+    return True
+
+
+def record_visible_to(record: Any, target: str = "user", include_inactive: bool = False) -> bool:
+    if record is None:
+        return False
+    if include_inactive:
+        return True
+    if target == "admin":
+        return not is_soft_deleted_record(record)
+    return is_publicly_visible_record(record)
+
+
 def _create_single_firestore_client(project_id: str, database: str, env_key: Optional[str], cred_path: Optional[str], label: str):
     # Check if Firestore sync is enabled in configuration
     sync_enabled = (
@@ -443,9 +501,32 @@ def normalize_firestore_project(doc_id: str, data: Dict[str, Any]) -> Dict[str, 
 
 
 def clear_property_catalog_cache() -> None:
-    """Test/helper: drop the catalog cache (does not interrupt in-flight loads)."""
+    """Drop the catalog cache (does not interrupt in-flight loads)."""
     with _CATALOG_LOCK:
         _CATALOG_CACHE.clear()
+
+
+def invalidate_property_caches() -> None:
+    """
+    Call after any listing create/update/delete/undo. Clears every in-process cache that can serve a
+    listing to the chatbot: search results, the Firestore catalog, and the name index. Without the
+    last two an archived listing stayed searchable for up to the catalog TTL (15 min, plus one
+    stale-while-revalidate serve). Each step is independent so one failure cannot skip the others.
+    """
+    try:
+        from app.services.cache_service import search_cache
+        search_cache.invalidate()
+    except Exception as exc:
+        logger.warning("Search cache invalidation failed: %s", exc)
+    try:
+        clear_property_catalog_cache()
+    except Exception as exc:
+        logger.warning("Catalog cache invalidation failed: %s", exc)
+    try:
+        from app.services.property_name_index import get_property_name_index
+        get_property_name_index().clear()
+    except Exception as exc:
+        logger.warning("Name index invalidation failed: %s", exc)
 
 
 def _slice_catalog(cached: List[Dict[str, Any]], limit: int) -> List[Dict[str, Any]]:
@@ -497,6 +578,10 @@ def _fetch_properties_from_firestore_uncached(
                 break
             for doc in docs:
                 data = doc.to_dict() or {}
+                # The isActive query filter is the first line; this catches archived docs whose flag
+                # disagrees (e.g. status "Archived" / _deletedAt with a stale isActive).
+                if active_only and not is_publicly_visible_record(data):
+                    continue
                 results.append(normalize_firestore_project(doc.id, data))
                 if len(results) >= max_total:
                     break
@@ -509,6 +594,7 @@ def _fetch_properties_from_firestore_uncached(
         results = [
             normalize_firestore_project(doc.id, doc.to_dict() or {})
             for doc in docs
+            if not active_only or is_publicly_visible_record(doc.to_dict() or {})
         ]
 
     results.sort(key=lambda p: str(p.get("property_id") or ""))
@@ -815,10 +901,18 @@ def get_firestore_properties_count(target: str = "user") -> int:
             return 0
 
 
-def get_property_by_id_from_firestore(property_id: str, target: str = "user") -> Optional[Dict[str, Any]]:
+def get_property_by_id_from_firestore(
+    property_id: str,
+    target: str = "user",
+    include_inactive: bool = False,
+) -> Optional[Dict[str, Any]]:
     """
     Retrieves a single property project from Firestore by document ID, slugified name, or title.
     Routes to user or admin Firestore client based on target.
+
+    Soft-deleted listings are never returned (and unpublished drafts are not returned to target="user")
+    unless include_inactive=True. Every lookup path below goes through this check, because this function
+    feeds the public chatbot, brochures and the public property API directly.
     """
     client = get_firestore_client(target=target)
     if not client:
@@ -827,6 +921,13 @@ def get_property_by_id_from_firestore(property_id: str, target: str = "user") ->
     raw_query = (property_id or "").strip()
     if not raw_query:
         return None
+
+    def normalize_firestore_project(doc_id: str, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        # Shadows the module-level normaliser inside this function so no return path can skip the check.
+        if not record_visible_to(data, target=target, include_inactive=include_inactive):
+            logger.info("Firestore lookup '%s' matched inactive/archived listing '%s'; not returned.", raw_query, doc_id)
+            return None
+        return globals()["normalize_firestore_project"](doc_id, data)
 
     # Never treat general city or country name as a single property!
     city_country_keywords = [

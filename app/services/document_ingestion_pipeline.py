@@ -34,7 +34,11 @@ from app.services.claude_property_extractor import (
     extract_property_details_from_image_with_claude,
     extract_property_details_with_claude,
 )
-from app.services.claude_vision_verifier import verify_image_with_claude_vision
+from app.services.property_photo_extractor import (
+    candidates_from_images,
+    extract_photos_from_candidates,
+    extract_property_photos,
+)
 from app.services.cloud_media_storage import cloud_storage
 from app.services.image_processor import (
     extract_high_res_images_from_pdf,
@@ -165,43 +169,49 @@ def _extract_zip_media_images(zip_bytes: bytes, prefix: str) -> List[Dict[str, A
 
 
 def _extract_candidate_pdf_images(pdf_bytes: bytes) -> List[Dict[str, Any]]:
-    """Extracts embedded photos and renders full visual page plates (150 DPI)."""
+    """Extracts genuine high-resolution embedded property photos and floor plans from PDF, excluding text slides."""
     candidates: List[Dict[str, Any]] = []
+    seen_xrefs = set()
     try:
         import fitz
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
 
-        # 1. Render presentation pages (up to 8 pages)
-        for page_idx in range(min(len(doc), 8)):
-            page = doc[page_idx]
-            pix = page.get_pixmap(dpi=150)
-            img_bytes = pix.tobytes("jpeg")
-            candidates.append({
-                "bytes": img_bytes,
-                "mime": "image/jpeg",
-                "source": f"page_{page_idx+1}"
-            })
-
-        # 2. Inspect high-res embedded photos (filter out tiny slivers, CAD fills and extreme aspect ratios)
+        # 1. First extract embedded photos (actual photographs uploaded by architect/developer)
         for page_idx in range(len(doc)):
             for img_info in doc[page_idx].get_images():
                 xref = img_info[0]
+                if xref in seen_xrefs:
+                    continue
+                seen_xrefs.add(xref)
                 base_img = doc.extract_image(xref)
                 if base_img:
                     w = base_img.get("width", 0)
                     h = base_img.get("height", 0)
-                    if w >= 800 and h >= 600 and 0.4 <= (w / h) <= 2.5:
+                    img_data = base_img.get("image", b"")
+                    # Filter out tiny icons, buttons, bullets, and extreme thin banners
+                    if w >= 400 and h >= 300 and len(img_data) >= 30000 and 0.4 <= (w / h) <= 2.8:
                         candidates.append({
-                            "bytes": base_img["image"],
+                            "bytes": img_data,
                             "mime": "image/jpeg" if base_img.get("ext") == "jpeg" else "image/png",
-                            "source": f"embedded_xref_{xref}"
+                            "source": f"embedded_p{page_idx+1}_xref{xref}"
                         })
+
+        # 2. Only if no embedded photos exist (e.g. flat full-bleed scanned document)
+        if not candidates:
+            for page_idx in range(min(len(doc), 6)):
+                page = doc[page_idx]
+                pix = page.get_pixmap(dpi=150)
+                candidates.append({
+                    "bytes": pix.tobytes("jpeg"),
+                    "mime": "image/jpeg",
+                    "source": f"page_{page_idx+1}"
+                })
 
         doc.close()
     except Exception as e:
         logger.warning(f"PDF image extraction helper error: {e}")
 
-    return candidates[:10]
+    return candidates[:12]
 
 
 def process_and_ingest_property_document(
@@ -238,33 +248,13 @@ def process_and_ingest_property_document(
 
     prop_name = ai_data.get("property_name") or os.path.splitext(filename)[0].replace("_", " ").title()
 
-    # --- Step 2: Image Extraction & Claude Vision Verification ---
-    candidate_images = extract_candidate_images(content_bytes, filename)
-    verified_images: List[Dict[str, Any]] = []
-
-    import concurrent.futures
-
-    def _verify_one(item):
-        i, c = item
-        res = verify_image_with_claude_vision(c["bytes"], property_name_hint=prop_name)
-        return i, c, res
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as pool:
-        check_results = list(pool.map(_verify_one, enumerate(candidate_images)))
-
-    check_results.sort(key=lambda x: x[0])
-    for idx, cand, v_result in check_results:
-        if v_result.get("is_valid", False):
-            verified_images.append({
-                "bytes": cand["bytes"],
-                "mime": cand["mime"],
-                "image_type": v_result.get("image_type", "exterior"),
-                "category": v_result.get("category"),
-                "alt_text": v_result.get("alt_text", f"{prop_name} Image {idx+1}"),
-                "description": v_result.get("description", "")
-            })
-        else:
-            logger.info(f"Filtered out invalid image #{idx+1} ({v_result.get('category')}): {v_result.get('description')}")
+    # --- Step 2: Clean property photos only (Claude detects text-free photo regions, crops, then re-verifies) ---
+    photo_report = extract_property_photos(content_bytes, filename, property_name=prop_name)
+    verified_images: List[Dict[str, Any]] = [p.as_dict() for p in photo_report.photos]
+    for rej in photo_report.rejected:
+        logger.info("Photo candidate rejected: %s", rej)
+    for err in photo_report.errors:
+        logger.warning("Photo extraction error: %s", err)
 
     # --- Step 3: Upload Verified Images to Firebase/GCS Cloud Bucket ---
     uploaded_urls: List[str] = []
@@ -283,7 +273,7 @@ def process_and_ingest_property_document(
     # Prioritize cover image: cover page or exterior photo
     cover_image_url = None
     for img in verified_images:
-        if img.get("category") in ("PRESENTATION_COVER", "PHOTOGRAPHY") and "public_url" in img:
+        if img.get("image_type") in ("exterior", "aerial") and "public_url" in img:
             cover_image_url = img["public_url"]
             break
     if not cover_image_url and uploaded_urls:
@@ -337,6 +327,33 @@ def process_and_ingest_property_document(
     return payload
 
 
+_MAX_FETCH_BYTES = 25 * 1024 * 1024
+
+
+def _safe_get(client: "httpx.Client", url: str, headers: Dict[str, str], max_bytes: int = _MAX_FETCH_BYTES) -> "httpx.Response":
+    """
+    GET with the same SSRF policy as admin URL imports (property_web_ingest._check_url_policy): http(s) only,
+    no private / loopback / link-local / metadata addresses, INGEST_ALLOWED/BLOCKED_DOMAINS honoured, and
+    every redirect hop re-checked (redirects are not followed blindly). Raises ValueError when refused.
+    """
+    from app.services.property_web_ingest import IngestError, _check_url_policy
+
+    current = url
+    for _hop in range(6):
+        try:
+            _check_url_policy(current)
+        except IngestError as exc:
+            raise ValueError(str(exc)) from exc
+        resp = client.get(current, headers=headers)
+        if resp.is_redirect and resp.headers.get("location"):
+            current = urllib.parse.urljoin(current, resp.headers["location"])
+            continue
+        if len(resp.content) > max_bytes:
+            raise ValueError("The download is larger than the import limit.")
+        return resp
+    raise ValueError("The URL redirected too many times.")
+
+
 def process_and_ingest_property_url(
     url: str,
     property_id_override: Optional[str] = None,
@@ -351,8 +368,8 @@ def process_and_ingest_property_url(
     logger.info(f"Ingesting property from URL: {url}")
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
-    with httpx.Client(timeout=30.0, follow_redirects=True) as client:
-        resp = client.get(url, headers=headers)
+    with httpx.Client(timeout=30.0, follow_redirects=False) as client:
+        resp = _safe_get(client, url, headers)
         resp.raise_for_status()
 
     content_type = resp.headers.get("content-type", "").lower()
@@ -391,10 +408,10 @@ def process_and_ingest_property_url(
 
     # Download candidate images (up to 12)
     candidate_images: List[Dict[str, Any]] = []
-    with httpx.Client(timeout=20.0, follow_redirects=True) as client:
+    with httpx.Client(timeout=20.0, follow_redirects=False) as client:
         for img_url in candidate_img_urls[:12]:
             try:
-                img_resp = client.get(img_url, headers=headers)
+                img_resp = _safe_get(client, img_url, headers, max_bytes=10 * 1024 * 1024)
                 if img_resp.status_code == 200 and len(img_resp.content) >= 15000:
                     candidate_images.append({
                         "bytes": img_resp.content,
@@ -413,29 +430,9 @@ def process_and_ingest_property_url(
 
     prop_name = ai_data.get("property_name") or (soup.title.string.strip() if soup.title else "Online Property")
 
-    # Verify images with Claude Vision
-    verified_images: List[Dict[str, Any]] = []
-    import concurrent.futures
-
-    def _verify_url_cand(item):
-        i, c = item
-        res = verify_image_with_claude_vision(c["bytes"], property_name_hint=prop_name)
-        return i, c, res
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as pool:
-        check_results = list(pool.map(_verify_url_cand, enumerate(candidate_images)))
-
-    check_results.sort(key=lambda x: x[0])
-    for idx, cand, v_result in check_results:
-        if v_result.get("is_valid", False):
-            verified_images.append({
-                "bytes": cand["bytes"],
-                "mime": cand["mime"],
-                "image_type": v_result.get("image_type", "exterior"),
-                "category": v_result.get("category"),
-                "alt_text": v_result.get("alt_text", f"{prop_name} Image {idx+1}"),
-                "description": v_result.get("description", "")
-            })
+    # Clean property photos only (same detect -> crop -> verify gate as documents)
+    photo_report = extract_photos_from_candidates(candidates_from_images(candidate_images), property_name=prop_name)
+    verified_images: List[Dict[str, Any]] = [p.as_dict() for p in photo_report.photos]
 
     # Upload verified images to Firebase/GCS
     uploaded_urls: List[str] = []
@@ -499,18 +496,19 @@ def process_and_ingest_property_url(
 
 
 def _upload_and_make_public(bucket: str, obj_name: str, content: bytes, content_type: str) -> str:
-    """Uploads asset to Firebase/GCS bucket and returns direct public web URL."""
-    token = cloud_storage._get_access_token()
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": content_type}
+    """Uploads asset to Cloudinary / Cloud Storage bucket and returns direct public web URL."""
+    parts = obj_name.split("/")
+    prop_id = parts[1] if len(parts) > 1 else "general"
+    img_type = parts[2] if len(parts) > 2 else "images"
+    filename = parts[-1] if parts else "image.jpg"
 
-    quoted_name = urllib.parse.quote(obj_name, safe="")
-    upload_url = f"https://storage.googleapis.com/upload/storage/v1/b/{bucket}/o?uploadType=media&name={quoted_name}"
-
-    with httpx.Client(timeout=30.0) as client:
-        resp = client.post(upload_url, headers=headers, content=content)
-        resp.raise_for_status()
-
-    return f"https://storage.googleapis.com/{bucket}/{obj_name}"
+    return cloud_storage.upload_property_image(
+        image_bytes=content,
+        filename=filename,
+        content_type=content_type,
+        property_id=prop_id,
+        image_type=img_type
+    )
 
 
 def _save_to_postgresql_and_firestore(payload: Dict[str, Any], verified_images: List[Dict[str, Any]]):
@@ -549,12 +547,41 @@ def _save_to_postgresql_and_firestore(payload: Dict[str, Any], verified_images: 
                 area_sqm_min=payload.get("area_sqm_min"),
                 area_sqm_max=payload.get("area_sqm_max"),
                 units=payload.get("units"),
+                available_units=payload.get("available_units"),
                 total_floors=payload.get("total_floors"),
+                completion_status=payload.get("completion_status") or payload.get("status"),
+                completion_date=payload.get("completion_date"),
+                project_name_pl=payload.get("project_name_pl") or payload.get("property_name"),
+                project_name_en=payload.get("project_name_en") or payload.get("property_name"),
+                slug_pl=payload.get("slug_pl"),
+                slug_en=payload.get("slug_en"),
+                subtitle_pl=payload.get("subtitle_pl"),
+                subtitle_en=payload.get("subtitle_en"),
+                city=payload.get("city") or payload.get("province"),
+                expected_roi=payload.get("expected_roi"),
+                rental_yield=payload.get("rental_yield"),
+                short_description_pl=payload.get("short_description_pl"),
+                description_pl=payload.get("full_description_pl") or payload.get("description_pl"),
+                short_description_en=payload.get("short_description_en"),
+                description_en=payload.get("full_description_en") or payload.get("description_en"),
+                video_url=payload.get("video_url"),
+                search_location=payload.get("search_location"),
+                address_en=payload.get("address_en") or payload.get("address"),
+                address_pl=payload.get("address_pl"),
+                neighborhood_lifestyle=payload.get("neighborhood_lifestyle"),
+                layouts=payload.get("layouts") or payload.get("unit_types", []),
+                seo_title_pl=payload.get("seo_title_pl"),
+                seo_title_en=payload.get("seo_title_en"),
+                seo_description_pl=payload.get("seo_description_pl"),
+                seo_description_en=payload.get("seo_description_en"),
+                is_featured=bool(payload.get("is_featured", False)),
+                is_top_list=bool(payload.get("is_top_list", False)),
                 has_pool=payload.get("has_pool", False),
                 beach_access=payload.get("beach_access", False),
                 sea_view=payload.get("sea_view", False),
                 amenities=payload.get("amenities", []),
                 features=payload.get("features", []),
+                tags=payload.get("tags", []),
                 raw_metadata={"unit_types": payload.get("unit_types", [])}
             )
             db.add(p)

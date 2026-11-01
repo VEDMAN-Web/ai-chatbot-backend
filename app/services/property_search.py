@@ -3,7 +3,7 @@ import re
 from typing import Optional, List, Dict, Any
 from decimal import Decimal
 from sqlalchemy.orm import Session
-from sqlalchemy import and_, or_, cast, String
+from sqlalchemy import and_, or_, cast, String, func
 from pydantic import BaseModel, Field, field_validator
 from app.db.models import Property, PropertyImage, PropertySpec
 from app.core.tenant import normalize_website_list, normalize_website_domain, normalize_tenant_domain_key
@@ -35,6 +35,8 @@ class PropertyFilterParams(BaseModel):
     sort_by_price: Optional[str] = Field(None, description="'asc' for cheapest first, 'desc' for most expensive first")
     status: Optional[str] = Field(None, max_length=50)
     is_public: Optional[bool] = True
+    # Soft-deleted (archived) rows are excluded from every listing query unless a caller opts in.
+    include_deleted: bool = False
     limit: int = 10
     offset: int = 0
 
@@ -94,6 +96,19 @@ class PropertyFilterParams(BaseModel):
         from app.core.tenant import normalize_website_list
         return normalize_website_list(v)
 
+def not_deleted_condition():
+    """SQL condition: the row is not soft-deleted (no deleted_at and status is not Archived/Deleted)."""
+    return and_(
+        Property.deleted_at.is_(None),
+        or_(Property.status.is_(None), func.lower(Property.status).notin_(("archived", "deleted"))),
+    )
+
+
+def publicly_visible_condition():
+    """SQL condition: published and not soft-deleted (NULL is_public counts as published, the column default)."""
+    return and_(not_deleted_condition(), or_(Property.is_public.is_(True), Property.is_public.is_(None)))
+
+
 def build_property_query(db: Session, filters: PropertyFilterParams):
     """
     Safely builds parameterized SQLAlchemy queries from validated structured filters.
@@ -104,6 +119,9 @@ def build_property_query(db: Session, filters: PropertyFilterParams):
     
     if filters.is_public is not None:
         conditions.append(Property.is_public == filters.is_public)
+
+    if not filters.include_deleted:
+        conditions.append(not_deleted_condition())
 
     if filters.query:
         q = f"%{filters.query.strip()}%"
@@ -336,6 +354,13 @@ class FirestorePropertyAdapter:
         self.developer_name = data.get("developer_name") or data.get("developer") or ""
         self.detail_page_url = data.get("detail_page_url") or ""
         self.raw_metadata = data.get("raw_firestore_data") or {}
+        self.is_public = bool(data.get("is_public", True))
+        self.deleted_at = data.get("deleted_at") or data.get("_deletedAt")
+        self.is_deleted = bool(
+            data.get("is_deleted")
+            or self.deleted_at
+            or (str(data.get("status") or "").lower() in ("archived", "deleted"))
+        )
 
         # Images list with image_url attribute
         raw_images = data.get("images") or []
@@ -352,22 +377,50 @@ class FirestorePropertyAdapter:
 
 
 def search_properties_safe(db: Session, filters: PropertyFilterParams) -> List[Any]:
-    """Execute the safe query and fetch matched records with images."""
+    """Execute the safe query and fetch matched records with images (eagerly loaded to prevent N+1 queries)."""
     if db is None:
         return []
-    query = build_property_query(db, filters)
+    from sqlalchemy.orm import selectinload
+    query = build_property_query(db, filters).options(selectinload(Property.images))
     return query.offset(filters.offset).limit(filters.limit).all()
 
-def get_property_by_id(db: Session, property_id: str) -> Optional[Any]:
-    """Retrieve full public record for a specific Property ID, checking live Cloud Firestore first."""
+def _firestore_says_hidden(property_id: str, staff: bool) -> bool:
+    """
+    True when Firestore (the authoritative store) has this listing but it must not be shown.
+    Batch deletes used to deactivate Firestore only, so a stale active SQL row must not resurrect it.
+    """
+    try:
+        from app.services.firestore_service import get_raw_property_document, record_visible_to
+        raw = get_raw_property_document(property_id, target="admin" if staff else "user")
+    except Exception:
+        return False
+    if raw is None:
+        return False
+    return not record_visible_to(raw, target="admin" if staff else "user")
+
+
+def _visible_sql_row(prop: Optional[Any], staff: bool) -> Optional[Any]:
+    if prop is None:
+        return None
+    if _firestore_says_hidden(str(prop.property_id), staff):
+        return None
+    return prop
+
+
+def get_property_by_id(db: Session, property_id: str, staff: bool = False) -> Optional[Any]:
+    """
+    Retrieve a record for a specific Property ID, checking live Cloud Firestore first.
+    Soft-deleted listings are never returned; unpublished drafts are only returned to staff (staff=True).
+    """
     if not property_id or not isinstance(property_id, str):
         return None
     clean_id = property_id.strip()
+    target = "admin" if staff else "user"
 
     # 1. Primary check: live Cloud Firestore
     try:
         from app.services.firestore_service import get_property_by_id_from_firestore
-        fs_p = get_property_by_id_from_firestore(clean_id)
+        fs_p = get_property_by_id_from_firestore(clean_id, target=target)
         if fs_p:
             return FirestorePropertyAdapter(fs_p)
     except Exception as e:
@@ -375,27 +428,30 @@ def get_property_by_id(db: Session, property_id: str) -> Optional[Any]:
 
     # 2. Check database (fallback when not in Firestore)
     if db is not None:
+        visible = not_deleted_condition() if staff else publicly_visible_condition()
         prop = db.query(Property).filter(
-            Property.property_id.ilike(clean_id)
+            Property.property_id.ilike(clean_id), visible
         ).first()
         if not prop and clean_id:
             prop = db.query(Property).filter(
                 (Property.property_id.ilike(f"%{clean_id}%")) |
-                (Property.property_name.ilike(f"%{clean_id}%"))
+                (Property.property_name.ilike(f"%{clean_id}%")),
+                visible,
             ).first()
-        return prop
+        return _visible_sql_row(prop, staff)
     return None
 
-def get_property_by_name(db: Session, name_query: str) -> Optional[Any]:
-    """Fuzzy lookup property by name, checking live Cloud Firestore first."""
+def get_property_by_name(db: Session, name_query: str, staff: bool = False) -> Optional[Any]:
+    """Fuzzy lookup property by name, checking live Cloud Firestore first. Same visibility rules as get_property_by_id."""
     if not name_query or not isinstance(name_query, str):
         return None
     clean_name = name_query.strip()
+    target = "admin" if staff else "user"
 
     # 1. Primary check: live Cloud Firestore
     try:
         from app.services.firestore_service import get_property_by_id_from_firestore
-        fs_p = get_property_by_id_from_firestore(clean_name)
+        fs_p = get_property_by_id_from_firestore(clean_name, target=target)
         if fs_p:
             return FirestorePropertyAdapter(fs_p)
     except Exception as e:
@@ -403,9 +459,11 @@ def get_property_by_name(db: Session, name_query: str) -> Optional[Any]:
 
     # 2. Check database (fallback when not in Firestore)
     if db is not None:
-        return db.query(Property).filter(
-            Property.property_name.ilike(f"%{clean_name}%")
+        visible = not_deleted_condition() if staff else publicly_visible_condition()
+        prop = db.query(Property).filter(
+            Property.property_name.ilike(f"%{clean_name}%"), visible
         ).first()
+        return _visible_sql_row(prop, staff)
     return None
 
 

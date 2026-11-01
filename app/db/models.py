@@ -2,9 +2,16 @@ import uuid
 from datetime import datetime
 from sqlalchemy import (
     Column, String, Text, Integer, Float, Boolean, 
-    DateTime, ForeignKey, Numeric, Index
+    DateTime, ForeignKey, Numeric, Index, Uuid, JSON
 )
-from sqlalchemy.dialects.postgresql import UUID, JSONB
+from sqlalchemy import func, or_
+from sqlalchemy.ext.hybrid import hybrid_property
+from sqlalchemy.dialects.postgresql import JSONB as PG_JSONB
+
+# Universal dialect-compatible types: native PostgreSQL JSONB/UUID, fallback to JSON/Uuid for SQLite
+JSONB = PG_JSONB().with_variant(JSON(), "sqlite")
+def UUID(as_uuid=True):
+    return Uuid(as_uuid=as_uuid)
 from sqlalchemy.orm import relationship
 from sqlalchemy.types import UserDefinedType
 from app.db.session import Base
@@ -29,16 +36,27 @@ class Property(Base):
     project_id = Column(String(64), nullable=True, index=True)
     property_name = Column(String(255), nullable=False, index=True)
     project_name = Column(String(255), nullable=True)
+    project_name_pl = Column(String(255), nullable=True)
+    project_name_en = Column(String(255), nullable=True)
+    slug_pl = Column(String(255), nullable=True, index=True)
+    slug_en = Column(String(255), nullable=True, index=True)
+    subtitle_pl = Column(String(255), nullable=True)
+    subtitle_en = Column(String(255), nullable=True)
     property_type = Column(String(64), nullable=True, index=True)  # Villa, Condominium
     status = Column(String(64), nullable=True, index=True)         # Under construction, Pre-sale, Ready to move in
 
     # Location
     country = Column(String(100), default="Thailand")
+    city = Column(String(100), nullable=True, index=True)
     province = Column(String(100), nullable=True, index=True)      # Phuket, Surat Thani
     district = Column(String(100), nullable=True, index=True)      # Bang Tao, Layan, Karon, Maenam
     subdistrict = Column(String(100), nullable=True)
     area = Column(String(100), nullable=True, index=True)          # Phuket, Samui, Koh Phangan
     address = Column(String(500), nullable=True)
+    address_en = Column(String(500), nullable=True)
+    address_pl = Column(String(500), nullable=True)
+    search_location = Column(String(500), nullable=True)
+    neighborhood_lifestyle = Column(Text, nullable=True)
     latitude = Column(Float, nullable=True)
     longitude = Column(Float, nullable=True)
 
@@ -52,6 +70,8 @@ class Property(Base):
     price_numeric_max = Column(Numeric(14, 2), nullable=True)
     currency = Column(String(10), default="THB")
     price_note = Column(Text, nullable=True)
+    expected_roi = Column(String(50), nullable=True)               # e.g. 7.5%
+    rental_yield = Column(String(50), nullable=True)               # e.g. 8.0%
 
     # Details
     bedrooms_display = Column(String(50), nullable=True)           # e.g., "2–3"
@@ -62,14 +82,38 @@ class Property(Base):
     area_sqm_min = Column(Numeric(8, 2), nullable=True, index=True)
     area_sqm_max = Column(Numeric(8, 2), nullable=True, index=True)
     units = Column(Integer, nullable=True)
+    available_units = Column(Integer, nullable=True)
     total_floors = Column(Integer, nullable=True)
+    completion_status = Column(String(100), nullable=True)
+    completion_date = Column(String(100), nullable=True)           # e.g. Q4 2026
+    tags = Column(JSONB, default=list)
 
-    # Description & Content
+    # Description & Content (Bilingual)
+    short_description_pl = Column(Text, nullable=True)
+    description_pl = Column(Text, nullable=True)
+    short_description_en = Column(Text, nullable=True)
+    description_en = Column(Text, nullable=True)
     description = Column(Text, nullable=True)
     investment_information = Column(Text, nullable=True)
     rental_information = Column(Text, nullable=True)
     payment_information = Column(Text, nullable=True)
     ownership_type = Column(String(100), nullable=True)
+
+    # Media & Video
+    video_url = Column(String(1024), nullable=True)
+
+    # Floor plans / Layouts
+    layouts = Column(JSONB, default=list)
+
+    # SEO Metadata (Bilingual)
+    seo_title_pl = Column(String(255), nullable=True)
+    seo_title_en = Column(String(255), nullable=True)
+    seo_description_pl = Column(Text, nullable=True)
+    seo_description_en = Column(Text, nullable=True)
+
+    # Publishing Flags
+    is_featured = Column(Boolean, default=False, index=True)
+    is_top_list = Column(Boolean, default=False, index=True)
 
     # Tags & Filters
     has_pool = Column(Boolean, default=False, index=True)
@@ -87,8 +131,38 @@ class Property(Base):
 
     detail_page_url = Column(String(500), nullable=True)
     is_public = Column(Boolean, default=True, index=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    # Soft delete: an archived listing keeps its row (status "Archived", is_public False) plus who/when.
+    # Mirrors Firestore `_deletedAt` / `_deletedBy`. Undo restores the row snapshot, which clears both.
+    deleted_at = Column(DateTime, nullable=True, index=True)
+    deleted_by = Column(String(255), nullable=True)
+
+    @hybrid_property
+    def is_deleted(self) -> bool:
+        return self.deleted_at is not None or (
+            self.status is not None and str(self.status).strip().lower() in ("archived", "deleted")
+        )
+
+    @is_deleted.setter
+    def is_deleted(self, val: bool) -> None:
+        if val:
+            if not self.deleted_at:
+                self.deleted_at = datetime.utcnow()
+            self.status = "Archived"
+            self.is_public = False
+        else:
+            self.deleted_at = None
+            if self.status and str(self.status).strip().lower() in ("archived", "deleted"):
+                self.status = "Available"
+            self.is_public = True
+
+    @is_deleted.expression
+    def is_deleted(cls):
+        return or_(
+            cls.deleted_at.isnot(None),
+            func.lower(cls.status).in_(("archived", "deleted"))
+        )
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, index=True)
 
     # Relationships
     images = relationship("PropertyImage", back_populates="property", cascade="all, delete-orphan")
@@ -97,8 +171,11 @@ class Property(Base):
 
     __table_args__ = (
         Index("ix_prop_search_composite", "property_type", "area", "status"),
+        Index("ix_prop_public_deleted_status", "is_public", "deleted_at", "status"),
+        Index("ix_prop_public_deleted_created", "is_public", "deleted_at", "created_at"),
         Index("ix_prop_amenities_gin", "amenities", postgresql_using="gin"),
         Index("ix_prop_features_gin", "features", postgresql_using="gin"),
+        Index("ix_prop_websites_gin", "websites", postgresql_using="gin"),
     )
 
 
@@ -115,6 +192,10 @@ class PropertyImage(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     property = relationship("Property", back_populates="images")
+
+    __table_args__ = (
+        Index("ix_property_images_prop_sort", "property_id", "sort_order"),
+    )
 
 
 class PropertySpec(Base):
@@ -146,7 +227,7 @@ class DocumentChunk(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     property_id = Column(String(64), ForeignKey("properties.property_id", ondelete="CASCADE"), nullable=True, index=True)
     document_title = Column(String(255), nullable=False)
-    source_type = Column(String(50), default="brochure")  # brochure, spec_sheet, faq, article, drive_doc
+    source_type = Column(String(50), default="brochure", index=True)  # brochure, spec_sheet, faq, article, drive_doc
     chunk_text = Column(Text, nullable=False)
     # Stored as JSONB float array with transparent migration to VECTOR(1536) once extension is activated
     embedding = Column(JSONB, nullable=True)
@@ -155,6 +236,10 @@ class DocumentChunk(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     property = relationship("Property", back_populates="documents")
+
+    __table_args__ = (
+        Index("ix_doc_chunks_prop_internal", "property_id", "is_internal_only"),
+    )
 
 
 class User(Base):
@@ -167,12 +252,12 @@ class User(Base):
     domain = Column(String(100), default="tajlandia.com", index=True)
     allowed_websites = Column(JSONB, default=list, nullable=True)  # Specific sites assigned by Super Admin: varsoviaestate.com, tajlandia.com, thai.estate
     password_hash = Column(String(255), nullable=True)
-    is_active = Column(Boolean, default=True, nullable=False)
-    status = Column(String(50), default="active", nullable=True)  # 'active', 'blocked', 'deactivated'
+    is_active = Column(Boolean, default=True, nullable=False, index=True)
+    status = Column(String(50), default="active", nullable=True, index=True)  # 'active', 'blocked', 'deactivated'
     google_email = Column(String(255), nullable=True, index=True)
     google_refresh_token = Column(Text, nullable=True)
     preferences = Column(JSONB, default=dict)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
 
     sessions = relationship("UserSession", back_populates="user", cascade="all, delete-orphan")
 
@@ -184,10 +269,14 @@ class UserSession(Base):
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     token = Column(String(255), unique=True, nullable=False, index=True)
     expires_at = Column(DateTime, nullable=False, index=True)
-    revoked_at = Column(DateTime, nullable=True)
+    revoked_at = Column(DateTime, nullable=True, index=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     user = relationship("User", back_populates="sessions")
+
+    __table_args__ = (
+        Index("ix_user_sessions_token_expires", "token", "expires_at", "revoked_at"),
+    )
 
 
 class Conversation(Base):
@@ -195,16 +284,20 @@ class Conversation(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     session_id = Column(String(128), index=True, nullable=False)
-    site_origin = Column(String(100), default="tajlandia.com")  # tajlandia.com, tajlandia.pl, thai.estate, varsoviaestate.com, admin
-    agent_type = Column(String(50), default="public")          # public (GPT), admin (Claude)
-    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    site_origin = Column(String(100), default="tajlandia.com", index=True)  # tajlandia.com, tajlandia.pl, thai.estate, varsoviaestate.com, admin
+    agent_type = Column(String(50), default="public", index=True)          # public (GPT), admin (Claude)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
     message_history = Column(JSONB, default=list)
     preferences = Column(JSONB, default=dict)
     lead_score = Column(Float, default=0.0)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, index=True)
 
-    lead = relationship("Lead", back_populates="conversation", uselist=False)
+    lead = relationship("Lead", back_populates="conversation", uselist=False, cascade="all, delete-orphan")
+
+    __table_args__ = (
+        Index("ix_conversations_site_created", "site_origin", "created_at"),
+    )
 
 
 class Lead(Base):
@@ -214,7 +307,7 @@ class Lead(Base):
     conversation_id = Column(UUID(as_uuid=True), ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False, unique=True)
     contact_name = Column(String(255), nullable=True)
     contact_email = Column(String(255), nullable=True, index=True)
-    contact_phone = Column(String(50), nullable=True)
+    contact_phone = Column(String(50), nullable=True, index=True)
     preferred_location = Column(String(100), nullable=True)
     preferred_type = Column(String(50), nullable=True)
     budget_min = Column(Numeric(14, 2), nullable=True)
@@ -222,9 +315,13 @@ class Lead(Base):
     lead_score = Column(Float, default=0.0)
     buying_signals = Column(JSONB, default=list)
     status = Column(String(50), default="new", index=True)  # new, contacted, qualified
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
 
     conversation = relationship("Conversation", back_populates="lead")
+
+    __table_args__ = (
+        Index("ix_leads_status_created", "status", "created_at"),
+    )
 
 
 class PendingAction(Base):
@@ -242,7 +339,12 @@ class PendingAction(Base):
     expires_at = Column(DateTime, nullable=False, index=True)
     confirmed_at = Column(DateTime, nullable=True)
     executed_at = Column(DateTime, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+    __table_args__ = (
+        Index("ix_pending_actions_status_expires", "status", "expires_at"),
+        Index("ix_pending_actions_staff_status", "staff_user_id", "status"),
+    )
 
 
 class AuditLog(Base):
@@ -261,3 +363,7 @@ class AuditLog(Base):
     pending_action_id = Column(String(128), nullable=True, index=True)
     request_id = Column(String(128), nullable=True, index=True)
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+    __table_args__ = (
+        Index("ix_audit_logs_staff_created", "staff_user_id", "created_at"),
+    )

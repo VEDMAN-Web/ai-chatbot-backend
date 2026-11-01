@@ -35,6 +35,9 @@
       <button class="mode-tab" id="tabAdmin" onclick="setAgentMode('admin')">
         Admin Team
       </button>
+      <button class="mode-tab" id="tabSuperAdmin" onclick="setAgentMode('superadmin')" style="display: none;">
+        Super Admin
+      </button>
     </div>
 
     <!-- Sidebar Language Switcher (EN / PL / TH) -->
@@ -87,6 +90,10 @@
           <span class="choice-icon">⚡</span>
           <span id="topBtnAdminText">Test Admin Side Chatbot</span>
         </button>
+        <button class="top-choice-btn" id="topBtnSuperAdmin" onclick="setAgentMode('superadmin')" style="display: none;">
+          <span class="choice-icon">👑</span>
+          <span id="topBtnSuperAdminText">Super Admin</span>
+        </button>
       </div>
 
       <!-- Top Language Switcher (EN / PL / TH) -->
@@ -130,10 +137,22 @@
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path><path d="M13.73 21a2 2 0 0 1-3.46 0"></path></svg>
         </div>
 
+        <button class="btn-secondary" id="btnManageProperties" onclick="openPropertyCrudModal()" style="display: none;" title="Manage Property Portfolio Listings (CRUD)">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect></svg>
+          <span id="btnManagePropertiesLabel">Manage Listings</span>
+        </button>
+
+        <button class="btn-secondary" id="btnSuperAdminTop" onclick="openSuperAdminModal()" style="display: none;" title="Super Admin directory and system settings">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"></path></svg>
+          <span id="btnSuperAdminTopLabel">Super Admin</span>
+        </button>
+
+        <span class="role-badge" id="staffRoleBadge" style="display: none;"></span>
+
         <button class="btn-secondary" id="btnAdminLoginTop" onclick="openAdminLoginModal()" title="Admin login" style="display: none;">
           <span id="btnAdminLoginTopLabel">Staff Login</span>
         </button>
-        <div class="avatar-btn" id="staffAvatarBtn" title="Staff Account" onclick="if(currentMode==='admin') openAdminLoginModal()">
+        <div class="avatar-btn" id="staffAvatarBtn" title="Staff Account" onclick="if(currentMode==='admin' || currentMode==='superadmin') openAdminLoginModal()">
           TJ
         </div>
       </div>
@@ -607,6 +626,393 @@
   <div class="app-modal-footer">
     <button class="btn-modal-secondary" onclick="closeAdminLoginModal()">Cancel</button>
     <button class="btn-modal-primary" id="btnAdminLogin" onclick="submitAdminLogin()">Sign in</button>
+  </div>
+</div>
+
+<!-- ================= 0. Image Lightbox Modal ================= -->
+<div class="image-lightbox" id="lightboxModal" style="display: none;" onclick="if(event.target===this) closeLightbox()">
+  <div class="lightbox-content">
+    <button class="lightbox-close" onclick="closeLightbox()" title="Close">&times;</button>
+    <img src="" class="lightbox-img" id="lightboxImg" alt="Preview" />
+    <div class="lightbox-caption" id="lightboxCaption"></div>
+  </div>
+</div>
+
+<!-- ================= 5. Property Portfolio CRUD Management Modal ================= -->
+<div class="app-modal-overlay" id="propertyCrudModalOverlay" onclick="closePropertyCrudModal()" style="display: none;"></div>
+<div class="app-modal crud-modal" id="propertyCrudModal" style="display: none;">
+  <div class="app-modal-header">
+    <div class="app-modal-title-wrap">
+      <div class="app-modal-icon">🏢</div>
+      <div>
+        <div class="app-modal-title">Property Listings Portfolio (CRUD)</div>
+        <div class="app-modal-subtitle">Direct management across PostgreSQL & Cloud Firestore catalogs</div>
+      </div>
+    </div>
+    <div style="display: flex; gap: 8px; align-items: center;">
+      <button class="btn-modal-primary" onclick="openPropertyFormModal('create')" style="padding: 6px 14px; font-size: 12.5px;">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+        <span>Add Listing</span>
+      </button>
+      <button class="app-modal-close" onclick="closePropertyCrudModal()">&times;</button>
+    </div>
+  </div>
+
+  <div class="app-modal-body" style="padding: 16px 20px;">
+    <!-- Filter Toolbar -->
+    <div class="crud-toolbar">
+      <div class="crud-filter-row">
+        <input type="text" id="crudFilterSearch" class="crud-input" placeholder="Search ID, title, project..." style="min-width: 200px;" onkeydown="if(event.key==='Enter') loadCrudProperties(0)" />
+        <select id="crudFilterType" class="crud-select" onchange="loadCrudProperties(0)">
+          <option value="">All Property Types</option>
+          <option value="Villa">Villa / Pool Villa</option>
+          <option value="Condominium">Condominium</option>
+          <option value="Apartment">Apartment</option>
+          <option value="Townhouse">Townhouse</option>
+          <option value="Penthouse">Penthouse</option>
+        </select>
+        <select id="crudFilterStatus" class="crud-select" onchange="loadCrudProperties(0)">
+          <option value="">All Statuses</option>
+          <option value="Available">Available</option>
+          <option value="For sale">For sale</option>
+          <option value="Archived">Archived (Soft Deleted)</option>
+          <option value="Reserved">Reserved</option>
+          <option value="Sold Out">Sold Out</option>
+        </select>
+        <input type="text" id="crudFilterLocation" class="crud-input" placeholder="Location/City" style="width: 130px;" onkeydown="if(event.key==='Enter') loadCrudProperties(0)" />
+        <button class="btn-modal-secondary" onclick="loadCrudProperties(0)" style="padding: 7px 14px;">Filter</button>
+        <button class="btn-modal-secondary" onclick="resetCrudFilters()" style="padding: 7px 10px;" title="Reset filters">↺</button>
+      </div>
+      <div>
+        <span id="crudCountSummary" style="font-size: 12.5px; color: var(--text-muted);">0 listings</span>
+      </div>
+    </div>
+
+    <!-- Error Banner -->
+    <div id="crudErrorBanner" class="modal-alert-info" style="display: none; border-color: var(--accent-red); color: #f87171;"></div>
+
+    <!-- Table Wrapper -->
+    <div class="crud-table-wrap">
+      <table class="crud-table">
+        <thead>
+          <tr>
+            <th style="width: 140px;">Property ID</th>
+            <th>Project & Name</th>
+            <th>Type</th>
+            <th>Location</th>
+            <th>Price</th>
+            <th>Status</th>
+            <th style="width: 150px; text-align: right;">Actions</th>
+          </tr>
+        </thead>
+        <tbody id="crudPropertiesTableBody">
+          <tr>
+            <td colspan="7" style="text-align: center; padding: 40px; color: var(--text-dim);">Loading listings...</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- Pagination -->
+    <div class="crud-pagination">
+      <div id="crudPaginationInfo">Showing page 1</div>
+      <div class="pagination-controls">
+        <button class="btn-page" id="crudPrevBtn" onclick="navigateCrudPage(-1)" disabled>Previous</button>
+        <span id="crudPageBadge" style="font-weight: 600; padding: 0 4px;">Page 1</span>
+        <button class="btn-page" id="crudNextBtn" onclick="navigateCrudPage(1)" disabled>Next</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="app-modal-footer">
+    <button class="btn-modal-secondary" onclick="closePropertyCrudModal()">Close</button>
+    <button class="btn-modal-primary" onclick="openPropertyFormModal('create')">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+      Add New Listing
+    </button>
+  </div>
+</div>
+
+<!-- ================= 6. Property Create / Edit Form Modal ================= -->
+<div class="app-modal-overlay" id="propertyFormModalOverlay" onclick="closePropertyFormModal()" style="display: none;"></div>
+<div class="app-modal" id="propertyFormModal" style="display: none; max-width: 680px;">
+  <div class="app-modal-header">
+    <div class="app-modal-title-wrap">
+      <div class="app-modal-icon" id="formModalIcon">➕</div>
+      <div>
+        <div class="app-modal-title" id="formModalTitle">Add New Property Listing</div>
+        <div class="app-modal-subtitle" id="formModalSubtitle">Saved to PostgreSQL and synced with Cloud Firestore</div>
+      </div>
+    </div>
+    <button class="app-modal-close" onclick="closePropertyFormModal()">&times;</button>
+  </div>
+
+  <div class="app-modal-body" style="gap: 14px; max-height: 72vh;">
+    <input type="hidden" id="formPropMode" value="create" />
+    <input type="hidden" id="formPropOriginalId" value="" />
+
+    <div class="modal-form-row">
+      <div class="modal-form-group" style="flex: 1;">
+        <label class="modal-form-label">Property ID <span id="formPropIdHint" style="color:var(--text-dim); font-size:11px;">(Auto-generated if empty)</span></label>
+        <input type="text" id="formPropId" class="modal-form-input" placeholder="e.g. villa-bang-tao-101" />
+      </div>
+      <div class="modal-form-group" style="flex: 1;">
+        <label class="modal-form-label">Property Type *</label>
+        <select id="formPropType" class="modal-form-input">
+          <option value="Villa">Villa / Pool Villa</option>
+          <option value="Condominium">Condominium</option>
+          <option value="Apartment">Apartment</option>
+          <option value="Townhouse">Townhouse</option>
+          <option value="Penthouse">Penthouse</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="modal-form-row">
+      <div class="modal-form-group">
+        <label class="modal-form-label">Project Name (EN) *</label>
+        <input type="text" id="formPropNameEn" class="modal-form-input" placeholder="e.g. Layan Palm Luxury Villa" />
+      </div>
+      <div class="modal-form-group">
+        <label class="modal-form-label">Project Name (PL) *</label>
+        <input type="text" id="formPropNamePl" class="modal-form-input" placeholder="e.g. Luksusowa Willa Layan Palm" />
+      </div>
+    </div>
+
+    <div class="modal-form-row">
+      <div class="modal-form-group">
+        <label class="modal-form-label">City / Destination *</label>
+        <input type="text" id="formPropCity" class="modal-form-input" placeholder="e.g. Phuket, Bang Tao, Koh Samui" />
+      </div>
+      <div class="modal-form-group">
+        <label class="modal-form-label">Country *</label>
+        <input type="text" id="formPropCountry" class="modal-form-input" value="Thailand" />
+      </div>
+    </div>
+
+    <div class="modal-form-row">
+      <div class="modal-form-group">
+        <label class="modal-form-label">Price From *</label>
+        <input type="number" id="formPropPriceFrom" class="modal-form-input" placeholder="e.g. 15000000" />
+      </div>
+      <div class="modal-form-group">
+        <label class="modal-form-label">Price To (Optional)</label>
+        <input type="number" id="formPropPriceTo" class="modal-form-input" placeholder="e.g. 22000000" />
+      </div>
+      <div class="modal-form-group" style="max-width: 100px;">
+        <label class="modal-form-label">Currency</label>
+        <select id="formPropCurrency" class="modal-form-input">
+          <option value="THB">THB</option>
+          <option value="EUR">EUR</option>
+          <option value="USD">USD</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="modal-form-row">
+      <div class="modal-form-group">
+        <label class="modal-form-label">Bedrooms</label>
+        <input type="number" id="formPropBedrooms" class="modal-form-input" placeholder="e.g. 3" min="0" />
+      </div>
+      <div class="modal-form-group">
+        <label class="modal-form-label">Bathrooms</label>
+        <input type="number" id="formPropBathrooms" class="modal-form-input" placeholder="e.g. 4" min="0" />
+      </div>
+      <div class="modal-form-group">
+        <label class="modal-form-label">Usable Area (sqm)</label>
+        <input type="text" id="formPropArea" class="modal-form-input" placeholder="e.g. 380 sqm" />
+      </div>
+    </div>
+
+    <div class="modal-form-row" style="align-items: center;">
+      <div class="modal-form-group" style="flex: 1;">
+        <label class="modal-form-label">Status</label>
+        <select id="formPropStatus" class="modal-form-input">
+          <option value="Available">Available (Active & In Catalog)</option>
+          <option value="For sale">For sale</option>
+          <option value="Archived">Archived (Soft Deleted / Hidden)</option>
+          <option value="Reserved">Reserved</option>
+          <option value="Sold Out">Sold Out</option>
+          <option value="Under construction">Under construction</option>
+        </select>
+      </div>
+      <div class="modal-form-group" style="display: flex; align-items: center; gap: 8px; margin-top: 18px;">
+        <input type="checkbox" id="formPropPool" style="width: 18px; height: 18px; accent-color: var(--gold);" />
+        <label for="formPropPool" style="font-size: 13px; color: #ffffff; cursor: pointer;">Private Swimming Pool</label>
+      </div>
+    </div>
+
+    <div class="modal-form-group">
+      <label class="modal-form-label">Cover Image URL</label>
+      <input type="url" id="formPropImage" class="modal-form-input" placeholder="https://images.unsplash.com/..." />
+    </div>
+
+    <div class="modal-form-group">
+      <label class="modal-form-label">Websites / Domains</label>
+      <div style="display: flex; gap: 16px; margin-top: 4px;">
+        <label style="display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--text-main); cursor: pointer;">
+          <input type="checkbox" class="form-site-chk" value="tajlandia.com" checked style="accent-color: var(--gold);" /> tajlandia.com
+        </label>
+        <label style="display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--text-main); cursor: pointer;">
+          <input type="checkbox" class="form-site-chk" value="varsoviaestate.com" checked style="accent-color: var(--gold);" /> varsoviaestate.com
+        </label>
+        <label style="display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--text-main); cursor: pointer;">
+          <input type="checkbox" class="form-site-chk" value="thai.estate" checked style="accent-color: var(--gold);" /> thai.estate
+        </label>
+      </div>
+    </div>
+
+    <div id="formModalError" class="modal-alert-info" style="display: none; border-color: var(--accent-red); color: #f87171;"></div>
+  </div>
+
+  <div class="app-modal-footer">
+    <button class="btn-modal-secondary" onclick="closePropertyFormModal()">Cancel</button>
+    <button class="btn-modal-primary" id="btnSaveProperty" onclick="submitPropertyForm()">
+      <span id="btnSavePropertyText">Save Property</span>
+    </button>
+  </div>
+</div>
+
+<!-- ================= 7. Property Delete Confirmation Dialog Modal ================= -->
+<div class="app-modal-overlay" id="propertyDeleteModalOverlay" onclick="closePropertyDeleteModal()" style="display: none;"></div>
+<div class="app-modal" id="propertyDeleteModal" style="display: none; max-width: 520px;">
+  <div class="app-modal-header">
+    <div class="app-modal-title-wrap">
+      <div class="app-modal-icon">⚠️</div>
+      <div>
+        <div class="app-modal-title">Delete Listing Confirmation</div>
+        <div class="app-modal-subtitle">Select Soft Delete (Safe) or Permanent Hard Delete</div>
+      </div>
+    </div>
+    <button class="app-modal-close" onclick="closePropertyDeleteModal()">&times;</button>
+  </div>
+
+  <div class="app-modal-body" style="gap: 14px;">
+    <div class="modal-form-property-chip">
+      <span class="form-prop-label">Target Property:</span>
+      <strong id="deleteModalPropName">Listing Name</strong>
+      <span class="form-prop-id" id="deleteModalPropId">prop-id</span>
+    </div>
+
+    <!-- Soft vs Hard Delete Choice -->
+    <div style="display: flex; flex-direction: column; gap: 10px;">
+      <!-- Option 1: Soft Delete -->
+      <label class="delete-choice-card selected" id="cardSoftDelete" onclick="selectDeleteType('soft')">
+        <input type="radio" name="deleteTypeChoice" value="soft" checked style="accent-color: var(--gold);" />
+        <div>
+          <div style="font-weight: 700; color: #fbbf24; font-size: 13.5px;">📦 Soft Delete (Archive Listing)</div>
+          <div style="font-size: 12px; color: var(--text-muted); margin-top: 2px;">
+            Hides listing from public website searches and customer chatbot inquiries. Safe and reversible anytime.
+          </div>
+        </div>
+      </label>
+
+      <!-- Option 2: Hard Delete -->
+      <label class="delete-choice-card danger" id="cardHardDelete" onclick="selectDeleteType('hard')">
+        <input type="radio" name="deleteTypeChoice" value="hard" style="accent-color: var(--accent-red);" />
+        <div>
+          <div style="font-weight: 700; color: #f87171; font-size: 13.5px;">💥 Permanent Hard Delete (Destructive)</div>
+          <div style="font-size: 12px; color: var(--text-muted); margin-top: 2px;">
+            Permanently purges record from PostgreSQL and Cloud Firestore. Cannot be restored without manual snapshot.
+          </div>
+        </div>
+      </label>
+    </div>
+
+    <!-- Confirmation input for Hard Delete -->
+    <div id="hardDeleteConfirmBox" style="display: none; padding: 12px; background: rgba(239, 68, 68, 0.08); border: 1px solid rgba(239, 68, 68, 0.3); border-radius: var(--radius-sm);">
+      <div style="font-size: 12px; color: #f87171; font-weight: 600; margin-bottom: 6px;">
+        To confirm permanent deletion, type the property ID (<code id="deleteConfirmTargetId" style="color: #ffffff;"></code>) below:
+      </div>
+      <input type="text" id="deleteConfirmInput" class="modal-form-input" placeholder="Type property ID here" oninput="validateDeleteConfirmInput()" />
+    </div>
+
+    <div id="deleteModalError" class="modal-alert-info" style="display: none; border-color: var(--accent-red); color: #f87171;"></div>
+  </div>
+
+  <div class="app-modal-footer">
+    <button class="btn-modal-secondary" onclick="closePropertyDeleteModal()">Cancel</button>
+    <button class="btn-modal-warning" id="btnExecuteDelete" onclick="submitDeleteProperty()">
+      <span>Archive Listing</span>
+    </button>
+  </div>
+</div>
+
+<!-- ================= 8. Super Admin User Directory & System Config Modal ================= -->
+<div class="app-modal-overlay" id="superAdminModalOverlay" onclick="closeSuperAdminModal()" style="display: none;"></div>
+<div class="app-modal crud-modal" id="superAdminModal" style="display: none;">
+  <div class="app-modal-header">
+    <div class="app-modal-title-wrap">
+      <div class="app-modal-icon">👑</div>
+      <div>
+        <div class="app-modal-title">Super Admin Control Center</div>
+        <div class="app-modal-subtitle">Staff User Directory, Access Roles & System Configuration</div>
+      </div>
+    </div>
+    <button class="app-modal-close" onclick="closeSuperAdminModal()">&times;</button>
+  </div>
+
+  <!-- Tabs -->
+  <div class="batch-modal-tabs" style="padding: 0 24px;">
+    <button class="batch-tab-btn active" id="tabBtnSuperUsers" onclick="switchSuperAdminTab('users')">
+      <span>👥 Staff Users Directory</span>
+    </button>
+    <button class="batch-tab-btn" id="tabBtnSuperConfig" onclick="switchSuperAdminTab('config')">
+      <span>⚙️ System & AI Engine Config</span>
+    </button>
+  </div>
+
+  <div class="app-modal-body" style="padding: 16px 24px;">
+    <!-- TAB 1: USERS DIRECTORY -->
+    <div id="superTabUsersView">
+      <div class="crud-toolbar" style="margin-bottom: 12px;">
+        <div class="crud-filter-row">
+          <input type="text" id="superUserSearch" class="crud-input" placeholder="Search staff name or email..." style="min-width: 220px;" onkeydown="if(event.key==='Enter') loadSuperAdminUsers()" />
+          <select id="superUserRoleFilter" class="crud-select" onchange="loadSuperAdminUsers()">
+            <option value="">All Roles</option>
+            <option value="super_admin">Super Admin</option>
+            <option value="admin">Admin</option>
+            <option value="worker">Worker / Agent</option>
+          </select>
+          <button class="btn-modal-secondary" onclick="loadSuperAdminUsers()" style="padding: 7px 14px;">Search</button>
+        </div>
+        <button class="btn-refresh-history" onclick="loadSuperAdminUsers()">🔄 Refresh Directory</button>
+      </div>
+
+      <div class="crud-table-wrap" style="max-height: 48vh;">
+        <table class="crud-table">
+          <thead>
+            <tr>
+              <th>Staff User</th>
+              <th>Role</th>
+              <th>Domain</th>
+              <th>Status</th>
+              <th>Created At</th>
+            </tr>
+          </thead>
+          <tbody id="superUsersTableBody">
+            <tr>
+              <td colspan="5" style="text-align: center; padding: 30px; color: var(--text-dim);">Loading staff accounts...</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- TAB 2: SYSTEM CONFIG -->
+    <div id="superTabConfigView" style="display: none;">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px;">
+        <span style="font-size: 13px; color: var(--text-muted);">Real-time infrastructure configuration & API telemetry:</span>
+        <button class="btn-refresh-history" onclick="loadSystemConfigStatus()">🔄 Refresh Status</button>
+      </div>
+      <div class="config-grid" id="superConfigGrid">
+        <div class="batch-loading-placeholder">Loading system configuration...</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="app-modal-footer">
+    <button class="btn-modal-secondary" onclick="closeSuperAdminModal()">Close</button>
   </div>
 </div>
 

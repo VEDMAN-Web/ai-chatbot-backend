@@ -1,3 +1,4 @@
+import hmac
 import logging
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List
@@ -109,18 +110,17 @@ def verify_firestore_admin_credentials(email: str, password: str) -> Optional[Di
     # 1. Verify bcrypt hash if present
     if stored_hash and verify_password(password, stored_hash):
         is_verified = True
-    # 2. Verify direct match with plaintext password if configured in Firebase Console
-    elif stored_plain and password == str(stored_plain):
-        is_verified = True
-    # 3. Verify if password was placed directly into passwordHash field as plaintext
-    elif stored_hash and password == str(stored_hash):
+    # 2. Legacy: plaintext password set by hand in the Firebase Console (hmac compare; new writes never store it).
+    # The old third branch accepted the stored bcrypt hash itself as a password ("pass-the-hash") and was removed.
+    elif stored_plain and hmac.compare_digest(str(password), str(stored_plain)):
         is_verified = True
 
     if is_verified:
         return {
             "email": admin_doc.get("email") or email.strip().lower(),
             "name": admin_doc.get("name") or "Admin Staff",
-            "role": admin_doc.get("role") or "super_admin",
+            # A doc without a role gets least privilege, never super_admin.
+            "role": admin_doc.get("role") or "worker",
             "is_active": True,
             "id": admin_doc.get("id") or email.strip().lower(),
             "password_hash": stored_hash or hash_password(password)
@@ -152,8 +152,7 @@ def add_or_update_admin_in_firestore(
 
     payload = {
         "email": email_clean,
-        "password": password,
-        "passwordHash": hashed,
+        "passwordHash": hashed,  # never store the plaintext password
         "role": role,
         "name": name,
         "domain": target_domain,
@@ -204,6 +203,7 @@ def add_or_update_admin_in_firestore(
         payload["status"] = "active"
 
     doc_ref.set(payload, merge=True)
+    _drop_plaintext_password(doc_ref)
     logger.info(f"Successfully configured admin '{email_clean}' for domain '{target_domain}' in Firestore collection '{ADMIN_AUTH_COLLECTION}'.")
     return payload
 
@@ -239,7 +239,7 @@ def sync_firestore_admin_to_local_db(
         user = User(
             email=email_clean,
             name=firestore_admin.get("name") or "Admin Staff",
-            role=firestore_admin.get("role") or "super_admin",
+            role=firestore_admin.get("role") or "worker",
             domain=fs_domain,
             password_hash=pw_hash,
             is_active=fs_active,
@@ -256,10 +256,15 @@ def sync_firestore_admin_to_local_db(
         # Update role, domain, password_hash, status, or allowed_websites if changed
         if pw_hash and user.password_hash != pw_hash:
             user.password_hash = pw_hash
-        user.role = firestore_admin.get("role") or user.role or "super_admin"
-        user.is_active = fs_active
-        user.status = fs_status
-        if fs_domain and (not getattr(user, "domain", None) or user.domain != fs_domain):
+        # Postgres is authoritative for an existing account's role, domain and block state; it is what
+        # /auth/admin/users manages. Copying them from Firestore at login let a stray or role-less
+        # Firestore doc promote a worker to super_admin and re-homed every user to the server's domain.
+        if not user.role:
+            user.role = firestore_admin.get("role") or "worker"
+        if (user.status or "active") == "active" and getattr(user, "is_active", True):
+            user.is_active = fs_active
+            user.status = fs_status
+        if fs_domain and not getattr(user, "domain", None):
             user.domain = fs_domain
         if fs_websites:
             user.allowed_websites = list(fs_websites)
@@ -271,6 +276,15 @@ def sync_firestore_admin_to_local_db(
         db.refresh(user)
 
     return user
+
+
+def _drop_plaintext_password(doc_ref: Any) -> None:
+    """Remove a legacy plaintext `password` field once a hash has been written."""
+    try:
+        from google.cloud import firestore as _fs
+        doc_ref.update({"password": _fs.DELETE_FIELD})
+    except Exception as exc:
+        logger.debug("Could not remove plaintext password field: %s", exc)
 
 
 def update_admin_password_in_firestore(email: str, new_password: str) -> bool:
@@ -287,7 +301,7 @@ def update_admin_password_in_firestore(email: str, new_password: str) -> bool:
     client = get_firestore_client()
     if not client:
         if email_clean in _LOCAL_ADMIN_STORE:
-            _LOCAL_ADMIN_STORE[email_clean]["password"] = new_password
+            _LOCAL_ADMIN_STORE[email_clean].pop("password", None)
             _LOCAL_ADMIN_STORE[email_clean]["passwordHash"] = hashed
             _LOCAL_ADMIN_STORE[email_clean]["updatedAt"] = now_iso
         try:
@@ -309,10 +323,10 @@ def update_admin_password_in_firestore(email: str, new_password: str) -> bool:
 
         if doc.exists:
             doc_ref.update({
-                "password": new_password,
                 "passwordHash": hashed,
                 "updatedAt": now_iso
             })
+            _drop_plaintext_password(doc_ref)
             logger.info(f"Updated password for admin '{email_clean}' in Firestore doc '{email_clean}'.")
             return True
 
@@ -326,34 +340,35 @@ def update_admin_password_in_firestore(email: str, new_password: str) -> bool:
         if docs:
             target_ref = col.document(docs[0].id)
             target_ref.update({
-                "password": new_password,
                 "passwordHash": hashed,
                 "updatedAt": now_iso
             })
+            _drop_plaintext_password(target_ref)
             logger.info(f"Updated password for admin '{email_clean}' in Firestore doc '{docs[0].id}'.")
             return True
 
-        # Fallback: create or merge
-        doc_ref.set({
-            "email": email_clean,
-            "password": new_password,
-            "passwordHash": hashed,
-            "updatedAt": now_iso,
-            "isActive": True,
-            "role": "super_admin"
-        }, merge=True)
-        logger.info(f"Created/merged password for admin '{email_clean}' in Firestore doc '{email_clean}'.")
-        return True
+        # No Firestore account: do not create one here. (The old fallback created a doc with
+        # role "super_admin", which the next login copied into Postgres - privilege escalation.)
+        # The caller updates the Postgres password, which is enough to log in.
+        logger.info("No Firestore admin doc for '%s'; password updated in Postgres only.", email_clean)
+        return False
 
     except Exception as e:
         logger.error(f"Error updating Firestore password for '{email_clean}': {e}")
         return False
 
 
-def generate_password_reset_token(email: str, expires_in_seconds: int = 1800) -> str:
+def password_fingerprint(password_hash: Optional[str]) -> str:
+    """Short digest of the account's current password hash. Binding reset tokens to it makes every token
+    single-use: once the password changes (by this reset or any other way) older tokens stop verifying."""
+    import hashlib
+    return hashlib.sha256((password_hash or "no-password").encode()).hexdigest()[:16]
+
+
+def generate_password_reset_token(email: str, expires_in_seconds: int = 1800, current_password_hash: Optional[str] = None) -> str:
     """
     Generates a cryptographically signed HMAC token for admin password reset.
-    Valid for the specified duration (default: 30 minutes).
+    Valid for the specified duration (default: 30 minutes) and only while the password is unchanged.
     """
     import hmac
     import hashlib
@@ -364,16 +379,21 @@ def generate_password_reset_token(email: str, expires_in_seconds: int = 1800) ->
     secret = settings.INTERNAL_API_SECRET or settings.SECRET_KEY or "tajlandia-reset-secret"
     exp = int(time.time()) + expires_in_seconds
     email_clean = (email or "").strip().lower()
-    payload = f"reset:{email_clean}:{exp}"
+    fp = password_fingerprint(current_password_hash)
+    payload = f"reset:{email_clean}:{exp}:{fp}"
     signature = hmac.new(secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
     raw = f"{payload}:{signature}"
     return urllib.parse.quote(raw)
 
 
-def verify_password_reset_token(token: str, expected_email: Optional[str] = None) -> Optional[str]:
+def verify_password_reset_token(
+    token: str,
+    expected_email: Optional[str] = None,
+    current_password_hash: Optional[str] = None,
+) -> Optional[str]:
     """
-    Verifies the HMAC signature and timestamp of a password reset token.
-    Returns the verified email address if valid, or None if invalid/expired.
+    Verifies the HMAC signature, timestamp and password fingerprint of a password reset token.
+    Returns the verified email address if valid, or None if invalid/expired/already used.
     """
     import hmac
     import hashlib
@@ -388,16 +408,19 @@ def verify_password_reset_token(token: str, expected_email: Optional[str] = None
         secret = settings.INTERNAL_API_SECRET or settings.SECRET_KEY or "tajlandia-reset-secret"
         decoded = urllib.parse.unquote(token.strip())
         parts = decoded.split(":")
-        if len(parts) != 4 or parts[0] != "reset":
+        if len(parts) != 5 or parts[0] != "reset":
             return None
 
-        _, token_email, exp_str, sig = parts
+        _, token_email, exp_str, fp, sig = parts
         exp = int(exp_str)
         if time.time() > exp:
             logger.warning(f"Password reset token expired for '{token_email}'.")
             return None
+        if not hmac.compare_digest(fp, password_fingerprint(current_password_hash)):
+            logger.warning(f"Password reset token for '{token_email}' was already used or the password changed.")
+            return None
 
-        payload = f"reset:{token_email}:{exp_str}"
+        payload = f"reset:{token_email}:{exp_str}:{fp}"
         expected_sig = hmac.new(secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
         if not hmac.compare_digest(sig, expected_sig):
             logger.warning(f"Invalid reset token signature for '{token_email}'.")
@@ -507,8 +530,13 @@ def update_admin_in_firestore(
         if not is_active and "status" not in updates:
             updates["isBlocked"] = True
     if password is not None and password.strip():
-        updates["password"] = password.strip()
+        # Hash only; the legacy plaintext field is removed (never written).
         updates["passwordHash"] = hash_password(password.strip())
+        try:
+            from google.cloud import firestore as _fs
+            updates["password"] = _fs.DELETE_FIELD
+        except Exception:
+            pass
     if allowed_websites is not None:
         updates["allowed_websites"] = list(allowed_websites)
         updates["websites"] = list(allowed_websites)

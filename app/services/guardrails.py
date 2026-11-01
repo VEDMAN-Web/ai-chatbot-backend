@@ -725,8 +725,8 @@ class ThaiPropertyLegalGuardrail:
         u_low = (user_message or "").lower()
         resp_low = (response_text or "").lower()
 
-        asked_land = any(k in u_low for k in cls.PRESSURE_LAND_KEYWORDS)
-        asked_tax = any(k in u_low for k in cls.PRESSURE_TAX_KEYWORDS)
+        asked_land = any(k in u_low for k in cls.PRESSURE_LAND_KEYWORDS) or bool(re.search(r"\bown\s+(?:the\s+)?land\b|\bland\s+(?:100%|freehold)\b|\bfreehold\s+land\b", u_low))
+        asked_tax = any(k in u_low for k in cls.PRESSURE_TAX_KEYWORDS) or bool(re.search(r"\btax[\s-]free\b|\bno\s+tax(?:es)?\b", u_low))
         pressured = any(re.search(p, u_low) for p in cls.LEADING_PRESSURE_PATTERNS)
 
         if (asked_land or asked_tax) and pressured:

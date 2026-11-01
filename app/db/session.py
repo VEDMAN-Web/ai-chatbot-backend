@@ -27,12 +27,17 @@ def _normalize_db_url(url: str) -> str:
 def _create_db_engine(raw_url: str, label: str):
     url = _normalize_db_url(raw_url)
     try:
-        eng = create_engine(
-            url,
-            pool_pre_ping=True,
-            pool_size=10,
-            max_overflow=20
-        )
+        if url.startswith("sqlite"):
+            eng = create_engine(url, connect_args={"check_same_thread": False})
+        else:
+            eng = create_engine(
+                url,
+                pool_pre_ping=True,
+                pool_size=10,
+                max_overflow=20,
+                pool_recycle=1800,
+                pool_timeout=30,
+            )
         logger.info(f"Initialized {label} database engine.")
         return eng
     except Exception as e:
@@ -55,44 +60,75 @@ engine = admin_engine
 SessionLocal = AdminSessionLocal
 
 
+def _patch_sqlite_fallback(eng) -> None:
+    from app.db.schema_sync import ensure_sqlite_fallback_columns
+    ensure_sqlite_fallback_columns(eng)
+
+
 def get_admin_db() -> Generator[Session, None, None]:
     """Provides a database session connected to the dedicated Admin Database (ADMIN_DATABASE_URL)."""
     global AdminSessionLocal, admin_engine
+    db = None
     try:
         db = AdminSessionLocal()
         db.connection()
-    except Exception:
+    except Exception as exc:
+        if db:
+            try:
+                db.close()
+            except Exception:
+                pass
+        logger.warning(f"Admin DB connection failed ({exc}). Using local SQLite cache fallback.")
         sqlite_url = "sqlite:///./data/local_admin_cache.db"
         os.makedirs("data", exist_ok=True)
         admin_engine = create_engine(sqlite_url, connect_args={"check_same_thread": False})
         Base.metadata.create_all(bind=admin_engine)
+        _patch_sqlite_fallback(admin_engine)
         AdminSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=admin_engine)
         db = AdminSessionLocal()
 
     try:
         yield db
+    except Exception:
+        if db:
+            db.rollback()
+        raise
     finally:
-        db.close()
+        if db:
+            db.close()
 
 
 def get_user_db() -> Generator[Session, None, None]:
     """Provides a database session connected to the dedicated User / Public Database (USER_DATABASE_URL)."""
     global UserSessionLocal, user_engine
+    db = None
     try:
         db = UserSessionLocal()
         db.connection()
-    except Exception:
+    except Exception as exc:
+        if db:
+            try:
+                db.close()
+            except Exception:
+                pass
+        logger.warning(f"User DB connection failed ({exc}). Using local SQLite cache fallback.")
         sqlite_url = "sqlite:///./data/local_user_cache.db"
         os.makedirs("data", exist_ok=True)
         user_engine = create_engine(sqlite_url, connect_args={"check_same_thread": False})
         Base.metadata.create_all(bind=user_engine)
+        _patch_sqlite_fallback(user_engine)
         UserSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=user_engine)
         db = UserSessionLocal()
 
     try:
         yield db
+    except Exception:
+        if db:
+            db.rollback()
+        raise
     finally:
-        db.close()
+        if db:
+            db.close()
 
 
 def get_db(target: str = "admin") -> Generator[Session, None, None]:

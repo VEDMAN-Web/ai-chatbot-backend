@@ -14,16 +14,23 @@ from app.services.firestore_auth_service import (
 client = TestClient(app)
 
 
+def _emailed_style_token(email: str) -> str:
+    """The token the server emails: bound to the account's current password hash (never returned by the API)."""
+    from app.api.v1.auth import _current_password_hash
+    return generate_password_reset_token(email, current_password_hash=_current_password_hash(email, None))
+
+
 def test_forgot_password_generates_token_and_rejects_invalid_email():
-    """Verifies that forgot-password generates a valid reset token for existing admin and rejects unknown emails."""
-    # 1. Non-existent email -> 404
+    """forgot-password answers the same for known and unknown emails and never returns the token (it is emailed)."""
+    # 1. Non-existent email -> same generic 200 (no account enumeration)
     resp = client.post(
         "/api/v1/auth/forgot-password",
         json={"email": f"nonexistent_{uuid.uuid4().hex[:8]}@tajlandia.com"}
     )
-    assert resp.status_code == 404
+    assert resp.status_code == 200
+    assert resp.json()["reset_token"] is None
 
-    # 2. Existing admin -> 200 with reset token
+    # 2. Existing admin -> 200, token NOT in the response
     resp = client.post(
         "/api/v1/auth/forgot-password",
         json={"email": "admin@tajlandia.com"}
@@ -31,12 +38,17 @@ def test_forgot_password_generates_token_and_rejects_invalid_email():
     assert resp.status_code == 200
     data = resp.json()
     assert data["success"] is True
-    assert "reset_token" in data
+    assert data["reset_token"] is None
     assert data["email"] == "admin@tajlandia.com"
     assert data["expires_in"] == 1800
 
-    # Verify the token is cryptographically valid
-    verified_email = verify_password_reset_token(data["reset_token"], expected_email="admin@tajlandia.com")
+    # A token minted the way the server mints the emailed one is cryptographically valid
+    from app.api.v1.auth import _current_password_hash
+    token = _emailed_style_token("admin@tajlandia.com")
+    verified_email = verify_password_reset_token(
+        token, expected_email="admin@tajlandia.com",
+        current_password_hash=_current_password_hash("admin@tajlandia.com", None),
+    )
     assert verified_email == "admin@tajlandia.com"
 
 
@@ -63,7 +75,8 @@ def test_reset_password_flow_and_tamper_rejection():
         json={"email": test_email}
     )
     assert forgot_resp.status_code == 200
-    reset_token = forgot_resp.json()["reset_token"]
+    assert forgot_resp.json()["reset_token"] is None  # delivered by email only
+    reset_token = _emailed_style_token(test_email)
 
     # 2. Attempt reset with tampered/invalid token -> 400
     bad_resp = client.post(

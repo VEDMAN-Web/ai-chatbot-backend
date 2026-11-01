@@ -1450,7 +1450,7 @@ def detect_deterministic_intent(
 
         # Specific price limit
         p_match = re.search(r"(?:under|below|max|budget|ไม่เกิน|ต่ำกว่า)\s*(\d+(?:\.\d+)?)\s*(?:m|million|ล้าน|ล้านบาท)?\s*(?:thb|baht|บาท)?", msg_low)
-        if p_match and "bed" not in p_match.group(0) and "ห้อง" not in p_match.group(0):
+        if p_match and "bed" not in p_match.group(0) and "ห้อง" not in p_match.group(0) and not re.search(_AREA_UNIT_PATTERN, p_match.group(0)) and not re.search(rf"([0-9][0-9,.]*)\s*{_AREA_UNIT_PATTERN}", msg_low):
             val = float(p_match.group(1))
             refinements["max_price"] = val * 1_000_000 if val < 500 else val
 
@@ -1802,6 +1802,57 @@ def _extract_search_filters_deterministic_impl(message: str) -> Dict[str, Any]:
     except Exception:
         pass
 
+    # -------------------------------------------------------------
+    # Area filters (sqm / sqft) with automatic unit conversion to metric sqm
+    # -------------------------------------------------------------
+    _AREA_UNIT_PATTERN = r"(?:sq\.?\s*m|sqm|m²|m2|square\s+(?:meters?|metres?)|m\s*kw\.?|metr(?:ów|ow|y|a)?|sq\.?\s*ft|sqft|square\s+feet|ตร\.?ม\.?|ตารางเมตร|ตรม)"
+
+    def _parse_area_val(val_str: str, unit_str: Optional[str] = None) -> float:
+        v = float(val_str.replace(",", ""))
+        u = (unit_str or "").lower().replace(" ", "")
+        if "ft" in u or "feet" in u:
+            return round(v * 0.092903, 1)  # convert sqft to metric sqm
+        return round(v, 1)
+
+    # 1. Area Range: "between 150 and 300 sqm", "150-300 m2", "od 200 do 400 sqm"
+    area_range_m = re.search(
+        rf"(?:between|od|range\s+of)?\s*([0-9][0-9,.]*)\s*(?:[-–]|to|do|and)\s*([0-9][0-9,.]*)\s*({_AREA_UNIT_PATTERN})",
+        msg_low,
+    )
+    if area_range_m:
+        a_unit = area_range_m.group(3)
+        v1 = _parse_area_val(area_range_m.group(1), a_unit)
+        v2 = _parse_area_val(area_range_m.group(2), a_unit)
+        filters["min_area"] = min(v1, v2)
+        filters["max_area"] = max(v1, v2)
+
+    # 2. Min Area: "larger than 200 sqm", "over 250 m2", "at least 150 sqm", "powyżej 200 m2", "มากกว่า 200 ตารางเมตร"
+    if "min_area" not in filters:
+        min_area_m = re.search(
+            rf"(?:larger\s+than|greater\s+than|more\s+than|over|above|at\s+least|minimum|min\.?|from|powyżej|powyzej|od|มากกว่า|ตั้งแต่|อย่างน้อย)\s*([0-9][0-9,.]*)\s*({_AREA_UNIT_PATTERN})",
+            msg_low,
+        ) or re.search(
+            rf"([0-9][0-9,.]*)\s*\+\s*({_AREA_UNIT_PATTERN})",
+            msg_low,
+        ) or re.search(
+            rf"([0-9][0-9,.]*)\s*({_AREA_UNIT_PATTERN})\s*(?:or\s+more|lub\s+wi[eę]cej|ขึ้นไป)",
+            msg_low,
+        )
+        if min_area_m:
+            filters["min_area"] = _parse_area_val(min_area_m.group(1), min_area_m.group(2))
+
+    # 3. Max Area: "smaller than 200 sqm", "under 150 sqm", "below 100 m2", "up to 300 sqm", "poniżej 200 m2", "ไม่เกิน 200 ตารางเมตร"
+    if "max_area" not in filters:
+        max_area_m = re.search(
+            rf"(?:smaller\s+than|less\s+than|under|below|up\s+to|at\s+most|maximum|max\.?|poniżej|ponizej|do|maksymalnie|ไม่เกิน|ต่ำกว่า)\s*([0-9][0-9,.]*)\s*({_AREA_UNIT_PATTERN})",
+            msg_low,
+        ) or re.search(
+            rf"([0-9][0-9,.]*)\s*({_AREA_UNIT_PATTERN})\s*(?:or\s+less|or\s+fewer|lub\s+mniej)",
+            msg_low,
+        )
+        if max_area_m:
+            filters["max_area"] = _parse_area_val(max_area_m.group(1), max_area_m.group(2))
+
     # Bedroom ranges / min / max BEFORE exact count
     # "4 or more", "4+", "at least 4", "more than 3" (→ min 4), "over 3" (→ min 4)
     # "3 or fewer", "up to 3", "at most 3"
@@ -1821,10 +1872,11 @@ def _extract_search_filters_deterministic_impl(message: str) -> Dict[str, Any]:
     )
     if _min_bed:
         n = int(_min_bed.group(1))
-        # "more than 3" / "over 3" → minimum 4
-        if re.search(r"(?:more\s+than|over)\s+\d+", _min_bed.group(0) or ""):
-            n = n + 1
-        filters["min_bedrooms"] = n
+        if not re.search(rf"\b{n}\s*{_AREA_UNIT_PATTERN}", msg_low) and n <= 100:
+            # "more than 3" / "over 3" → minimum 4
+            if re.search(r"(?:more\s+than|over)\s+\d+", _min_bed.group(0) or ""):
+                n = n + 1
+            filters["min_bedrooms"] = n
 
     _max_bed = (
         re.search(rf"(\d+)\s+or\s+fewer\b", msg_low)
@@ -1834,10 +1886,11 @@ def _extract_search_filters_deterministic_impl(message: str) -> Dict[str, Any]:
     if _max_bed and "min_bedrooms" not in filters:
         filters["max_bedrooms"] = int(_max_bed.group(1))
 
+    _bed_unit_explicit = r"(?:bedrooms?|beds?|br|bhk|sypialni[aeę]?|sypialn|pokoj(?:e|i)?|спальн(?:я|и|ей|ями|е)?|ห้องนอน|ห้อง)"
     _range_bed = (
-        re.search(rf"between\s+(\d+)\s+and\s+(\d+)\s*{_bed_unit}", msg_low)
-        or re.search(rf"od\s+(\d+)\s+do\s+(\d+)\s*{_bed_unit}", msg_low)
-        or re.search(rf"(\d+)\s*[-–]\s*(\d+)\s*{_bed_unit}", msg_low)
+        re.search(rf"between\s+(\d+)\s+and\s+(\d+)\s*{_bed_unit_explicit}", msg_low)
+        or re.search(rf"od\s+(\d+)\s+do\s+(\d+)\s*{_bed_unit_explicit}", msg_low)
+        or re.search(rf"(\d+)\s*[-–]\s*(\d+)\s*{_bed_unit_explicit}", msg_low)
     )
     if _range_bed:
         a, b = int(_range_bed.group(1)), int(_range_bed.group(2))
@@ -1854,7 +1907,9 @@ def _extract_search_filters_deterministic_impl(message: str) -> Dict[str, Any]:
         if bed_match:
             try:
                 _bed_val = int(float(bed_match.group(1)))
-                if _bed_val <= 20:
+                # Keep large explicit counts ("50-bedroom villa"): dropping them made the bot answer a different
+                # question with unrelated listings instead of an honest "no matches". 100 only rejects junk numbers.
+                if 0 < _bed_val <= 100:
                     filters["bedrooms"] = _bed_val
             except (ValueError, TypeError):
                 pass
@@ -1881,7 +1936,7 @@ def _extract_search_filters_deterministic_impl(message: str) -> Dict[str, Any]:
             return val * 1_000_000.0
         return val
 
-    _UNIT_RE = r"(?:tys\.?|tysi[eę]cy|tysiecy|thousand|k|m|million|mln|milionów|milionow|ล้าน|ล้านบาท|lakhs?|lacs?|crores?|cr|l)"
+    _UNIT_RE = r"(?:tysi[eę]cy|tysiecy|tys\.?|thousand|milionów|milionow|million|mln|lakhs?|lacs?|crores?|ล้านบาท|ล้าน|cr|k|m|l)"
     _CURR_RE = r"(?:pln|eur|usd|thb|baht|บาท|zł|zl|dollars|euro|zlote|złotych|inr|rs\.?|rupees|₹)"
 
     # Price Range: "between 30L and 60 lakhs", "od 5 do 10 mln", "30-50 lakhs"
@@ -1928,18 +1983,24 @@ def _extract_search_filters_deterministic_impl(message: str) -> Dict[str, Any]:
     if "max_price" not in filters:
         p_match = re.search(rf"(?:under|below|max|budget|up to|poniżej|ponizej|do|maksymalnie|budżet|budzet|ไม่เกิน|ต่ำกว่า|งบ|สูงสุด|ไม่เกินงบ)\s*(?:is|\s*[:=]|\s+around|\s+about)?\s*([0-9][0-9,.]*)\s*({_UNIT_RE})?\s*({_CURR_RE})?", msg_low)
         if p_match and "bed" not in p_match.group(0) and "ห้อง" not in p_match.group(0):
-            curr = (p_match.group(3) or "").lower()
-            val = _parse_budget_amount(p_match.group(1), p_match.group(2), curr)
-            rate = FX_RATES.get(curr, 1.0)
-            filters["max_price"] = val * rate
+            # Ensure number is not an area measurement like "under 100 sqm"
+            after_num = msg_low[p_match.end(1):p_match.end(1) + 25]
+            if not re.match(rf"^\s*{_AREA_UNIT_PATTERN}", after_num):
+                curr = (p_match.group(3) or "").lower()
+                val = _parse_budget_amount(p_match.group(1), p_match.group(2), curr)
+                rate = FX_RATES.get(curr, 1.0)
+                filters["max_price"] = val * rate
 
     # Min Price
-    min_match = re.search(rf"(?:from|above|minimum|min|od|powyżej|powyzej|ตั้งแต่|มากกว่า|เริ่มต้น)\s*(?:is|\s*[:=])?\s*([0-9][0-9,.]*)\s*({_UNIT_RE})?\s*({_CURR_RE})?", msg_low)
-    if min_match and "bed" not in min_match.group(0) and "ห้อง" not in min_match.group(0):
-        curr = (min_match.group(3) or "").lower()
-        val = _parse_budget_amount(min_match.group(1), min_match.group(2), curr)
-        rate = FX_RATES.get(curr, 1.0)
-        filters["min_price"] = val * rate
+    if "min_price" not in filters:
+        min_match = re.search(rf"(?:from|above|minimum|min|od|powyżej|powyzej|ตั้งแต่|มากกว่า|เริ่มต้น)\s*(?:is|\s*[:=])?\s*([0-9][0-9,.]*)\s*({_UNIT_RE})?\s*({_CURR_RE})?", msg_low)
+        if min_match and "bed" not in min_match.group(0) and "ห้อง" not in min_match.group(0):
+            after_min_num = msg_low[min_match.end(1):min_match.end(1) + 25]
+            if not re.match(rf"^\s*{_AREA_UNIT_PATTERN}", after_min_num):
+                curr = (min_match.group(3) or "").lower()
+                val = _parse_budget_amount(min_match.group(1), min_match.group(2), curr)
+                rate = FX_RATES.get(curr, 1.0)
+                filters["min_price"] = val * rate
 
     # Amenities & Furnishing
     if "gym" in msg_low or "fitness" in msg_low or "siłowni" in msg_low or "ฟิตเนส" in msg_low:

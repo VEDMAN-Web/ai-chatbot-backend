@@ -321,7 +321,8 @@ def propose_archive(db, staff, staff_email: str, conversation_id: str, property_
                 "text": f"Access denied: `{property_id}` does not belong to your currently selected website(s): {selected_websites}."}
     name = record.get("property_name") or record.get("name") if isinstance(record, dict) else getattr(record, "property_name", property_id)
     status = record.get("status") if isinstance(record, dict) else getattr(record, "status", None)
-    if str(status or "").lower() == "archived":
+    from app.services.firestore_service import is_soft_deleted_record
+    if str(status or "").lower() in ("archived", "deleted") or is_soft_deleted_record(record):
         return {"ok": False, "status": "already_archived", "text": f"**{name}** (`{property_id}`) is already archived. Nothing to do."}
     table = (
         "| Field | Current | New |\n|---|---|---|\n"
@@ -429,6 +430,9 @@ def resolve_listing_for_read(db, message: str, selected_websites: Optional[List[
     if resolved.kind != "resolved" or not resolved.property_id:
         return None
     source, record = resolve_existing_property(db, resolved.property_id)
+    from app.services.firestore_service import is_soft_deleted_record
+    if is_soft_deleted_record(record):
+        return None
     if not source:
         return None
     if selected_websites and not property_belongs_to_websites(record, selected_websites):

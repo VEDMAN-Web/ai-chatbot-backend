@@ -135,15 +135,15 @@ def get_current_user_from_db(
         existing_session = db.query(UserSession).filter(UserSession.token == token).first()
         if existing_session:
             user = db.query(User).filter(User.id == existing_session.user_id).first()
-            user_status = getattr(user, "status", None) or ("blocked" if not getattr(user, "is_active", True) else "active")
-            if not user or not getattr(user, "is_active", True) or user_status == "blocked":
+            user_status = (getattr(user, "status", None) or ("active" if getattr(user, "is_active", True) else "blocked")).strip().lower()
+            if not user or not getattr(user, "is_active", True) or user_status != "active":
                 # Instantly terminate session in database
                 if existing_session.revoked_at is None:
                     existing_session.revoked_at = datetime.utcnow()
                     db.commit()
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
-                    detail="User account is blocked. All active sessions have been terminated. Access denied."
+                    detail=f"User account is {user_status or 'inactive'}. All active sessions have been terminated. Access denied."
                 )
             if existing_session.revoked_at is not None:
                 raise HTTPException(

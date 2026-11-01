@@ -1,8 +1,8 @@
 """
 app/services/cloud_media_storage.py
 
-Enterprise-grade Cloud Media and Storage Service supporting Firebase Storage,
-Google Cloud Storage (GCS), AWS S3, and local fallback.
+Enterprise-grade Cloud Media and Storage Service supporting Cloudinary,
+Firebase Storage, Google Cloud Storage (GCS), and local fallback.
 
 Provides:
 - upload_property_image(bytes, filename, content_type, property_id, image_type) -> public_url
@@ -41,7 +41,40 @@ class CloudMediaStorageService:
     def __init__(self, bucket_name: Optional[str] = None):
         self.bucket_name = bucket_name or FIREBASE_STORAGE_BUCKET
         self._credentials = None
+        self._cloudinary_configured = False
+        self._init_cloudinary()
         self._init_credentials()
+
+    def _init_cloudinary(self):
+        """Initializes Cloudinary configuration from settings or environment."""
+        try:
+            import cloudinary
+            cloud_name = getattr(settings, "CLOUDINARY_CLOUD_NAME", None) or os.getenv("CLOUDINARY_CLOUD_NAME")
+            api_key = getattr(settings, "CLOUDINARY_API_KEY", None) or os.getenv("CLOUDINARY_API_KEY")
+            api_secret = getattr(settings, "CLOUDINARY_API_SECRET", None) or os.getenv("CLOUDINARY_API_SECRET")
+            cloudinary_url = getattr(settings, "CLOUDINARY_URL", None) or os.getenv("CLOUDINARY_URL")
+
+            if cloudinary_url:
+                os.environ["CLOUDINARY_URL"] = cloudinary_url
+                cloudinary.reset_config()
+
+            if cloud_name and api_key and api_secret:
+                cloudinary.config(
+                    cloud_name=cloud_name,
+                    api_key=api_key,
+                    api_secret=api_secret,
+                    secure=True
+                )
+
+            cfg = cloudinary.config()
+            if cfg.cloud_name and cfg.api_key and cfg.api_secret:
+                self._cloudinary_configured = True
+                logger.info(f"Cloudinary configured successfully for cloud: {cfg.cloud_name}")
+            else:
+                self._cloudinary_configured = False
+        except Exception as e:
+            logger.warning(f"Could not initialize Cloudinary: {e}")
+            self._cloudinary_configured = False
 
     def _init_credentials(self):
         """Initializes Google OAuth2 Service Account credentials from env or file."""
@@ -76,7 +109,7 @@ class CloudMediaStorageService:
                 except Exception as e:
                     logger.warning(f"Could not load service account from {path}: {e}")
 
-        logger.info("CloudMediaStorageService running in local storage fallback mode (no Google Cloud credentials)")
+        logger.info("CloudMediaStorageService running with local/Cloudinary storage fallback (no Google Cloud credentials)")
 
     def _get_access_token(self) -> Optional[str]:
         if not self._credentials:
@@ -89,6 +122,38 @@ class CloudMediaStorageService:
             logger.error(f"Failed to refresh Google Storage access token: {e}")
             return None
 
+    def _upload_to_cloudinary(
+        self,
+        image_bytes: bytes,
+        property_id: Optional[str] = None,
+        image_type: str = "images",
+        content_hash: Optional[str] = None,
+        ext: str = "jpg"
+    ) -> Optional[str]:
+        """Uploads image directly to Cloudinary and returns secure CDN URL."""
+        if not self._cloudinary_configured:
+            return None
+        try:
+            import cloudinary.uploader
+            prop_slug = (property_id or "general").strip().replace("/", "_")
+            folder_path = f"properties/{prop_slug}/{image_type}"
+            public_id = content_hash or f"img_{uuid.uuid4().hex[:12]}"
+
+            result = cloudinary.uploader.upload(
+                io.BytesIO(image_bytes),
+                folder=folder_path,
+                public_id=public_id,
+                overwrite=True,
+                resource_type="image"
+            )
+            secure_url = result.get("secure_url") or result.get("url")
+            if secure_url:
+                logger.info(f"Successfully uploaded image to Cloudinary: {secure_url}")
+                return secure_url
+        except Exception as e:
+            logger.error(f"Failed to upload image to Cloudinary: {e}")
+        return None
+
     def upload_property_image(
         self,
         image_bytes: bytes,
@@ -98,7 +163,7 @@ class CloudMediaStorageService:
         image_type: str = "images"  # "images", "floor_plans", "documents"
     ) -> str:
         """
-        Uploads image bytes to Firebase Storage / Cloud Storage under a structured key:
+        Uploads image bytes to Cloudinary (Primary) or Firebase Storage / Local fallback under a structured key:
         properties/{property_id}/{image_type}/{content_hash}.{ext}
         
         Returns the permanent HTTPS media URL.
@@ -109,7 +174,20 @@ class CloudMediaStorageService:
         # Compute SHA-256 hash for deduplication
         content_hash = hashlib.sha256(image_bytes).hexdigest()[:16]
         ext = "webp" if "webp" in content_type else ("png" if "png" in content_type else "jpg")
-        
+
+        # 1. Primary: Cloudinary
+        if self._cloudinary_configured:
+            c_url = self._upload_to_cloudinary(
+                image_bytes=image_bytes,
+                property_id=property_id,
+                image_type=image_type,
+                content_hash=content_hash,
+                ext=ext
+            )
+            if c_url:
+                return c_url
+
+        # 2. Secondary: Firebase Storage
         prop_slug = (property_id or "general").strip().replace("/", "_")
         object_name = f"properties/{prop_slug}/{image_type}/{content_hash}.{ext}"
 
@@ -120,7 +198,7 @@ class CloudMediaStorageService:
             except Exception as e:
                 logger.error(f"Failed to upload to Firebase Storage: {e}, falling back to local file store.")
 
-        # Local fallback if remote store not reachable
+        # 3. Local fallback if remote store not reachable
         return self._save_locally(object_name, image_bytes)
 
     def upload_floor_plan(
@@ -212,4 +290,3 @@ class CloudMediaStorageService:
 
 # Global singleton instance
 cloud_storage = CloudMediaStorageService()
-

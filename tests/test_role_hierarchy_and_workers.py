@@ -12,10 +12,23 @@ def mock_firestore_for_tests(monkeypatch):
     """Disable live Firestore network calls during fast local test execution."""
     from app.core.config import settings
     monkeypatch.setattr(settings, "ENABLE_FIRESTORE_SYNC", False)
+    monkeypatch.setattr(settings, "ADMIN_ENABLE_FIRESTORE_SYNC", False)
+    monkeypatch.setattr(settings, "get_admin_enable_firestore_sync", lambda: False)
+    monkeypatch.setattr("app.services.action_service._fs_sync_enabled", lambda: False)
     monkeypatch.setattr("app.services.firestore_auth_service.get_firestore_client", lambda *a, **kw: None)
     monkeypatch.setattr("app.services.firestore_service.get_firestore_client", lambda *a, **kw: None)
     monkeypatch.setattr("app.services.admin_batch_service.get_firestore_client", lambda *a, **kw: None)
+    with SessionLocal() as db:
+        p = db.query(Property).filter(Property.property_id == "test-promoted-admin-01").first()
+        if p:
+            db.delete(p)
+            db.commit()
     yield
+    with SessionLocal() as db:
+        p = db.query(Property).filter(Property.property_id == "test-promoted-admin-01").first()
+        if p:
+            db.delete(p)
+            db.commit()
 
 
 def _seed_test_accounts():

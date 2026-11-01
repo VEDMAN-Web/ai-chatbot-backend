@@ -641,29 +641,58 @@ def execute_batch_property_operation(
     # --------------------------------------------------------------------------
     selected_sites = getattr(staff_user, "selected_websites", None)
     skipped_rows: List[Dict[str, Any]] = []
+    # Postgres state before the change, so undo restores the row. Recording "not in SQL" made undo
+    # run _delete_sql_row, which permanently deleted existing listings.
+    raw_sql_snapshot: Dict[str, Any] = {}
+    existed_sql_snapshot: Dict[str, bool] = {}
+
+    def _in_scope(doc: Dict[str, Any]) -> bool:
+        # Same rule as the REST endpoints: unassigned legacy listings belong to tajlandia.com only.
+        # An empty selection keeps the previous behaviour (no site restriction): authenticated staff always
+        # carry their selected websites, so this only applies to internal callers.
+        if not selected_sites:
+            return True
+        from app.services.property_search import property_belongs_to_websites
+        return property_belongs_to_websites(doc, list(selected_sites))
+
+    def _snapshot_sql(doc_id: str) -> None:
+        raw_row, existed = _capture_raw_sql(db_session, doc_id)
+        existed_sql_snapshot[doc_id] = existed
+        if existed:
+            raw_sql_snapshot[doc_id] = raw_row
 
     if action_clean == "delete":
+        actor = staff_user.email or staff_user.user_id
         for rec in records:
             doc_id, current_doc = _resolve_firestore_document(projects_col, rec)
             if doc_id and current_doc:
-                if selected_sites:
-                    doc_sites = current_doc.get("websites") or current_doc.get("allowed_websites")
-                    if doc_sites and not any(s in selected_sites for s in doc_sites):
-                        logger.warning(f"Batch delete skipping {doc_id} as it is outside selected websites: {selected_sites}")
-                        continue
+                if not _in_scope(current_doc):
+                    logger.warning(f"Batch delete skipping {doc_id} as it is outside selected websites: {selected_sites}")
+                    skipped_rows.append({"property_id": doc_id, "reason": "outside your selected websites"})
+                    continue
 
                 # Capture complete previous state snapshot
                 previous_snapshot[doc_id] = current_doc
+                _snapshot_sql(doc_id)
                 affected_ids.append(doc_id)
 
                 # Instantly deactivate/delete in database
                 # Soft-delete by setting isActive: False to protect referential integrity, while marking deleted
                 projects_col.document(doc_id).update({
                     "isActive": False,
+                    "status": "Archived",
                     "_deletedAt": now.isoformat(),
-                    "_deletedBy": staff_user.email or staff_user.user_id,
+                    "_deletedBy": actor,
                     "_batchOperationId": operation_id
                 })
+                if existed_sql_snapshot.get(doc_id):
+                    from app.db.models import Property
+                    row = db_session.query(Property).filter(Property.property_id == doc_id).first()
+                    row.is_public = False
+                    row.status = "Archived"
+                    row.deleted_at = now.replace(tzinfo=None)
+                    row.deleted_by = actor
+                    db_session.commit()
 
                 executed_details.append({
                     "property_id": doc_id,
@@ -678,14 +707,14 @@ def execute_batch_property_operation(
         for rec in records:
             doc_id, current_doc = _resolve_firestore_document(projects_col, rec)
             if doc_id and current_doc:
-                if selected_sites:
-                    doc_sites = current_doc.get("websites") or current_doc.get("allowed_websites")
-                    if doc_sites and not any(s in selected_sites for s in doc_sites):
-                        logger.warning(f"Batch update skipping {doc_id} as it is outside selected websites: {selected_sites}")
-                        continue
+                if not _in_scope(current_doc):
+                    logger.warning(f"Batch update skipping {doc_id} as it is outside selected websites: {selected_sites}")
+                    skipped_rows.append({"property_id": doc_id, "reason": "outside your selected websites"})
+                    continue
 
                 # Capture complete previous state snapshot
                 previous_snapshot[doc_id] = current_doc
+                _snapshot_sql(doc_id)
                 affected_ids.append(doc_id)
 
                 # Prepare updates
@@ -784,13 +813,21 @@ def execute_batch_property_operation(
         "details": executed_details,
         "snapshot_format": "raw_v1",
         "raw_firestore": {k: _json_safe(v) for k, v in previous_snapshot.items()},
-        "raw_sql": {},
+        "raw_sql": raw_sql_snapshot,
         "existed_in_firestore": (
             {k: False for k in created_ids} if action_clean == "create"
             else {k: True for k in previous_snapshot}
         ),
-        "existed_in_sql": {k: False for k in (created_ids or affected_ids)},
+        "existed_in_sql": (
+            {k: False for k in created_ids} if action_clean == "create"
+            else {k: bool(existed_sql_snapshot.get(k)) for k in affected_ids}
+        ),
     }
+    try:
+        from app.services.firestore_service import invalidate_property_caches
+        invalidate_property_caches()
+    except Exception:
+        pass
 
     try:
         snap_client = get_snapshot_client() or fs_client
@@ -1156,8 +1193,8 @@ def undo_batch_property_operation(
                 restored_count += 1
     finally:
         try:
-            from app.services.cache_service import search_cache
-            search_cache.invalidate()
+            from app.services.firestore_service import invalidate_property_caches
+            invalidate_property_caches()
         except Exception:
             pass
 

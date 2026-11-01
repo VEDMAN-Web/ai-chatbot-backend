@@ -1598,11 +1598,12 @@ def _fs_sync_enabled() -> bool:
 
 
 def _invalidate_search_cache() -> None:
+    """Search results, Firestore catalog and name index (see firestore_service.invalidate_property_caches)."""
     try:
-        from app.services.cache_service import search_cache
-        search_cache.invalidate()
+        from app.services.firestore_service import invalidate_property_caches
+        invalidate_property_caches()
     except Exception as exc:
-        logger.warning("Search cache invalidation failed: %s", exc)
+        logger.warning("Property cache invalidation failed: %s", exc)
 
 
 def _summary_sql(prop: Any) -> Optional[Dict[str, Any]]:
@@ -1723,11 +1724,19 @@ def _require_undo_snapshot(
 
 _SQL_MUTABLE = {
     "property_name", "project_name", "property_type", "status",
+    "project_name_pl", "project_name_en", "slug_pl", "slug_en",
+    "subtitle_pl", "subtitle_en", "city",
     "country", "province", "district", "subdistrict", "area", "address",
+    "address_en", "address_pl", "search_location", "neighborhood_lifestyle",
     "price_display", "price_numeric_min", "price_numeric_max", "currency", "price_note",
+    "expected_roi", "rental_yield",
+    "completion_status", "completion_date", "available_units", "units", "total_floors", "tags",
     "bedrooms_display", "bedrooms_min", "bedrooms_max", "bathrooms",
     "area_display", "area_sqm_min", "area_sqm_max", "usable_area_sqm", "land_area_sqm",
-    "description", "has_pool", "beach_access", "sea_view",
+    "short_description_pl", "description_pl", "short_description_en", "description_en",
+    "description", "video_url", "layouts",
+    "seo_title_pl", "seo_title_en", "seo_description_pl", "seo_description_en",
+    "is_featured", "is_top_list", "has_pool", "beach_access", "sea_view",
     "features", "facilities", "amenities", "highlights", "developer_name", "ownership_type",
     "websites", "raw_metadata",
 }
@@ -2173,6 +2182,14 @@ def rest_delete_property(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Property with ID '{property_id}' not found.",
         )
+    if not hard_delete:
+        from app.services.firestore_service import is_soft_deleted_record
+        already = [r for r in (raw, prop) if r is not None]
+        if already and all(is_soft_deleted_record(r) for r in already):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Property '{property_id}' is already archived. Use undo to restore it.",
+            )
     before = {"sql": _summary_sql(prop), "firestore": _summary_fs(raw)}
     operation_id = _require_undo_snapshot(
         db=db,
@@ -2214,6 +2231,8 @@ def rest_delete_property(
             else:
                 prop.is_public = False
                 prop.status = "Archived"
+                prop.deleted_at = datetime.utcnow()
+                prop.deleted_by = getattr(staff, "email", None) or getattr(staff, "user_id", None)
             db.commit()
             sql_ok = True
         except Exception as exc:

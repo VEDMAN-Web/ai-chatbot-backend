@@ -341,7 +341,7 @@ def save_conversation_review(
 
     try:
         record_sensitive_audit(
-            db=db, tool_name="conversation_review", staff_user_id=staff.email,
+            db=db, tool_name="conversation_review", staff_user_id=staff.email or getattr(staff, "user_id", None) or "super_admin",
             proposed_payload={"conversation_id": key, "message_index": index, "satisfactory": body.is_satisfactory,
                               "target": None if body.is_satisfactory else bot, "website": None if body.is_satisfactory else site,
                               "instructions_length": len(text)},

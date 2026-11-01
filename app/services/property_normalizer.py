@@ -363,3 +363,117 @@ def disaggregate_unit_types(text: str) -> List[Dict[str, Any]]:
 
     return configs
 
+def normalize_percentage_rate(raw_val: Any) -> Optional[str]:
+    """
+    Normalizes ROI and Rental Yield expressions to clean percentage strings.
+    e.g. 7 -> '7%', '8.5' -> '8.5%', '7-9%' -> '7-9%', 'up to 10%' -> '10%'
+    """
+    if raw_val is None:
+        return None
+    s = str(raw_val).strip()
+    if not s:
+        return None
+    m = re.search(r"(\d+(?:\.\d+)?(?:\s*-\s*\d+(?:\.\d+)?)?)\s*%", s)
+    if m:
+        return f"{m.group(1)}%"
+    m_num = re.search(r"(\d+(?:\.\d+)?)", s)
+    if m_num:
+        return f"{m_num.group(1)}%"
+    return s
+
+
+def generate_project_slug(name: Optional[str]) -> str:
+    """
+    Generates a clean URL slug for Polish or English project names.
+    """
+    if not name:
+        return ""
+    # Map Polish diacritics
+    pl_trans = str.maketrans({
+        'ą': 'a', 'ć': 'c', 'ę': 'e', 'ł': 'l', 'ń': 'n',
+        'ó': 'o', 'ś': 's', 'ź': 'z', 'ż': 'z',
+        'Ą': 'a', 'Ć': 'c', 'Ę': 'e', 'Ł': 'l', 'Ń': 'n',
+        'Ó': 'o', 'Ś': 's', 'Ź': 'z', 'Ż': 'z'
+    })
+    cleaned = name.translate(pl_trans).lower()
+    slug = re.sub(r"[^a-z0-9]+", "-", cleaned).strip("-")
+    return slug[:120]
+
+
+# Exact specification of Compulsory vs Optional fields
+COMPULSORY_FIELDS = [
+    ("project_name_pl", "Project Name (PL)"),
+    ("project_name_en", "Project Name (EN)"),
+    ("property_type", "Project Type"),
+    ("country", "Country"),
+    ("city", "City"),
+    ("short_description_pl", "Short Description (PL)"),
+    ("short_description_en", "Short Description (EN)"),
+    ("media", "Media (at least 1 image/asset)"),
+]
+
+OPTIONAL_FIELDS = [
+    # Basic info
+    "slug_pl", "slug_en", "subtitle_pl", "subtitle_en", "websites",
+    # Pricing
+    "currency", "price_from", "price_to", "expected_roi", "rental_yield",
+    # Details
+    "completion_status", "completion_date", "total_units", "available_units",
+    "area_from_sqm", "area_to_sqm", "amenities", "tags",
+    # Descriptions
+    "full_description_pl", "full_description_en",
+    # Media
+    "video_url",
+    # Location
+    "search_location", "latitude", "longitude", "address_en", "address_pl", "neighborhood_lifestyle",
+    # Layouts
+    "layouts",
+    # SEO
+    "seo_title_pl", "seo_title_en", "seo_description_pl", "seo_description_en",
+    # Publish
+    "active", "featured", "top_list"
+]
+
+
+def validate_project_schema(data: Dict[str, Any]) -> Tuple[bool, List[str]]:
+    """
+    Validates that all compulsory project fields are present and non-empty.
+    Returns (is_valid, list_of_missing_or_invalid_field_descriptions).
+    """
+    errors: List[str] = []
+    
+    # 1. Check Project Name (PL)
+    if not (data.get("project_name_pl") or "").strip():
+        errors.append("Project Name (PL) is required")
+        
+    # 2. Check Project Name (EN)
+    if not (data.get("project_name_en") or data.get("property_name") or "").strip():
+        errors.append("Project Name (EN) is required")
+        
+    # 3. Check Project Type
+    if not (data.get("property_type") or "").strip():
+        errors.append("Project Type is required (e.g. Villa, Condominium, Apartment, Townhouse)")
+        
+    # 4. Check Country
+    if not (data.get("country") or "").strip():
+        errors.append("Country is required")
+        
+    # 5. Check City
+    city = data.get("city") or data.get("province") or data.get("district") or data.get("area")
+    if not (city or "").strip():
+        errors.append("City is required")
+        
+    # 6. Check Short Description (PL)
+    if not (data.get("short_description_pl") or "").strip():
+        errors.append("Short Description (PL) is required")
+        
+    # 7. Check Short Description (EN)
+    if not (data.get("short_description_en") or "").strip():
+        errors.append("Short Description (EN) is required")
+        
+    # 8. Check Media
+    media = data.get("media") or data.get("images") or []
+    if not media or len(media) == 0:
+        errors.append("Media is required (must contain at least 1 image URL)")
+        
+    return len(errors) == 0, errors

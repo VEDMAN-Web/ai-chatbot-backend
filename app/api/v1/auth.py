@@ -14,7 +14,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.security import HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field, ConfigDict, model_validator
 from sqlalchemy.orm import Session
-from sqlalchemy import func
+from sqlalchemy import func, or_
 
 from app.db.session import get_db
 from app.db.models import User, UserSession
@@ -357,6 +357,43 @@ def _user_by_id(db: Session, user_id: Any) -> Optional[User]:
     return db.query(User).filter(User.id == user_uuid).first()
 
 
+VALID_USER_STATUSES = ("active", "blocked", "deactivated")
+
+
+def _require_manageable_by(staff: AuthenticatedStaff, user: User) -> None:
+    """
+    Tenant scope for user management by a non-super admin: every website the target may access must be one
+    of the admin's own websites. (The older check compared domains with the server's env domain, and a user's
+    domain could be rewritten at login, so it did not isolate tenants.)
+    """
+    if staff.role == "super_admin":
+        return
+    target_sites = set(resolve_user_allowed_websites(user, user.role))
+    outside = sorted(target_sites - set(staff.allowed_websites or []))
+    if outside:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied: this account has access to websites outside your scope.",
+        )
+
+
+def _require_other_active_super_admin(db: Session, user: User, action: str) -> None:
+    """Refuse to demote / block / deactivate / delete the last active super admin (nobody could manage the system)."""
+    if (user.role or "").lower() != "super_admin":
+        return
+    others = db.query(User).filter(
+        User.id != user.id,
+        func.lower(User.role) == "super_admin",
+        User.is_active.is_(True),
+        or_(User.status.is_(None), func.lower(User.status) == "active"),
+    ).count()
+    if others == 0:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Cannot {action} the last active super admin. Create or activate another super admin first.",
+        )
+
+
 def _get_user_google_info(user: Optional[User]) -> GoogleAuthInfo:
     if not user:
         return GoogleAuthInfo()
@@ -609,20 +646,8 @@ def user_login(
                 headers={"WWW-Authenticate": "Bearer"}
             )
 
-        # 2. Verify account is active and not blocked in database
-        user_status = (getattr(user, "status", None) or "active").lower()
-        if user_status == "blocked" or not getattr(user, "is_active", True):
-            db.query(UserSession).filter(
-                UserSession.user_id == user.id,
-                UserSession.revoked_at.is_(None)
-            ).update({"revoked_at": datetime.utcnow()}, synchronize_session=False)
-            db.commit()
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="User account is blocked. All active sessions have been terminated. Access denied."
-            )
-
-        # 3. Verify password against database password_hash
+        # 2. Verify password against database password_hash. Done before the blocked check so that a wrong
+        # password never reveals whether an account exists or is blocked.
         if not user.password_hash or not verify_password(req.password, user.password_hash):
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
@@ -630,9 +655,10 @@ def user_login(
                 headers={"WWW-Authenticate": "Bearer"}
             )
 
-    # Universal check: verify account is not blocked regardless of auth source (Firestore or DB)
+    # Universal check: only an active account may log in, regardless of auth source (Firestore or DB).
+    # Any non-active status ("blocked", "deactivated", ...) is refused; previously only "blocked" was.
     user_status = (getattr(user, "status", None) or "active").lower()
-    if user_status == "blocked" or not getattr(user, "is_active", True):
+    if user_status != "active" or not getattr(user, "is_active", True):
         db.query(UserSession).filter(
             UserSession.user_id == user.id,
             UserSession.revoked_at.is_(None)
@@ -668,13 +694,11 @@ def user_login(
     if requested_domain_raw:
         canon_req = normalize_website_domain(requested_domain_raw)
         if canon_req:
-            # Verify permission to access target domain
-            if is_privileged_admin or canon_req in user_allowed_sites:
+            # The requested website must be one the account is assigned (super admins: all sites by default).
+            # It applies to this login only. It used to be saved as the account's home domain, which let an
+            # admin re-home themselves into another tenant and pass the user-management tenant checks.
+            if canon_req in user_allowed_sites:
                 user_domain = canon_req
-                # Persist selected default website for this account if changed
-                if getattr(user, "domain", None) != canon_req:
-                    user.domain = canon_req
-                    db.commit()
             else:
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
@@ -862,17 +886,20 @@ def list_admin_users_with_google_status(
 
     if status_filter:
         query = query.filter(func.lower(User.status) == status_filter.strip().lower())
+    else:
+        # Soft-deleted accounts are hidden from the normal directory (ask for status=deleted to list them).
+        query = query.filter(or_(User.status.is_(None), func.lower(User.status) != "deleted"))
 
     all_users = query.order_by(User.created_at.asc()).all()
 
-    # Filter by domain: Super Admins can inspect all domains; regular Admins are restricted to their allowed websites or active env
+    # Filter by scope: Super Admins see all; regular Admins only see accounts whose websites are all within theirs.
     if staff.role == "super_admin":
         users = all_users
     else:
+        own_sites = set(staff.allowed_websites or [])
         users = [
-            u for u in all_users 
-            if get_user_domain_key(u) == active_env_key or 
-            any(normalize_tenant_domain_key(w) == get_user_domain_key(u) for w in (staff.allowed_websites or []))
+            u for u in all_users
+            if set(resolve_user_allowed_websites(u, u.role)) <= own_sites
         ]
 
     now = datetime.utcnow()
@@ -1076,7 +1103,7 @@ def get_admin_user_details(
         )
 
     target_user_domain_key = get_user_domain_key(user)
-    if target_user_domain_key != active_env_key:
+    if staff.role != "super_admin" and target_user_domain_key != active_env_key:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="User not found on this website domain."
@@ -1084,6 +1111,9 @@ def get_admin_user_details(
 
     if staff.role != "super_admin" and user.role == "super_admin":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admins cannot view super admin accounts.")
+    if (user.status or "").lower() == "deleted" and staff.role != "super_admin":
+        raise HTTPException(status_code=404, detail="User not found.")
+    _require_manageable_by(staff, user)
 
     now = datetime.utcnow()
     active_sess_count = db.query(UserSession).filter(
@@ -1149,6 +1179,14 @@ def update_admin_user(
         )
 
     target_user_role = (user.role or "worker").lower()
+    _require_manageable_by(staff, user)
+
+    if req.status is not None and req.status.strip().lower() not in VALID_USER_STATUSES:
+        raise HTTPException(status_code=422, detail=f"status must be one of {list(VALID_USER_STATUSES)}.")
+    demoting = req.role is not None and req.role.strip().lower() != "super_admin"
+    disabling = (req.status is not None and req.status.strip().lower() != "active") or req.is_active is False
+    if demoting or disabling:
+        _require_other_active_super_admin(db, user, "demote or disable")
 
     # Role hierarchy enforcement
     if staff.role != "super_admin":
@@ -1214,7 +1252,7 @@ def update_admin_user(
     if req.status is not None:
         target_status = req.status.strip().lower()
         user.status = target_status
-        if target_status == "blocked":
+        if target_status in ("blocked", "deactivated"):
             user.is_active = False
             db.query(UserSession).filter(
                 UserSession.user_id == user.id,
@@ -1341,19 +1379,33 @@ def delete_admin_user(
                 detail="Admins cannot delete other admin accounts. Only super administrators can delete admins."
             )
 
+    _require_manageable_by(staff, user)
+    _require_other_active_super_admin(db, user, "delete")
+    if (user.status or "").lower() == "deleted":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This account is already deleted.")
+
     deleted_email = user.email
 
-    # Cascade sessions
-    db.query(UserSession).filter(UserSession.user_id == user.id).delete()
-    db.delete(user)
+    # Soft delete: the account row stays (audit trails keep pointing at a real user) but can never log in again.
+    now = datetime.utcnow()
+    db.query(UserSession).filter(
+        UserSession.user_id == user.id,
+        UserSession.revoked_at.is_(None),
+    ).update({"revoked_at": now}, synchronize_session=False)
+    user.status = "deleted"
+    user.is_active = False
+    prefs = dict(user.preferences or {})
+    prefs["deleted_at"] = now.isoformat()
+    prefs["deleted_by"] = staff.email
+    user.preferences = prefs
     db.commit()
 
-    # Delete from Firestore admin_authentication
+    # Deactivate (not delete) the Firestore admin_authentication login so it cannot authenticate either.
     try:
-        from app.services.firestore_auth_service import delete_admin_from_firestore
-        delete_admin_from_firestore(deleted_email)
+        from app.services.firestore_auth_service import update_admin_in_firestore
+        update_admin_in_firestore(email=deleted_email, is_active=False, status="deleted")
     except Exception as fe:
-        logger.warning(f"Error deleting user '{deleted_email}' from Firestore: {fe}")
+        logger.warning(f"Error deactivating user '{deleted_email}' in Firestore: {fe}")
 
     # Audit log
     try:
@@ -1400,7 +1452,10 @@ def block_admin_user(
         )
 
     is_blocking = req.blocked
+    if (user.status or "").lower() == "deleted":
+        raise HTTPException(status_code=404, detail="User not found.")
     if is_blocking:
+        _require_other_active_super_admin(db, user, "block")
         user.status = "blocked"
         user.is_active = False
         # Revoke all active sessions immediately
@@ -1608,8 +1663,10 @@ def forgot_password_endpoint(
     db: Session = Depends(get_db)
 ):
     """
-    Generates a secure password reset token for an administrator account.
-    Validates account existence in both Cloud Firestore `admin_authentication` and local DB.
+    Starts a password reset. The reset token is emailed to the account owner and is NEVER returned in the
+    response (returning it let anyone reset any account, including a super admin's, without logging in).
+    The response is the same whether or not the account exists, so it cannot be used to discover accounts.
+    The token is bound to the current password, so it works once and dies when the password changes.
     """
     from app.services.firestore_auth_service import get_admin_from_firestore, generate_password_reset_token
 
@@ -1617,17 +1674,39 @@ def forgot_password_endpoint(
     if not email_clean or "@" not in email_clean:
         raise HTTPException(status_code=400, detail="Invalid email format.")
 
+    expires_in_secs = 1800  # 30 minutes
+    generic = ForgotPasswordResponse(
+        success=True,
+        message="If an account exists for this email, a password reset link has been sent to it.",
+        email=email_clean,
+        reset_token=None,
+        expires_in=expires_in_secs,
+    )
+
     fs_admin = get_admin_from_firestore(email_clean)
     db_user = db.query(User).filter(func.lower(User.email) == email_clean).first()
-
     if not fs_admin and not db_user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"No administrative account found for '{email_clean}'."
-        )
+        return generic
 
-    expires_in_secs = 1800  # 30 minutes
-    reset_token = generate_password_reset_token(email_clean, expires_in_seconds=expires_in_secs)
+    current_hash = _current_password_hash(email_clean, db_user, fs_admin)
+    reset_token = generate_password_reset_token(
+        email_clean, expires_in_seconds=expires_in_secs, current_password_hash=current_hash
+    )
+    sent = False
+    try:
+        from app.services.google_services import google_manager
+        base = (getattr(settings, "BASE_WEBSITE_URL", "") or "").rstrip("/")
+        body = (
+            "A password reset was requested for your staff account.\n\n"
+            "If this was you, use this reset token within 30 minutes (it works once):\n\n"
+            f"{reset_token}\n\n"
+            f"{base + '/admin?reset_token=' + reset_token if base else ''}\n\n"
+            "If you did not request this, ignore this email; your password is unchanged."
+        )
+        result = google_manager.send_email(to=email_clean, subject="Password reset", body=body)
+        sent = bool(result and result.get("success") and not result.get("is_mock"))
+    except Exception as e:
+        logger.warning("Password reset email could not be sent: %s", type(e).__name__)
 
     try:
         record_audit_log(
@@ -1637,19 +1716,25 @@ def forgot_password_endpoint(
             tool_arguments={"email": email_clean},
             proposed_payload={"action": "forgot_password_request", "email": email_clean},
             confirmed_by_staff=True,
-            status="SUCCESS",
-            execution_result=f"Password reset token generated for {email_clean}"
+            status="SUCCESS" if sent else "FAILED",
+            execution_result=("Password reset email sent" if sent else "Password reset email could not be delivered")
         )
     except Exception as e:
         logger.warning(f"Audit log failed for forgot-password: {e}")
 
-    return ForgotPasswordResponse(
-        success=True,
-        message=f"Password reset token has been successfully generated for {email_clean}.",
-        email=email_clean,
-        reset_token=reset_token,
-        expires_in=expires_in_secs
-    )
+    return generic
+
+
+def _current_password_hash(email_clean: str, db_user: Optional[User], fs_admin: Optional[Dict[str, Any]] = None) -> Optional[str]:
+    """The hash reset tokens are bound to: Postgres first (what login checks), else Firestore."""
+    if db_user is not None and getattr(db_user, "password_hash", None):
+        return db_user.password_hash
+    if fs_admin is None:
+        from app.services.firestore_auth_service import get_admin_from_firestore
+        fs_admin = get_admin_from_firestore(email_clean)
+    if fs_admin:
+        return fs_admin.get("passwordHash") or fs_admin.get("password_hash")
+    return None
 
 
 @router.post("/reset-password", response_model=ResetPasswordResponse, tags=["Authentication"])
@@ -1670,18 +1755,22 @@ def reset_password_endpoint(
     if len(new_pw) < 6:
         raise HTTPException(status_code=400, detail="New password must be at least 6 characters long.")
 
-    verified_email = verify_password_reset_token(req.reset_token, expected_email=email_clean)
+    db_user = db.query(User).filter(func.lower(User.email) == email_clean).first()
+    verified_email = verify_password_reset_token(
+        req.reset_token,
+        expected_email=email_clean,
+        current_password_hash=_current_password_hash(email_clean, db_user),
+    )
     if not verified_email:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid or expired password reset token."
+            detail="Invalid, expired or already used password reset token."
         )
 
     # 1. Update in Cloud Firestore admin_authentication
     fs_updated = update_admin_password_in_firestore(email_clean, new_pw)
 
     # 2. Update in PostgreSQL
-    db_user = db.query(User).filter(func.lower(User.email) == email_clean).first()
     new_hash = hash_password(new_pw)
     if db_user:
         db_user.password_hash = new_hash
@@ -1759,9 +1848,19 @@ def change_password_endpoint(
     # 1. Update in Cloud Firestore admin_authentication
     update_admin_password_in_firestore(staff.email, new_pw)
 
-    # 2. Update in PostgreSQL
+    # 2. Update in PostgreSQL, and sign out every other session (a stolen token must not outlive a password change)
     if user:
         user.password_hash = hash_password(new_pw)
+        others = db.query(UserSession).filter(
+            UserSession.user_id == user.id,
+            UserSession.revoked_at.is_(None),
+        )
+        if staff.session_id:
+            try:
+                others = others.filter(UserSession.id != uuid.UUID(str(staff.session_id)))
+            except ValueError:
+                pass
+        others.update({"revoked_at": datetime.utcnow()}, synchronize_session=False)
         db.commit()
 
     try:

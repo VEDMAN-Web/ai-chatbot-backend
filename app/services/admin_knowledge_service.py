@@ -21,6 +21,7 @@ def get_property_knowledge(
     property_id: str,
     *,
     include_internal_notes: bool = False,
+    include_deleted: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """
     Retrieves complete private/internal information for a property,
@@ -47,7 +48,7 @@ def get_property_knowledge(
     try:
         from app.services.firestore_service import get_property_by_id_from_firestore
         for alias in id_aliases:
-            fs_prop = get_property_by_id_from_firestore(alias, target="admin")
+            fs_prop = get_property_by_id_from_firestore(alias, target="admin", include_inactive=include_deleted)
             if fs_prop:
                 break
     except Exception as e:
@@ -59,11 +60,23 @@ def get_property_knowledge(
     spec = None
     if db is not None:
         try:
-            prop = db.query(Property).filter(Property.property_id.in_(list(id_aliases))).first()
+            q = db.query(Property).filter(Property.property_id.in_(list(id_aliases)))
+            if not include_deleted:
+                from app.services.property_search import not_deleted_condition
+                q = q.filter(not_deleted_condition())
+            prop = q.first()
             if prop:
                 spec = db.query(PropertySpec).filter(PropertySpec.property_id == prop.property_id).first()
         except Exception as e:
             logger.debug(f"DB lookup fallback: {e}")
+
+    if not include_deleted:
+        from app.services.firestore_service import is_soft_deleted_record
+        if fs_prop and is_soft_deleted_record(fs_prop):
+            fs_prop = None
+        if prop and is_soft_deleted_record(prop):
+            prop = None
+            spec = None
 
     if not fs_prop and not prop and not spec:
         return None
