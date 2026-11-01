@@ -820,17 +820,20 @@ def coerce_price_storage(val: Any) -> Optional[Any]:
 def resolve_existing_property(
     db: Optional[Any],
     property_id_or_name: Optional[str],
+    *,
+    exact_id_only: bool = False,
 ) -> Tuple[Optional[str], Optional[Any]]:
     """
     Resolve a listing from the Firestore projects collection.
     Returns (source, record) where source is 'firestore' | None.
     The record is a normalized dict with canonical keys plus '_firestore_doc_id' and '_raw'.
+    If exact_id_only is True, matches ONLY by exact listing/document ID (no fuzzy or substring search).
     """
     raw = (property_id_or_name or "").strip()
     if not raw:
         return None, None
 
-    aliases = {raw, raw.lower(), raw.upper()}
+    aliases = {raw} if exact_id_only else {raw, raw.lower(), raw.upper()}
     # Firestore (admin client, then user)
     try:
         from app.services.firestore_service import (
@@ -864,7 +867,7 @@ def resolve_existing_property(
             doc = dict(raw_fs or {})
             doc.update({k: v for k, v in fs_prop.items() if k != "raw_firestore_data" and v is not None})
             doc.update(firestore_identity(raw_fs or {}))
-        else:
+        elif not exact_id_only:
             for target in ("admin", "user"):
                 fs = get_firestore_client(target=target) or (
                     get_firestore_client() if target == "admin" else None
@@ -875,6 +878,7 @@ def resolve_existing_property(
                     doc_id, doc = _resolve_firestore_document(
                         fs.collection("projects"),
                         {"property_id": raw, "name": raw},
+                        exact_id_only=exact_id_only,
                     )
                 except Exception:
                     doc_id, doc = None, {}

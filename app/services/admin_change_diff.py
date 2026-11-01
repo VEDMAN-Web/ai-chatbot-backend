@@ -100,10 +100,15 @@ def read_stored_property_fields(
     out: Dict[str, Any] = {"property_id": property_id}
     readable: Dict[str, bool] = {}
 
-    source, record = resolve_existing_property(db, property_id)
+    source, record = resolve_existing_property(db, property_id, exact_id_only=True)
     if source == "firestore" and isinstance(record, dict):
-        out["property_id"] = record.get("property_id") or record.get("_firestore_doc_id") or property_id
-        out["_resolve_source"] = "firestore"
+        exact_match = (
+            str(record.get("property_id") or "") == str(property_id)
+            or str(record.get("_firestore_doc_id") or "") == str(property_id)
+        )
+        if exact_match:
+            out["property_id"] = record.get("property_id") or record.get("_firestore_doc_id") or property_id
+            out["_resolve_source"] = "firestore"
         for k in keys:
             if record.get(k) is not None and record.get(k) != "":
                 out[k] = record[k]
@@ -151,6 +156,10 @@ def build_change_diff_rows(
             if canon == "websites" and "websites" not in (proposed_fields or {}):
                 continue
             work[canon] = v
+
+    # Deduplicate companion price fields: price_numeric_min is authoritative for diff rows
+    if "price_numeric_min" in work and "price_display" in work:
+        work = {k: v for k, v in work.items() if k != "price_display"}
 
     for field, new_val in work.items():
         if field in ("images", "image_urls", "cover_image", "mode", "property_id", "_readable"):
@@ -221,6 +230,7 @@ def format_single_diff_markdown(
     if not rows:
         lines.append("| _(no field changes)_ | — | — |")
     else:
+        seen_row_keys = set()
         for r in rows:
             cur = r["current"]
             if cur == UNREADABLE:
@@ -229,8 +239,15 @@ def format_single_diff_markdown(
                 cur_s = _norm(cur) or "—"
             from app.services.admin_chat_quality import human_field_label
 
+            label = human_field_label(str(r['field']))
+            new_s = _norm(r['new']) or "—"
+            row_key = (label.lower(), cur_s, new_s)
+            if row_key in seen_row_keys:
+                continue
+            seen_row_keys.add(row_key)
+
             lines.append(
-                f"| {human_field_label(str(r['field']))} | {cur_s} | {_norm(r['new']) or '—'} |"
+                f"| {label} | {cur_s} | {new_s} |"
             )
     return "\n".join(lines)
 
@@ -409,6 +426,7 @@ def build_single_listing_change_diff(
     mode: str = "update",
     user_message: Optional[str] = None,
 ) -> Dict[str, Any]:
+    is_create = str(mode or "").strip().lower() == "create"
     current = read_stored_property_fields(
         db, property_id, list((proposed_fields or {}).keys()) + list(_TRACKED_FOR_DIFF)
     )
@@ -416,6 +434,8 @@ def build_single_listing_change_diff(
     resolve_source = current.get("_resolve_source")
     if resolve_source == "firestore":
         mode = "update"
+    elif is_create:
+        mode = "create"
 
     allow_web = "websites" in (proposed_fields or {})
     expanded, expand_errors = expand_proposed_fields(

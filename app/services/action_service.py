@@ -410,8 +410,17 @@ def create_pending_action(
                 detail="Cannot stage this action: " + "; ".join(problems) + ".",
             )
     if tool_name in ["create_or_update_listing", "propose_listing_update"]:
+        is_create = str((action_payload or {}).get("mode") or "").strip().lower() == "create"
         from app.services.admin_property_fields import resolve_existing_property
-        src, rec = resolve_existing_property(db, action_payload.get("property_id"))
+        src, rec = resolve_existing_property(db, action_payload.get("property_id"), exact_id_only=is_create)
+        if src and is_create:
+            exact_match = (
+                str((rec or {}).get("property_id") or "") == str(action_payload.get("property_id"))
+                or str((rec or {}).get("_firestore_doc_id") or "") == str(action_payload.get("property_id"))
+            )
+            if not exact_match:
+                src = None
+                rec = None
         if src:
             action_payload = dict(action_payload)
             action_payload["mode"] = "update"
@@ -1345,15 +1354,25 @@ def _execute_update_listing(
         format_price_thb,
     )
 
-    resolve_source, resolved = resolve_existing_property(db, property_id)
+    is_create = str(payload.get("mode") or "").strip().lower() == "create"
+    resolve_source, resolved = resolve_existing_property(db, property_id, exact_id_only=is_create)
     if resolve_source == "firestore" and isinstance(resolved, dict):
-        property_id = str(resolved.get("property_id") or resolved.get("_firestore_doc_id") or property_id)
-        payload = dict(payload)
-        payload["property_id"] = property_id
-        payload["resolve_source"] = "firestore"
-        payload["is_update_only"] = True
-        payload["mode"] = "update"
-        mode = "update"
+        if is_create:
+            exact_match = (
+                str(resolved.get("property_id") or "") == str(property_id)
+                or str(resolved.get("_firestore_doc_id") or "") == str(property_id)
+            )
+            if not exact_match:
+                resolve_source = None
+                resolved = None
+        if resolve_source:
+            property_id = str(resolved.get("property_id") or resolved.get("_firestore_doc_id") or property_id)
+            payload = dict(payload)
+            payload["property_id"] = property_id
+            payload["resolve_source"] = "firestore"
+            payload["is_update_only"] = True
+            payload["mode"] = "update"
+            mode = "update"
 
     # Coerce price fields to int before write
     for pk in ("price_numeric_min", "price_numeric_max"):

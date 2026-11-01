@@ -1100,7 +1100,12 @@ def create_property_endpoint(
             detail="overwrite=true is not supported; use update",
         )
 
-    pid = req.property_id or f"prop-{uuid.uuid4().hex[:8]}"
+    if req.property_id and str(req.property_id).strip():
+        pid = str(req.property_id).strip()
+    else:
+        from app.services.action_service import generate_property_id
+        prop_title = req.project_name_en or req.project_name_pl or getattr(req, "project_name", None) or "property"
+        pid = generate_property_id(db, prop_title)
 
     # Website scope validation
     if req.websites:
