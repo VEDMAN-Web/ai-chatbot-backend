@@ -1191,9 +1191,12 @@ def search_properties_firestore(
     sort_by_price: Optional[str] = None,
     max_price_exclusive: bool = False,
     status: Optional[str] = None,
+    stats_out: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """
     Searches properties in Firestore projects collection using structured criteria.
+    If ``stats_out`` is given it receives ``total_matches`` (every match, before ``limit``) so callers
+    can report a true count instead of the length of a capped page.
     Includes Google Maps URLs, embeds, and landmark calculations.
     Routes to user or admin Firestore client based on target.
     """
@@ -1443,6 +1446,10 @@ def search_properties_firestore(
         priced = [c for c in remaining if (c.get("price_thb_min") or 0) > 0]
         priced.sort(key=lambda c: (c["price_thb_min"], str(c.get("property_id") or "")), reverse=(sort_by_price == "desc"))
         remaining = priced
+
+    if stats_out is not None:
+        stats_out["total_matches"] = len(matched) + len(remaining)
+        stats_out["limit"] = limit
 
     for p in remaining:
         # Add Google Maps URL & Embed
@@ -1739,6 +1746,23 @@ def create_lead_in_firestore(lead_data: Dict[str, Any]) -> Optional[str]:
             "updatedAt": now_iso,
             "metadata": lead_data.get("metadata") or {}
         }
+        # Optional intent signals (snake_case, matching session-lead docs)
+        for key in ("preferred_location", "preferred_type", "budget_min", "budget_max"):
+            value = lead_data.get(key)
+            if value is None or value == "":
+                continue
+            if key.startswith("budget_"):
+                try:
+                    value = float(value)
+                except (TypeError, ValueError):
+                    continue
+            payload[key] = value
+        # Always store a score: previously this path wrote none, so every lead read 0.
+        from app.services.lead_service import resolve_lead_score
+
+        payload["lead_score"] = float(
+            resolve_lead_score({**payload, "lead_score": lead_data.get("lead_score")})
+        )
 
         doc_ref = client.collection("leads").document()
         doc_ref.set(payload)

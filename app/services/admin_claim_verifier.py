@@ -144,8 +144,14 @@ def _add_derived_arithmetic(allowed: Set[str]) -> None:
         allowed.update(_norm_num_token(f"{round(avg_all, 1)}"))
 
 
-def _walk_all_text_and_numbers(obj: Any, into: Set[str], depth: int = 0) -> None:
-    """Collect numbers/ids from ALL scalars including nested text fields."""
+def _walk_all_text_and_numbers(
+    obj: Any, into: Set[str], depth: int = 0, *, list_lengths: bool = True
+) -> None:
+    """Collect numbers/ids from ALL scalars including nested text fields.
+
+    ``list_lengths=False`` skips list-length tokens (used for prior-turn payloads,
+    whose stored lists are truncated to 6 items and so do not carry real counts).
+    """
     if depth > 10:
         return
     if obj is None or isinstance(obj, bool):
@@ -185,21 +191,22 @@ def _walk_all_text_and_numbers(obj: Any, into: Set[str], depth: int = 0) -> None
                     for m in _PCT_CLAIM_RE.finditer(v):
                         into.update(_norm_num_token(m.group("num")))
                 continue
-            if isinstance(v, (list, tuple)) and any(
+            if list_lengths and isinstance(v, (list, tuple)) and any(
                 x in lk for x in ("item", "result", "propert", "lead", "record", "row")
             ):
                 into.update(_norm_num_token(str(len(v))))
             if any(x in lk for x in ("count", "total", "item_count", "found", "size", "length", "shown")):
                 if isinstance(v, (int, float)) and not isinstance(v, bool):
                     into.update(_norm_num_token(str(int(v) if float(v) == int(v) else v)))
-                elif isinstance(v, list):
+                elif list_lengths and isinstance(v, list):
                     into.update(_norm_num_token(str(len(v))))
-            _walk_all_text_and_numbers(v, into, depth + 1)
+            _walk_all_text_and_numbers(v, into, depth + 1, list_lengths=list_lengths)
         return
     if isinstance(obj, (list, tuple)):
-        into.update(_norm_num_token(str(len(obj))))
+        if list_lengths:
+            into.update(_norm_num_token(str(len(obj))))
         for item in obj[:80]:
-            _walk_all_text_and_numbers(item, into, depth + 1)
+            _walk_all_text_and_numbers(item, into, depth + 1, list_lengths=list_lengths)
 
 
 def _is_redacted_key(key: str) -> bool:
@@ -521,17 +528,402 @@ def detect_unfair_lead_retraction(
     return violations
 
 
+# ---------------------------------------------------------------------------
+# Prior-turn grounding (figures from earlier turns' tool results stay valid)
+# ---------------------------------------------------------------------------
+
+def prior_tool_results_from_history(
+    conversation_history: Optional[Sequence[Any]],
+) -> List[Any]:
+    """Tool payloads stored on earlier turns (firestore keeps them on the last ~8 turns)."""
+    out: List[Any] = []
+    for turn in conversation_history or []:
+        if not isinstance(turn, dict):
+            continue
+        tr = turn.get("tool_results")
+        if isinstance(tr, (list, tuple)):
+            out.extend(tr)
+        elif isinstance(tr, dict):
+            out.append(tr)
+        cards = turn.get("properties")
+        if isinstance(cards, list) and cards:
+            out.append({"properties": cards})
+    return out
+
+
+def collect_prior_grounded_tokens(prior_tool_results: Optional[Sequence[Any]]) -> Set[str]:
+    """
+    Numbers/ids grounded by EARLIER turns' tool results.
+
+    Stored lists are truncated (<=6 items), so list lengths are NOT treated as
+    counts - only scalar values (total / count / authoritative_total_properties ...)
+    and values inside the stored records.
+    """
+    allowed: Set[str] = set()
+    for payload in _normalize_tool_payloads(prior_tool_results):
+        _walk_all_text_and_numbers(payload, allowed, list_lengths=False)
+        items: List[Any] = []
+        if isinstance(payload, dict):
+            for key in ("property_id", "id", "doc_id", "lead_id"):
+                if payload.get(key):
+                    items.append({key: payload.get(key)})
+            for list_key in ("items", "properties", "results", "leads"):
+                if isinstance(payload.get(list_key), list):
+                    items.extend(payload[list_key])
+        elif isinstance(payload, list):
+            items.extend(payload)
+        for it in items:
+            if isinstance(it, dict):
+                for key in ("property_id", "id", "doc_id", "name", "lead_id", "contact_name", "title"):
+                    if it.get(key):
+                        allowed.add(str(it[key]).strip())
+                        allowed.add(str(it[key]).strip().upper())
+    return allowed
+
+
+# ---------------------------------------------------------------------------
+# Per-property price attribution (prices must be stated next to THEIR property)
+# ---------------------------------------------------------------------------
+
+_PRICE_FIELD_KEYS = (
+    "price_display", "price", "price_numeric_min", "price_numeric_max",
+    "price_min", "price_max", "price_from", "price_to", "priceFrom", "priceTo",
+    "price_thb", "starting_price", "min_price", "max_price",
+)
+_PROP_NAME_KEYS = ("property_name", "name", "title")
+_PROP_ID_KEYS = ("property_id", "doc_id", "id")
+_NAME_STOP = frozenset({
+    "unknown property", "property", "properties", "villa", "condo", "listing",
+    "not specified", "n/a", "none",
+})
+
+# Number (en/pl formats) + optional million unit + optional currency.
+_AMOUNT_RE = re.compile(
+    r"(?<![\w.,])(?P<pre>฿\s*)?"
+    r"(?P<num>\d{1,3}(?:,\d{3})+(?:\.\d+)?(?!\d)"
+    r"|\d{1,3}(?:[   ]\d{3})+(?=\s*(?:thb|baht|฿))"
+    r"|\d+(?:[.,]\d+)?)"
+    r"(?:\s*(?P<unit>millions?|mln|mil|m)(?![a-zA-Z²³\d]))?"
+    r"(?:\s*(?P<cur>thb|baht|฿))?",
+    re.I,
+)
+_NON_PRICE_UNIT_AFTER_RE = re.compile(
+    r"^\s*(?:sq\.?\s?m|sqm|m²|m2|rai|ha\b|%|bed|bath|br\b|units?\b|floors?\b|km\b|"
+    r"mins?\b|minutes?\b|years?\b|lat\b|x\b)",
+    re.I,
+)
+_RANGE_SEP_RE = re.compile(r"^\s*(?:-|–|—|to|do)\s*$", re.I)
+# Comparisons / aggregates / filters: the number is not "the price of" the named property.
+_AGGREGATE_CTX_RE = re.compile(
+    r"\b(?:cheaper|less|more|expensive|difference|diff|than|total|combined|together|"
+    r"average|avg|sum|budget|under|below|above|over|up\s+to|within|max(?:imum)?|"
+    r"min(?:imum)?|between|tańsz\w*|droższ\w*|poniżej|powyżej|razem|średni\w*)\b",
+    re.I,
+)
+
+
+def _parse_amount_number(raw: str) -> Optional[Tuple[float, int]]:
+    s = raw.strip().replace(" ", " ").replace(" ", " ")
+    if re.fullmatch(r"\d{1,3}(?:,\d{3})+(?:\.\d+)?", s):
+        s = s.replace(",", "")
+    elif re.fullmatch(r"\d{1,3}(?: \d{3})+", s):
+        s = s.replace(" ", "")
+    elif "," in s:
+        s = s.replace(",", ".")  # Polish decimal comma: 19,98 mln
+    try:
+        val = float(s)
+    except ValueError:
+        return None
+    decimals = len(s.split(".", 1)[1]) if "." in s else 0
+    return val, decimals
+
+
+def _iter_price_amounts(text: str, *, lenient: bool = False) -> List[Tuple[int, int, float, float]]:
+    """
+    Price-like amounts in ``text`` as (start, end, value_thb, tolerance_thb).
+
+    Strict (reply) mode only accepts explicit prices: "19.98M", "19.98 million",
+    "19,98 mln", "฿19,980,000", "19,980,000 THB" or bare numbers >= 100,000.
+    Lenient mode (tool price fields) also reads bare small numbers as millions.
+    """
+    text = text or ""
+    raw_matches: List[List[Any]] = []
+    for m in _AMOUNT_RE.finditer(text):
+        parsed = _parse_amount_number(m.group("num"))
+        if not parsed:
+            continue
+        unit = m.group("unit") or ""
+        has_cur = bool(m.group("cur") or m.group("pre"))
+        if unit.lower() == "m" and not (unit == "M" or has_cur or lenient):
+            unit = ""  # "50 m from the beach" - metres, not millions
+        if not unit and not has_cur and _NON_PRICE_UNIT_AFTER_RE.match(text[m.end():m.end() + 12]):
+            continue
+        raw_matches.append([m, parsed, unit.lower(), has_cur])
+    # "5.2 - 12M THB": the low end of a range inherits the unit/currency of the high end.
+    for i in range(len(raw_matches) - 1):
+        cur_m, _, unit, has_cur = raw_matches[i]
+        nxt_m, _, nunit, ncur = raw_matches[i + 1]
+        if not unit and _RANGE_SEP_RE.match(text[cur_m.end():nxt_m.start()]):
+            raw_matches[i][2] = nunit
+            raw_matches[i][3] = has_cur or ncur
+    out: List[Tuple[int, int, float, float]] = []
+    for m, (val, decimals), unit, has_cur in raw_matches:
+        if val <= 0:
+            continue
+        half_step = 0.5 * (10 ** -decimals)
+        if unit:
+            mult = 1_000_000.0
+        elif val < 1000:
+            if not lenient:
+                continue
+            mult = 1_000_000.0
+        elif has_cur or val >= 100_000 or lenient:
+            mult = 1.0
+        else:
+            continue
+        out.append((m.start(), m.end(), val * mult, half_step * mult))
+    return out
+
+
+def _price_values_from_field(v: Any) -> List[float]:
+    if v is None or isinstance(v, bool):
+        return []
+    if isinstance(v, (int, float)):
+        f = float(v)
+        if f <= 0:
+            return []
+        return [f if f >= 1000 else f * 1_000_000.0]
+    if isinstance(v, str):
+        return [a[2] for a in _iter_price_amounts(v, lenient=True)]
+    return []
+
+
+@dataclass
+class _PropPriceInfo:
+    key: str
+    names: Set[str] = field(default_factory=set)
+    ids: Set[str] = field(default_factory=set)
+    price_values: List[float] = field(default_factory=list)
+    own_values: List[float] = field(default_factory=list)
+
+
+def _string_leaves(obj: Any, depth: int = 0) -> List[str]:
+    if depth > 6:
+        return []
+    if isinstance(obj, str):
+        return [obj]
+    if isinstance(obj, dict):
+        out: List[str] = []
+        for k, v in obj.items():
+            if k in _PRICE_FIELD_KEYS:
+                continue
+            out.extend(_string_leaves(v, depth + 1))
+        return out
+    if isinstance(obj, (list, tuple)):
+        out = []
+        for x in obj[:40]:
+            out.extend(_string_leaves(x, depth + 1))
+        return out
+    return []
+
+
+def build_property_price_index(tool_results: Optional[Sequence[Any]]) -> Dict[str, _PropPriceInfo]:
+    """Every property-like record in this turn's tools -> its names/ids and own prices."""
+    index: Dict[str, _PropPriceInfo] = {}
+
+    def _visit(obj: Any, depth: int = 0) -> None:
+        if depth > 8:
+            return
+        if isinstance(obj, list):
+            for x in obj[:80]:
+                _visit(x, depth + 1)
+            return
+        if not isinstance(obj, dict):
+            return
+        names = {
+            str(obj[k]).strip()
+            for k in _PROP_NAME_KEYS
+            if isinstance(obj.get(k), str) and str(obj[k]).strip()
+        }
+        names = {n for n in names if len(n) >= 4 and n.lower() not in _NAME_STOP}
+        is_prop = bool(names) and not _looks_like_lead(obj) and (
+            _looks_like_property(obj) or any(k in obj for k in _PRICE_FIELD_KEYS)
+        )
+        if is_prop:
+            ids = {
+                str(obj[k]).strip()
+                for k in _PROP_ID_KEYS
+                if obj.get(k) not in (None, "") and len(str(obj[k]).strip()) >= 4
+            }
+            key = (sorted(ids)[0] if ids else sorted(names)[0]).lower()
+            # Merge duplicates of the same listing (same id or same name)
+            ids_l = {i.lower() for i in ids}
+            names_l = {n.lower() for n in names}
+            for existing_key, existing in index.items():
+                if ({i.lower() for i in existing.ids} & ids_l) or (
+                    {n.lower() for n in existing.names} & names_l
+                ):
+                    key = existing_key
+                    break
+            info = index.setdefault(key, _PropPriceInfo(key=key))
+            info.names |= names
+            info.ids |= ids
+            for pk in _PRICE_FIELD_KEYS:
+                info.price_values.extend(_price_values_from_field(obj.get(pk)))
+            for s in _string_leaves(obj):
+                info.own_values.extend(a[2] for a in _iter_price_amounts(s))
+        for k, v in obj.items():
+            if isinstance(v, (dict, list)) and not _is_redacted_key(str(k)):
+                _visit(v, depth + 1)
+
+    for p in _normalize_tool_payloads(tool_results):
+        _visit(p)
+    return index
+
+
+def _amount_fits(value: float, tol: float, candidates: Sequence[float]) -> bool:
+    for c in candidates:
+        if abs(value - c) <= max(tol, 0.005 * c):
+            return True
+    return False
+
+
+def _amount_fits_property(value: float, tol: float, info: _PropPriceInfo) -> bool:
+    if _amount_fits(value, tol, info.price_values) or _amount_fits(value, tol, info.own_values):
+        return True
+    if len(set(info.price_values)) >= 2:  # price range: anything inside min..max belongs to it
+        lo, hi = min(info.price_values), max(info.price_values)
+        slack = max(tol, 0.005 * hi)
+        if lo - slack <= value <= hi + slack:
+            return True
+    return False
+
+
+def _mention_patterns(index: Dict[str, _PropPriceInfo]) -> List[Tuple["re.Pattern[str]", str]]:
+    pats: List[Tuple["re.Pattern[str]", str]] = []
+    for key, info in index.items():
+        for label in info.names | info.ids:
+            toks = [t for t in re.split(r"[\s\-_]+", label.strip()) if t]
+            if not toks:
+                continue
+            body = r"[\s\-_*]+".join(re.escape(t) for t in toks)
+            pats.append((re.compile(rf"(?<![\w]){body}(?![\w])", re.I), key))
+    return pats
+
+
+_CONTINUATION_LINE_RE = re.compile(
+    r"^(?:\s+\S|\s*(?:[-*•‣◦]\s|\d+[.)]\s)|\s*\**\s*[^\W\d_][\w ./()]{0,30}\**\s*:)"
+)
+
+
+def split_reply_by_property(
+    text: str, index: Dict[str, _PropPriceInfo]
+) -> List[Tuple[str, Optional[str]]]:
+    """
+    Split the reply into (segment, property_key|None).
+
+    - A line naming exactly one known property binds to it; following bullet /
+      indented / "Label:" lines stay bound until another property or a plain
+      paragraph line.
+    - A line naming several properties is split at each name mention; text
+      before the first mention stays unbound, and binding does not carry over.
+    - Lines mentioning no property outside such a block are unbound (global check).
+    """
+    pats = _mention_patterns(index)
+    segments: List[Tuple[str, Optional[str]]] = []
+    current: Optional[str] = None
+    for line in (text or "").splitlines():
+        if not line.strip():
+            continue
+        hits = []
+        for rx, key in pats:
+            for m in rx.finditer(line):
+                hits.append((m.start(), m.end(), key))
+        hits.sort(key=lambda h: (h[0], -(h[1] - h[0])))  # longest match wins on overlap
+        chosen: List[Tuple[int, int, str]] = []
+        for h in hits:
+            if chosen and h[0] < chosen[-1][1]:
+                continue
+            chosen.append(h)
+        keys = {h[2] for h in chosen}
+        if not chosen:
+            if current and _CONTINUATION_LINE_RE.match(line):
+                segments.append((line, current))
+            else:
+                current = None
+                segments.append((line, None))
+            continue
+        if len(keys) == 1:
+            current = chosen[0][2]
+            segments.append((line, current))
+            continue
+        segments.append((line[: chosen[0][0]], None))
+        for i, (start, _end, key) in enumerate(chosen):
+            stop = chosen[i + 1][0] if i + 1 < len(chosen) else len(line)
+            segments.append((line[start:stop], key))
+        current = None
+    return segments
+
+
+def detect_price_misattribution(
+    reply_text: Optional[str],
+    tool_results: Optional[Sequence[Any]],
+    *,
+    change_prices: Optional[Set[str]] = None,
+) -> List[str]:
+    """
+    HARD violations for prices stated next to the wrong property.
+
+    A price bound to property P is flagged when it does not fit P's own price
+    (value, range, or a figure in P's own text) AND either it is another listed
+    property's price (a swap) or P has no numeric price at all (price on request).
+    Prices that fit nobody while P has a price fall back to the global soft check.
+    """
+    index = build_property_price_index(tool_results)
+    if not index:
+        return []
+    change_prices = change_prices or set()
+    violations: List[str] = []
+    for seg, key in split_reply_by_property(reply_text or "", index):
+        if not key or key not in index:
+            continue
+        info = index[key]
+        for start, end, value, tol in _iter_price_amounts(seg):
+            window = seg[max(0, start - 30):min(len(seg), end + 25)]
+            if _AGGREGATE_CTX_RE.search(window):
+                continue
+            if _amount_fits_property(value, tol, info):
+                continue
+            if change_prices and (
+                _norm_num_token(f"{value:g}") & change_prices
+                or _norm_num_token(f"{value / 1_000_000:g}") & change_prices
+            ):
+                continue  # the new price of a pending change on this property
+            owners = [
+                k for k, other in index.items()
+                if k != key and _amount_fits_property(value, tol, other)
+            ]
+            if owners or not info.price_values:
+                label = sorted(info.names)[0] if info.names else key
+                violations.append(f"wrong_property_price:{seg[start:end].strip()}@{label}")
+    return violations
+
+
 def verify_admin_claims(
     reply_text: Optional[str],
     tool_results: Optional[Sequence[Any]],
     *,
     prior_verified_leads: Optional[Set[str]] = None,
+    prior_tool_results: Optional[Sequence[Any]] = None,
 ) -> ClaimVerifyResult:
     text = reply_text or ""
     payloads = _normalize_tool_payloads(tool_results)
     allowed = collect_allowed_tokens(tool_results) if payloads else set()
     tool_counts = extract_tool_counts(tool_results) if payloads else set()
     change_ids, change_prices = extract_change_target_ids_and_prices(tool_results)
+    # Figures grounded by EARLIER turns' tool results stay valid for counts / soft
+    # numbers / ids — never for this turn's change target price/id or success claims.
+    prior_allowed = collect_prior_grounded_tokens(prior_tool_results) if prior_tool_results else set()
 
     numbers, ids = extract_numeric_claims(text)
     unsupported_numbers: List[str] = []
@@ -553,6 +945,8 @@ def verify_admin_claims(
             is_price_ctx = any(m.group("num") == num for m in _PRICE_CLAIM_RE.finditer(text))
 
             if is_count_ctx:
+                if forms & prior_allowed:
+                    continue  # restating a count grounded by an earlier turn's tool
                 try:
                     claimed = int(str(num).replace(",", ""))
                 except ValueError:
@@ -565,6 +959,9 @@ def verify_admin_claims(
             if is_price_ctx and change_prices and not (forms & change_prices):
                 unsupported_numbers.append(num)
                 hard_mismatches.append(f"wrong_change_price:{num}")
+                continue
+
+            if forms & prior_allowed:
                 continue
 
             if _is_soft_number(num, text):
@@ -581,8 +978,14 @@ def verify_admin_claims(
             if change_ids and pid.lower() not in change_ids:
                 unsupported_ids.append(pid)
                 hard_mismatches.append(f"wrong_change_id:{pid}")
+            elif pid.lower() in {str(a).lower() for a in prior_allowed}:
+                continue
             else:
                 soft_mismatches.append(pid)
+
+        for v in detect_price_misattribution(text, tool_results, change_prices=change_prices):
+            unsupported_numbers.append(v.split(":", 1)[1].rsplit("@", 1)[0])
+            hard_mismatches.append(v)
 
     if reply_claims_success(text):
         if not payloads:
@@ -600,6 +1003,7 @@ def verify_admin_claims(
     has_hard = bool(success_violations) or any(
         h.startswith("wrong_count")
         or h.startswith("wrong_change")
+        or h.startswith("wrong_property_price")
         or h.startswith("success_")
         or h.startswith("unfair_retract")
         or h.startswith("demo_label")
@@ -1047,16 +1451,25 @@ def verify_and_correct_admin_reply(
     user_message: Optional[str] = None,
     conversation_history: Optional[Sequence[Any]] = None,
     prior_verified_leads: Optional[Set[str]] = None,
+    prior_tool_results: Optional[Sequence[Any]] = None,
 ) -> ClaimVerifyResult:
     """
     HARD → regenerate once → template.
     SOFT-only → keep model reply, audit log.
+
+    Counts / numbers / ids grounded by earlier turns' stored tool results
+    (``conversation_history[*].tool_results`` or explicit ``prior_tool_results``)
+    are accepted, so restating an earlier grounded figure is never "invented".
     """
     prior = set(prior_verified_leads or set())
     if conversation_history and not prior:
         prior = extract_prior_verified_lead_names(conversation_history)
+    prior_payloads: List[Any] = list(prior_tool_results or [])
+    if conversation_history:
+        prior_payloads.extend(prior_tool_results_from_history(conversation_history))
     first = verify_admin_claims(
-        reply_text, tool_results, prior_verified_leads=prior
+        reply_text, tool_results, prior_verified_leads=prior,
+        prior_tool_results=prior_payloads,
     )
     # Soft-only: keep reply
     if first.ok and first.soft_mismatches:
@@ -1081,8 +1494,12 @@ def verify_and_correct_admin_reply(
     regenerated: Optional[str] = None
     if regenerate_fn is not None:
         instruction = (
-            "GUARDRAIL: use only values from the tool results. "
-            "Do not invent counts, prices, percentages, or ids. "
+            "GUARDRAIL: every count, price, percentage and id must come from tool results — "
+            "this turn's, or earlier tool results already shown in this conversation. "
+            "Figures you stated in earlier turns from earlier tool results remain valid: "
+            "do not disown them or call them invented, fake or unverified. "
+            "State each price next to the property it belongs to in the tool results; "
+            "if a property has no price there, say 'price on request' for it. "
             "Do not claim an action succeeded unless the tool result has success=true and is_mock=false. "
             "Do NOT retract a previously returned lead as demo/unreal/not verified unless this turn's "
             "tools looked up that same lead by id/name/email. A narrower empty window must not erase prior facts. "
@@ -1097,7 +1514,8 @@ def verify_and_correct_admin_reply(
 
     if regenerated and str(regenerated).strip():
         second = verify_admin_claims(
-            regenerated, tool_results, prior_verified_leads=prior
+            regenerated, tool_results, prior_verified_leads=prior,
+            prior_tool_results=prior_payloads,
         )
         if second.ok or (second.soft_mismatches and not second.hard_mismatches and not second.success_violations):
             second.final_text = regenerated

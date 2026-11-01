@@ -269,7 +269,11 @@ def handle_public_chat(
                             "brand": _tenant.brand_name,
                             "source_url": _tenant.website_url,
                             "message": req.notes or user_msg,
-                            "property_id": req.property_id or req.preferred_location or ""
+                            "property_id": req.property_id or req.preferred_location or "",
+                            "preferred_location": req.preferred_location,
+                            "budget_max": budget_dec,
+                            # Same score the session lead got (includes turn count)
+                            "lead_score": getattr(conversation, "lead_score", None),
                         })
                     except Exception as e:
                         logger.warning(f"Firestore lead sync error: {e}")
@@ -548,7 +552,9 @@ def submit_direct_lead(
                     "phone": c_phone,
                     "property_id": c_loc or "",
                     "message": req.notes or "Direct frontend lead submission",
-                    "brand": conversation.site_origin or "tajlandia"
+                    "brand": conversation.site_origin or "tajlandia",
+                    "preferred_location": req.preferred_location,
+                    "lead_score": lead_score if lead_saved else None,
                 })
             except Exception as e:
                 logger.warning(f"Firestore direct lead sync error: {e}")

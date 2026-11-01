@@ -440,6 +440,7 @@ class ResponseConfidenceGuardrail:
         language: str = "en",
         tool_results: Optional[List[Any]] = None,
         run_llm_judge: bool = True,
+        prior_tool_results: Optional[List[Any]] = None,
     ) -> GuardrailEvaluationResult:
         tool_calls = tool_calls or []
         tool_results = tool_results or []
@@ -509,9 +510,18 @@ class ResponseConfidenceGuardrail:
             try:
                 from app.services.admin_perf import admin_fast_model
                 tool_blob = cls._trim_tool_results_for_judge(tool_results, max_chars=1500)
+                prior_blob = (
+                    cls._trim_tool_results_for_judge(prior_tool_results, max_chars=800)
+                    if prior_tool_results else ""
+                )
+                prior_section = (
+                    f"EARLIER TURN TOOL RESULTS (also valid; grounded in a previous turn):\n{prior_blob}\n\n"
+                    if prior_blob else ""
+                )
                 eval_system = (
                     "Strict truthfulness judge. Verify against TOOL RESULTS only. "
                     "Flag ONLY concrete contradictions, fabricated actions, or unsolicited docs. "
+                    "Figures that match EARLIER TURN TOOL RESULTS were grounded in a previous turn — they are NOT fabricated. "
                     "Output JSON: is_confident, confidence_score, has_false_agreement, "
                     "has_unsolicited_action, has_concrete_contradiction, critique, correction_needed."
                 )
@@ -521,6 +531,7 @@ class ResponseConfidenceGuardrail:
                     f"Doc requested: {user_wants_doc}\n"
                     f"Tools: {json.dumps([tc.get('name') for tc in tool_calls])}\n"
                     f"TOOL RESULTS:\n{tool_blob}\n\n"
+                    f"{prior_section}"
                     f"Reply (first 800 chars): \"{(response_text or '')[:800]}\""
                 )
                 helper_timeout = float(getattr(settings, "ADMIN_HELPER_TIMEOUT", 30.0) or 30.0)

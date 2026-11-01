@@ -15,6 +15,7 @@ Change attributes, then call save_user(db, user).
 
 from __future__ import annotations
 
+import collections
 import copy
 import hashlib
 import logging
@@ -232,9 +233,29 @@ def get_by_id(db: Any, user_id: Any):
         rec = _fs_get_by_email(uid.lower())
         if rec is not None:
             return rec
-    for rec in _fs_all_users():
-        if str(rec.id) == uid:
+
+    client = _fs_client_required()
+    if client is not None:
+        try:
+            for snap in client.collection(USERS_COLLECTION).where("userId", "==", uid).limit(1).stream():
+                d = fs.doc_to_dict(snap)
+                d.setdefault("email", snap.id)
+                rec = UserRecord(d)
+                rec._doc_id = snap.id
+                return rec
+        except Exception as e:
+            logger.debug("users_repo: userId query failed: %s", e)
+
+        data = fs.get_document(client, USERS_COLLECTION, uid)
+        if data is not None:
+            data.setdefault("email", data.get("id") or uid)
+            rec = UserRecord(data)
+            rec._doc_id = uid
             return rec
+
+        for rec in _fs_all_users():
+            if str(rec.id) == uid:
+                return rec
     return None
 
 
@@ -432,6 +453,35 @@ def revoke_user_sessions(db: Any, user_id: Any) -> int:
                 fs.set_document(client, SESSIONS_COLLECTION, sess.id, {"revokedAt": _iso(now)}, merge=True)
                 count += 1
     return int(count)
+
+
+def count_active_sessions_by_user(db: Any) -> Dict[str, int]:
+    """Return a mapping of user_id -> count of active unexpired sessions."""
+    now_iso = datetime.now(timezone.utc).isoformat()
+    client = _fs_client_required()
+    if client is None:
+        return {}
+    counts: Dict[str, int] = collections.defaultdict(int)
+    try:
+        for snap in client.collection(SESSIONS_COLLECTION).where("revokedAt", "==", None).where("expiresAt", ">", now_iso).stream():
+            data = fs.doc_to_dict(snap)
+            uid = str(data.get("userId") or data.get("user_id") or "")
+            if uid:
+                counts[uid] += 1
+    except Exception as e:
+        logger.warning("users_repo: count_active_sessions_by_user query failed: %s", e)
+        try:
+            now = datetime.utcnow()
+            for snap in client.collection(SESSIONS_COLLECTION).where("revokedAt", "==", None).stream():
+                data = fs.doc_to_dict(snap)
+                exp = _naive_utc(data.get("expiresAt") or data.get("expires_at"))
+                if exp and exp > now:
+                    uid = str(data.get("userId") or data.get("user_id") or "")
+                    if uid:
+                        counts[uid] += 1
+        except Exception as e2:
+            logger.warning("users_repo: count_active_sessions_by_user fallback failed: %s", e2)
+    return dict(counts)
 
 
 def count_active_sessions(db: Any, user_id: Any) -> int:

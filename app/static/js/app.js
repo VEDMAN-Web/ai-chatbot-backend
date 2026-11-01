@@ -2646,8 +2646,13 @@ async function loadBatchHistory(manual = false) {
       item.className = 'batch-history-item';
 
       const isExpired = op.is_expired;
-      const isUndone = op.status === 'undone';
-      const canUndo = !isExpired && !isUndone;
+      const isUndone = op.status === 'undone' || op.status === 'REVERTED';
+      const canUndo = !isExpired && !isUndone && op.can_undo !== false;
+      const changes = Array.isArray(op.changes) ? op.changes : [];
+      const changeLines = changes.slice(0, 5).map(c =>
+        `<li>${c.property_name ? `<strong>${escapeHtml(c.property_name)}</strong> — ` : ''}${escapeHtml(c.text || '')}</li>`).join('');
+      const moreChanges = changes.length > 5 ? `<li>+${changes.length - 5} more changes</li>` : '';
+      const names = Array.isArray(op.property_names) ? op.property_names : [];
 
       let badgeClass = 'active';
       if (isExpired) badgeClass = 'expired';
@@ -2656,8 +2661,8 @@ async function loadBatchHistory(manual = false) {
       item.innerHTML = `
         <div class="history-item-top">
           <div style="display: flex; align-items: center; gap: 8px;">
-            <span class="history-op-badge ${escapeHtml(op.operation_type)}">${escapeHtml(op.operation_type)}</span>
-            <span class="history-op-id">${escapeHtml(op.operation_id)}</span>
+            <span class="history-op-badge ${escapeHtml(op.operation_type)}">${escapeHtml(op.operation_label || op.operation_type)}</span>
+            <span class="history-op-summary">${escapeHtml(op.summary || '')}</span>
           </div>
           <span class="countdown-badge ${badgeClass}">
             ${isExpired ? '❌ Expired' : '⏳ ' + escapeHtml(op.time_remaining || 'Active')}
@@ -2666,9 +2671,11 @@ async function loadBatchHistory(manual = false) {
 
         <div class="history-item-meta">
           <span>📄 <strong>File:</strong> ${escapeHtml(op.file_name || 'batch')}</span>
-          <span>🎯 <strong>Affected:</strong> ${op.items_affected || 0} listings</span>
-          <span>📅 <strong>Executed:</strong> ${new Date(op.created_at).toLocaleString()}</span>
+          <span>🎯 <strong>Affected:</strong> ${op.items_affected || 0} listings${names.length ? ': ' + escapeHtml(names.join(', ')) : ''}</span>
+          <span>📅 <strong>Executed:</strong> ${new Date(op.created_at).toLocaleString()}${op.actor ? ' by ' + escapeHtml(op.actor) : ''}</span>
+          <span class="history-op-id">${escapeHtml(op.operation_id)}</span>
         </div>
+        ${changeLines ? `<ul class="history-op-changes">${changeLines}${moreChanges}</ul>` : ''}
 
         <div style="display: flex; align-items: center; justify-content: space-between; margin-top: 4px; padding-top: 6px; border-top: 1px solid rgba(255,255,255,0.05);">
           <span style="font-size: 11px; color: var(--text-dim);">
