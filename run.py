@@ -9,6 +9,7 @@ BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 sys.path.insert(0, BASE_DIR)
 
 def init_database():
+    
     """Initializes tables and extensions with retries for cloud databases."""
     import sqlalchemy as sa
     from app.db.session import admin_engine, user_engine, Base
