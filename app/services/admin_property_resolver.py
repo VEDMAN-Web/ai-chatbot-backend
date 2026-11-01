@@ -160,6 +160,12 @@ def extract_property_name_phrase(message: Optional[str]) -> Optional[str]:
         flags=re.I,
     ).strip(" .,;:'\"")
 
+    if phrase:
+        phrase = re.sub(r"^(?:the\s+)?(?:listing|property|project)\s+", "", phrase, flags=re.I).strip(" .,;:'\"")
+        m_paren = re.match(r"^([a-zA-Z0-9_\-\.]+)\s*\((.+)\)$", phrase)
+        if m_paren:
+            phrase = m_paren.group(2).strip()
+
     if _is_filler_only(phrase):
         return None
     return phrase or None
@@ -258,6 +264,21 @@ def resolve_admin_property_name(
             ensure_name_index_from_firestore(target="user")
         except Exception as e:
             logger.debug(f"Name index ensure skipped: {e}")
+
+    # Check exact ID match directly before fuzzy name matching
+    try:
+        from app.services.admin_property_fields import resolve_existing_property
+        _src, _rec = resolve_existing_property(db, phrase, exact_id_only=True)
+        if _src and _rec:
+            return AdminNameResolution(
+                kind="resolved",
+                query=phrase,
+                property_id=str(_rec.get("property_id") or _rec.get("_firestore_doc_id")),
+                official_name=str(_rec.get("property_name") or _rec.get("name") or phrase),
+                reason="exact_id",
+            )
+    except Exception as e:
+        logger.debug(f"Exact ID check skipped: {e}")
 
     mr = match_property_name(phrase)
 

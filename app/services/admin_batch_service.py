@@ -1087,7 +1087,7 @@ def record_crud_operation_snapshot(
     return operation_id
 
 
-def _resolve_firestore_document(projects_col: Any, record: Dict[str, Any]) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
+def _resolve_firestore_document(projects_col: Any, record: Dict[str, Any], exact_id_only: bool = False) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
     """Finds a matching Firestore document by property_id, slug, or name/title."""
     query_str = (record.get("property_id") or record.get("id") or record.get("doc_id") or record.get("name") or "").strip()
     if not query_str:
@@ -1102,6 +1102,9 @@ def _resolve_firestore_document(projects_col: Any, record: Dict[str, Any]) -> Tu
         target_id = doc.id if isinstance(getattr(doc, "id", None), str) and not type(doc.id).__name__ == "MagicMock" else query_str
         return target_id, doc.to_dict() or {}
 
+    if exact_id_only:
+        return None, None
+
     # 2. Slugified document ID lookup (e.g. "9D Cozy Villas" -> "9d-cozy-villas")
     if query_slug:
         doc = projects_col.document(query_slug).get()
@@ -1112,6 +1115,7 @@ def _resolve_firestore_document(projects_col: Any, record: Dict[str, Any]) -> Tu
     # 3. Stream search across portfolio for name, title, or slug match
     try:
         docs = list(projects_col.limit(200).stream())
+        has_explicit_id = bool(record.get("property_id") or record.get("id") or record.get("doc_id"))
         for d in docs:
             # Check document ID
             d_id_lower = d.id.lower()
@@ -1132,7 +1136,7 @@ def _resolve_firestore_document(projects_col: Any, record: Dict[str, Any]) -> Tu
             for candidate in names_to_check:
                 if query_lower == candidate or (query_slug and query_slug == candidate):
                     return d.id, d_data
-                if len(query_lower) >= 4 and (query_lower in candidate or candidate in query_lower):
+                if not has_explicit_id and len(query_lower) >= 4 and query_lower in candidate:
                     return d.id, d_data
     except Exception as e:
         logger.warning(f"Error resolving firestore doc by name: {e}")

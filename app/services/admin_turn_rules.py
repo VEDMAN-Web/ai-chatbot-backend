@@ -100,9 +100,34 @@ def resolve_write_target(db: Any, name: str) -> Tuple[Any, Optional[str]]:
     from app.repositories import properties_store
     from app.services.admin_property_fields import resolve_existing_property
 
-    label = (name or "").strip(" ?.!")
-    if len(label) < 2:
+    raw_label = (name or "").strip(" ?.!'\"")
+    if len(raw_label) < 2:
         return None, "Name the property you want to change. Nothing was changed."
+
+    # Strip leading "the listing ", "listing ", "the property ", "property "
+    cleaned = re.sub(r"^(?:the\s+)?(?:listing|property|project)\s+", "", raw_label, flags=re.I).strip(" ?.!:'\"")
+    if not cleaned:
+        cleaned = raw_label
+
+    # Check for "prop-id (Property Name)" format
+    m_paren = re.match(r"^([a-zA-Z0-9_\-\.]+)\s*\((.+)\)$", cleaned)
+    if m_paren:
+        id_part = m_paren.group(1).strip()
+        name_part = m_paren.group(2).strip()
+        src, rec = resolve_existing_property(db, id_part, exact_id_only=True)
+        if src and rec is not None:
+            return rec, None
+        src, rec = resolve_existing_property(db, name_part)
+        if src and rec is not None:
+            return rec, None
+        label = name_part
+    else:
+        label = cleaned
+
+    # Check exact ID first
+    src, rec = resolve_existing_property(db, label, exact_id_only=True)
+    if src and rec is not None:
+        return rec, None
     rows: List[Any] = []
     try:
         queried = properties_store.list_rows(db)

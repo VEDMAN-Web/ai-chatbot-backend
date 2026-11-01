@@ -84,6 +84,7 @@ def build_admin_structured_state(
     pending_action_id: Optional[str] = None,
     last_resolved_property_id: Optional[str] = None,
     last_report_file: Optional[str] = None,
+    last_undo: Optional[Dict[str, Any]] = None,
     extra: Optional[Dict[str, Any]] = None,
     open_pending: Optional[Sequence[Any]] = None,
     recent_finished: Optional[Sequence[Any]] = None,
@@ -130,6 +131,13 @@ def build_admin_structured_state(
 
     lines.append(f"last_resolved_property_id: {last_resolved_property_id or 'none'}")
     lines.append(f"last_report_file: {last_report_file or 'none'}")
+    if last_undo and isinstance(last_undo, dict):
+        op = last_undo.get("operation_id") or "recent"
+        target = last_undo.get("property_name") or last_undo.get("property_id") or "the listing"
+        lines.append(
+            f"recent_undo_event: Operation `{op}` on `{target}` was UNDONE/REVERTED to previous values. "
+            f"If the user asks about the price or status of this listing, explain that the prior change was undone/rolled back."
+        )
     if extra:
         for k, v in extra.items():
             if v is not None and str(v).strip():
@@ -181,12 +189,13 @@ def trim_admin_history_for_llm(
     return hist[-limit:]
 
 
-def extract_session_state_from_conversation(conv: Any) -> Dict[str, Optional[str]]:
+def extract_session_state_from_conversation(conv: Any) -> Dict[str, Any]:
     prefs = dict(getattr(conv, "preferences", None) or {})
     return {
         "pending_action_id": prefs.get("last_pending_action_id"),
         "last_resolved_property_id": prefs.get("last_resolved_property_id"),
         "last_report_file": prefs.get("last_report_file"),
+        "last_undo": prefs.get("last_undo"),
     }
 
 
@@ -196,6 +205,7 @@ def remember_admin_session_fact(
     pending_action_id: Optional[str] = None,
     property_id: Optional[str] = None,
     report_file: Optional[str] = None,
+    last_undo: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Best-effort in-memory preference update (caller may commit)."""
     if conv is None:
@@ -207,6 +217,8 @@ def remember_admin_session_fact(
         prefs["last_resolved_property_id"] = str(property_id)
     if report_file:
         prefs["last_report_file"] = str(report_file)
+    if last_undo is not None:
+        prefs["last_undo"] = last_undo
     conv.preferences = prefs
 
 

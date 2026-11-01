@@ -2048,9 +2048,18 @@ def _process_admin_chat_inner(
             elif target_action.tool_name == "undo_operation":
                 _res = raw_exec if isinstance(raw_exec, dict) else {}
                 _ids = (target_action.action_payload or {}).get("affected_ids") or _res.get("affected_ids") or []
+                _pname = (target_action.action_payload or {}).get("property_name") or ""
                 reply_text = (
                     f"\u2705 **Undone.** Operation `{(target_action.action_payload or {}).get('operation_id')}` was rolled back; "
                     f"{len(_ids)} listing(s) are back to how they were: {', '.join('`' + str(i) + '`' for i in _ids[:10])}."
+                )
+                remember_admin_session_fact(
+                    conv,
+                    last_undo={
+                        "operation_id": (target_action.action_payload or {}).get("operation_id") or op_id,
+                        "property_id": (target_action.action_payload or {}).get("property_id") or (_ids[0] if _ids else None),
+                        "property_name": _pname,
+                    }
                 )
             elif target_action.tool_name in ("send_email", "create_calendar_event"):
                 payload = target_action.action_payload or {}
@@ -2564,6 +2573,7 @@ def _call_anthropic_claude(
         pending_action_id=live_pending_id or (open_pending_id if open_from_db else None),
         last_resolved_property_id=session_bits.get("last_resolved_property_id"),
         last_report_file=session_bits.get("last_report_file"),
+        last_undo=session_bits.get("last_undo"),
         open_pending=open_from_db,
         recent_finished=db_action_state.get("recent_finished") or [],
     )
@@ -5289,7 +5299,7 @@ def _handle_crud_intent(db, conv, message: str, intent: str, staff_user, languag
         return reply("Select the website for this listing first (the chat-bot selector at the top), then ask again.", status="needs_clarification")
     from app.services.action_service import _duplicate_property_message
     from app.services.admin_property_fields import resolve_existing_property
-    source, existing = resolve_existing_property(db, new.property_id)
+    source, existing = resolve_existing_property(db, new.property_id, exact_id_only=True)
     if source:
         return reply(f"A listing with id `{new.property_id}` already exists, so I did not create a second one. "
                      "To change it, say `update <name> ...`.", status="duplicate")
@@ -6129,13 +6139,26 @@ def _execute_admin_tool_uncached(
 
         target_pid = tool_args.get("property_id")
         selected_websites = getattr(staff_user, "selected_websites", None)
-        resolve_source, resolved = resolve_existing_property(db, str(target_pid or ""))
+        mode_arg = str(tool_args.get("mode") or "").strip().lower()
+        is_create_mode = mode_arg == "create"
+        resolve_source, resolved = resolve_existing_property(
+            db, str(target_pid or ""), exact_id_only=is_create_mode
+        )
         prop = None
 
         # Canonical id from resolver (Firestore doc id)
         if resolve_source == "firestore" and isinstance(resolved, dict):
-            target_pid = resolved.get("property_id") or resolved.get("_firestore_doc_id") or target_pid
-            tool_args["property_id"] = target_pid
+            if is_create_mode:
+                exact_match = (
+                    str(resolved.get("property_id") or "") == str(target_pid)
+                    or str(resolved.get("_firestore_doc_id") or "") == str(target_pid)
+                )
+                if not exact_match:
+                    resolve_source = None
+                    resolved = None
+            if resolve_source:
+                target_pid = resolved.get("property_id") or resolved.get("_firestore_doc_id") or target_pid
+                tool_args["property_id"] = target_pid
 
         raw_fields = dict(tool_args.get("fields_to_update") or tool_args.get("fields") or {})
         explicit_websites = "websites" in raw_fields or "selected_websites" in raw_fields
