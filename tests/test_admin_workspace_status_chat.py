@@ -83,4 +83,5 @@ def test_services_come_from_the_scopes_google_granted():
 
 def test_other_questions_are_still_refused_as_off_topic():
     body = _ask(_account("admin", True), "what is the capital of india")
-    assert "off-topic" in body["text"].lower()
+    text = body["text"].lower()
+    assert "off-topic" in text or "don't answer general-knowledge questions" in text

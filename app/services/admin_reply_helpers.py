@@ -673,3 +673,170 @@ def is_anthropic_connection_error(exc: BaseException) -> bool:
 def is_transient_anthropic_error(exc: BaseException) -> bool:
     """Timeouts OR connection errors (used for friendly slow message)."""
     return is_anthropic_timeout_error(exc) or is_anthropic_connection_error(exc)
+
+
+# ---------------------------------------------------------------------------
+# Admin scope guard (off-topic general-knowledge questions)
+# ---------------------------------------------------------------------------
+
+# Words that tie a message to the portfolio or the admin platform. The public off-topic detector blocks
+# phrases like "write me a", "who is the", "sql query" — normal admin requests ("write me a listing
+# description", "who is the developer of X") must never be refused because of them.
+_ADMIN_DOMAIN_RE = re.compile(
+    r"(?:\bprop-[a-z0-9]|"
+    r"\b(?:propert\w*|listing\w*|leads?\b|buyer\w*|client\w*|villa\w*|condo\w*|apartment\w*|"
+    r"land\b|plot\w*|project\w*|developer\w*|agent\w*|advisor\w*|"
+    r"thb|baht|report\w*|pdf|excel|csv|export\w*|dossier\w*|brochure\w*|offer\w*|portfolio\w*|"
+    r"inventor\w*|catalog\w*|database|firestore|users?\b|staff|admin\w*|role\w*|log\b|logs\b|"
+    r"audit\w*|activity|chat\w*|conversation\w*|proposal\w*|pending|undo|batch\w*|drive|google|gmail|"
+    r"calendar|workspace|email\w*|e-mail|description\w*|tagline\w*|amenit\w*|bedroom\w*|pool\w*|"
+    r"beach\w*|sea\s*view|rental|yield\w*|roi|freehold|leasehold|visa\w*|tax\w*|"
+    r"tajland\w*|phuket|samui|phangan|bangkok|pattaya|hua\s*hin|chalong|krabi|chiang\s*mai|"
+    r"nieruchomo\w*|oferta\w*|ofert\w*|klient\w*|cena\w*|ceny|raport\w*|willa\w*|mieszka\w*)"
+    r")",
+    re.I,
+)
+
+
+def is_admin_off_topic(message: Optional[str]) -> bool:
+    """True for general-knowledge / unrelated questions the admin bot must steer back (not answer).
+
+    Uses the public detector, but any message that mentions the portfolio or the platform stays on-topic.
+    """
+    text = (message or "").strip()
+    if not text:
+        return False
+    try:
+        from app.services.public_agent import is_off_topic_query
+    except Exception:  # pragma: no cover - import guard
+        return False
+    if not is_off_topic_query(text):
+        return False
+    return not _ADMIN_DOMAIN_RE.search(text)
+
+
+def admin_off_topic_reply(language: str = "en") -> str:
+    if (language or "en").lower().startswith("pl"):
+        return (
+            "Jako wewnętrzny asystent AI Tajlandia zajmuję się wyłącznie naszym portfolio nieruchomości "
+            "w Tajlandii oraz administracją platformy (oferty, leady, raporty, użytkownicy, logi). "
+            "Nie odpowiadam na pytania ogólne. W czym mogę pomóc w tym zakresie?"
+        )
+    return (
+        "As the Tajlandia Internal AI Assistant, I only handle our Thailand real estate portfolio and "
+        "platform administration (listings, leads, reports, users, logs). I don't answer general-knowledge "
+        "questions. How can I help with the portfolio or the platform?"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Multi-turn grounding provenance
+# ---------------------------------------------------------------------------
+
+ADMIN_SCOPE_AND_GROUNDING_RULES = """
+
+SCOPE (MANDATORY):
+- You only help with our Thailand real estate portfolio and platform administration (listings, leads, reports, users, logs, documents, Google Workspace).
+- General-knowledge or unrelated questions (geography, trivia, celebrities, politics, maths homework, coding unrelated to the platform): do NOT answer them, not even briefly. Reply in one sentence that this is outside your scope and offer portfolio/platform help instead.
+
+EARLIER ANSWERS ARE GROUNDED (MANDATORY):
+- The conversation history only shows the text of your earlier replies, not the tool calls behind them. The "EARLIER GROUNDED ANSWERS" section of SESSION STATE lists which earlier replies came from live tool results and their key figures.
+- Those figures were verified against the database when they were given. NEVER describe them as fake, invented, unverified, a "QA flag", a hallucination, or demo data.
+- Only revise an earlier figure when a tool call in THIS turn returns different data — then say the data was re-checked and show the new value. If the user asks "are you sure?", re-run the relevant tool rather than doubting the earlier answer.
+"""
+
+_PROVENANCE_SCALAR_KEYS = (
+    "authoritative_total_properties", "active_properties_count", "total", "total_count", "count",
+    "total_leads", "returned", "property_id", "name", "property_name", "price", "price_thb",
+    "lead_id", "contact_name", "window", "days", "status", "success",
+)
+
+
+def _compact_tool_facts(payload: Any, max_items: int = 3) -> str:
+    """A short 'key=value' digest of a stored tool result (scalars only, a few list items)."""
+    if isinstance(payload, dict) and "result" in payload and len(payload) <= 3:
+        payload = payload.get("result")
+    parts: List[str] = []
+    if isinstance(payload, dict):
+        for k in _PROVENANCE_SCALAR_KEYS:
+            v = payload.get(k)
+            if isinstance(v, (str, int, float, bool)) and str(v).strip():
+                parts.append(f"{k}={str(v)[:60]}")
+        for k in ("location_breakdown", "property_type_breakdown"):
+            v = payload.get(k)
+            if isinstance(v, dict) and v:
+                top = sorted(v.items(), key=lambda kv: -(kv[1] if isinstance(kv[1], (int, float)) else 0))[:4]
+                parts.append(f"{k}=" + ", ".join(f"{a}:{b}" for a, b in top))
+        for k in ("properties", "results", "leads", "items"):
+            v = payload.get(k)
+            if isinstance(v, list) and v:
+                names = []
+                for it in v[:max_items]:
+                    if isinstance(it, dict):
+                        nm = it.get("name") or it.get("property_name") or it.get("contact_name") or it.get("property_id")
+                        pr = it.get("price") or it.get("price_display")
+                        if nm:
+                            names.append(f"{nm}" + (f" ({pr})" if pr else ""))
+                if names:
+                    parts.append(f"{k}: " + "; ".join(str(n)[:80] for n in names))
+                break
+    elif isinstance(payload, list) and payload:
+        parts.append(f"{len(payload)} rows")
+    return ", ".join(parts)[:400]
+
+
+def build_prior_grounding_note(
+    message_history: Optional[Sequence[Dict[str, Any]]],
+    limit: int = ADMIN_HISTORY_MESSAGE_LIMIT,
+    max_turns: int = 4,
+) -> str:
+    """Describe which recent assistant replies were produced from tool results (and their key facts).
+
+    The LLM history only carries reply text; without this note the model cannot tell grounded figures
+    from invented ones and may disown its own correct earlier answers.
+    """
+    hist = trim_admin_history_for_llm(message_history, limit=limit)
+    lines: List[str] = []
+    for turn in reversed(hist):
+        if not isinstance(turn, dict) or turn.get("role") != "assistant":
+            continue
+        calls = turn.get("tool_calls") or []
+        names: List[str] = []
+        for tc in calls if isinstance(calls, list) else []:
+            n = tc.get("name") if isinstance(tc, dict) else (tc if isinstance(tc, str) else None)
+            if n and n not in names:
+                names.append(str(n))
+        results = turn.get("tool_results") or []
+        if not names and not results:
+            continue
+        facts = []
+        for tr in results if isinstance(results, list) else [results]:
+            f = _compact_tool_facts(tr)
+            if f:
+                facts.append(f)
+        snippet = re.sub(r"\s+", " ", str(turn.get("content") or ""))[:80]
+        line = f'- Reply "{snippet}…" came from live tool results ({", ".join(names) or "tools"})'
+        if facts:
+            line += ": " + " | ".join(facts)[:500]
+        lines.append(line)
+        if len(lines) >= max_turns:
+            break
+    if not lines:
+        return ""
+    return "EARLIER GROUNDED ANSWERS (verified when given; newest first):\n" + "\n".join(lines)
+
+
+def collect_prior_tool_results(
+    message_history: Optional[Sequence[Dict[str, Any]]],
+    limit: int = ADMIN_HISTORY_MESSAGE_LIMIT,
+) -> List[Any]:
+    """Tool results stored on recent assistant turns (oldest first) — facts already grounded earlier."""
+    out: List[Any] = []
+    for turn in trim_admin_history_for_llm(message_history, limit=limit):
+        if isinstance(turn, dict) and turn.get("role") == "assistant":
+            tr = turn.get("tool_results")
+            if isinstance(tr, list):
+                out.extend(tr)
+            elif tr:
+                out.append(tr)
+    return out

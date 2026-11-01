@@ -1413,6 +1413,16 @@ def process_admin_chat(
         confirmation_token=confirmation_token, attached_images=attached_images,
     )
     _remember_proposal(session_id, result)
+    if result.get("text"):
+        from app.services.response_refurbisher import refurbish_response
+        role = getattr(staff_user, "role", "admin") or "admin"
+        lang = result.get("language") or requested_language or "en"
+        result["text"] = refurbish_response(
+            result["text"],
+            role=role,
+            language=lang,
+            context={"session_id": session_id, "site_origin": site_origin}
+        )
     return result
 
 
@@ -2324,6 +2334,21 @@ def _process_admin_chat_inner(
             append_conversation_turn(db, conv, clean_message, _taught["answer"])
             return _attach_timing_debug(_taught_text(conv, _taught["answer"]), timer)
 
+    # 3c. Scope guard: general-knowledge questions ("capital of India") are steered back, never answered.
+    # This must run before the Claude route — the deterministic orchestrator's copy of this check is only
+    # reached when no Anthropic key is configured.
+    if clean_message and not attached_images and action not in ("confirm", "reject"):
+        from app.services.admin_reply_helpers import admin_off_topic_reply, is_admin_off_topic
+        if is_admin_off_topic(clean_message):
+            reply = admin_off_topic_reply(active_lang)
+            append_conversation_turn(db, conv, clean_message, reply)
+            return _attach_timing_debug({
+                "type": "text", "text": reply,
+                "session_id": conv.session_id, "conversation_id": str(conv.id),
+                "requires_confirmation": False, "pending_action_id": None,
+                "tools_used": [], "language": active_lang, "off_topic": True,
+            }, timer)
+
     # 4. AI Model Intent Classification & Safety Evaluation
     client = None
     if settings.ANTHROPIC_API_KEY:
@@ -2491,8 +2516,11 @@ def _call_anthropic_claude(
         ADMIN_HISTORY_MESSAGE_LIMIT,
         ADMIN_LLM_SLOW_MESSAGE,
         ADMIN_LLM_SLOW_MESSAGE_PL,
+        ADMIN_SCOPE_AND_GROUNDING_RULES,
         append_followup_suggestions,
         build_admin_structured_state,
+        build_prior_grounding_note,
+        collect_prior_tool_results,
         contextual_followup_suggestions,
         extract_session_state_from_conversation,
         remember_admin_session_fact,
@@ -2576,7 +2604,10 @@ def _call_anthropic_claude(
         f"The authenticated staff member you are conversing with is {staff_name} "
         f"({staff_user.email if staff_user else 'Staff'}). Address them by their first name "
         f"({staff_name}) warmly when greeting or consulting with them.\n\n"
-        f"{base_prompt}{intent_guidance}"
+        f"{base_prompt}{ADMIN_SCOPE_AND_GROUNDING_RULES}{intent_guidance}"
+    )
+    prior_grounding = build_prior_grounding_note(
+        conv.message_history or [], limit=ADMIN_HISTORY_MESSAGE_LIMIT
     )
     system_blocks = [
         {
@@ -2586,7 +2617,10 @@ def _call_anthropic_claude(
         },
         {
             "type": "text",
-            "text": f"SESSION STATE (authoritative; prefer these over inventing ids):\n{state_block}",
+            "text": (
+                f"SESSION STATE (authoritative; prefer these over inventing ids):\n{state_block}"
+                + (f"\n\n{prior_grounding}" if prior_grounding else "")
+            ),
         },
     ]
     full_system_prompt = static_system + f"\n\nSESSION STATE:\n{state_block}"
@@ -2733,6 +2767,7 @@ def _call_anthropic_claude(
                         _tool_error_sigs[tool_name] = err_s
                 if timer:
                     timer.record_tool(tool_name, (_time.perf_counter() - _tool_t0) * 1000.0)
+                t_res = with_search_total(t_res)
                 curr_tool_results.append({"tool_use_id": tool_use_id, "result": t_res})
                 if need_confirm:
                     requires_confirmation = True
@@ -2936,6 +2971,11 @@ def _call_anthropic_claude(
                     f"{instruction}\n\n"
                     f"Tool results (source of truth):\n"
                     + "\n---\n".join(tool_summary)
+                    + (
+                        f"\n\n{prior_grounding}\n(Figures from those earlier grounded answers are valid; "
+                        "never call them invented or unverified.)"
+                        if prior_grounding else ""
+                    )
                     + f"\n\nUser query: \"{raw_user_message or message}\"\n"
                     "Write the corrected admin reply now. Keep it under 120 words."
                 )
@@ -3004,6 +3044,9 @@ def _call_anthropic_claude(
             language=language,
             tool_results=tool_results,
             run_llm_judge=True,
+            prior_tool_results=collect_prior_tool_results(
+                conv.message_history or [], limit=ADMIN_HISTORY_MESSAGE_LIMIT
+            ),
         )
         if timer:
             timer.guardrail_ms = (_time.perf_counter() - _g0) * 1000.0
@@ -3254,19 +3297,9 @@ def _run_deterministic_admin(
     ) or ("report" in msg_lower and any(w in msg_lower for w in ("again", "download", "generate", "export", "pdf")))
 
     # Off-topic inquiry handling for internal admin agent
-    if is_off_topic_query(message) and not _is_report_followup and not _WORKSPACE_WORDS.search(message):
-        if language == "pl":
-            reply = (
-                "Jako wewnętrzny asystent AI Tajlandia specjalizuję się wyłącznie w zarządzaniu i analizie bazy nieruchomości w Tajlandii (Phuket, Koh Samui, Koh Phangan, Bangkok). "
-                "Nie obsługuję zapytań ogólnych ani tematów niezwiązanych z naszym portfolio. "
-                "W czym mogę Ci pomóc w zakresie nieruchomości, leadów lub specyfikacji technicznych?"
-            )
-        else:
-            reply = (
-                "As the Tajlandia Internal AI Assistant, I specialize exclusively in managing and querying our Thailand real estate portfolio (Phuket, Koh Samui, Koh Phangan, Bangkok). "
-                "I do not process general off-topic requests. "
-                "How can I assist you with our properties, buyer leads, or technical specifications?"
-            )
+    from app.services.admin_reply_helpers import admin_off_topic_reply, is_admin_off_topic
+    if is_admin_off_topic(message) and not _is_report_followup and not _WORKSPACE_WORDS.search(message):
+        reply = admin_off_topic_reply(language)
         append_conversation_turn(db, conv, message, reply)
         return {
             "type": "text", "text": reply,
@@ -5309,6 +5342,36 @@ def _workspace_status_reply(status: Dict[str, Any], language: str) -> str:
             "Google account whose Drive holds the files. Until then I cannot read your Drive.")
 
 
+class CountedResultList(list):
+    """A search result page that also knows how many listings matched in total (before the limit)."""
+
+    total_matches: Optional[int] = None
+
+
+def with_search_total(t_res: Any) -> Any:
+    """For the LLM: turn a capped search page into {properties, returned, total, results_capped}.
+
+    Without the total the model counts the page (10/50/100) and reports that as the number of listings.
+    """
+    total = getattr(t_res, "total_matches", None)
+    if not isinstance(t_res, list) or total is None:
+        return t_res
+    items = list(t_res)
+    capped = int(total) > len(items)
+    return {
+        "properties": items,
+        "returned": len(items),
+        "total": int(total),
+        "total_matches": int(total),
+        "results_capped": capped,
+        "note": (
+            f"{int(total)} listings match these filters; only the first {len(items)} are included. "
+            "Use total_matches when stating how many listings match."
+            if capped else f"All {len(items)} matching listings are included."
+        ),
+    }
+
+
 def _execute_admin_tool(
     db: Any,
     tool_name: str,
@@ -5381,6 +5444,7 @@ def _execute_admin_tool_uncached(
         _amenities = list(tool_args.get("required_amenities") or [])
         if _has_parking and "parking" not in [a.lower() for a in _amenities]:
             _amenities.append("parking")
+        _search_stats: Dict[str, Any] = {}
         try:
             from app.services.firestore_service import search_properties_firestore
             fs_props = search_properties_firestore(
@@ -5393,7 +5457,8 @@ def _execute_admin_tool_uncached(
                 required_amenities=_amenities if _amenities else None,
                 websites=selected_websites,
                 target="admin",
-                limit=tool_args.get("limit", 10)
+                limit=tool_args.get("limit", 10),
+                stats_out=_search_stats,
             )
             if fs_props:
                 from app.services.admin_list_display import overlay_missing_bedrooms
@@ -5401,6 +5466,9 @@ def _execute_admin_tool_uncached(
                 res = [_clean_property_for_admin_tool(fp) for fp in fs_props]
         except Exception as e:
             logger.warning(f"Error querying Firestore in search_properties_full: {e}")
+        # Still a plain list for every internal caller; carries the real match count for the LLM path.
+        res = CountedResultList(res)
+        res.total_matches = int(_search_stats.get("total_matches", len(res)) or len(res))
 
         record_audit_log(
             db=db,
@@ -5423,11 +5491,17 @@ def _execute_admin_tool_uncached(
             fs_unavailable = True
             logger.warning(f"Firestore property count is unavailable: {e}")
 
+        # Breakdowns must cover the WHOLE active catalog (not a sample), otherwise location/type counts
+        # disagree with the total (QA: "130 in Phuket" next to "1,046 total"). limit=5000 shares the
+        # cached full-catalog entry used by search, so this is not an extra Firestore scan.
         props_sample = []
+        catalog_unavailable = False
         try:
             from app.services.firestore_service import fetch_properties_from_firestore
-            props_sample = fetch_properties_from_firestore(limit=250, active_only=True, target="admin")
-        except Exception:
+            props_sample = fetch_properties_from_firestore(limit=5000, active_only=True, target="admin")
+        except Exception as e:
+            catalog_unavailable = True
+            logger.warning(f"Firestore catalog is unavailable for inventory breakdown: {e}")
             props_sample = []
 
         by_location: Dict[str, int] = {}
@@ -5461,20 +5535,41 @@ def _execute_admin_tool_uncached(
                 pool_count += 1
             if p.get("beach_access"):
                 beach_count += 1
-            if p.get("price_numeric_min"):
-                prices.append(p["price_numeric_min"])
+            # Compare in THB so a EUR/USD-priced listing can't become the "min" or "max"
+            p_thb = p.get("price_thb_min")
+            if p_thb is None and p.get("price_numeric_min") and str(p.get("currency") or "THB").upper() == "THB":
+                p_thb = p.get("price_numeric_min")
+            if p_thb:
+                prices.append(p_thb)
 
+        active_count = len(props_sample)
         if fs_unavailable or fs_count is None:
-            total_count = len(props_sample)
+            total_count = active_count
         else:
-            total_count = fs_count
+            # The collection count includes archived / soft-deleted docs; never report fewer than active.
+            total_count = max(int(fs_count), active_count)
+        archived_count = (
+            total_count - active_count
+            if not (fs_unavailable or fs_count is None or catalog_unavailable)
+            else None
+        )
 
         res = {
             "authoritative_total_properties": total_count,
+            "active_count": None if catalog_unavailable else active_count,
+            "archived_count": archived_count,
             "firestore_live_projects_count": 0 if fs_count is None else fs_count,
             "firestore_count_unavailable": fs_unavailable,
             "is_complete_database_count": not fs_unavailable,
-            "notes": "This is the authoritative total property count of the entire database. It is NOT capped or truncated by search limits.",
+            "breakdown_basis": (
+                f"all {active_count} active listings (breakdown counts sum to the active count)"
+                if not catalog_unavailable else "unavailable"
+            ),
+            "notes": (
+                "authoritative_total_properties counts every document in the database (active + archived). "
+                "The location/type/status breakdowns cover ALL active listings, not a sample, and sum to active_count. "
+                "Nothing here is capped or truncated by search limits."
+            ),
             "location_breakdown": by_location,
             "property_type_breakdown": by_type,
             "status_breakdown": by_status,
@@ -5633,7 +5728,8 @@ def _execute_admin_tool_uncached(
         else:
             window_start = now - timedelta(days=max(1, int(days)))
 
-        order = "newest" if (all_time or days == 0) else "score"
+        # A score threshold means "best leads first" (high-intent asks) even for all-time requests
+        order = "score" if min_sc > 0 else ("newest" if (all_time or days == 0) else "score")
         leads = leads_read_repo.query_leads(
             db,
             window_start=window_start,

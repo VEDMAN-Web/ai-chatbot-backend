@@ -1415,6 +1415,7 @@ def _execute_update_listing(
                 confirmed_by_staff=True,
                 conversation_id=conversation_id or payload.get("conversation_id"),
                 pending_action_id=pending_action_id or payload.get("pending_action_id"),
+                new_values=fields,
             )
         except Exception as snap_exc:
             logger.warning(f"Failed to save CRUD undo snapshot before listing write: {snap_exc}")
@@ -1659,9 +1660,10 @@ def _bump_properties_version() -> None:
 
 
 def _invalidate_search_cache() -> None:
+    """Search results, Firestore catalog and name index (see firestore_service.invalidate_property_caches)."""
     try:
-        from app.services.cache_service import search_cache
-        search_cache.invalidate()
+        from app.services.firestore_service import invalidate_property_caches
+        invalidate_property_caches()
     except Exception as exc:
         logger.warning("Search cache invalidation failed: %s", exc)
     _bump_properties_version()
@@ -1741,6 +1743,7 @@ def _require_undo_snapshot(
     source: str,
     created_id: Optional[str] = None,
     allow_without_undo: bool = False,
+    new_values: Optional[Dict[str, Any]] = None,
 ) -> Optional[str]:
     operation_id = record_crud_operation_snapshot(
         action_type=action,
@@ -1752,6 +1755,7 @@ def _require_undo_snapshot(
         db_session=db,
         confirmed_by_staff=True,
         skip_audit=True,
+        new_values=new_values,
     )
     if not operation_id and not allow_without_undo:
         raise HTTPException(
@@ -1855,6 +1859,7 @@ def rest_create_property(
         source="admin_api_create",
         created_id=property_id,
         allow_without_undo=allow_without_undo,
+        new_values=fields,
     )
 
     is_public = True if fields.get("is_public") is None else bool(fields.get("is_public"))
@@ -1931,6 +1936,7 @@ def rest_update_property(
         property_id=property_id,
         source="admin_api_update",
         allow_without_undo=allow_without_undo,
+        new_values={**fields, **({"websites": websites} if websites is not None else {})},
     )
 
     try:
@@ -1999,6 +2005,13 @@ def rest_delete_property(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Property with ID '{property_id}' not found.",
         )
+    if not hard_delete:
+        from app.services.firestore_service import is_soft_deleted_record
+        if is_soft_deleted_record(raw):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Property '{property_id}' is already archived. Use undo to restore it.",
+            )
     before = {"firestore": _summary_fs(raw)}
     operation_id = _require_undo_snapshot(
         db=db,

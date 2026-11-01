@@ -251,7 +251,9 @@ def test_deleting_twice_is_harmless(people, listing):
     chat.say("Delete 3 Villas - Lamai")
     chat.say("Confirm")
     again = chat.say("Delete 3 Villas - Lamai")
-    assert not again.pending_action_id and "already archived" in again.text
+    # Archived listings are now hidden from lookups (soft-delete), so the second delete may simply not find it.
+    assert not again.pending_action_id
+    assert "already archived" in again.text or "couldn't find" in again.text
 
 
 def test_undo_with_nothing_to_undo_says_so(people):

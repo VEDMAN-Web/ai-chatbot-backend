@@ -171,14 +171,14 @@ def get_current_user_from_db(
         existing_session = _load_session(db, token)
         if existing_session:
             user = _load_user_by_id(db, existing_session.user_id)
-            user_status = getattr(user, "status", None) or ("blocked" if not getattr(user, "is_active", True) else "active")
-            if not user or not getattr(user, "is_active", True) or user_status == "blocked":
+            user_status = (getattr(user, "status", None) or ("active" if getattr(user, "is_active", True) else "blocked")).strip().lower()
+            if not user or not getattr(user, "is_active", True) or user_status != "active":
                 # Instantly terminate session
                 if existing_session.revoked_at is None:
                     users_repo.revoke_session(db, existing_session)
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
-                    detail="User account is blocked. All active sessions have been terminated. Access denied."
+                    detail=f"User account is {user_status or 'inactive'}. All active sessions have been terminated. Access denied."
                 )
             if existing_session.revoked_at is not None:
                 raise HTTPException(

@@ -1,3 +1,4 @@
+import hmac
 import logging
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List
@@ -100,13 +101,24 @@ def verify_firestore_admin_credentials(email: str, password: str) -> Optional[Di
         return {
             "email": admin_doc.get("email") or email.strip().lower(),
             "name": admin_doc.get("name") or "Admin Staff",
-            "role": admin_doc.get("role") or "super_admin",
+            # A doc without a role gets least privilege, never super_admin.
+            "role": admin_doc.get("role") or "worker",
             "is_active": True,
             "id": admin_doc.get("id") or email.strip().lower(),
             "password_hash": stored_hash or hash_password(password)
         }
 
     return None
+
+
+
+def _drop_plaintext_password(doc_ref: Any) -> None:
+    """Remove a legacy plaintext `password` field once a hash has been written."""
+    try:
+        if _DROP_PLAINTEXT is not None and hasattr(doc_ref, "update"):
+            doc_ref.update({"password": _DROP_PLAINTEXT})
+    except Exception as exc:
+        logger.debug("Could not remove plaintext password field: %s", exc)
 
 
 def add_or_update_admin_in_firestore(
@@ -123,8 +135,6 @@ def add_or_update_admin_in_firestore(
     Stores both hashed and structured credentials for live authentication.
     """
     client = get_firestore_client()
-    if not client:
-        raise RuntimeError("Firestore client is not initialized or unavailable.")
 
     email_clean = (email or "").strip().lower()
     if not email_clean:
@@ -155,6 +165,7 @@ def add_or_update_admin_in_firestore(
         payload["status"] = "active"
 
     doc_ref.set(payload, merge=True)
+    _drop_plaintext_password(doc_ref)
     logger.info(f"Successfully configured admin '{email_clean}' for domain '{target_domain}' in Firestore collection '{ADMIN_AUTH_COLLECTION}'.")
     return payload
 
@@ -175,6 +186,14 @@ def update_admin_password_in_firestore(email: str, new_password: str) -> bool:
     now_iso = datetime.now(timezone.utc).isoformat()
     hashed = hash_password(new_password)
 
+    if not client:
+        if email_clean in _LOCAL_ADMIN_STORE:
+            _LOCAL_ADMIN_STORE[email_clean].pop("password", None)
+            _LOCAL_ADMIN_STORE[email_clean]["passwordHash"] = hashed
+            _LOCAL_ADMIN_STORE[email_clean]["updatedAt"] = now_iso
+            return True
+        logger.warning("Firestore client not available to update password.")
+        return False
     try:
         col = client.collection(ADMIN_AUTH_COLLECTION)
         doc_ref = col.document(email_clean)
@@ -186,6 +205,7 @@ def update_admin_password_in_firestore(email: str, new_password: str) -> bool:
                 "updatedAt": now_iso,
                 **({"password": _DROP_PLAINTEXT} if _DROP_PLAINTEXT is not None else {}),
             })
+            _drop_plaintext_password(doc_ref)
             logger.info(f"Updated password for admin '{email_clean}' in Firestore doc '{email_clean}'.")
             return True
 
@@ -203,19 +223,13 @@ def update_admin_password_in_firestore(email: str, new_password: str) -> bool:
                 "updatedAt": now_iso,
                 **({"password": _DROP_PLAINTEXT} if _DROP_PLAINTEXT is not None else {}),
             })
+            _drop_plaintext_password(target_ref)
             logger.info(f"Updated password for admin '{email_clean}' in Firestore doc '{docs[0].id}'.")
             return True
 
-        # Fallback: create or merge
-        doc_ref.set({
-            "email": email_clean,
-            "passwordHash": hashed,
-            "updatedAt": now_iso,
-            "isActive": True,
-            "role": "super_admin"
-        }, merge=True)
-        logger.info(f"Created/merged password for admin '{email_clean}' in Firestore doc '{email_clean}'.")
-        return True
+        # No Firestore admin doc: do not create one here to prevent privilege escalation.
+        logger.info("No Firestore admin doc for '%s'; password update refused.", email_clean)
+        return False
 
     except Exception as e:
         logger.error(f"Error updating Firestore password for '{email_clean}': {e}")
@@ -534,6 +548,11 @@ def update_admin_in_firestore(
         if _DROP_PLAINTEXT is not None:
             updates["password"] = _DROP_PLAINTEXT
         updates["passwordHash"] = hash_password(password.strip())
+        try:
+            from google.cloud import firestore as _fs
+            updates["password"] = _fs.DELETE_FIELD
+        except Exception:
+            pass
     if allowed_websites is not None:
         updates["allowed_websites"] = list(allowed_websites)
         updates["websites"] = list(allowed_websites)

@@ -18,6 +18,7 @@ def get_property_knowledge(
     property_id: str,
     *,
     include_internal_notes: bool = False,
+    include_deleted: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """
     Retrieves complete private/internal information for a property,
@@ -44,12 +45,17 @@ def get_property_knowledge(
     try:
         from app.services.firestore_service import get_property_by_id_from_firestore
         for alias in id_aliases:
-            fs_prop = get_property_by_id_from_firestore(alias, target="admin")
+            fs_prop = get_property_by_id_from_firestore(alias, target="admin", include_inactive=include_deleted)
             if fs_prop:
                 break
     except Exception as e:
         logger.warning(f"Firestore get_property_by_id_from_firestore error: {e}")
         fs_prop = None
+
+    if not include_deleted:
+        from app.services.firestore_service import is_soft_deleted_record
+        if fs_prop and is_soft_deleted_record(fs_prop):
+            fs_prop = None
 
     if not fs_prop:
         return None

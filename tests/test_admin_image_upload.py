@@ -132,7 +132,8 @@ def test_attach_control_is_admin_only():
     button = html.split('id="btnPropertyImages"', 1)[1][:240]
     assert 'style="display: none;"' in button
     assert 'id="btnAttachment"' in html
-    assert "btnPropertyImages.style.display = (mode === 'admin')" in js
+    assert "const isPrivileged = (mode === 'admin' || mode === 'superadmin');" in js
+    assert "btnPropertyImages.style.display = isPrivileged ? 'inline-flex' : 'none'" in js
     assert "if (currentMode !== 'admin') return" in js
     assert "currentMode === 'admin' && attachedUrls.length" in js
     assert "clearPropertyImageTray" in js

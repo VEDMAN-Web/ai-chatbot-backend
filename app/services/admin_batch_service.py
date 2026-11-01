@@ -141,6 +141,188 @@ def _store_summary(raw_fs: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
+# ------------------------------------------------------------------------------
+# Human-readable history (names, field changes, one-line summary)
+# ------------------------------------------------------------------------------
+
+# Bookkeeping keys written by the batch engine; never reported as a "change".
+_INTERNAL_CHANGE_KEYS = {
+    "updatedAt", "createdAt", "_lastModifiedBy", "_batchOperationId", "_createdBy",
+    "_deletedAt", "_deletedBy", "property_id", "doc_id", "id",
+}
+
+_FIELD_LABELS = {
+    "priceFrom": "price", "price_numeric_min": "price", "price": "price", "price_display": "price",
+    "priceTo": "max price", "price_numeric_max": "max price",
+    "name": "name", "property_name": "name", "title": "name",
+    "isActive": "visibility", "status": "status",
+    "property_type": "type", "type": "type",
+    "bedrooms": "bedrooms", "bedrooms_min": "bedrooms", "bedroomsMin": "bedrooms",
+    "bedrooms_max": "max bedrooms", "bedroomsMax": "max bedrooms",
+    "images": "images", "websites": "websites",
+}
+
+_ACTION_VERBS = {"update": "Updated", "delete": "Archived", "create": "Created"}
+_ACTION_NOUNS = {"update": "update", "delete": "archive", "create": "create"}
+
+
+def _field_label(field: str) -> str:
+    return _FIELD_LABELS.get(field) or str(field).replace("_", " ")
+
+
+def _listing_name(doc: Any) -> Optional[str]:
+    """Display name from a Firestore doc, a display card, or a batch row (handles localized dicts)."""
+    if not isinstance(doc, dict):
+        return None
+    try:
+        from app.services.admin_property_fields import firestore_identity
+        name = firestore_identity(doc).get("name")
+    except Exception:
+        name = None
+    if not name:
+        for key in ("property_name", "name", "title"):
+            val = doc.get(key)
+            if isinstance(val, dict):
+                val = val.get("en") or next((v for v in val.values() if isinstance(v, str) and v), None)
+            if isinstance(val, str) and val.strip():
+                name = val.strip()
+                break
+    return name or None
+
+
+def _fmt_value(value: Any) -> str:
+    if value is None or value == "":
+        return "(empty)"
+    if isinstance(value, bool):
+        return "yes" if value else "no"
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return f"{value:,.0f}" if float(value).is_integer() else f"{value:,}"
+    if isinstance(value, dict):
+        loc = value.get("en") or next((v for v in value.values() if isinstance(v, str) and v), None)
+        if loc:
+            return _fmt_value(loc)
+    if isinstance(value, (list, tuple)):
+        text = ", ".join(_fmt_value(v) for v in value[:5])
+        return text + (f" (+{len(value) - 5} more)" if len(value) > 5 else "")
+    text = str(value)
+    return text if len(text) <= 80 else text[:77] + "..."
+
+
+def _make_change(property_id: str, name: Optional[str], field: str, old: Any, new: Any) -> Dict[str, Any]:
+    label = _field_label(field)
+    return {
+        "property_id": property_id,
+        "property_name": name,
+        "field": field,
+        "label": label,
+        "old": _json_safe(old),
+        "new": _json_safe(new),
+        "text": f"{label}: {_fmt_value(old)} -> {_fmt_value(new)}",
+    }
+
+
+def _crud_changes(property_id: str, name: Optional[str], raw_before: Optional[Dict[str, Any]],
+                  new_values: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """field old -> new for a single-listing write. Canonical keys are read back from the raw doc."""
+    if not isinstance(new_values, dict) or not new_values:
+        return []
+    keys = [k for k in new_values if k not in _INTERNAL_CHANGE_KEYS]
+    before: Dict[str, Any] = {}
+    if isinstance(raw_before, dict) and raw_before:
+        try:
+            from app.services.admin_property_fields import read_firestore_canonical
+            before = read_firestore_canonical(raw_before, keys)
+        except Exception:
+            before = {}
+        for k in keys:
+            if k not in before and k in raw_before:
+                before[k] = raw_before.get(k)
+    changes = []
+    for k in keys:
+        old = before.get(k)
+        new = new_values.get(k)
+        if _json_safe(old) == _json_safe(new):
+            continue
+        changes.append(_make_change(property_id, name, k, old, new))
+    return changes
+
+
+def _operation_label(action_type: Optional[str], operation_id: str, source: Optional[str]) -> str:
+    noun = _ACTION_NOUNS.get(str(action_type or ""), str(action_type or "change"))
+    scope = "Batch" if str(operation_id or "").startswith("batch_") else "Listing"
+    if source and "image" in str(source):
+        scope = "Image"
+    return f"{scope} {noun}"
+
+
+def _build_summary(action_type: Optional[str], names: List[str], count: int,
+                   changes: List[Dict[str, Any]]) -> str:
+    verb = _ACTION_VERBS.get(str(action_type or ""), "Changed")
+    count = max(int(count or 0), len(names))
+    noun = "listing" if count == 1 else "listings"
+    fields: List[str] = []
+    for ch in changes or []:
+        lbl = ch.get("label") or _field_label(ch.get("field") or "")
+        if lbl and lbl not in fields:
+            fields.append(lbl)
+    head = verb
+    if action_type == "update" and fields:
+        shown_fields = ", ".join(fields[:3]) + (f" +{len(fields) - 3} more" if len(fields) > 3 else "")
+        head = f"{verb} {shown_fields} on"
+    shown = [n for n in names if n][:2]
+    rest = count - len(shown)
+    tail = ", ".join(shown) + (f", +{rest} more" if shown and rest > 0 else "")
+    return f"{head} {count} {noun}: {tail}" if tail else f"{head} {count} {noun}"
+
+
+def _stored_names(data: Dict[str, Any]) -> Dict[str, str]:
+    """Names already on the operation record (new property_names, details, display cards, raw snapshot)."""
+    out: Dict[str, str] = {}
+    stored = data.get("property_names")
+    if isinstance(stored, dict):
+        out.update({str(k): v for k, v in stored.items() if isinstance(v, str) and v})
+    for det in data.get("details") or []:
+        if isinstance(det, dict) and det.get("property_id") and str(det["property_id"]) not in out:
+            nm = _listing_name(det)
+            if nm:
+                out[str(det["property_id"])] = nm
+    for pool_key in ("previous_snapshot", "raw_firestore"):
+        pool = data.get(pool_key) or {}
+        if isinstance(pool, dict):
+            for pid, doc in pool.items():
+                if str(pid) not in out:
+                    nm = _listing_name(doc)
+                    if nm:
+                        out[str(pid)] = nm
+    return out
+
+
+def _lookup_names(property_ids: List[str]) -> Dict[str, str]:
+    """One batched Firestore read (client.get_all) for listings whose name was not stored."""
+    ids = [i for i in dict.fromkeys(str(x) for x in property_ids if x)]
+    if not ids:
+        return {}
+    client = get_snapshot_client()
+    if not client:
+        return {}
+    out: Dict[str, str] = {}
+    try:
+        col = client.collection("projects")
+        refs = [col.document(i) for i in ids]
+        if hasattr(client, "get_all"):
+            snaps = list(client.get_all(refs))
+        else:
+            snaps = [r.get() for r in refs]
+        for snap in snaps:
+            if getattr(snap, "exists", False) is True:
+                nm = _listing_name(snap.to_dict() or {})
+                if nm:
+                    out[str(snap.id)] = nm
+    except Exception as exc:
+        logger.warning(f"Batch history name lookup failed: {exc}")
+    return out
+
+
 class OperationNotFound(Exception):
     """The operation does not exist, or the caller may not see it (the two are not told apart)."""
 
@@ -531,7 +713,8 @@ def execute_batch_property_operation(
             f"Validation failed for {len(validation_errors)} row(s): " + " | ".join(shown) + more
         )
 
-    fs_client = get_firestore_client()
+    # Listings live in the admin store (undo restores there too). On staging the user store is production.
+    fs_client = get_snapshot_client()
     if not fs_client:
         raise BatchOperationError("Firestore client is not available. Cannot execute batch operation.")
 
@@ -544,6 +727,7 @@ def execute_batch_property_operation(
     previous_snapshot: Dict[str, Any] = {}
     created_ids: List[str] = []
     executed_details: List[Dict[str, Any]] = []
+    change_rows: List[Dict[str, Any]] = []
 
     projects_col = fs_client.collection("projects")
 
@@ -553,15 +737,24 @@ def execute_batch_property_operation(
     selected_sites = getattr(staff_user, "selected_websites", None)
     skipped_rows: List[Dict[str, Any]] = []
 
+    def _in_scope(doc: Dict[str, Any]) -> bool:
+        # Same rule as the REST endpoints: unassigned legacy listings belong to tajlandia.com only.
+        # An empty selection keeps the previous behaviour (no site restriction): authenticated staff always
+        # carry their selected websites, so this only applies to internal callers.
+        if not selected_sites:
+            return True
+        from app.services.property_search import property_belongs_to_websites
+        return property_belongs_to_websites(doc, list(selected_sites))
+
     if action_clean == "delete":
+        actor = staff_user.email or staff_user.user_id
         for rec in records:
             doc_id, current_doc = _resolve_firestore_document(projects_col, rec)
             if doc_id and current_doc:
-                if selected_sites:
-                    doc_sites = current_doc.get("websites") or current_doc.get("allowed_websites")
-                    if doc_sites and not any(s in selected_sites for s in doc_sites):
-                        logger.warning(f"Batch delete skipping {doc_id} as it is outside selected websites: {selected_sites}")
-                        continue
+                if not _in_scope(current_doc):
+                    logger.warning(f"Batch delete skipping {doc_id} as it is outside selected websites: {selected_sites}")
+                    skipped_rows.append({"property_id": doc_id, "reason": "outside your selected websites"})
+                    continue
 
                 # Capture complete previous state snapshot
                 previous_snapshot[doc_id] = current_doc
@@ -571,8 +764,9 @@ def execute_batch_property_operation(
                 # Soft-delete by setting isActive: False to protect referential integrity, while marking deleted
                 projects_col.document(doc_id).update({
                     "isActive": False,
+                    "status": "Archived",
                     "_deletedAt": now.isoformat(),
-                    "_deletedBy": staff_user.email or staff_user.user_id,
+                    "_deletedBy": actor,
                     "_batchOperationId": operation_id
                 })
 
@@ -589,11 +783,10 @@ def execute_batch_property_operation(
         for rec in records:
             doc_id, current_doc = _resolve_firestore_document(projects_col, rec)
             if doc_id and current_doc:
-                if selected_sites:
-                    doc_sites = current_doc.get("websites") or current_doc.get("allowed_websites")
-                    if doc_sites and not any(s in selected_sites for s in doc_sites):
-                        logger.warning(f"Batch update skipping {doc_id} as it is outside selected websites: {selected_sites}")
-                        continue
+                if not _in_scope(current_doc):
+                    logger.warning(f"Batch update skipping {doc_id} as it is outside selected websites: {selected_sites}")
+                    skipped_rows.append({"property_id": doc_id, "reason": "outside your selected websites"})
+                    continue
 
                 # Capture complete previous state snapshot
                 previous_snapshot[doc_id] = current_doc
@@ -608,6 +801,12 @@ def execute_batch_property_operation(
                 update_fields["updatedAt"] = now.isoformat()
                 update_fields["_lastModifiedBy"] = staff_user.email or staff_user.user_id
                 update_fields["_batchOperationId"] = operation_id
+
+                listing_name = _listing_name(current_doc) or _listing_name(rec)
+                for k, v in update_fields.items():
+                    if k in _INTERNAL_CHANGE_KEYS or _json_safe(current_doc.get(k)) == _json_safe(v):
+                        continue
+                    change_rows.append(_make_change(doc_id, listing_name, k, current_doc.get(k), v))
 
                 # Instantly apply update in database
                 projects_col.document(doc_id).update(update_fields)
@@ -676,9 +875,24 @@ def execute_batch_property_operation(
     # second safety net (auto-delete after expire_at) in addition to purge_expired_snapshots.
     # --------------------------------------------------------------------------
     expire_at_iso = expire_at.isoformat()
+    # Names captured now, so history never depends on later lookups of (possibly deleted) listings.
+    property_names: Dict[str, str] = {}
+    for det in executed_details:
+        nm = _listing_name(det)
+        if not nm and det.get("property_id") in previous_snapshot:
+            nm = _listing_name(previous_snapshot[det["property_id"]])
+        if nm:
+            property_names[str(det["property_id"])] = nm
     snapshot_doc = {
         "operation_id": operation_id,
         "action_type": action_clean,
+        "operation_label": _operation_label(action_clean, operation_id, source_filename),
+        "summary": _build_summary(
+            action_clean, [property_names.get(i) for i in affected_ids if property_names.get(i)],
+            len(affected_ids), change_rows,
+        ),
+        "property_names": property_names,
+        "changes": _json_safe(change_rows),
         "source_filename": source_filename,
         "staff_user_id": staff_user.user_id,
         "staff_email": staff_user.email,
@@ -700,6 +914,11 @@ def execute_batch_property_operation(
             else {k: True for k in previous_snapshot}
         ),
     }
+    try:
+        from app.services.firestore_service import invalidate_property_caches
+        invalidate_property_caches()
+    except Exception:
+        pass
 
     try:
         snap_client = get_snapshot_client() or fs_client
@@ -737,6 +956,8 @@ def execute_batch_property_operation(
         "expire_at": expire_at_iso,
         "expires_at": expire_at_iso,
         "undo_window_days": retention_days,
+        "summary": snapshot_doc["summary"],
+        "property_names": property_names,
         "status": "APPLIED",
         "message": (
             f"Successfully executed {action_clean} on {len(affected_ids)} properties. "
@@ -757,9 +978,12 @@ def record_crud_operation_snapshot(
     skip_audit: bool = False,
     conversation_id: Optional[str] = None,
     pending_action_id: Optional[str] = None,
+    new_values: Optional[Dict[str, Any]] = None,
 ) -> Optional[str]:
     """
     Saves a 6-day pre-modification snapshot for individual admin CRUD operations.
+
+    new_values (optional): the fields about to be written, so history can show "field: old -> new".
 
     Restore source is the raw Firestore document.
     `previous_snapshot` is kept only as a display card and is never written back.
@@ -798,9 +1022,21 @@ def record_crud_operation_snapshot(
     created_ids = [created_id] if created_id else []
     affected_ids = [property_id]
 
+    listing_name = (
+        _listing_name(raw_fs)
+        or _listing_name(previous_state)
+        or _listing_name(new_values)
+    )
+    property_names = {property_id: listing_name} if listing_name else {}
+    change_rows = _crud_changes(property_id, listing_name, raw_fs, new_values) if action_clean == "update" else []
+
     snapshot_doc = {
         "operation_id": operation_id,
         "action_type": action_clean,
+        "operation_label": _operation_label(action_clean, operation_id, source),
+        "summary": _build_summary(action_clean, [listing_name] if listing_name else [], 1, change_rows),
+        "property_names": property_names,
+        "changes": _json_safe(change_rows),
         "source_filename": source,
         "staff_user_id": staff_user.user_id,
         "staff_email": staff_user.email,
@@ -1033,8 +1269,8 @@ def undo_batch_property_operation(
                 restored_count += 1
     finally:
         try:
-            from app.services.cache_service import search_cache
-            search_cache.invalidate()
+            from app.services.firestore_service import invalidate_property_caches
+            invalidate_property_caches()
         except Exception:
             pass
         try:
@@ -1158,6 +1394,7 @@ def get_batch_operations_history(limit: int = 50, staff_user: Any = None) -> Lis
         results = []
         now = datetime.now(timezone.utc)
 
+        visible: List[Tuple[Any, Dict[str, Any]]] = []
         for doc in docs:
             data = doc.to_dict() or {}
             # Hide expired / purged-equivalent ops from history
@@ -1165,6 +1402,18 @@ def get_batch_operations_history(limit: int = 50, staff_user: Any = None) -> Lis
                 continue
             if staff_user is not None and not can_access_operation(data, staff_user):
                 continue
+            visible.append((doc, data))
+
+        # Names: stored on the record first; only older records without them need one batched lookup.
+        stored_by_op = [(_stored_names(data)) for _, data in visible]
+        missing: List[str] = []
+        for (_, data), names in zip(visible, stored_by_op):
+            for pid in _ordered_ids(data):
+                if pid not in names:
+                    missing.append(pid)
+        looked_up = _lookup_names(missing) if missing else {}
+
+        for (doc, data), names in zip(visible, stored_by_op):
 
             expire_at_str = data.get("expire_at") or data.get("expires_at")
             can_undo = False
@@ -1185,14 +1434,29 @@ def get_batch_operations_history(limit: int = 50, staff_user: Any = None) -> Lis
             elif data.get("status") == "REVERTED":
                 remaining_text = "Already Reverted"
 
+            op_id = data.get("operation_id") or doc.id
+            action_type = data.get("action_type")
+            ids = _ordered_ids(data)
+            name_map = {pid: names.get(pid) or looked_up.get(pid) for pid in ids}
+            property_names = [n for n in (name_map.get(pid) for pid in ids) if n]
+            changes = [dict(c) for c in (data.get("changes") or []) if isinstance(c, dict)]
+            for c in changes:
+                if not c.get("property_name") and c.get("property_id"):
+                    c["property_name"] = name_map.get(str(c["property_id"]))
+            affected_count = data.get("affected_count", 0)
+            actor = data.get("staff_email") or data.get("staff_user_id")
+            summary = data.get("summary") or _build_summary(
+                action_type, property_names, affected_count or len(ids), changes
+            )
+
             results.append({
-                "operation_id": data.get("operation_id") or doc.id,
-                "action_type": data.get("action_type"),
+                "operation_id": op_id,
+                "action_type": action_type,
                 "source_filename": data.get("source_filename"),
                 "staff_user_id": data.get("staff_user_id"),
                 "staff_email": data.get("staff_email"),
                 "status": data.get("status"),
-                "affected_count": data.get("affected_count", 0),
+                "affected_count": affected_count,
                 "affected_ids": data.get("affected_ids", []),
                 "created_at": data.get("created_at"),
                 "expire_at": expire_at_str,
@@ -1200,7 +1464,22 @@ def get_batch_operations_history(limit: int = 50, staff_user: Any = None) -> Lis
                 "can_undo": can_undo,
                 "remaining_undo_time": remaining_text,
                 "reverted_at": data.get("reverted_at"),
-                "reverted_by": data.get("reverted_by")
+                "reverted_by": data.get("reverted_by"),
+                # Human-readable fields (Bug 14)
+                "operation_label": data.get("operation_label")
+                or _operation_label(action_type, op_id, data.get("source_filename")),
+                "summary": summary,
+                "property_names": property_names,
+                "property_name_map": name_map,
+                "changes": changes,
+                "timestamp": data.get("created_at"),
+                "actor": actor,
+                # Field names the portal list (app/static/js/app.js loadBatchHistory) renders
+                "operation_type": action_type,
+                "file_name": data.get("source_filename"),
+                "items_affected": affected_count,
+                "time_remaining": remaining_text,
+                "is_expired": False,
             })
 
         # Sort descending by created_at

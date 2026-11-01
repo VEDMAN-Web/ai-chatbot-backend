@@ -32,9 +32,11 @@ _BATCH = re.compile(r"\bbatch(?:\s+size)?\s*(?:of|=|:)?\s*(\d{1,3})\b", re.I)
 
 def _response(conv: Any, text: str, language: str, *, pending_id: Optional[str] = None, tool: str = "drive_folder_ingestion",
               extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    from app.services.response_refurbisher import refurbish_response
+    polished_text = refurbish_response(text, role="admin", language=language, context={"tool": tool})
     out = {
         "type": "action_proposal" if pending_id else "text",
-        "text": text,
+        "text": polished_text,
         "session_id": getattr(conv, "session_id", None),
         "conversation_id": str(getattr(conv, "id", "")),
         "requires_confirmation": bool(pending_id),

@@ -126,8 +126,19 @@ def tool_cache_get(tool_name: str, args: Any, ttl_sec: float, scope: str = "") -
 
 def tool_cache_set(tool_name: str, args: Any, value: Any, scope: str = "") -> None:
     key = _cache_key(tool_name, args, scope)
+    now = time.time()
     with _CACHE_LOCK:
-        _TOOL_CACHE[key] = (time.time(), value)
+        if len(_TOOL_CACHE) > 500:
+            # Prune entries older than 300s to avoid memory leak under load
+            expired = [k for k, (ts, _) in _TOOL_CACHE.items() if now - ts > 300.0]
+            for k in expired:
+                _TOOL_CACHE.pop(k, None)
+            if len(_TOOL_CACHE) > 500:
+                # If still over limit, drop oldest entries
+                sorted_keys = sorted(_TOOL_CACHE.keys(), key=lambda k: _TOOL_CACHE[k][0])
+                for k in sorted_keys[:250]:
+                    _TOOL_CACHE.pop(k, None)
+        _TOOL_CACHE[key] = (now, value)
 
 
 def tool_cache_invalidate_all() -> None:

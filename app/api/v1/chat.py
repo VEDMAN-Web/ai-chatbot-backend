@@ -203,6 +203,7 @@ def handle_public_chat(
             detail="Please provide a message or contact details."
         )
 
+    conversation = None  # the error fallback below reads it; unset it raised UnboundLocalError (bare 500)
     try:
         request_origin = req.site_origin or getattr(settings, "SITE_ORIGIN", "varsoviaestate.com")
         conversation = get_or_create_conversation(
@@ -268,7 +269,11 @@ def handle_public_chat(
                             "brand": _tenant.brand_name,
                             "source_url": _tenant.website_url,
                             "message": req.notes or user_msg,
-                            "property_id": req.property_id or req.preferred_location or ""
+                            "property_id": req.property_id or req.preferred_location or "",
+                            "preferred_location": req.preferred_location,
+                            "budget_max": budget_dec,
+                            # Same score the session lead got (includes turn count)
+                            "lead_score": getattr(conversation, "lead_score", None),
                         })
                     except Exception as e:
                         logger.warning(f"Firestore lead sync error: {e}")
@@ -389,6 +394,14 @@ def handle_public_chat(
             req.session_id,
             req.site_origin,
         )
+        if response.get("text"):
+            from app.services.response_refurbisher import refurbish_response
+            response["text"] = refurbish_response(
+                response["text"],
+                role="user",
+                language=response.get("language") or req.language or "en",
+                context={"session_id": req.session_id, "site_origin": req.site_origin}
+            )
         return response
     except HTTPException:
         raise
@@ -539,7 +552,9 @@ def submit_direct_lead(
                     "phone": c_phone,
                     "property_id": c_loc or "",
                     "message": req.notes or "Direct frontend lead submission",
-                    "brand": conversation.site_origin or "tajlandia"
+                    "brand": conversation.site_origin or "tajlandia",
+                    "preferred_location": req.preferred_location,
+                    "lead_score": lead_score if lead_saved else None,
                 })
             except Exception as e:
                 logger.warning(f"Firestore direct lead sync error: {e}")
@@ -710,10 +725,23 @@ def download_property_brochure(
     response_class=FileResponse
 )
 def get_brochure_file(filename: str):
-    storage_dir = settings.REPORT_STORAGE_DIR
-    file_path = os.path.join(storage_dir, filename)
-    if not os.path.isfile(file_path):
+    """
+    Public, unauthenticated. The storage folder is shared with staff lead reports (customer PII) that only
+    /admin/reports may serve, so only brochure PDFs (names produced by brochure_service) are returned,
+    and the resolved path must stay inside the folder.
+    """
+    import re as _re
+
+    name = filename or ""
+    is_brochure_name = bool(_re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_\-]{0,200}\.pdf", name)) and (
+        name.startswith("brochure_") or "_Property_" in name
+    )
+    if not is_brochure_name:
         raise HTTPException(status_code=404, detail="Brochure file not found")
-    return FileResponse(file_path, media_type="application/pdf", filename=filename)
+    storage_dir = os.path.realpath(settings.REPORT_STORAGE_DIR)
+    file_path = os.path.realpath(os.path.join(storage_dir, name))
+    if not file_path.startswith(storage_dir + os.sep) or not os.path.isfile(file_path):
+        raise HTTPException(status_code=404, detail="Brochure file not found")
+    return FileResponse(file_path, media_type="application/pdf", filename=name)
 
 

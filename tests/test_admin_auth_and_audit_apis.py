@@ -25,6 +25,12 @@ def seeded_super_admin():
     yield
 
 
+def _emailed_style_token(email: str) -> str:
+    """The token the server emails: bound to the account's current password hash (never returned by the API)."""
+    from app.api.v1.auth import _current_password_hash
+    return generate_password_reset_token(email, current_password_hash=_current_password_hash(email, None))
+
+
 def test_forgot_password_generates_token_and_rejects_invalid_email():
     """Known and unknown emails share one response. The token is only on the test hook."""
     from app.services.firestore_auth_service import get_test_reset_token

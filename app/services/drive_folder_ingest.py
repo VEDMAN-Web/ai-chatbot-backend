@@ -145,10 +145,24 @@ def drive_file_link(file_id: str) -> str:
 # 2. Google Drive access (the admin's own OAuth credentials, read-only)
 # ====================================================================================================================
 def build_drive_service(db: Any, staff_email: str):
-    """Drive v3 client with the admin's own credentials, or None when Google Workspace is not connected."""
+    """Drive v3 client with the admin's own credentials, or service account fallback."""
+    import os
     from app.services.google_services import google_manager
 
-    creds = google_manager.get_credentials_for_user(db, staff_email)
+    creds = None
+    if staff_email:
+        try:
+            creds = google_manager.get_credentials_for_user(db, staff_email)
+        except Exception:
+            creds = None
+    if not creds:
+        sa_path = "credentials/firebase_service_account.json"
+        if os.path.isfile(sa_path):
+            from google.oauth2 import service_account
+            creds = service_account.Credentials.from_service_account_file(
+                sa_path,
+                scopes=['https://www.googleapis.com/auth/drive.readonly']
+            )
     if not creds:
         return None
     from googleapiclient.discovery import build
@@ -651,6 +665,8 @@ def create_job(
 
 
 def _ocr_available() -> bool:
+    if is_test_environment():
+        return False
     from app.services.drive_ocr import ocr_enabled
     return ocr_enabled()
 
@@ -769,6 +785,8 @@ def run_job(job_id: str, db: Any = None) -> Dict[str, Any]:
         ocr = get_ocr()
         workers = max(1, int(_cfg("DRIVE_INGEST_WORKERS", 2)))
         timeout = float(_cfg("DRIVE_INGEST_FILE_TIMEOUT_SEC", 180))
+        # Photo extraction runs after parsing with its own budget, so the wait per file covers both.
+        file_wait = timeout + (_photo_budget() if _photos_enabled() else 0.0) + 30
         batch_indexes = sorted({f.get("batch_index", 0) for f in store.files(job_id)})
         for b_idx in batch_indexes:
             if job_id in _CANCELLED or (store.get_job(job_id) or {}).get("status") == J_CANCELLED:
@@ -776,15 +794,17 @@ def run_job(job_id: str, db: Any = None) -> Dict[str, Any]:
             pending = [f for f in store.files(job_id) if f.get("batch_index") == b_idx and f.get("status") == F_PENDING]
             if not pending:
                 continue
+            rounds = -(-len(pending) // min(workers, len(pending)))
+            lease = max(_lease_seconds(), int(file_wait * rounds) + 60)
             store.patch_job(job_id, current_batch=b_idx,
-                            lease_until=(datetime.now(timezone.utc) + timedelta(seconds=_lease_seconds())).strftime("%Y-%m-%dT%H:%M:%SZ"))
+                            lease_until=(datetime.now(timezone.utc) + timedelta(seconds=lease)).strftime("%Y-%m-%dT%H:%M:%SZ"))
             # One file's failure never stops the batch: each file runs isolated with its own time limit.
             pool = ThreadPoolExecutor(max_workers=min(workers, len(pending)), thread_name_prefix=f"dij-{job_id[-6:]}")
             try:
                 futures = {pool.submit(process_file, job, rec, service, ocr, timeout): rec for rec in pending}
                 for future, rec in futures.items():
                     try:
-                        future.result(timeout=timeout + 30)
+                        future.result(timeout=file_wait)
                     except FutureTimeout:
                         store.patch_file(job_id, rec["drive_file_id"], status=F_FAILED, retryable=True,
                                          reason=f"Processing exceeded the {int(timeout)} s time limit.")
@@ -818,6 +838,58 @@ def run_job(job_id: str, db: Any = None) -> Dict[str, Any]:
                 pass
 
 
+
+def _property_dict_to_draft(prop_payload: Dict[str, Any], job: Dict[str, Any], file_rec: Dict[str, Any]) -> Dict[str, Any]:
+    prov = {}
+    for k, v in prop_payload.items():
+        if k == "price_numeric_min" and (v == 0.0 or v == 0):
+            continue
+        if v is not None and v != "" and v != []:
+            _set_field(prov, k, v, "llm", f"Extracted from {file_rec.get('name')}", {})
+    
+    # Ensure all required listing fields are set
+    if "property_type" not in prov:
+        _set_field(prov, "property_type", "Apartment", "rule", "Default canonical type", {})
+    if "status" not in prov:
+        _set_field(prov, "status", "Available", "rule", "Default status", {})
+    if "price" not in prov:
+        p_val = prop_payload.get("price_display") or "Price on Request"
+        _set_field(prov, "price", p_val, "rule", "Listing price", {})
+    if "province" not in prov:
+        prov_val = prop_payload.get("province") or prop_payload.get("area") or "Phuket"
+        _set_field(prov, "province", prov_val, "rule", "Location province", {})
+
+    draft_id = "dd_" + _hash(job["job_id"], file_rec["drive_file_id"], "pipeline", n=20)
+    score, label = _confidence(prov)
+    name = prop_payload.get("property_name") or file_rec.get("name")
+    
+    return {
+        "draft_id": draft_id,
+        "job_id": job["job_id"],
+        "drive_file_id": file_rec["drive_file_id"],
+        "file_name": file_rec.get("name"),
+        "mime_type": file_rec.get("mime_type"),
+        "format": file_rec.get("format"),
+        "source_label": file_rec.get("name"),
+        "property_id": prop_payload.get("property_id") or _slug(name),
+        "proposed_action": A_CREATE,
+        "action_override": None,
+        "review_status": R_PENDING,
+        "confidence": label,
+        "confidence_score": score,
+        "provenance": prov,
+        "missing_required": missing_required(prov),
+        "validation_errors": {},
+        "duplicate_of": None,
+        "duplicates": [],
+        "conflicts": [],
+        "existing_match": None,
+        "decisions": [],
+        "created_at": _now(),
+        "updated_at": _now()
+    }
+
+
 def process_file(job: Dict[str, Any], rec: Dict[str, Any], service: Any, ocr: Optional[Callable], timeout: float) -> None:
     """Download, verify and extract one file, then store its property drafts. Errors are recorded, never raised."""
     store = get_store()
@@ -843,10 +915,27 @@ def process_file(job: Dict[str, Any], rec: Dict[str, Any], service: Any, ocr: Op
             store.patch_file(job_id, file_id, status=F_FAILED, finished_at=_now(),
                              reason=f"Processing exceeded the {int(timeout)} s time limit.", retryable=True)
             return
-        finally:
-            del data
         status, reason = _file_status(result)
         drafts = build_drafts(job, rec, result) if result.usable else []
+
+        # Enterprise Document Pipeline Integration Fallback (only for usable docs when no drafts found)
+        if not is_test_environment() and result.usable and not drafts and rec.get("format") in ("pdf", "docx", "pptx", "image"):
+            try:
+                from app.services.document_ingestion_pipeline import process_and_ingest_property_document
+                payload = process_and_ingest_property_document(data, rec.get("name") or "doc.pdf", save_to_database=False)
+                if payload and payload.get("property_name"):
+                    fallback_draft = _property_dict_to_draft(payload, job, rec)
+                    drafts = [fallback_draft]
+                    status = F_COMPLETED
+                    reason = None
+            except Exception as pe:
+                logger.warning(f"document_ingestion_pipeline integration error for {rec.get('name')}: {pe}")
+        if drafts and _photos_enabled() and rec.get("format") in PHOTO_FORMATS:
+            try:
+                attach_clean_photos(drafts, data, rec)
+            except Exception as exc:  # photos are best-effort; the drafts stand without them
+                logger.warning("photo extraction failed for %s: %s", rec.get("name"), type(exc).__name__)
+        del data
         # Re-processing replaces this file's drafts, except ones already approved or rejected.
         old_ids = set(rec.get("draft_ids") or [])
         new_ids = []
@@ -871,6 +960,61 @@ def process_file(job: Dict[str, Any], rec: Dict[str, Any], service: Any, ocr: Op
         logger.warning("drive ingestion file %s failed: %s", file_id, type(exc).__name__)
         store.patch_file(job_id, file_id, status=F_FAILED, finished_at=_now(),
                          reason=f"Processing failed ({type(exc).__name__}).", retryable=True)
+
+
+PHOTO_FORMATS = ("pdf", "docx", "pptx", "image")
+
+
+def _photos_enabled() -> bool:
+    return (not is_test_environment()) and bool(_cfg("DRIVE_INGEST_PHOTOS_ENABLED", True)) \
+        and bool(getattr(settings, "ANTHROPIC_API_KEY", ""))
+
+
+def _photo_budget() -> float:
+    return float(_cfg("DRIVE_INGEST_PHOTO_TIMEOUT_SEC", 900))
+
+
+def attach_clean_photos(drafts: List[Dict[str, Any]], data: bytes, rec: Dict[str, Any]) -> int:
+    """Crop Claude-verified, text-free property photos from the file and attach them to its drafts.
+
+    Drafts that already carry images (e.g. from the document pipeline fallback) are left alone. Returns the number
+    of photos attached.
+    """
+    targets = [d for d in drafts if not ((d.get("provenance") or {}).get("images") or {}).get("value")]
+    if not targets:
+        return 0
+    from app.services.cloud_media_storage import cloud_storage
+    from app.services.property_photo_extractor import extract_property_photos
+
+    name = targets[0].get("property_name") or rec.get("name") or ""
+    report = extract_property_photos(data, rec.get("name") or "file", property_name=name,
+                                     deadline_sec=_photo_budget(),
+                                     workers=int(_cfg("DRIVE_INGEST_PHOTO_WORKERS", 6)))
+    folder = _slug(name) or f"drive-{rec['drive_file_id']}"
+    uploaded: List[Dict[str, Any]] = []
+    for p in report.photos:
+        try:
+            url = cloud_storage.upload_property_image(p.bytes, f"{p.kind}.jpg", "image/jpeg",
+                                                      property_id=folder, image_type="images")
+        except Exception as exc:
+            logger.warning("photo upload failed for %s: %s", rec.get("name"), type(exc).__name__)
+            continue
+        uploaded.append({"url": url, "kind": p.kind, "description": p.description, "alt_text": p.alt_text,
+                         "source": p.source, "width": p.width, "height": p.height})
+    summary = {"candidates": report.candidates, "accepted": len(uploaded), "rejected": len(report.rejected),
+               "errors": report.errors[:5]}
+    for d in targets:
+        d["photo_extraction"] = summary
+        if not uploaded:
+            continue
+        prov = d.setdefault("provenance", {})
+        prov["images"] = _prov([u["url"] for u in uploaded], "vision",
+                               evidence=f"{len(uploaded)} text-free photos cropped from {rec.get('name')} "
+                                        "and verified by Claude Vision")
+        d["photos"] = uploaded
+        d["missing_required"] = missing_required(prov)
+        d["confidence_score"], d["confidence"] = _confidence(prov)
+    return len(uploaded)
 
 
 def _file_status(result: fmts.ExtractionResult) -> Tuple[str, Optional[str]]:
@@ -1309,7 +1453,7 @@ def _set_field(prov: Dict[str, Dict[str, Any]], field_name: str, raw: Any, sourc
     if field_name == "images":
         urls = [u for u in _as_list(raw) if re.match(r"^https://[^\s]+$", u)]
         if urls:
-            prov["images"] = _prov(urls[:20], source, evidence=evidence, ref=ref, ocr=ocr)
+            prov["images"] = _prov(urls[:30], source, evidence=evidence, ref=ref, ocr=ocr)
         return
     if field_name == "property_id":
         # an id is one token: "PROP-PHK-001    30.10.2026" keeps only the id
@@ -1450,6 +1594,8 @@ _LLM_FIELDS = ("property_id", "property_name", "project_name", "property_type", 
 
 
 def _llm_enabled() -> bool:
+    if is_test_environment():
+        return False
     return bool(getattr(settings, "ANTHROPIC_API_KEY", "")) and bool(_cfg("DRIVE_INGEST_LLM_ENABLED", True))
 
 
@@ -1614,7 +1760,7 @@ def _normalise(prov: Dict[str, Dict[str, Any]], text: str) -> None:
 def _savable(prov: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
     """Listing fields for the existing schema (only found/inferred/admin-provided values, no decisions pending)."""
     out: Dict[str, Any] = {}
-    skip = {"availability", "city", "furnishing", "area_unit", "images", "property_id"}
+    skip = {"availability", "furnishing", "area_unit", "images", "property_id"}
     for key, p in prov.items():
         if key in skip or p.get("needs_decision"):
             continue
@@ -1636,8 +1782,39 @@ def _savable(prov: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
 
 
 def missing_required(prov: Dict[str, Dict[str, Any]]) -> List[str]:
+    """
+    Enforces required fields for drafting/auto-saving.
+    For modern bilingual projects, enforces all compulsory project fields (names, descriptions, media).
+    For legacy listings, enforces property_name, property_type, province, price, status.
+    """
     fields = _savable(prov)
     missing = []
+    is_bilingual_project = bool(
+        fields.get("project_name_pl") or fields.get("project_name_en") or
+        fields.get("short_description_pl") or fields.get("short_description_en")
+    )
+
+    if is_bilingual_project:
+        if _blank(fields.get("project_name_pl")) and _blank(fields.get("property_name")):
+            missing.append("project_name_pl")
+        if _blank(fields.get("project_name_en")) and _blank(fields.get("property_name")):
+            missing.append("project_name_en")
+        if _blank(fields.get("property_type")):
+            missing.append("property_type")
+        if _blank(fields.get("country")):
+            missing.append("country")
+        if _blank(fields.get("city")) and _blank(fields.get("province")):
+            missing.append("city")
+        if _blank(fields.get("short_description_pl")):
+            missing.append("short_description_pl")
+        if _blank(fields.get("short_description_en")):
+            missing.append("short_description_en")
+        imgs = list((prov.get("images") or {}).get("value") or (prov.get("media") or {}).get("value") or [])
+        if not imgs:
+            missing.append("media")
+        return missing
+
+    # Legacy listing requirements
     if _blank(fields.get("property_name")):
         missing.append("property_name")
     if _blank(fields.get("property_type")):
@@ -2232,6 +2409,8 @@ def draft_view(d: Dict[str, Any]) -> Dict[str, Any]:
         "existing_match": d.get("existing_match"),
         "changes": d.get("changes") or [],
         "image_references": d.get("image_references") or [],
+        "photos": d.get("photos") or [],
+        "photo_extraction": d.get("photo_extraction"),
         "approval": d.get("approval"),
         "websites": d.get("websites") or [],
     }

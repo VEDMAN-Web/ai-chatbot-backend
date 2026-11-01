@@ -32,7 +32,13 @@ class LeadRecord:
         self.preferred_type = d.get("preferred_type") or d.get("property_type")
         self.budget_min = d.get("budget_min")
         self.budget_max = d.get("budget_max") or d.get("budget")
-        self.lead_score = float(d.get("lead_score") or d.get("score") or 0.0)
+        # Stored score when present; unscored docs (portal/imported/older/camelCase,
+        # or a 0 placeholder) are scored from their own signals so min_score / score
+        # ordering work for historical leads too.
+        from app.services.lead_service import resolve_lead_score, stored_lead_score
+
+        self.lead_score_computed = stored_lead_score(d) is None
+        self.lead_score = float(resolve_lead_score(d))
         signals = d.get("buying_signals")
         if signals is None and d.get("summary"):
             signals = [f"Note: {d.get('summary')}"]

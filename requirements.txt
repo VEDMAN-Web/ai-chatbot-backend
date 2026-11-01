@@ -35,4 +35,7 @@ google-api-python-client>=2.130.0
 # Firebase & Firestore Database
 firebase-admin>=7.0.0
 google-cloud-firestore>=2.15.0
+
+# Cloudinary Cloud Storage
+cloudinary>=1.40.0
 pypdfium2>=4.30

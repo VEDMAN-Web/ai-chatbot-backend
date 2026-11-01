@@ -1805,8 +1805,8 @@ def is_off_topic_query(message: str, lenient: bool = False) -> bool:
 
     # 4. Explicit off-topic categories (regardless of format)
     coding_patterns = [
-        "write python", "write a python", "write code", "write a code", "write a script",
-        "write a program", "write a function", "write javascript", "fix this code", "debug this",
+        "write python", "write a python", "python script", "write code", "write a code", "write a script",
+        "write me a", "sort a list", "write a program", "write a function", "write javascript", "fix this code", "debug this",
         "binary search", "bubble sort", "sql query", "regex to", "html code",
         "how to code", "write a class", "leetcode", "napisz kod", "napisz program", "napisz skrypt",
         "kod w pythonie", "błąd w kodzie", "jak zaprogramować", "funkcja w pythonie"
@@ -1908,6 +1908,22 @@ def is_off_topic_query(message: str, lenient: bool = False) -> bool:
         "poleć", "polec", "sugeruj", "wybierz", "najlepsz", "najlepsza", "najlepszy",
     ]
     has_real_estate_context = any(k in msg for k in on_topic_keywords)
+
+    # Building facilities and development-name nouns are questions about a listing ("does Zorblax Towers have a
+    # gym?"). Without them such a question was refused as trivia instead of getting an honest "not found".
+    # Whole-word match so e.g. "spa" does not fire inside "space".
+    facility_and_building_words = (
+        "gym", "fitness", "sauna", "spa", "parking", "garage", "lift", "elevator", "concierge", "security",
+        "clubhouse", "co-working", "coworking", "rooftop", "jacuzzi", "kids club", "playground",
+        "tower", "towers", "residence", "residences", "resort", "estate",
+        "siłownia", "silownia", "parking", "winda", "ochrona", "rezydencja",
+    )
+    if not has_real_estate_context and any(re.search(r"\b" + re.escape(w) + r"\b", msg) for w in facility_and_building_words):
+        has_real_estate_context = True
+    # "Do you have <Proper Name>?" asks about our inventory.
+    if not has_real_estate_context and re.match(r"^\s*(do|does)\s+you\s+(have|list|sell)\s+[A-Z0-9]", message.strip(), re.I) \
+            and re.search(r"\b(?:have|list|sell)\s+[A-Z][\w'-]+", message):
+        has_real_estate_context = True
 
     # Check for direct contact / lead signals
     has_contact = bool(re.search(r"[\w\.-]+@[\w\.-]+\.\w+", msg) or re.search(r"\+?\d{9,15}", msg))
@@ -3076,6 +3092,13 @@ class PublicAgentService:
             resp["text"] = strip_unverified_marketing(resp["text"], verified_blob)
             # Never leave literal None in visitor-facing text
             resp["text"] = re.sub(r"\bNone\b", "not listed in our verified data", resp["text"])
+            from app.services.response_refurbisher import refurbish_response
+            resp["text"] = refurbish_response(
+                resp["text"],
+                role="user",
+                language=lang,
+                context={"session_id": resp.get("session_id")},
+            )
         if "preferences" in resp and isinstance(resp["preferences"], dict):
             focus = resp["preferences"].get("focus_summary")
             if focus and isinstance(focus, str):

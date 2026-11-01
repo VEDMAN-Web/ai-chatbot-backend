@@ -353,7 +353,26 @@ class PropertyNameIndex:
         with self._lock:
             self._entries = []
             self._by_id = {}
+            self._vocab = {}
+            self._vocab_by_len = {}
+            self._cores = []
             self._loaded_at = 0.0
+
+    def remove_entry(self, doc_id: str) -> None:
+        """Removes an entry from the name index immediately (e.g. on soft delete)."""
+        if not doc_id:
+            return
+        clean_id = str(doc_id).strip()
+        with self._lock:
+            if clean_id not in self._by_id and clean_id.lower() not in self._by_id:
+                return
+            remaining = [e for e in self._entries if e.doc_id != clean_id and e.doc_id.lower() != clean_id.lower()]
+            self._entries = remaining
+            self._by_id = {e.doc_id: e for e in remaining}
+            vocab, by_len, cores = self._build_mention_index(remaining)
+            self._vocab = vocab
+            self._vocab_by_len = by_len
+            self._cores = cores
 
     def load_from_rows(self, rows: Sequence[Dict[str, Any]]) -> None:
         """Load from raw project dicts (or CSV-shaped rows with doc_id)."""
@@ -361,6 +380,9 @@ class PropertyNameIndex:
         entries: List[NameIndexEntry] = []
         by_id: Dict[str, NameIndexEntry] = {}
         for row in rows:
+            from app.services.firestore_service import is_soft_deleted_record
+            if is_soft_deleted_record(row) or bool(row.get("is_deleted")):
+                continue
             doc_id = str(row.get("doc_id") or row.get("id") or row.get("property_id") or "").strip()
             if not doc_id:
                 continue
@@ -931,8 +953,11 @@ def default_firestore_name_loader(target: str = "user") -> List[Dict[str, Any]]:
     """
     Read-only projection: id + name/slug/title/cityId fields only.
     Streams all project docs (paginated) without full normalize.
+    Archived (soft-deleted) listings are left out, so no bot names them (e.g. in "did you mean ...?").
+    Unpublished drafts stay: staff resolve them by name through this same index, and the lookup
+    (get_property_by_id_from_firestore) refuses to return a draft to the public bot.
     """
-    from app.services.firestore_service import get_firestore_client
+    from app.services.firestore_service import get_firestore_client, is_soft_deleted_record
 
     t0 = time.monotonic()
     client = get_firestore_client(target=target)
@@ -943,13 +968,15 @@ def default_firestore_name_loader(target: str = "user") -> List[Dict[str, Any]]:
     # Select only needed fields when possible
     try:
         stream = col.select(
-            ["name", "title", "seoTitle", "projectName", "slug", "cityId"]
+            ["name", "title", "seoTitle", "projectName", "slug", "cityId", "isActive", "status", "_deletedAt"]
         ).stream()
     except Exception:
         stream = col.stream()
 
     for doc in stream:
         data = doc.to_dict() or {}
+        if is_soft_deleted_record(data):
+            continue
         data["doc_id"] = doc.id
         data["id"] = doc.id
         rows.append(data)

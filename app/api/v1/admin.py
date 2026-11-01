@@ -82,6 +82,30 @@ def _sse_pack(event: str, data: Dict[str, Any]) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
+_ADMIN_OWNER_KEY = "owner_user_id"
+
+
+def _claim_admin_conversation(db: Any, session_id: str, staff: AuthenticatedStaff):
+    """
+    Admin chat session ids are chosen by the client, so a conversation must belong to the staff member using it.
+    Without this, any staff member (workers included) could read - or continue - another person's admin chat by
+    guessing its session id. Reviewing other staff's chats goes through /chat-logs, which is permission-scoped.
+    A conversation with no owner yet (new, or created before this check existed) is claimed by the caller.
+    """
+    from app.services.conversation_service import get_or_create_conversation, update_conversation_preferences
+
+    conv = get_or_create_conversation(db=db, session_id=session_id, agent_type="admin")
+    prefs = dict(getattr(conv, "preferences", None) or {})
+    owner = prefs.get(_ADMIN_OWNER_KEY)
+    if owner and str(owner) != str(staff.user_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found.")
+    if not owner:
+        if not update_conversation_preferences(session_id, "admin", {_ADMIN_OWNER_KEY: str(staff.user_id)}):
+            prefs[_ADMIN_OWNER_KEY] = str(staff.user_id)
+            conv.preferences = prefs
+    return conv
+
+
 # 1. Admin Chat (Unified Action & Chatbot Endpoint)
 @router.post("/chat", response_model=None)
 def admin_chat_endpoint(
@@ -139,6 +163,8 @@ def admin_chat_endpoint(
         staff.selected_websites = norm_selected
 
     active_origin = staff.selected_websites[0] if staff.selected_websites else req.site_origin
+    if req.session_id:
+        _claim_admin_conversation(db, req.session_id, staff)
 
     def _run() -> Dict[str, Any]:
         return process_admin_chat(
@@ -199,13 +225,7 @@ def get_admin_history_endpoint(
     Includes tool invocations, results, and action proposals.
     Strictly isolated from public chatbot conversations.
     """
-    from app.services.conversation_service import get_or_create_conversation
-
-    conv = get_or_create_conversation(
-        db=db,
-        session_id=session_id,
-        agent_type="admin",
-    )
+    conv = _claim_admin_conversation(db, session_id, staff)
     history = list(getattr(conv, "message_history", None) or [])
     created = getattr(conv, "created_at", None)
     return {
@@ -581,7 +601,7 @@ def undo_batch_operation_endpoint(
 
 @router.get("/operations/history")
 def get_batch_operations_history_endpoint(
-    limit: int = 50,
+    limit: int = Query(50, ge=1, le=200),
     staff: AuthenticatedStaff = Depends(require_admin_or_super_admin)
 ):
     """
@@ -634,63 +654,259 @@ def admin_config_status_endpoint(
 # 8. Direct Property CRUD Endpoints (REST API for Frontend Developers)
 # ==============================================================================
 
+from pydantic import model_validator
+
+class LayoutItem(BaseModel):
+    name: Optional[str] = Field(None, description="Layout/Unit title e.g. 2-Bedroom Deluxe")
+    bedrooms: Optional[int] = Field(None, description="Bedrooms count")
+    bathrooms: Optional[int] = Field(None, description="Bathrooms count")
+    area_sqm: Optional[float] = Field(None, description="Total size in sqm")
+    price: Optional[str] = Field(None, description="Price display or numerical")
+    floor_plan_url: Optional[str] = Field(None, description="Floor plan diagram URL")
+
+
 class PropertyCreateRequest(BaseModel):
-    property_id: Optional[str] = Field(None, example="villa-horizon-phuket", description="Unique property ID. If omitted, will be auto-generated.")
-    property_name: Optional[str] = Field(None, example="Villa Horizon Luxury Residences", description="Property title/name")
-    project_name: Optional[str] = Field(None, example="Villa Horizon")
-    property_type: Optional[str] = Field(None, example="Villa", description="'Villa', 'Condominium', 'Townhouse'")
-    status: Optional[str] = Field(None, example="Ready to move in", description="'Ready to move in', 'Under construction', 'Off-plan'")
-    location: Optional[str] = Field("Phuket, Thailand", example="Bang Tao, Phuket")
-    province: Optional[str] = Field("Phuket", example="Phuket")
-    district: Optional[str] = Field(None, example="Thalang")
-    address: Optional[str] = Field(None, example="123 Lagoon Road, Choeng Thale")
-    price_display: Optional[str] = Field(None, example="from 18.5 million THB")
-    price_numeric_min: Optional[float] = Field(None, example=18500000.0)
-    price_numeric_max: Optional[float] = Field(None, example=24000000.0)
-    currency: Optional[str] = Field("THB", example="THB")
-    bedrooms: Optional[int] = Field(None, example=3)
-    bedrooms_min: Optional[int] = Field(None, example=3)
-    bedrooms_max: Optional[int] = Field(None, example=4)
-    bathrooms: Optional[int] = Field(None, example=4)
-    area_sqm_min: Optional[float] = Field(None, example=320.0)
-    area_sqm_max: Optional[float] = Field(None, example=450.0)
-    has_pool: Optional[bool] = Field(False, example=True)
-    beach_access: Optional[bool] = Field(False, example=True)
-    sea_view: Optional[bool] = Field(False, example=True)
-    description: Optional[str] = Field(None, example="Stunning luxury pool villa with panoramic sea views.")
-    images: Optional[List[str]] = Field(default_factory=list, example=["https://varsoviaestate.com/media/pool.jpg", "https://varsoviaestate.com/media/bedroom.jpg"])
-    cover_image: Optional[str] = Field(None, example="https://varsoviaestate.com/media/pool.jpg")
-    websites: Optional[List[str]] = Field(None, example=["tajlandia.com", "varsoviaestate.com"], description="Specific website domains for this property: 'varsoviaestate.com', 'tajlandia.com', 'thai.estate'")
-    is_public: Optional[bool] = Field(True, example=True)
+    # --- 1. Basic Info ---
+    project_name_pl: str = Field(..., description="[REQUIRED] Project Name in Polish")
+    project_name_en: str = Field(..., description="[REQUIRED] Project Name in English")
+    property_type: str = Field(..., description="[REQUIRED] Project Type e.g. Villa, Condominium, Apartment, Townhouse")
+    slug_pl: Optional[str] = Field(None, description="[Optional] URL Slug in Polish")
+    slug_en: Optional[str] = Field(None, description="[Optional] URL Slug in English")
+    subtitle_pl: Optional[str] = Field(None, description="[Optional] Subtitle in Polish")
+    subtitle_en: Optional[str] = Field(None, description="[Optional] Subtitle in English")
+    country: str = Field(..., description="[REQUIRED] Country e.g. Thailand")
+    city: str = Field(..., description="[REQUIRED] City e.g. Phuket, Bangkok, Samui")
+    websites: Optional[List[str]] = Field(None, description="[Optional] Sites this project belongs to")
+
+    # --- 2. Pricing ---
+    currency: Optional[str] = Field("THB", description="[Optional] Currency e.g. THB, EUR, USD")
+    price_from: Optional[float] = Field(None, description="[Optional] Price From (minimum numerical price)")
+    price_to: Optional[float] = Field(None, description="[Optional] Price To (maximum numerical price)")
+    expected_roi: Optional[str] = Field(None, description="[Optional] Expected ROI (%) e.g. 7.5%")
+    rental_yield: Optional[str] = Field(None, description="[Optional] Rental Yield (%) e.g. 8.0%")
+
+    # --- 3. Details (all optional) ---
+    completion_status: Optional[str] = Field(None, description="[Optional] Completion Status e.g. Under construction, Ready to move in")
+    completion_date: Optional[str] = Field(None, description="[Optional] Completion Date e.g. Q4 2026")
+    total_units: Optional[int] = Field(None, description="[Optional] Total Units")
+    available_units: Optional[int] = Field(None, description="[Optional] Available Units")
+    area_from_sqm: Optional[float] = Field(None, description="[Optional] Area From (sqm)")
+    area_to_sqm: Optional[float] = Field(None, description="[Optional] Area To (sqm)")
+    amenities: Optional[List[str]] = Field(default_factory=list, description="[Optional] Amenities list")
+    tags: Optional[List[str]] = Field(default_factory=list, description="[Optional] Project tags")
+
+    # --- 4. Description PL ---
+    short_description_pl: str = Field(..., description="[REQUIRED] Short Description in Polish")
+    full_description_pl: Optional[str] = Field(None, description="[Optional] Full Description in Polish")
+
+    # --- 5. Description EN ---
+    short_description_en: str = Field(..., description="[REQUIRED] Short Description in English")
+    full_description_en: Optional[str] = Field(None, description="[Optional] Full Description in English")
+
+    # --- 6. Media ---
+    media: List[str] = Field(..., min_length=1, description="[REQUIRED] Media image URLs (minimum 1 image required)")
+    video_url: Optional[str] = Field(None, description="[Optional] Video Tour URL")
+
+    # --- 7. Location (all optional) ---
+    search_location: Optional[str] = Field(None, description="[Optional] Search Location query")
+    latitude: Optional[float] = Field(None, description="[Optional] Latitude")
+    longitude: Optional[float] = Field(None, description="[Optional] Longitude")
+    address_en: Optional[str] = Field(None, description="[Optional] Address in English")
+    address_pl: Optional[str] = Field(None, description="[Optional] Address in Polish")
+    neighborhood_lifestyle: Optional[str] = Field(None, description="[Optional] Neighborhood & Lifestyle (AI)")
+
+    # --- 8. Layouts ---
+    layouts: Optional[List[Dict[str, Any]]] = Field(default_factory=list, description="[Optional] Layout configurations")
+
+    # --- 9. SEO (all optional) ---
+    seo_title_pl: Optional[str] = Field(None, description="[Optional] SEO Title (PL)")
+    seo_title_en: Optional[str] = Field(None, description="[Optional] SEO Title (EN)")
+    seo_description_pl: Optional[str] = Field(None, description="[Optional] SEO Description (PL)")
+    seo_description_en: Optional[str] = Field(None, description="[Optional] SEO Description (EN)")
+
+    # --- 10. Publish (all optional) ---
+    active: Optional[bool] = Field(True, description="[Optional] Active / Published status")
+    featured: Optional[bool] = Field(False, description="[Optional] Featured property flag")
+    top_list: Optional[bool] = Field(False, description="[Optional] Top List property flag")
+
+    # --- Compatibility / Internal Aliases ---
+    property_id: Optional[str] = Field(None, description="Internal property ID override")
+    cover_image: Optional[str] = Field(None, description="Cover image URL")
+    price_display: Optional[str] = Field(None, description="Price display string e.g. from 18.5M THB")
+    bedrooms: Optional[int] = Field(None, description="Bedrooms")
+    bathrooms: Optional[int] = Field(None, description="Bathrooms")
+    has_pool: Optional[bool] = Field(False)
+    beach_access: Optional[bool] = Field(False)
+    sea_view: Optional[bool] = Field(False)
+    # Legacy location fields still sent by older clients and batch tools; without them these values were silently dropped.
+    province: Optional[str] = Field(None, description="Legacy alias: province (defaults to city)")
+    district: Optional[str] = Field(None, description="Legacy alias: district")
+    address: Optional[str] = Field(None, description="Legacy alias: address (defaults to address_en)")
+    project_name: Optional[str] = Field(None, description="Legacy alias: project / development name")
+    bedrooms_min: Optional[int] = Field(None, description="Legacy alias: minimum bedrooms (validated against bedrooms_max)")
+    bedrooms_max: Optional[int] = Field(None, description="Legacy alias: maximum bedrooms")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reconcile_and_default_fields(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        d = dict(data)
+
+        # 1. Names reconciliation
+        en_name = d.get("project_name_en") or d.get("property_name") or d.get("project_name") or d.get("title")
+        pl_name = d.get("project_name_pl") or en_name
+        if en_name and not d.get("project_name_en"):
+            d["project_name_en"] = en_name
+        if pl_name and not d.get("project_name_pl"):
+            d["project_name_pl"] = pl_name
+
+        # 2. Location & Country/City
+        if not d.get("country"):
+            d["country"] = "Thailand"
+        city_val = d.get("city") or d.get("province") or d.get("district") or d.get("area") or d.get("location")
+        if city_val and not d.get("city"):
+            d["city"] = str(city_val).split(",")[0].strip()
+
+        # 3. Descriptions
+        desc_en = d.get("full_description_en") or d.get("description") or d.get("short_description_en") or ""
+        short_en = d.get("short_description_en") or (desc_en[:200] if desc_en else en_name or "Real estate project")
+        desc_pl = d.get("full_description_pl") or d.get("description_pl") or desc_en
+        short_pl = d.get("short_description_pl") or (desc_pl[:200] if desc_pl else short_en)
+        if not d.get("short_description_en"):
+            d["short_description_en"] = short_en
+        if not d.get("short_description_pl"):
+            d["short_description_pl"] = short_pl
+        if desc_en and not d.get("full_description_en"):
+            d["full_description_en"] = desc_en
+        if desc_pl and not d.get("full_description_pl"):
+            d["full_description_pl"] = desc_pl
+
+        # 4. Media
+        media_list = d.get("media") or d.get("images") or []
+        if isinstance(media_list, str):
+            media_list = [media_list]
+        if not d.get("media") and media_list:
+            d["media"] = list(media_list)
+        elif not d.get("media"):
+            # Provide sensible fallback image if legacy creation called without media
+            d["media"] = ["https://tajlandia.com/images/default-property.jpg"]
+
+        # 5. Pricing aliases
+        if d.get("price_numeric_min") is not None and d.get("price_from") is None:
+            d["price_from"] = d.get("price_numeric_min")
+        if d.get("price_numeric_max") is not None and d.get("price_to") is None:
+            d["price_to"] = d.get("price_numeric_max")
+
+        # 6. Units & Area aliases
+        if d.get("units") is not None and d.get("total_units") is None:
+            d["total_units"] = d.get("units")
+        if d.get("area_sqm_min") is not None and d.get("area_from_sqm") is None:
+            d["area_from_sqm"] = d.get("area_sqm_min")
+        if d.get("area_sqm_max") is not None and d.get("area_to_sqm") is None:
+            d["area_to_sqm"] = d.get("area_sqm_max")
+
+        # 7. Status alias
+        if d.get("status") and not d.get("completion_status"):
+            d["completion_status"] = d.get("status")
+
+        # 8. Address alias
+        if d.get("address") and not d.get("address_en"):
+            d["address_en"] = d.get("address")
+
+        # 9. Active alias
+        if d.get("is_public") is not None and d.get("active") is None:
+            d["active"] = d.get("is_public")
+
+        return d
 
 
 class PropertyUpdateRequest(BaseModel):
-    property_name: Optional[str] = Field(None, example="Villa Horizon Luxury Residences")
-    project_name: Optional[str] = Field(None, example="Villa Horizon")
-    property_type: Optional[str] = Field(None, example="Villa")
-    status: Optional[str] = Field(None, example="Ready to move in")
-    location: Optional[str] = Field(None, example="Bang Tao, Phuket")
-    province: Optional[str] = Field(None, example="Phuket")
-    district: Optional[str] = Field(None, example="Thalang")
-    address: Optional[str] = Field(None, example="123 Lagoon Road, Choeng Thale")
-    price_display: Optional[str] = Field(None, example="from 19.00M THB")
-    price_numeric_min: Optional[float] = Field(None, example=19000000.0)
-    price_numeric_max: Optional[float] = Field(None, example=25000000.0)
-    currency: Optional[str] = Field(None, example="THB")
-    bedrooms: Optional[int] = Field(None, example=4)
-    bedrooms_min: Optional[int] = Field(None, example=3)
-    bedrooms_max: Optional[int] = Field(None, example=5)
-    bathrooms: Optional[int] = Field(None, example=4)
-    area_sqm_min: Optional[float] = Field(None, example=350.0)
-    area_sqm_max: Optional[float] = Field(None, example=480.0)
-    has_pool: Optional[bool] = Field(None, example=True)
-    beach_access: Optional[bool] = Field(None, example=True)
-    sea_view: Optional[bool] = Field(None, example=True)
-    description: Optional[str] = Field(None, example="Updated description with new villa details.")
-    images: Optional[List[str]] = Field(None, example=["https://varsoviaestate.com/media/new-image.jpg"])
-    cover_image: Optional[str] = Field(None, example="https://varsoviaestate.com/media/new-cover.jpg")
-    websites: Optional[List[str]] = Field(None, example=["tajlandia.com"], description="Update website domains for this property")
-    is_public: Optional[bool] = Field(None, example=True)
+    # --- 1. Basic Info ---
+    project_name_pl: Optional[str] = Field(None, description="Project Name (PL)")
+    project_name_en: Optional[str] = Field(None, description="Project Name (EN)")
+    property_type: Optional[str] = Field(None, description="Project Type")
+    slug_pl: Optional[str] = Field(None, description="Slug (PL)")
+    slug_en: Optional[str] = Field(None, description="Slug (EN)")
+    subtitle_pl: Optional[str] = Field(None, description="Subtitle (PL)")
+    subtitle_en: Optional[str] = Field(None, description="Subtitle (EN)")
+    country: Optional[str] = Field(None, description="Country")
+    city: Optional[str] = Field(None, description="City")
+    websites: Optional[List[str]] = Field(None, description="Sites this project belongs to")
+
+    # --- 2. Pricing ---
+    currency: Optional[str] = Field(None, description="Currency")
+    price_from: Optional[float] = Field(None, description="Price From")
+    price_to: Optional[float] = Field(None, description="Price To")
+    expected_roi: Optional[str] = Field(None, description="Expected ROI (%)")
+    rental_yield: Optional[str] = Field(None, description="Rental Yield (%)")
+
+    # --- 3. Details ---
+    completion_status: Optional[str] = Field(None, description="Completion Status")
+    completion_date: Optional[str] = Field(None, description="Completion Date")
+    total_units: Optional[int] = Field(None, description="Total Units")
+    available_units: Optional[int] = Field(None, description="Available Units")
+    area_from_sqm: Optional[float] = Field(None, description="Area From (sqm)")
+    area_to_sqm: Optional[float] = Field(None, description="Area To (sqm)")
+    amenities: Optional[List[str]] = Field(None, description="Amenities")
+    tags: Optional[List[str]] = Field(None, description="Tags")
+
+    # --- 4. Description PL ---
+    short_description_pl: Optional[str] = Field(None, description="Short Description (PL)")
+    full_description_pl: Optional[str] = Field(None, description="Full Description (PL)")
+
+    # --- 5. Description EN ---
+    short_description_en: Optional[str] = Field(None, description="Short Description (EN)")
+    full_description_en: Optional[str] = Field(None, description="Full Description (EN)")
+
+    # --- 6. Media ---
+    media: Optional[List[str]] = Field(None, description="Media images")
+    video_url: Optional[str] = Field(None, description="Video URL")
+
+    # --- 7. Location ---
+    search_location: Optional[str] = Field(None, description="Search Location")
+    latitude: Optional[float] = Field(None, description="Latitude")
+    longitude: Optional[float] = Field(None, description="Longitude")
+    address_en: Optional[str] = Field(None, description="Address (EN)")
+    address_pl: Optional[str] = Field(None, description="Address (PL)")
+    neighborhood_lifestyle: Optional[str] = Field(None, description="Neighborhood & Lifestyle (AI)")
+
+    # --- 8. Layouts ---
+    layouts: Optional[List[Dict[str, Any]]] = Field(None, description="Layouts")
+
+    # --- 9. SEO ---
+    seo_title_pl: Optional[str] = Field(None, description="SEO Title (PL)")
+    seo_title_en: Optional[str] = Field(None, description="SEO Title (EN)")
+    seo_description_pl: Optional[str] = Field(None, description="SEO Description (PL)")
+    seo_description_en: Optional[str] = Field(None, description="SEO Description (EN)")
+
+    # --- 10. Publish ---
+    active: Optional[bool] = Field(None, description="Active status")
+    featured: Optional[bool] = Field(None, description="Featured status")
+    top_list: Optional[bool] = Field(None, description="Top List status")
+
+    # Legacy field aliases
+    property_name: Optional[str] = None
+    project_name: Optional[str] = None
+    status: Optional[str] = None
+    location: Optional[str] = None
+    province: Optional[str] = None
+    district: Optional[str] = None
+    address: Optional[str] = None
+    price_display: Optional[str] = None
+    price_numeric_min: Optional[float] = None
+    price_numeric_max: Optional[float] = None
+    bedrooms: Optional[int] = None
+    bathrooms: Optional[int] = None
+    area_sqm_min: Optional[float] = None
+    area_sqm_max: Optional[float] = None
+    has_pool: Optional[bool] = None
+    beach_access: Optional[bool] = None
+    sea_view: Optional[bool] = None
+    description: Optional[str] = None
+    images: Optional[List[str]] = None
+    cover_image: Optional[str] = None
+    is_public: Optional[bool] = None
 
 
 @router.get("/properties")
@@ -712,6 +928,7 @@ def list_admin_properties_endpoint(
     Directly retrieves from Cloud Firestore 'projects' (ADMIN_FIRESTORE_*).
     """
     fs_output = []
+    fs_answered = False  # Firestore matched something: an empty page past the end is still Firestore's answer
     try:
         from app.services.firestore_service import search_properties_firestore
         fs_props = search_properties_firestore(
@@ -723,10 +940,13 @@ def list_admin_properties_endpoint(
             has_pool=has_pool,
             websites=staff.selected_websites,
             target="admin",
-            limit=limit
+            status=status,
+            # No native offset in the catalog search: fetch through the end of the requested page, then slice.
+            limit=offset + limit
         )
         if fs_props:
-            for p in fs_props:
+            fs_answered = True
+            for p in fs_props[offset:offset + limit]:
                 fs_output.append({
                     "property_id": p.get("property_id"),
                     "property_name": p.get("name") or p.get("property_name"),
@@ -746,14 +966,18 @@ def list_admin_properties_endpoint(
     except Exception as e:
         logger.warning(f"Error querying Firestore properties in list_admin_properties_endpoint: {e}")
 
-    if fs_output:
+    if fs_answered:
         return {
             "count": len(fs_output),
+            "offset": offset,
+            "limit": limit,
             "selected_websites": staff.selected_websites,
             "properties": fs_output
         }
     return {
         "count": 0,
+        "offset": offset,
+        "limit": limit,
         "selected_websites": staff.selected_websites,
         "properties": []
     }
@@ -762,18 +986,31 @@ def list_admin_properties_endpoint(
 @router.get("/properties/{property_id}")
 def get_admin_property_endpoint(
     property_id: str,
+    include_archived: bool = Query(False, description="Admin / super admin only: also return a soft-deleted (archived) listing."),
     staff: AuthenticatedStaff = Depends(require_admin_or_employee_with_sites),
     db: Any = Depends(get_db)
 ):
     """
     Retrieves a single property listing from Cloud Firestore.
     Strictly verifies that the property belongs to the staff member's currently selected websites.
+    Archived (soft-deleted) listings return 404 unless an admin passes include_archived=true.
     """
+    from app.services.firestore_service import (
+        get_property_by_id_from_firestore,
+        get_raw_property_document,
+        is_soft_deleted_record,
+    )
+
+    if include_archived and staff.role not in ("admin", "super_admin"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only admins can view archived listings.",
+        )
+
     # 1. Check Cloud Firestore (Primary)
     fs_prop = None
     try:
-        from app.services.firestore_service import get_property_by_id_from_firestore
-        fs_prop = get_property_by_id_from_firestore(property_id, target="admin")
+        fs_prop = get_property_by_id_from_firestore(property_id, target="admin", include_inactive=include_archived)
     except Exception:
         fs_prop = None
 
@@ -793,10 +1030,17 @@ def get_admin_property_endpoint(
         )
 
     if fs_prop:
+        # Admins edit the stored record: show the stored name, not the public display-cleaned one
+        # (the card presenter shortens names, e.g. drops "Residence").
+        _raw = fs_prop.get("raw_firestore_data") or {}
+        _stored_name = _raw.get("name") or _raw.get("title")
+        if isinstance(_stored_name, dict):
+            _stored_name = _stored_name.get("en") or _stored_name.get("pl") or next((v for v in _stored_name.values() if v), None)
         return {
             "found": True,
             "property_id": fs_prop.get("property_id"),
-            "property_name": fs_prop.get("name"),
+            "property_name": _stored_name or fs_prop.get("name"),
+            "archived": is_soft_deleted_record(_raw),
             "project_name": fs_prop.get("project_name") or fs_prop.get("name"),
             "property_type": fs_prop.get("property_type"),
             "status": fs_prop.get("status"),
@@ -877,14 +1121,46 @@ def create_property_endpoint(
     else:
         assigned_websites = list(staff.selected_websites)
 
-    fields = req.model_dump(exclude={"images", "cover_image", "property_id"})
+    fields = req.model_dump(exclude={"images", "media", "cover_image", "property_id"})
+    images_list = getattr(req, "media", None) or getattr(req, "images", None) or []
+    # Reconcile aliases into standard DB field names
+    fields["property_name"] = req.project_name_en or fields.get("property_name") or req.project_name_pl
+    fields["project_name"] = req.project_name or req.project_name_en
+    fields["province"] = req.province or req.city or "Phuket"
+    fields["description"] = req.full_description_en or req.short_description_en or fields.get("description")
+    # Map the bilingual request fields onto the stored columns. `status` is required by validation and is what
+    # search and the chatbot read; without this every create failed with 422 "status is required".
+    if req.completion_status:
+        fields["status"] = req.completion_status
+    if req.address_en and not req.address:
+        fields["address"] = req.address_en
+    if req.full_description_pl is not None:
+        fields["description_pl"] = req.full_description_pl
+    if req.full_description_en is not None:
+        fields["description_en"] = req.full_description_en
+    if req.area_from_sqm is not None:
+        fields["area_sqm_min"] = req.area_from_sqm
+    if req.area_to_sqm is not None:
+        fields["area_sqm_max"] = req.area_to_sqm
+    if req.total_units is not None:
+        fields["units"] = req.total_units
+    if req.price_from is not None and fields.get("price_numeric_min") is None:
+        fields["price_numeric_min"] = req.price_from
+    if req.price_to is not None and fields.get("price_numeric_max") is None:
+        fields["price_numeric_max"] = req.price_to
+    if req.active is not None:
+        fields["is_public"] = bool(req.active)
+    if req.featured is not None:
+        fields["is_featured"] = bool(req.featured)
+    if req.top_list is not None:
+        fields["is_top_list"] = bool(req.top_list)
     return rest_create_property(
         db,
         staff,
         fields,
         property_id=pid,
         websites=assigned_websites,
-        images=req.images or [],
+        images=images_list,
         cover_image=req.cover_image,
         allow_without_undo=allow_without_undo,
     )
@@ -938,14 +1214,47 @@ def update_property_endpoint(
             )
         assigned_websites = norm_targets
 
-    update_data = req.model_dump(exclude_unset=True, exclude={"images", "cover_image"})
+    update_data = req.model_dump(exclude_unset=True, exclude={"images", "media", "cover_image"})
+    images_list = req.media if req.media is not None else req.images
+    if req.project_name_en is not None and "property_name" not in update_data:
+        update_data["property_name"] = req.project_name_en
+    if req.city is not None and "province" not in update_data:
+        update_data["province"] = req.city
+    if req.price_from is not None and "price_numeric_min" not in update_data:
+        update_data["price_numeric_min"] = req.price_from
+    if req.price_to is not None and "price_numeric_max" not in update_data:
+        update_data["price_numeric_max"] = req.price_to
+    if req.completion_status is not None and "status" not in update_data:
+        update_data["status"] = req.completion_status
+    if req.address_en is not None and "address" not in update_data:
+        update_data["address"] = req.address_en
+    if req.full_description_en is not None and "description_en" not in update_data:
+        update_data["description_en"] = req.full_description_en
+    if req.full_description_pl is not None and "description_pl" not in update_data:
+        update_data["description_pl"] = req.full_description_pl
+    if req.full_description_en is not None and "description" not in update_data:
+        update_data["description"] = req.full_description_en
+    elif req.short_description_en is not None and "description" not in update_data:
+        update_data["description"] = req.short_description_en
+    if req.area_from_sqm is not None and "area_sqm_min" not in update_data:
+        update_data["area_sqm_min"] = req.area_from_sqm
+    if req.area_to_sqm is not None and "area_sqm_max" not in update_data:
+        update_data["area_sqm_max"] = req.area_to_sqm
+    if req.total_units is not None and "units" not in update_data:
+        update_data["units"] = req.total_units
+    if req.active is not None and "is_public" not in update_data:
+        update_data["is_public"] = bool(req.active)
+    if req.featured is not None and "is_featured" not in update_data:
+        update_data["is_featured"] = bool(req.featured)
+    if req.top_list is not None and "is_top_list" not in update_data:
+        update_data["is_top_list"] = bool(req.top_list)
     return rest_update_property(
         db,
         staff,
         property_id,
         update_data,
         websites=assigned_websites,
-        images=req.images,
+        images=images_list,
         cover_image=req.cover_image,
         allow_without_undo=allow_without_undo,
     )
@@ -1164,6 +1473,7 @@ from app.api.v1.auth import (
     get_admin_user_details,
     update_admin_user,
     delete_admin_user,
+    block_admin_user,
     AdminUserDirectoryItem,
     CreateUserRequest,
     UpdateUserRequest
@@ -1334,3 +1644,4 @@ router.get("/users/{user_id}", response_model=AdminUserDirectoryItem, tags=["Adm
 router.patch("/users/{user_id}", response_model=AdminUserDirectoryItem, tags=["Admin Directory Management"])(update_admin_user)
 router.put("/users/{user_id}", response_model=AdminUserDirectoryItem, tags=["Admin Directory Management"])(update_admin_user)
 router.delete("/users/{user_id}", tags=["Admin Directory Management"])(delete_admin_user)
+router.post("/users/{user_id}/block", response_model=AdminUserDirectoryItem, tags=["Admin Directory Management"])(block_admin_user)

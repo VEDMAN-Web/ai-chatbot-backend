@@ -5,10 +5,11 @@ import hashlib
 import json
 import time
 import urllib.parse
+import uuid
 from datetime import datetime, timedelta
 from typing import Dict, Any, Optional, List
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Query, Security, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Security, Request, Response, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.security import HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field, ConfigDict, model_validator
@@ -384,6 +385,79 @@ class GoogleAuthInfo(BaseModel):
     services: list[str] = Field(default_factory=list)
 
 
+
+VALID_USER_STATUSES = ("active", "blocked", "deactivated")
+
+
+def _require_manageable_by(staff: AuthenticatedStaff, user: Any) -> None:
+    """
+    Tenant scope for user management by a non-super admin: every website the target may access must be one
+    of the admin's own websites.
+    """
+    if staff.role == "super_admin":
+        return
+    # resolve_user_allowed_websites lives in app.core.auth (imported at module top); the former local import from
+    # app.core.tenant raised ImportError, turning every admin-side user GET/PATCH into a 500.
+    target_sites = set(resolve_user_allowed_websites(user, getattr(user, "role", "worker")))
+    outside = sorted(target_sites - set(staff.allowed_websites or []))
+    if outside:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied: this account has access to websites outside your scope.",
+        )
+
+
+def _require_other_active_super_admin(db: Any, user: Any, action: str) -> None:
+    """Refuse to demote / block / deactivate / delete the last active super admin.
+
+    Fails closed: if the super admins cannot be counted, the change is refused (503) rather than allowed.
+    """
+    if (getattr(user, "role", "") or "").lower() != "super_admin":
+        return
+    try:
+        all_supers = users_repo.list_users(db, roles=["super_admin"])
+    except Exception as exc:
+        logger.error("Could not verify remaining super admins before '%s': %s", action, exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Cannot verify the remaining super admins right now. Please try again shortly.",
+        ) from exc
+    others = [
+        u for u in all_supers
+        if str(u.id) != str(user.id) and getattr(u, "is_active", True) and (getattr(u, "status", None) or "active").lower() == "active"
+    ]
+    if not others:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Cannot {action} the last active super admin. Create or activate another super admin first.",
+        )
+
+
+def _is_self(staff: AuthenticatedStaff, user: Any) -> bool:
+    if str(staff.user_id) == str(getattr(user, "id", "")):
+        return True
+    return bool(staff.email) and (staff.email or "").strip().lower() == (getattr(user, "email", "") or "").strip().lower()
+
+
+def _require_no_self_lockout(staff: AuthenticatedStaff, user: Any, req: Any) -> None:
+    """Nobody may deactivate, block or change the role of their own account through user management."""
+    if not _is_self(staff, user):
+        return
+    if req.role is not None:
+        new_role = req.role.strip().lower()
+        new_role = "worker" if new_role == "employee" else new_role
+        if new_role != (getattr(user, "role", "") or "worker").strip().lower():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="You cannot change the role of your own account. Ask another super admin to do it.",
+            )
+    if (req.status is not None and req.status.strip().lower() != "active") or req.is_active is False:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="You cannot deactivate or block your own account. Ask another super admin to do it.",
+        )
+
+
 def _get_user_google_info(user: Optional[Any]) -> GoogleAuthInfo:
     if not user:
         return GoogleAuthInfo()
@@ -652,7 +726,7 @@ def user_login(
 
     # 2. Blocked or deactivated accounts never log in (their sessions are revoked)
     user_status = (getattr(user, "status", None) or "active").lower()
-    if user_status == "blocked" or not getattr(user, "is_active", True):
+    if user_status != "active" or not getattr(user, "is_active", True):
         _store_call(lambda: users_repo.revoke_user_sessions(db, user.id))
         _audit_login_failure("account_blocked")
         raise HTTPException(
@@ -698,8 +772,10 @@ def user_login(
     if requested_domain_raw:
         canon_req = normalize_website_domain(requested_domain_raw)
         if canon_req:
-            # Verify permission to access target domain
-            if is_privileged_admin or canon_req in user_allowed_sites:
+            # The requested website must be one the account is assigned (super admins: all sites by default).
+            # It applies to this login only. It used to be saved as the account's home domain, which let an
+            # admin re-home themselves into another tenant and pass the user-management tenant checks.
+            if canon_req in user_allowed_sites:
                 user_domain = canon_req
                 # Persist selected default website for this account if changed
                 if getattr(user, "domain", None) != canon_req:
@@ -865,6 +941,9 @@ def get_current_user_profile(
 
 @router.get("/admin/users", response_model=list[AdminUserDirectoryItem], tags=["Admin Directory"])
 def list_admin_users_with_google_status(
+    response: Response,
+    limit: Optional[int] = Query(None, ge=1, description="Page size limit"),
+    offset: int = Query(0, ge=0, description="Offset for pagination"),
     role: Optional[str] = Query(None, description="Filter by role: super_admin, admin, worker"),
     search: Optional[str] = Query(None, description="Search by name or email"),
     is_active: Optional[bool] = Query(None, description="Filter by active status"),
@@ -901,20 +980,22 @@ def list_admin_users_with_google_status(
         db, roles=roles_filter, search=search, is_active=is_active, status=status_filter
     ))
 
-    # Filter by domain: Super Admins can inspect all domains; regular Admins are restricted to their allowed websites or active env
+    # Filter by scope: Super Admins see all; regular Admins only see accounts whose websites are all within theirs.
     if staff.role == "super_admin":
         users = all_users
     else:
+        own_sites = set(staff.allowed_websites or [])
         users = [
-            u for u in all_users 
-            if get_user_domain_key(u) == active_env_key or 
-            any(normalize_tenant_domain_key(w) == get_user_domain_key(u) for w in (staff.allowed_websites or []))
+            u for u in all_users
+            if set(resolve_user_allowed_websites(u, u.role)) <= own_sites
         ]
+
+    active_session_counts = _store_call(lambda: users_repo.count_active_sessions_by_user(db)) or {}
 
     now = datetime.utcnow()
     results = []
     for u in users:
-        active_sess_count = _store_call(lambda: users_repo.count_active_sessions(db, u.id))
+        active_sess_count = active_session_counts.get(str(u.id), 0)
 
         resolved_u_role = u.role or "worker"
         resolved_u_domain = u.domain or CANONICAL_DOMAINS.get(active_env_key, get_current_env_domain())
@@ -933,6 +1014,13 @@ def list_admin_users_with_google_status(
             active_sessions_count=active_sess_count,
             allowed_websites=allowed_sites
         ))
+
+    total = len(results)
+    response.headers["X-Total-Count"] = str(total)
+    if offset:
+        results = results[offset:]
+    if limit is not None:
+        results = results[:limit]
     return results
 
 
@@ -1097,6 +1185,9 @@ def get_admin_user_details(
 
     if staff.role != "super_admin" and user.role == "super_admin":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admins cannot view super admin accounts.")
+    if (user.status or "").lower() == "deleted" and staff.role != "super_admin":
+        raise HTTPException(status_code=404, detail="User not found.")
+    _require_manageable_by(staff, user)
 
     active_sess_count = _store_call(lambda: users_repo.count_active_sessions(db, user.id))
 
@@ -1157,8 +1248,13 @@ def update_admin_user(
         )
 
     target_user_role = (user.role or "worker").lower()
+    _require_manageable_by(staff, user)
 
-    # Role hierarchy enforcement
+    if req.status is not None and req.status.strip().lower() not in VALID_USER_STATUSES:
+        raise HTTPException(status_code=422, detail=f"status must be one of {list(VALID_USER_STATUSES)}.")
+    _require_no_self_lockout(staff, user, req)
+
+    # Role hierarchy enforcement (before the last-super-admin check, so an admin learns nothing about super admins)
     if staff.role != "super_admin":
         if target_user_role == "super_admin":
             raise HTTPException(
@@ -1177,6 +1273,11 @@ def update_admin_user(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail="Only super administrators can promote accounts to admin or super_admin."
                 )
+
+    demoting = req.role is not None and req.role.strip().lower() != "super_admin"
+    disabling = (req.status is not None and req.status.strip().lower() != "active") or req.is_active is False
+    if demoting or disabling:
+        _require_other_active_super_admin(db, user, "demote or disable")
 
     new_plain_password = None
     if req.name is not None:
@@ -1219,7 +1320,7 @@ def update_admin_user(
     if req.status is not None:
         target_status = req.status.strip().lower()
         user.status = target_status
-        if target_status == "blocked":
+        if target_status in ("blocked", "deactivated"):
             user.is_active = False
             _store_call(lambda: users_repo.revoke_user_sessions(db, user.id))
         elif target_status == "active":
@@ -1319,6 +1420,11 @@ def delete_admin_user(
                 detail="Admins cannot delete other admin accounts. Only super administrators can delete admins."
             )
 
+    _require_manageable_by(staff, user)
+    _require_other_active_super_admin(db, user, "delete")
+    if (user.status or "").lower() == "deleted":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This account is already deleted.")
+
     deleted_email = user.email
 
     # Cascade sessions and remove the account
@@ -1370,7 +1476,10 @@ def block_admin_user(
         )
 
     is_blocking = req.blocked
+    if (user.status or "").lower() == "deleted":
+        raise HTTPException(status_code=404, detail="User not found.")
     if is_blocking:
+        _require_other_active_super_admin(db, user, "block")
         user.status = "blocked"
         user.is_active = False
         # Revoke all active sessions immediately

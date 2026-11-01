@@ -139,15 +139,15 @@ def _allowed_text_blob(cards: List[Dict[str, Any]], tool_results: Optional[List[
 _AMENITY_CLAIM_PATTERNS: List[Tuple[str, re.Pattern]] = [
     # Affirmative amenity claims only — not bare words inside titles like "Luxury Pool Villas"
     ("spa", re.compile(
-        r"(?:spa\s*:\s*(?:yes|✓|available|included))|\b(?:has|with|includes?|offers?)\s+(?:a\s+)?spa\b|\bspa\s+yes\b",
+        r"(?:spa\s*:\s*(?:yes|✓|available|included))|\b(?:has|with|includes?|offers?)\s+(?:a\s+|an\s+)?(?:luxury\s+|private\s+)?spa\b|\bspa\s+yes\b",
         re.I,
     )),
     ("gym", re.compile(
-        r"(?:gym\s*:\s*(?:yes|✓))|\b(?:has|with|includes?|offers?)\s+(?:a\s+)?(?:gym|fitness(?:\s+center)?)\b",
+        r"(?:gym\s*:\s*(?:yes|✓))|\b(?:has|with|includes?|offers?)\s+(?:a\s+|an\s+)?(?:private\s+|luxury\s+)?(?:gym|fitness(?:\s+center)?)\b",
         re.I,
     )),
     ("pool", re.compile(
-        r"(?:(?:private\s+)?pool\s*:\s*(?:yes|✓))|\b(?:has|with|includes?|offers?)\s+(?:a\s+)?(?:private\s+)?pool\b",
+        r"(?:(?:private\s+)?pool\s*:\s*(?:yes|✓))|\b(?:has|with|includes?|offers?)\s+(?:a\s+|an\s+)?(?:private\s+|luxury\s+)?pool\b",
         re.I,
     )),
     ("parking", re.compile(
@@ -174,7 +174,7 @@ _AMENITY_CLAIM_PATTERNS: List[Tuple[str, re.Pattern]] = [
 for _name in ("golf", "sauna", "cinema", "tennis", "elevator", "helipad", "marina", "rooftop"):
     _AMENITY_CLAIM_PATTERNS.append((_name, re.compile(
         r"(?:" + _name + r"\s*(?:course|court)?\s*:\s*(?:yes|✓))|"
-        r"\b(?:has|with|includes?|offers?)\s+(?:a\s+|an\s+|private\s+)?" + _name + r"\b",
+        r"\b(?:has|with|includes?|offers?)\s+(?:a\s+|an\s+)?(?:private\s+|luxury\s+|exclusive\s+)?" + _name + r"\b",
         re.I,
     )))
 
@@ -275,6 +275,7 @@ def verify_claims(
     tool_results: Optional[List[Any]] = None,
     allowed_property_ids: Optional[set] = None,
     allowed_property_names: Optional[set] = None,
+    applied_filters: Optional[Dict[str, Any]] = None,
 ) -> Tuple[bool, List[str]]:
     """
     Extract factual claims from reply and check against this-turn FACTS/cards.
@@ -396,7 +397,17 @@ def verify_claims(
     # --- Areas ---
     for m in _AREA_CLAIM.finditer(text):
         num = m.group(1).replace(",", "")
+        window = text[max(0, m.start() - 30): m.end() + 25].lower()
+        if re.search(r"\b(?:over|larger|smaller|more than|less than|under|below|above|from|to|between|at least|up to|min|max|powyżej|poniżej|od|do|większ|mniejsz)\b", window):
+            continue
+        applied_areas = {
+            re.sub(r"[^\d]", "", str(v))
+            for k, v in (applied_filters or {}).items()
+            if k in ("min_area", "max_area", "area") and v is not None
+        }
         digs = re.sub(r"[^\d]", "", num)
+        if digs in applied_areas:
+            continue
         if digs and digs not in re.sub(r"[^\d]", "", facts_blob):
             reasons.append(f"area_not_in_facts:{m.group(0)[:30]}")
 
@@ -405,8 +416,16 @@ def verify_claims(
         n = m.group(1)
         if n in re.findall(r"\d+", facts_blob) or n in facts_low:
             continue
+        window = text[max(0, m.start() - 25): m.end() + 15].lower()
+        if re.search(r"\b(?:at least|or more|or fewer|up to|more than|less than|over|under|minimum|maximum|co najmniej|lub więcej|nie więcej niż)\b", window):
+            continue
+        applied_beds = {
+            str(v) for k, v in (applied_filters or {}).items()
+            if k in ("bedrooms", "min_bedrooms", "max_bedrooms") and v is not None
+        }
+        if n in applied_beds:
+            continue
         # Allow ordinals / "first bedroom" style rare; fail clear inventory claims
-        window = text[max(0, m.start() - 20): m.end() + 10].lower()
         if any(x in window for x in ("has", "with", "bedrooms:", "beds:", "•")):
             reasons.append(f"bedrooms_not_in_facts:{m.group(0)[:30]}")
 
@@ -650,6 +669,7 @@ def validate_reply(
         tool_results=tool_results,
         allowed_property_ids=allowed_property_ids,
         allowed_property_names=allowed_property_names,
+        applied_filters=applied_filters,
     )
     if not claim_ok:
         reasons.extend(claim_reasons)

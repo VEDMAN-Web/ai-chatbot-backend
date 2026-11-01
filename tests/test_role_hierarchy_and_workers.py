@@ -12,7 +12,6 @@ def _no_sync(monkeypatch):
     monkeypatch.setattr(settings, "ENABLE_FIRESTORE_SYNC", False)
     yield
 
-
 def _seed_test_accounts():
     """Ensure all requested test users are present in local test DB."""
     accounts = [

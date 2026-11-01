@@ -257,7 +257,7 @@ function updateHeroAndInputUI() {
     if (chatInput) chatInput.placeholder = s.inputPlaceholderPublic;
     if (promptGrid) {
       promptGrid.innerHTML = s.samplePromptsPublic.map(p => `
-        <div class="prompt-card" onclick="sendSamplePrompt('${p.replace(/'/g, "\\'")}')">
+        <div class="prompt-card" onclick="sendSamplePrompt(${jsArg(p)})">
           <div class="prompt-card-text">${p}</div>
         </div>
       `).join('');
@@ -268,7 +268,7 @@ function updateHeroAndInputUI() {
     if (chatInput) chatInput.placeholder = s.inputPlaceholderAdmin;
     if (promptGrid) {
       promptGrid.innerHTML = s.samplePromptsAdmin.map(p => `
-        <div class="prompt-card" onclick="sendSamplePrompt('${p.replace(/'/g, "\\'")}')">
+        <div class="prompt-card" onclick="sendSamplePrompt(${jsArg(p)})">
           <div class="prompt-card-text">${p}</div>
         </div>
       `).join('');
@@ -488,17 +488,66 @@ function updateAdminLoginUI() {
   const btn = document.getElementById('btnAdminLoginTop');
   const label = document.getElementById('btnAdminLoginTopLabel');
   const avatar = document.getElementById('staffAvatarBtn');
+  const roleBadge = document.getElementById('staffRoleBadge');
+  const btnSuperTop = document.getElementById('btnSuperAdminTop');
+  const tabSuper = document.getElementById('tabSuperAdmin');
+  const topBtnSuper = document.getElementById('topBtnSuperAdmin');
+  const btnCrud = document.getElementById('btnManageProperties');
   const user = getAdminUser();
   const loggedIn = isAdminLoggedIn();
+  const isSuper = loggedIn && user && (user.role === 'super_admin' || user.role === 'superadmin');
+  const isAdmin = loggedIn && user && (user.role === 'admin' || isSuper);
+
   if (btn) {
-    btn.style.display = currentMode === 'admin' ? 'inline-flex' : 'none';
+    btn.style.display = (currentMode === 'admin' || currentMode === 'superadmin') ? 'inline-flex' : 'none';
     if (label) label.innerText = loggedIn ? (user?.email ? `Logout (${user.email.split('@')[0]})` : 'Logout') : 'Staff Login';
     btn.onclick = loggedIn ? () => logoutAdminStaff() : () => openAdminLoginModal();
   }
-  if (avatar && user?.name) {
-    const initials = String(user.name || user.email || 'AD').trim().slice(0, 2).toUpperCase();
-    avatar.innerText = initials;
-    avatar.title = loggedIn ? `${user.email || user.name} (${user.role || 'staff'})` : 'Staff Account';
+
+  if (roleBadge) {
+    if (loggedIn && user) {
+      roleBadge.style.display = 'inline-flex';
+      if (isSuper) {
+        roleBadge.className = 'role-badge superadmin';
+        roleBadge.innerText = 'Super Admin';
+      } else if (isAdmin) {
+        roleBadge.className = 'role-badge admin';
+        roleBadge.innerText = 'Admin';
+      } else {
+        roleBadge.className = 'role-badge staff';
+        roleBadge.innerText = (user.role || 'Staff').toUpperCase();
+      }
+    } else {
+      roleBadge.style.display = 'none';
+    }
+  }
+
+  // Super Admin visibility
+  if (btnSuperTop) {
+    btnSuperTop.style.display = isSuper ? 'inline-flex' : 'none';
+  }
+  if (tabSuper) {
+    tabSuper.style.display = isSuper ? 'inline-block' : 'none';
+  }
+  if (topBtnSuper) {
+    topBtnSuper.style.display = isSuper ? 'inline-flex' : 'none';
+  }
+
+  // Manage listings visibility
+  if (btnCrud) {
+    btnCrud.style.display = (loggedIn && (currentMode === 'admin' || currentMode === 'superadmin')) ? 'inline-flex' : 'none';
+  }
+
+  if (avatar) {
+    if (loggedIn && user) {
+      const nameOrEmail = user.name || user.email || 'AD';
+      const initials = String(nameOrEmail).trim().slice(0, 2).toUpperCase();
+      avatar.innerText = initials;
+      avatar.title = `${user.email || user.name} (${user.role || 'staff'})`;
+    } else {
+      avatar.innerText = 'TJ';
+      avatar.title = 'Staff Account';
+    }
   }
   updateVisitorLogsButtonVisibility();
 }
@@ -837,55 +886,62 @@ function startNewChat(resetUI = true) {
 
 // Mode Switching (Test User Chatbot vs Test Admin Side Chatbot)
 function setAgentMode(mode, createNew = true) {
+  // Authorization check for superadmin mode
+  if (mode === 'superadmin') {
+    if (!isAdminLoggedIn()) {
+      openAdminLoginModal();
+      return;
+    }
+    const user = getAdminUser();
+    if (!user || (user.role !== 'super_admin' && user.role !== 'superadmin')) {
+      alert('Access restricted: Super Admin privileges required.');
+      return;
+    }
+  }
+
   currentMode = mode;
 
   // Sync upper-side choice buttons
   const topBtnUser = document.getElementById('topBtnUser');
   const topBtnAdmin = document.getElementById('topBtnAdmin');
-  if (topBtnUser && topBtnAdmin) {
-    if (mode === 'public') {
-      topBtnUser.classList.add('active');
-      topBtnAdmin.classList.remove('active');
-    } else {
-      topBtnAdmin.classList.add('active');
-      topBtnUser.classList.remove('active');
-    }
-  }
+  const topBtnSuper = document.getElementById('topBtnSuperAdmin');
+  if (topBtnUser) topBtnUser.classList.toggle('active', mode === 'public');
+  if (topBtnAdmin) topBtnAdmin.classList.toggle('active', mode === 'admin');
+  if (topBtnSuper) topBtnSuper.classList.toggle('active', mode === 'superadmin');
 
   // Sync sidebar tabs
   const tabPub = document.getElementById('tabPublic');
   const tabAdm = document.getElementById('tabAdmin');
+  const tabSuper = document.getElementById('tabSuperAdmin');
   const modelLabel = document.getElementById('agentModelLabel');
 
-  if (tabPub && tabAdm) {
-    if (mode === 'public') {
-      tabPub.classList.add('active');
-      tabAdm.classList.remove('active');
-    } else {
-      tabAdm.classList.add('active');
-      tabPub.classList.remove('active');
-    }
-  }
+  if (tabPub) tabPub.classList.toggle('active', mode === 'public');
+  if (tabAdm) tabAdm.classList.toggle('active', mode === 'admin');
+  if (tabSuper) tabSuper.classList.toggle('active', mode === 'superadmin');
 
   if (modelLabel) {
-    modelLabel.innerText = mode === 'public' ? 'GPT-5.5' : 'Claude Opus 5.5';
+    modelLabel.innerText = mode === 'public' ? 'GPT-5.5' : (mode === 'superadmin' ? 'Claude 3.5 Sonnet (Super Admin)' : 'Claude Opus 5.5');
   }
 
-  // Toggle Admin-only controls (Batch operations button & attachment paperclip)
+  // Toggle Admin-only controls (Batch operations button & attachment paperclip & CRUD button)
   const btnBatchOps = document.getElementById('btnBatchOps');
   const btnAttachment = document.getElementById('btnAttachment');
+  const btnCrud = document.getElementById('btnManageProperties');
   const btnPropertyImages = document.getElementById('btnPropertyImages');
-  if (btnBatchOps) btnBatchOps.style.display = (mode === 'admin') ? 'inline-flex' : 'none';
-  if (btnAttachment) btnAttachment.style.display = (mode === 'admin') ? 'inline-flex' : 'none';
-  if (btnPropertyImages) btnPropertyImages.style.display = (mode === 'admin') ? 'inline-flex' : 'none';
+  const isPrivileged = (mode === 'admin' || mode === 'superadmin');
+
+  if (btnBatchOps) btnBatchOps.style.display = isPrivileged ? 'inline-flex' : 'none';
+  if (btnAttachment) btnAttachment.style.display = isPrivileged ? 'inline-flex' : 'none';
+  if (btnPropertyImages) btnPropertyImages.style.display = isPrivileged ? 'inline-flex' : 'none';
+  if (btnCrud) btnCrud.style.display = isPrivileged ? 'inline-flex' : 'none';
   updateVisitorLogsButtonVisibility();
-  if (mode !== 'admin') clearPropertyImageTray();
+  if (!isPrivileged && typeof clearPropertyImageTray === 'function') clearPropertyImageTray();
 
   // Update Hero texts & prompt cards according to current mode & language
   updateHeroAndInputUI();
   updateAdminLoginUI();
 
-  if (mode === 'admin') {
+  if (isPrivileged) {
     const bar = document.getElementById('userFocusBar');
     if (bar) bar.style.display = 'none';
     closeFocusDrawer();
@@ -923,22 +979,39 @@ function sendSamplePrompt(text) {
   }
 }
 
-// Topbar Quick Actions
+// Topbar Quick Actions (Unified Handler)
 function triggerQuickAction(action) {
   if (action === 'batch') {
     openBatchOpsModal('upload');
     return;
   }
-  if (currentMode !== 'admin') {
-    setAgentMode('admin', false);
+  if (action === 'properties' || action === 'crud') {
+    openPropertyCrudModal();
+    return;
   }
-  const input = document.getElementById('chatInput');
-  if (!input) return;
   if (action === 'report') {
-    input.value = "Generate a comprehensive investment and structural dossier PDF report for 15 Sukhumvit Residences";
-    handleSendMessage();
-  } else if (action === 'listing') {
-    openBatchOpsModal('upload');
+    if (currentMode !== 'admin' && currentMode !== 'superadmin') {
+      setAgentMode('admin', false);
+    }
+    const input = document.getElementById('chatInput');
+    if (input) {
+      input.value = "Generate a comprehensive investment and structural dossier PDF report for 15 Sukhumvit Residences";
+      handleSendMessage();
+    }
+    return;
+  }
+  if (action === 'listing') {
+    if (isAdminLoggedIn()) {
+      openPropertyFormModal('create');
+    } else {
+      if (currentMode !== 'admin') setAgentMode('admin', false);
+      const input = document.getElementById('chatInput');
+      if (input) {
+        input.value = 'Propose adding a new luxury pool villa listing in Phuket';
+        handleSendMessage();
+      }
+    }
+    return;
   }
 }
 
@@ -956,20 +1029,7 @@ function executeTopSearch() {
   }
 }
 
-// Quick Actions
-function triggerQuickAction(action) {
-  const input = document.getElementById('chatInput');
-  if (!input) return;
-
-  if (action === 'report') {
-    if (currentMode !== 'admin') setAgentMode('admin', false);
-    input.value = 'Generate a property report for our featured listings';
-  } else if (action === 'listing') {
-    if (currentMode !== 'admin') setAgentMode('admin', false);
-    input.value = 'Propose adding a new luxury pool villa listing in Phuket';
-  }
-  handleSendMessage();
-}
+// Second duplicate triggerQuickAction removed (unified above)
 
 // Input Keydown (Enter to send, Shift+Enter for newline)
 function handleInputKeyDown(e) {
@@ -1271,7 +1331,7 @@ async function appendAssistantResponse(data, animate = false) {
       const propId = p.property_id || '';
 
       card.innerHTML = `
-        <div class="property-item-img-wrap" onclick="openLightbox('${escapeHtml(imgUrl)}', '${escapeHtml(name)} - ${escapeHtml(price)}')">
+        <div class="property-item-img-wrap" onclick="openLightbox(${jsArg(imgUrl)}, ${jsArg(name + ' - ' + price)})">
           <img 
             src="${escapeHtml(imgUrl)}" 
             class="property-item-img" 
@@ -1290,11 +1350,11 @@ async function appendAssistantResponse(data, animate = false) {
             ${area ? `<span class="meta-chip">📐 ${escapeHtml(area)}</span>` : ''}
           </div>
           <div class="property-item-actions">
-            <button class="btn-card-action btn-card-map" title="View on Google Maps" onclick="openPropertyMap('${escapeHtml(propId)}')">📍 Map</button>
-            <button class="btn-card-action btn-card-cal" title="Request a viewing" onclick="openPropertyCalendar('${escapeHtml(propId)}')">📅 Tour</button>
-            <button class="btn-card-action btn-card-email" title="Request specs by email" onclick="openPropertyEmail('${escapeHtml(propId)}')">✉️ Email</button>
-            <button class="btn-card-action btn-card-secondary" title="Download Verified PDF" onclick="generatePdfForProperty('${escapeHtml(propId)}')">📄 PDF</button>
-            <button class="btn-card-action btn-card-primary" onclick="inquireProperty('${escapeHtml(propId || name)}')">Inquire</button>
+            <button class="btn-card-action btn-card-map" title="View on Google Maps" onclick="openPropertyMap(${jsArg(propId)})">📍 Map</button>
+            <button class="btn-card-action btn-card-cal" title="Request a viewing" onclick="openPropertyCalendar(${jsArg(propId)})">📅 Tour</button>
+            <button class="btn-card-action btn-card-email" title="Request specs by email" onclick="openPropertyEmail(${jsArg(propId)})">✉️ Email</button>
+            <button class="btn-card-action btn-card-secondary" title="Download Verified PDF" onclick="generatePdfForProperty(${jsArg(propId)})">📄 PDF</button>
+            <button class="btn-card-action btn-card-primary" onclick="inquireProperty(${jsArg(propId || name)})">Inquire</button>
           </div>
         </div>
       `;
@@ -1321,11 +1381,11 @@ async function appendAssistantResponse(data, animate = false) {
         This write action has been safely staged in Firestore and will not execute until confirmed.
       </div>
       <div class="action-card-buttons">
-        <button class="btn-confirm" onclick="confirmAction('${pendingActionId}')">
+        <button class="btn-confirm" onclick="confirmAction(${jsArg(pendingActionId)})">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>
           Confirm & Execute
         </button>
-        <button class="btn-reject" onclick="rejectAction('${pendingActionId}')">
+        <button class="btn-reject" onclick="rejectAction(${jsArg(pendingActionId)})">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
           Reject
         </button>
@@ -1781,6 +1841,10 @@ document.addEventListener('keydown', (e) => {
     closeBatchOpsModal();
     closeFocusDrawer();
     closeLightbox();
+    closePropertyCrudModal();
+    closePropertyFormModal();
+    closePropertyDeleteModal();
+    closeSuperAdminModal();
   }
 });
 
@@ -1915,7 +1979,7 @@ function renderHistoryList() {
           ${s.mode === 'admin' ? 'Admin' : 'User'}
         </span>
       </div>
-      <button class="history-item-delete" title="Delete conversation" onclick="deleteHistorySession(event, '${escapeHtml(s.id)}')">
+      <button class="history-item-delete" title="Delete conversation" onclick="deleteHistorySession(event, ${jsArg(s.id)})">
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
       </button>
     `;
@@ -2031,6 +2095,31 @@ function escapeHtml(str) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#039;');
+}
+
+// Safe argument for an inline handler: onclick="fn(${jsArg(value)})".
+// escapeHtml alone is NOT enough inside '...': the browser decodes &#039; back to ' before running the
+// handler, so a crafted property id/name could break out and run script. JSON.stringify makes a proper
+// JS string literal; escapeHtml then protects the attribute.
+function jsArg(value) {
+  return escapeHtml(JSON.stringify(String(value == null ? '' : value)));
+}
+
+// FastAPI `detail` may be a string, a validation-error array, or an object; never show "[object Object]".
+function formatApiErrorDetail(detail) {
+  if (detail == null) return '';
+  if (typeof detail === 'string') return detail;
+  if (Array.isArray(detail)) {
+    return detail.map(d => (d && d.msg) ? `${(d.loc || []).slice(1).join('.') || 'request'}: ${d.msg}` : String(d)).join('; ');
+  }
+  if (typeof detail === 'object') {
+    const parts = [detail.message].filter(Boolean);
+    if (detail.fields && typeof detail.fields === 'object') {
+      parts.push(Object.entries(detail.fields).map(([k, v]) => `${k}: ${v}`).join('; '));
+    }
+    return parts.join(' - ') || JSON.stringify(detail);
+  }
+  return String(detail);
 }
 
 // ==========================================================================
@@ -2278,9 +2367,10 @@ function selectBatchAction(actionType) {
 
   const btnText = document.getElementById('btnExecuteBatchText');
   if (btnText) {
-    if (actionType === 'delete') btnText.innerText = 'Delete Instantly';
-    else if (actionType === 'create') btnText.innerText = 'Create Instantly';
-    else btnText.innerText = 'Update Instantly';
+    // The backend stages batch changes for confirmation; nothing is applied until "Confirm".
+    if (actionType === 'delete') btnText.innerText = 'Review Archive';
+    else if (actionType === 'create') btnText.innerText = 'Review Create';
+    else btnText.innerText = 'Review Update';
   }
 }
 
@@ -2421,9 +2511,14 @@ async function submitBatchOperation() {
   const resultBox = document.getElementById('batchExecutionResult');
   const notesInput = document.getElementById('batchNotesInput');
 
+  if (selectedBatchActionType === 'delete' &&
+      !confirm(`Archive every listing in "${selectedBatchFile.name}"?\n\nArchived listings disappear from the websites and the chatbot. You will review the list and can undo for 6 days.`)) {
+    return;
+  }
+
   if (btn) {
     btn.disabled = true;
-    btn.innerHTML = `<span>⏳</span> <span>Applying to Database...</span>`;
+    btn.innerHTML = `<span>⏳</span> <span>Preparing proposal...</span>`;
   }
   if (resultBox) {
     resultBox.style.display = 'none';
@@ -2451,7 +2546,7 @@ async function submitBatchOperation() {
 
     const data = await res.json();
     if (!res.ok) {
-      throw new Error(formatApiError(data.detail, 'Batch operation failed'));
+      throw new Error((typeof formatApiErrorDetail === 'function' ? formatApiErrorDetail(data.detail) : null) || (typeof formatApiError === 'function' ? formatApiError(data.detail, 'Batch operation failed') : 'Batch operation failed'));
     }
 
     if (data.status === 'PREVIEW') {
@@ -2459,11 +2554,20 @@ async function submitBatchOperation() {
       return;
     }
 
+    const pendingId = data.pending_action_id || data.action_id || '';
     if (resultBox) {
       resultBox.className = 'batch-result-box success';
       resultBox.style.display = 'flex';
       resultBox.innerHTML = `
-        <div style="font-weight: 700; font-size: 13.5px;">✅ Operation Applied Instantly!</div>
+        ${pendingId ? `
+        <div style="font-weight: 700; font-size: 13.5px;">📝 Change proposed - nothing has been applied yet</div>
+        <div style="white-space: pre-wrap;">${escapeHtml(data.message || data.text || '')}</div>
+        <div id="action-card-${escapeHtml(pendingId)}" style="margin-top: 6px; display: flex; gap: 8px;">
+          <button class="btn-confirm" onclick="confirmAction(${jsArg(pendingId)})">Confirm</button>
+          <button class="btn-reject" onclick="rejectAction(${jsArg(pendingId)})">Reject</button>
+          <button class="btn-refresh-history" onclick="switchBatchTab('history')">History & Undo</button>
+        </div>` : `
+        <div style="font-weight: 700; font-size: 13.5px;">⚡ Operation Applied Instantly!</div>
         <div><strong>Operation ID:</strong> <code>${escapeHtml(data.operation_id)}</code></div>
         <div><strong>Items Affected:</strong> ${data.items_affected || 0} properties modified in Firestore.</div>
         <div style="font-size: 11.5px; opacity: 0.9;">
@@ -2471,6 +2575,7 @@ async function submitBatchOperation() {
         </div>
         <div style="margin-top: 6px; display: flex; gap: 8px;">
           <button class="btn-refresh-history" onclick="switchBatchTab('history')">View in History & Undo</button>
+        </div>`}
         </div>
       `;
     }
@@ -2541,8 +2646,13 @@ async function loadBatchHistory(manual = false) {
       item.className = 'batch-history-item';
 
       const isExpired = op.is_expired;
-      const isUndone = op.status === 'undone';
-      const canUndo = !isExpired && !isUndone;
+      const isUndone = op.status === 'undone' || op.status === 'REVERTED';
+      const canUndo = !isExpired && !isUndone && op.can_undo !== false;
+      const changes = Array.isArray(op.changes) ? op.changes : [];
+      const changeLines = changes.slice(0, 5).map(c =>
+        `<li>${c.property_name ? `<strong>${escapeHtml(c.property_name)}</strong> — ` : ''}${escapeHtml(c.text || '')}</li>`).join('');
+      const moreChanges = changes.length > 5 ? `<li>+${changes.length - 5} more changes</li>` : '';
+      const names = Array.isArray(op.property_names) ? op.property_names : [];
 
       let badgeClass = 'active';
       if (isExpired) badgeClass = 'expired';
@@ -2551,8 +2661,8 @@ async function loadBatchHistory(manual = false) {
       item.innerHTML = `
         <div class="history-item-top">
           <div style="display: flex; align-items: center; gap: 8px;">
-            <span class="history-op-badge ${escapeHtml(op.operation_type)}">${escapeHtml(op.operation_type)}</span>
-            <span class="history-op-id">${escapeHtml(op.operation_id)}</span>
+            <span class="history-op-badge ${escapeHtml(op.operation_type)}">${escapeHtml(op.operation_label || op.operation_type)}</span>
+            <span class="history-op-summary">${escapeHtml(op.summary || '')}</span>
           </div>
           <span class="countdown-badge ${badgeClass}">
             ${isExpired ? '❌ Expired' : '⏳ ' + escapeHtml(op.time_remaining || 'Active')}
@@ -2561,9 +2671,11 @@ async function loadBatchHistory(manual = false) {
 
         <div class="history-item-meta">
           <span>📄 <strong>File:</strong> ${escapeHtml(op.file_name || 'batch')}</span>
-          <span>🎯 <strong>Affected:</strong> ${op.items_affected || 0} listings</span>
-          <span>📅 <strong>Executed:</strong> ${new Date(op.created_at).toLocaleString()}</span>
+          <span>🎯 <strong>Affected:</strong> ${op.items_affected || 0} listings${names.length ? ': ' + escapeHtml(names.join(', ')) : ''}</span>
+          <span>📅 <strong>Executed:</strong> ${new Date(op.created_at).toLocaleString()}${op.actor ? ' by ' + escapeHtml(op.actor) : ''}</span>
+          <span class="history-op-id">${escapeHtml(op.operation_id)}</span>
         </div>
+        ${changeLines ? `<ul class="history-op-changes">${changeLines}${moreChanges}</ul>` : ''}
 
         <div style="display: flex; align-items: center; justify-content: space-between; margin-top: 4px; padding-top: 6px; border-top: 1px solid rgba(255,255,255,0.05);">
           <span style="font-size: 11px; color: var(--text-dim);">
@@ -2572,7 +2684,7 @@ async function loadBatchHistory(manual = false) {
           ${isUndone 
             ? `<span class="status-undone-tag">Restored ✓</span>` 
             : (canUndo 
-                ? `<button class="btn-undo" onclick="executeBatchUndo('${escapeHtml(op.operation_id)}', ${op.items_affected || 0})">
+                ? `<button class="btn-undo" onclick="executeBatchUndo(${jsArg(op.operation_id)}, ${Number(op.items_affected) || 0})">
                      ↺ Rollback & Undo
                    </button>` 
                 : `<span style="font-size: 11.5px; color: var(--text-dim);">Expired (> 6 days)</span>`
@@ -2773,3 +2885,748 @@ function initPropertyImageAttach() {
 initPropertyImageAttach();
 
 
+
+
+// ==========================================================================
+// 1. Image Lightbox Modal Handlers
+// ==========================================================================
+function openLightbox(src, caption) {
+  const modal = document.getElementById('lightboxModal');
+  const img = document.getElementById('lightboxImg');
+  const cap = document.getElementById('lightboxCaption');
+  if (!modal || !img) return;
+  img.src = src || '';
+  if (cap) cap.innerText = caption || '';
+  modal.style.display = 'flex';
+}
+
+function closeLightbox() {
+  const modal = document.getElementById('lightboxModal');
+  if (modal) modal.style.display = 'none';
+  const img = document.getElementById('lightboxImg');
+  if (img) img.src = '';
+}
+
+// ==========================================================================
+// 2. Verified Property Brochure PDF Generation
+// ==========================================================================
+async function generatePdfForProperty(propId, btnEl) {
+  if (!propId) {
+    alert('Property ID is required to generate brochure PDF.');
+    return;
+  }
+  const btn = btnEl || (window.event && window.event.target ? window.event.target.closest('button') : null);
+  const originalLabel = btn ? btn.innerHTML : '📄 PDF';
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = '⏳ Generating...';
+  }
+
+  try {
+    const url = `/api/v1/chat/brochure/${encodeURIComponent(propId)}?site_origin=${encodeURIComponent(activeTenantOrigin)}&lang=${encodeURIComponent(currentLanguage)}&session_id=${encodeURIComponent(currentSessionId || '')}`;
+    const res = await fetch(url);
+    if (!res.ok) {
+      throw new Error(`Failed to generate brochure PDF (${res.status})`);
+    }
+    const blob = await res.blob();
+    const filename = `Brochure_${propId}.pdf`;
+    triggerBlobDownload(blob, filename);
+  } catch (err) {
+    console.error('Brochure generation error:', err);
+    alert(`❌ Could not generate PDF: ${err.message || 'Unknown error'}`);
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = originalLabel;
+    }
+  }
+}
+
+// ==========================================================================
+// 3. Property Portfolio CRUD Management
+// ==========================================================================
+let crudCurrentPage = 0;
+const crudPageSize = 10;
+let crudTotalCount = 0;
+let crudPropertiesCache = [];
+let activeDeletePropertyId = '';
+let activeDeletePropertyName = '';
+let selectedDeleteType = 'soft';
+
+function openPropertyCrudModal() {
+  if (!isAdminLoggedIn()) {
+    openAdminLoginModal();
+    appendMessageRow('assistant', '⚠️ **Authentication required.** Sign in as staff before accessing Property CRUD portfolio.');
+    return;
+  }
+  const modal = document.getElementById('propertyCrudModal');
+  const overlay = document.getElementById('propertyCrudModalOverlay');
+  if (modal) modal.style.display = 'flex';
+  if (overlay) overlay.style.display = 'block';
+  loadCrudProperties(0);
+}
+
+function closePropertyCrudModal() {
+  const modal = document.getElementById('propertyCrudModal');
+  const overlay = document.getElementById('propertyCrudModalOverlay');
+  if (modal) modal.style.display = 'none';
+  if (overlay) overlay.style.display = 'none';
+}
+
+async function loadCrudProperties(page = 0) {
+  crudCurrentPage = Math.max(0, page);
+  const tableBody = document.getElementById('crudPropertiesTableBody');
+  const errBanner = document.getElementById('crudErrorBanner');
+  const searchInput = document.getElementById('crudFilterSearch');
+  const typeSelect = document.getElementById('crudFilterType');
+  const statusSelect = document.getElementById('crudFilterStatus');
+  const locInput = document.getElementById('crudFilterLocation');
+  const pageBadge = document.getElementById('crudPageBadge');
+  const paginationInfo = document.getElementById('crudPaginationInfo');
+  const countSummary = document.getElementById('crudCountSummary');
+  const prevBtn = document.getElementById('crudPrevBtn');
+  const nextBtn = document.getElementById('crudNextBtn');
+
+  if (errBanner) errBanner.style.display = 'none';
+  if (tableBody) {
+    tableBody.innerHTML = `<tr><td colspan="7" style="text-align: center; padding: 30px; color: var(--text-dim);">Loading listings from database...</td></tr>`;
+  }
+
+  const offset = crudCurrentPage * crudPageSize;
+  const params = new URLSearchParams({
+    limit: String(crudPageSize),
+    offset: String(offset)
+  });
+
+  if (typeSelect && typeSelect.value) params.set('property_type', typeSelect.value);
+  if (statusSelect && statusSelect.value) params.set('status', statusSelect.value);
+  if (locInput && locInput.value.trim()) params.set('location', locInput.value.trim());
+
+  try {
+    const res = await fetch(`/api/v1/admin/properties?${params.toString()}`, {
+      headers: adminAuthHeaders()
+    });
+
+    if (!res.ok) {
+      if (res.status === 401) {
+        openAdminLoginModal();
+        throw new Error('Your session has expired. Please sign in again.');
+      }
+      const errData = await res.json().catch(() => ({}));
+      throw new Error(errData.detail || `Server error (${res.status})`);
+    }
+
+    const data = await res.json();
+    let props = data.properties || [];
+    crudTotalCount = data.count || props.length;
+
+    // Optional client-side search query filter
+    const query = (searchInput?.value || '').trim().toLowerCase();
+    if (query) {
+      props = props.filter(p => {
+        const idMatch = (p.property_id || '').toLowerCase().includes(query);
+        const nameMatch = (p.property_name || p.project_name || '').toLowerCase().includes(query);
+        const typeMatch = (p.property_type || '').toLowerCase().includes(query);
+        return idMatch || nameMatch || typeMatch;
+      });
+    }
+
+    crudPropertiesCache = props;
+
+    // Cache properties for instant modal lookups
+    props.forEach(p => {
+      if (p.property_id) propertyCache[p.property_id] = p;
+    });
+
+    if (countSummary) countSummary.innerText = `${crudTotalCount} total listings`;
+    if (pageBadge) pageBadge.innerText = `Page ${crudCurrentPage + 1}`;
+    if (paginationInfo) paginationInfo.innerText = `Showing ${props.length} listings (Page ${crudCurrentPage + 1})`;
+    if (prevBtn) prevBtn.disabled = (crudCurrentPage === 0);
+    if (nextBtn) nextBtn.disabled = (props.length < crudPageSize);
+
+    if (!tableBody) return;
+
+    if (props.length === 0) {
+      tableBody.innerHTML = `<tr><td colspan="7" style="text-align: center; padding: 40px; color: var(--text-dim);">No properties found matching current filters.</td></tr>`;
+      return;
+    }
+
+    tableBody.innerHTML = '';
+    props.forEach(p => {
+      const tr = document.createElement('tr');
+      const pid = p.property_id || '';
+      const name = p.property_name || p.project_name || 'Listing';
+      const sub = p.project_name || '';
+      const ptype = p.property_type || 'Villa';
+      const loc = p.district || p.province || p.location || 'Thailand';
+      const price = p.price_display || p.price || 'Contact';
+      const st = p.status || 'active';
+
+      tr.innerHTML = `
+        <td><span class="crud-prop-id">${escapeHtml(pid)}</span></td>
+        <td>
+          <div class="crud-prop-name">${escapeHtml(name)}</div>
+          ${sub && sub !== name ? `<div class="crud-prop-sub">${escapeHtml(sub)}</div>` : ''}
+        </td>
+        <td>${escapeHtml(ptype)}</td>
+        <td>${escapeHtml(loc)}</td>
+        <td style="font-weight: 600; color: var(--gold);">${escapeHtml(price)}</td>
+        <td><span class="status-pill ${escapeHtml(st)}">${escapeHtml(st)}</span></td>
+        <td style="text-align: right;">
+          <div class="crud-btn-group" style="justify-content: flex-end;">
+            <button class="btn-table-action btn-table-edit" onclick="openPropertyFormModal('edit', ${jsArg(pid)})" title="Edit property">Edit</button>
+            <button class="btn-table-action btn-table-delete" onclick="openPropertyDeleteModal(${jsArg(pid)}, ${jsArg(name)})" title="Delete property">Delete</button>
+            <button class="btn-table-action btn-table-view" onclick="openPropertyMap(${jsArg(pid)})" title="Map & amenities">Map</button>
+          </div>
+        </td>
+      `;
+      tableBody.appendChild(tr);
+    });
+
+  } catch (err) {
+    console.error('Error loading CRUD properties:', err);
+    if (errBanner) {
+      errBanner.style.display = 'block';
+      errBanner.innerText = `Failed to load properties: ${err.message}`;
+    }
+    if (tableBody) {
+      tableBody.innerHTML = `<tr><td colspan="7" style="text-align: center; padding: 30px; color: #f87171;">Failed to load properties: ${escapeHtml(err.message)}</td></tr>`;
+    }
+  }
+}
+
+function navigateCrudPage(delta) {
+  loadCrudProperties(crudCurrentPage + delta);
+}
+
+function resetCrudFilters() {
+  const searchInput = document.getElementById('crudFilterSearch');
+  const typeSelect = document.getElementById('crudFilterType');
+  const statusSelect = document.getElementById('crudFilterStatus');
+  const locInput = document.getElementById('crudFilterLocation');
+  if (searchInput) searchInput.value = '';
+  if (typeSelect) typeSelect.value = '';
+  if (statusSelect) statusSelect.value = '';
+  if (locInput) locInput.value = '';
+  loadCrudProperties(0);
+}
+
+// Create / Edit Property Form
+function openPropertyFormModal(mode = 'create', propId = '') {
+  if (!isAdminLoggedIn()) {
+    openAdminLoginModal();
+    return;
+  }
+  const modal = document.getElementById('propertyFormModal');
+  const overlay = document.getElementById('propertyFormModalOverlay');
+  const modeInput = document.getElementById('formPropMode');
+  const origIdInput = document.getElementById('formPropOriginalId');
+  const idInput = document.getElementById('formPropId');
+  const iconEl = document.getElementById('formModalIcon');
+  const titleEl = document.getElementById('formModalTitle');
+  const btnText = document.getElementById('btnSavePropertyText');
+  const errEl = document.getElementById('formModalError');
+
+  if (errEl) errEl.style.display = 'none';
+  if (modeInput) modeInput.value = mode;
+  if (origIdInput) origIdInput.value = propId;
+
+  if (mode === 'edit') {
+    if (iconEl) iconEl.innerText = '✏️';
+    if (titleEl) titleEl.innerText = `Edit Listing (${propId})`;
+    if (btnText) btnText.innerText = 'Save Changes';
+    if (idInput) {
+      idInput.value = propId;
+      idInput.disabled = true;
+    }
+
+    const p = propertyCache[propId] || crudPropertiesCache.find(x => x.property_id === propId) || {};
+    const nameEn = document.getElementById('formPropNameEn');
+    const namePl = document.getElementById('formPropNamePl');
+    const ptype = document.getElementById('formPropType');
+    const city = document.getElementById('formPropCity');
+    const country = document.getElementById('formPropCountry');
+    const pFrom = document.getElementById('formPropPriceFrom');
+    const pTo = document.getElementById('formPropPriceTo');
+    const curr = document.getElementById('formPropCurrency');
+    const beds = document.getElementById('formPropBedrooms');
+    const baths = document.getElementById('formPropBathrooms');
+    const area = document.getElementById('formPropArea');
+    const pool = document.getElementById('formPropPool');
+    const statusEl = document.getElementById('formPropStatus');
+    const imgEl = document.getElementById('formPropImage');
+
+    if (nameEn) nameEn.value = p.property_name || p.project_name || '';
+    if (namePl) namePl.value = p.project_name_pl || p.property_name || p.project_name || '';
+    if (ptype && p.property_type) ptype.value = p.property_type;
+    if (city) city.value = p.district || p.province || p.city || 'Phuket';
+    if (country) country.value = p.country || 'Thailand';
+    if (pFrom) pFrom.value = p.min_price || p.price_from || '';
+    if (pTo) pTo.value = p.max_price || p.price_to || '';
+    if (curr && p.currency) curr.value = p.currency;
+    if (beds && p.bedrooms) beds.value = parseInt(p.bedrooms, 10) || '';
+    if (baths && p.bathrooms) baths.value = parseInt(p.bathrooms, 10) || '';
+    if (area) area.value = p.area || '';
+    if (pool) pool.checked = Boolean(p.has_pool);
+    if (statusEl && p.status) statusEl.value = p.status;
+    if (imgEl) imgEl.value = (p.images && p.images[0]) || p.cover_image || '';
+
+  } else {
+    // Mode: Create
+    if (iconEl) iconEl.innerText = '➕';
+    if (titleEl) titleEl.innerText = 'Add New Property Listing';
+    if (btnText) btnText.innerText = 'Create Property';
+    if (idInput) {
+      idInput.value = '';
+      idInput.disabled = false;
+    }
+
+    ['formPropNameEn', 'formPropNamePl', 'formPropCity', 'formPropPriceFrom', 'formPropPriceTo', 'formPropBedrooms', 'formPropBathrooms', 'formPropArea', 'formPropImage'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.value = '';
+    });
+    const pool = document.getElementById('formPropPool');
+    if (pool) pool.checked = false;
+  }
+
+  if (modal) modal.style.display = 'flex';
+  if (overlay) overlay.style.display = 'block';
+}
+
+function closePropertyFormModal() {
+  const modal = document.getElementById('propertyFormModal');
+  const overlay = document.getElementById('propertyFormModalOverlay');
+  if (modal) modal.style.display = 'none';
+  if (overlay) overlay.style.display = 'none';
+}
+
+async function submitPropertyForm() {
+  const mode = document.getElementById('formPropMode')?.value || 'create';
+  const origId = document.getElementById('formPropOriginalId')?.value || '';
+  const customId = (document.getElementById('formPropId')?.value || '').trim();
+  const nameEn = (document.getElementById('formPropNameEn')?.value || '').trim();
+  const namePl = (document.getElementById('formPropNamePl')?.value || '').trim();
+  const ptype = document.getElementById('formPropType')?.value || 'Villa';
+  const city = (document.getElementById('formPropCity')?.value || '').trim();
+  const country = (document.getElementById('formPropCountry')?.value || 'Thailand').trim();
+  const pFrom = document.getElementById('formPropPriceFrom')?.value;
+  const pTo = document.getElementById('formPropPriceTo')?.value;
+  const curr = document.getElementById('formPropCurrency')?.value || 'THB';
+  const beds = document.getElementById('formPropBedrooms')?.value;
+  const baths = document.getElementById('formPropBathrooms')?.value;
+  const area = (document.getElementById('formPropArea')?.value || '').trim();
+  const pool = document.getElementById('formPropPool')?.checked || false;
+  const statusVal = document.getElementById('formPropStatus')?.value || 'Available';
+  const imgUrl = (document.getElementById('formPropImage')?.value || '').trim();
+  const errEl = document.getElementById('formModalError');
+  const btn = document.getElementById('btnSaveProperty');
+
+  if (errEl) errEl.style.display = 'none';
+
+  if (!nameEn || !namePl || !city || !pFrom) {
+    if (errEl) {
+      errEl.style.display = 'block';
+      errEl.innerText = 'Please fill all required fields: Project Name (EN), Project Name (PL), City, and Price From.';
+    }
+    return;
+  }
+
+  const selectedWebsites = [];
+  document.querySelectorAll('.form-site-chk:checked').forEach(chk => {
+    selectedWebsites.push(chk.value);
+  });
+  if (selectedWebsites.length === 0) selectedWebsites.push('tajlandia.com');
+
+  const payload = {
+    project_name_en: nameEn,
+    project_name_pl: namePl,
+    property_type: ptype,
+    city: city,
+    country: country,
+    price_from: parseFloat(pFrom),
+    price_to: pTo ? parseFloat(pTo) : null,
+    currency: curr,
+    bedrooms: beds ? parseInt(beds, 10) : null,
+    bathrooms: baths ? parseInt(baths, 10) : null,
+    area: area || null,
+    has_pool: pool,
+    status: statusVal,
+    cover_image: imgUrl || null,
+    websites: selectedWebsites
+  };
+
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = '<span>Saving...</span>';
+  }
+
+  try {
+    let url = '/api/v1/admin/properties';
+    let method = 'POST';
+
+    if (mode === 'create') {
+      if (customId) payload.property_id = customId;
+    } else {
+      url = `/api/v1/admin/properties/${encodeURIComponent(origId)}`;
+      method = 'PUT';
+    }
+
+    const res = await fetch(url, {
+      method: method,
+      headers: adminAuthHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify(payload)
+    });
+
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(formatApiErrorDetail(data.detail) || `Save failed (${res.status})`);
+    }
+
+    closePropertyFormModal();
+    loadCrudProperties(crudCurrentPage);
+    appendMessageRow('assistant', `✅ **Property Saved:** ${escapeHtml(nameEn)} (${data.property_id || origId || customId}) has been successfully ${mode === 'create' ? 'created' : 'updated'} across PostgreSQL and Firestore catalogs.`);
+
+  } catch (err) {
+    console.error('Save property error:', err);
+    if (errEl) {
+      errEl.style.display = 'block';
+      errEl.innerText = err.message || 'Failed to save property';
+    }
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = `<span id="btnSavePropertyText">${mode === 'create' ? 'Create Property' : 'Save Changes'}</span>`;
+    }
+  }
+}
+
+// Delete Property Confirmation Dialog
+function openPropertyDeleteModal(propId, propName) {
+  if (!isAdminLoggedIn()) {
+    openAdminLoginModal();
+    return;
+  }
+  activeDeletePropertyId = propId;
+  activeDeletePropertyName = propName || propId;
+
+  const modal = document.getElementById('propertyDeleteModal');
+  const overlay = document.getElementById('propertyDeleteModalOverlay');
+  const nameEl = document.getElementById('deleteModalPropName');
+  const idEl = document.getElementById('deleteModalPropId');
+  const targetIdEl = document.getElementById('deleteConfirmTargetId');
+  const inputEl = document.getElementById('deleteConfirmInput');
+  const errEl = document.getElementById('deleteModalError');
+
+  if (nameEl) nameEl.innerText = activeDeletePropertyName;
+  if (idEl) idEl.innerText = activeDeletePropertyId;
+  if (targetIdEl) targetIdEl.innerText = activeDeletePropertyId;
+  if (inputEl) inputEl.value = '';
+  if (errEl) errEl.style.display = 'none';
+
+  selectDeleteType('soft');
+
+  if (modal) modal.style.display = 'flex';
+  if (overlay) overlay.style.display = 'block';
+}
+
+function closePropertyDeleteModal() {
+  const modal = document.getElementById('propertyDeleteModal');
+  const overlay = document.getElementById('propertyDeleteModalOverlay');
+  if (modal) modal.style.display = 'none';
+  if (overlay) overlay.style.display = 'none';
+}
+
+function selectDeleteType(type) {
+  selectedDeleteType = type;
+  const cardSoft = document.getElementById('cardSoftDelete');
+  const cardHard = document.getElementById('cardHardDelete');
+  const confirmBox = document.getElementById('hardDeleteConfirmBox');
+  const btn = document.getElementById('btnExecuteDelete');
+
+  if (type === 'soft') {
+    if (cardSoft) {
+      cardSoft.classList.add('selected');
+      const r = cardSoft.querySelector('input');
+      if (r) r.checked = true;
+    }
+    if (cardHard) {
+      cardHard.classList.remove('selected');
+      const r = cardHard.querySelector('input');
+      if (r) r.checked = false;
+    }
+    if (confirmBox) confirmBox.style.display = 'none';
+    if (btn) {
+      btn.className = 'btn-modal-warning';
+      btn.innerHTML = '<span>Archive Listing (Soft Delete)</span>';
+      btn.disabled = false;
+    }
+  } else {
+    if (cardHard) {
+      cardHard.classList.add('selected');
+      const r = cardHard.querySelector('input');
+      if (r) r.checked = true;
+    }
+    if (cardSoft) {
+      cardSoft.classList.remove('selected');
+      const r = cardSoft.querySelector('input');
+      if (r) r.checked = false;
+    }
+    if (confirmBox) confirmBox.style.display = 'block';
+    if (btn) {
+      btn.className = 'btn-modal-danger';
+      btn.innerHTML = '<span>Permanently Purge Listing</span>';
+      btn.disabled = true;
+    }
+    validateDeleteConfirmInput();
+    const input = document.getElementById('deleteConfirmInput');
+    if (input) setTimeout(() => input.focus(), 50);
+  }
+}
+
+function validateDeleteConfirmInput() {
+  const input = document.getElementById('deleteConfirmInput');
+  const btn = document.getElementById('btnExecuteDelete');
+  if (selectedDeleteType === 'hard' && btn) {
+    const val = (input?.value || '').trim();
+    btn.disabled = (val !== activeDeletePropertyId);
+  }
+}
+
+async function submitDeleteProperty() {
+  if (!activeDeletePropertyId) return;
+
+  const btn = document.getElementById('btnExecuteDelete');
+  const errEl = document.getElementById('deleteModalError');
+  if (errEl) errEl.style.display = 'none';
+
+  const isHard = (selectedDeleteType === 'hard');
+
+  if (isHard) {
+    const input = (document.getElementById('deleteConfirmInput')?.value || '').trim();
+    if (input !== activeDeletePropertyId) {
+      if (errEl) {
+        errEl.style.display = 'block';
+        errEl.innerText = `Confirmation failed: you must type exact ID "${activeDeletePropertyId}".`;
+      }
+      return;
+    }
+  }
+
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = '<span>Deleting...</span>';
+  }
+
+  try {
+    let url = `/api/v1/admin/properties/${encodeURIComponent(activeDeletePropertyId)}?hard_delete=${isHard ? 'true' : 'false'}`;
+    if (isHard) {
+      url += `&confirm_property_id=${encodeURIComponent(activeDeletePropertyId)}`;
+    }
+
+    const res = await fetch(url, {
+      method: 'DELETE',
+      headers: adminAuthHeaders()
+    });
+
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(formatApiErrorDetail(data.detail) || `Delete failed (${res.status})`);
+    }
+
+    closePropertyDeleteModal();
+    loadCrudProperties(crudCurrentPage);
+    const actionLabel = isHard ? 'Permanently Purged' : 'Archived (Soft-Deleted)';
+    appendMessageRow('assistant', `🗑️ **Listing ${actionLabel}:** Property ${activeDeletePropertyId} (${activeDeletePropertyName}) was ${isHard ? 'permanently removed from databases' : 'safely archived and hidden from public search'}.`);
+
+  } catch (err) {
+    console.error('Delete error:', err);
+    if (errEl) {
+      errEl.style.display = 'block';
+      errEl.innerText = err.message || 'Failed to delete listing';
+    }
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = `<span>${isHard ? 'Permanently Purge Listing' : 'Archive Listing'}</span>`;
+    }
+  }
+}
+
+// ==========================================================================
+// 4. Super Admin Control Center Handlers
+// ==========================================================================
+function openSuperAdminModal() {
+  if (!isAdminLoggedIn()) {
+    openAdminLoginModal();
+    return;
+  }
+  const user = getAdminUser();
+  if (!user || (user.role !== 'super_admin' && user.role !== 'superadmin')) {
+    alert('Access denied: Super Admin privileges required.');
+    return;
+  }
+
+  const modal = document.getElementById('superAdminModal');
+  const overlay = document.getElementById('superAdminModalOverlay');
+  if (modal) modal.style.display = 'flex';
+  if (overlay) overlay.style.display = 'block';
+
+  switchSuperAdminTab('users');
+}
+
+function closeSuperAdminModal() {
+  const modal = document.getElementById('superAdminModal');
+  const overlay = document.getElementById('superAdminModalOverlay');
+  if (modal) modal.style.display = 'none';
+  if (overlay) overlay.style.display = 'none';
+}
+
+function switchSuperAdminTab(tab) {
+  const usersBtn = document.getElementById('tabBtnSuperUsers');
+  const configBtn = document.getElementById('tabBtnSuperConfig');
+  const usersView = document.getElementById('superTabUsersView');
+  const configView = document.getElementById('superTabConfigView');
+
+  if (tab === 'config') {
+    if (usersBtn) usersBtn.classList.remove('active');
+    if (configBtn) configBtn.classList.add('active');
+    if (usersView) usersView.style.display = 'none';
+    if (configView) configView.style.display = 'block';
+    loadSystemConfigStatus();
+  } else {
+    if (usersBtn) usersBtn.classList.add('active');
+    if (configBtn) configBtn.classList.remove('active');
+    if (usersView) usersView.style.display = 'block';
+    if (configView) configView.style.display = 'none';
+    loadSuperAdminUsers();
+  }
+}
+
+async function loadSuperAdminUsers() {
+  const tableBody = document.getElementById('superUsersTableBody');
+  const searchInput = document.getElementById('superUserSearch');
+  const roleSelect = document.getElementById('superUserRoleFilter');
+
+  if (tableBody) {
+    tableBody.innerHTML = `<tr><td colspan="5" style="text-align: center; padding: 24px; color: var(--text-dim);">Loading staff directory...</td></tr>`;
+  }
+
+  const params = new URLSearchParams();
+  if (searchInput && searchInput.value.trim()) params.set('search', searchInput.value.trim());
+  if (roleSelect && roleSelect.value) params.set('role', roleSelect.value);
+
+  try {
+    const res = await fetch(`/api/v1/auth/admin/users?${params.toString()}`, {
+      headers: adminAuthHeaders()
+    });
+
+    if (!res.ok) {
+      throw new Error(`Directory query failed (${res.status})`);
+    }
+
+    const users = await res.json();
+    if (!tableBody) return;
+
+    if (!Array.isArray(users) || users.length === 0) {
+      tableBody.innerHTML = `<tr><td colspan="5" style="text-align: center; padding: 30px; color: var(--text-dim);">No staff users found matching criteria.</td></tr>`;
+      return;
+    }
+
+    tableBody.innerHTML = '';
+    users.forEach(u => {
+      const tr = document.createElement('tr');
+      const isSuper = (u.role === 'super_admin' || u.role === 'superadmin');
+      const isAdmin = (u.role === 'admin');
+      const badgeCls = isSuper ? 'superadmin' : (isAdmin ? 'admin' : 'staff');
+      const isAct = u.is_active !== false && u.status !== 'blocked' && u.status !== 'deactivated';
+
+      tr.innerHTML = `
+        <td>
+          <div style="font-weight: 600; color: #ffffff;">${escapeHtml(u.name || u.email)}</div>
+          <div style="font-size: 11.5px; color: var(--text-muted);">${escapeHtml(u.email)}</div>
+        </td>
+        <td><span class="role-badge ${badgeCls}">${escapeHtml(u.role || 'staff')}</span></td>
+        <td><span style="font-size: 12px; color: var(--text-muted);">${escapeHtml(u.domain || 'All domains')}</span></td>
+        <td>
+          <span class="status-pill ${isAct ? 'active' : 'archived'}">
+            ${isAct ? 'Active ✓' : 'Inactive / Blocked'}
+          </span>
+        </td>
+        <td style="font-size: 11.5px; color: var(--text-dim);">
+          ${u.created_at ? new Date(u.created_at).toLocaleDateString() : 'N/A'}
+        </td>
+      `;
+      tableBody.appendChild(tr);
+    });
+
+  } catch (err) {
+    console.error('Super Admin user directory error:', err);
+    if (tableBody) {
+      tableBody.innerHTML = `<tr><td colspan="5" style="text-align: center; padding: 24px; color: #f87171;">Failed to load user directory: ${escapeHtml(err.message)}</td></tr>`;
+    }
+  }
+}
+
+async function loadSystemConfigStatus() {
+  const grid = document.getElementById('superConfigGrid');
+  if (grid) {
+    grid.innerHTML = '<div class="batch-loading-placeholder">Fetching real-time configuration status...</div>';
+  }
+
+  try {
+    const res = await fetch('/api/v1/admin/system/config-status', {
+      headers: adminAuthHeaders()
+    });
+
+    if (!res.ok) {
+      throw new Error(`Config status query failed (${res.status})`);
+    }
+
+    const cfg = await res.json();
+    if (!grid) return;
+
+    grid.innerHTML = `
+      <div class="config-card">
+        <span class="config-card-label">Active Tenant Domain</span>
+        <span class="config-card-value">${escapeHtml(activeTenantOrigin)}</span>
+        <span class="config-card-status" style="color: #34d399;">● Multi-tenant Active</span>
+      </div>
+
+      <div class="config-card">
+        <span class="config-card-label">PostgreSQL Database</span>
+        <span class="config-card-value">${cfg.database_configured ? 'Configured & Online' : 'Local SQLite'}</span>
+        <span class="config-card-status" style="color: #34d399;">● Verified Database</span>
+      </div>
+
+      <div class="config-card">
+        <span class="config-card-label">Audit Logging & Undo</span>
+        <span class="config-card-value">${cfg.audit_logging ? 'Enabled (6-Day Retention)' : 'Disabled'}</span>
+        <span class="config-card-status" style="color: #34d399;">● Audit Trail Active</span>
+      </div>
+
+      <div class="config-card">
+        <span class="config-card-label">Luxury Brochure LLM</span>
+        <span class="config-card-value">${escapeHtml(cfg.brochure_llm_model || 'claude-sonnet-5-5')}</span>
+        <span class="config-card-status" style="color: #fbbf24;">● LLM Engine: ${escapeHtml(cfg.brochure_llm || 'on')}</span>
+      </div>
+
+      <div class="config-card">
+        <span class="config-card-label">Brochure PDF Engine</span>
+        <span class="config-card-value">${escapeHtml(cfg.brochure_engine || 'ReportLab / WeasyPrint')}</span>
+        <span class="config-card-status" style="color: #34d399;">● 7 Luxury Visual Themes</span>
+      </div>
+
+      <div class="config-card">
+        <span class="config-card-label">Report Storage Engine</span>
+        <span class="config-card-value">${escapeHtml(cfg.report_storage || 'Ephemeral / S3')}</span>
+        <span class="config-card-status" style="color: #34d399;">● Direct Download Stream</span>
+      </div>
+    `;
+
+  } catch (err) {
+    console.error('System config load error:', err);
+    if (grid) {
+      grid.innerHTML = `<div class="batch-empty-placeholder" style="color: #f87171;">Failed to load system config: ${escapeHtml(err.message)}</div>`;
+    }
+  }
+}

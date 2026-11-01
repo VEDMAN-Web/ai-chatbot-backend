@@ -33,6 +33,8 @@ class PropertyFilterParams(BaseModel):
     sort_by_price: Optional[str] = Field(None, description="'asc' for cheapest first, 'desc' for most expensive first")
     status: Optional[str] = Field(None, max_length=50)
     is_public: Optional[bool] = True
+    # Soft-deleted (archived) rows are excluded from every listing query unless a caller opts in.
+    include_deleted: bool = False
     limit: int = 10
     offset: int = 0
 
@@ -213,6 +215,13 @@ class FirestorePropertyAdapter:
         self.websites = list(data.get("websites") or [])
         self.units = data.get("units")
         self.features = list(data.get("features") or [])
+        self.is_public = bool(data.get("is_public", True))
+        self.deleted_at = data.get("deleted_at") or data.get("_deletedAt")
+        self.is_deleted = bool(
+            data.get("is_deleted")
+            or self.deleted_at
+            or (str(data.get("status") or "").lower() in ("archived", "deleted"))
+        )
 
         # Images list with image_url attribute
         raw_images = data.get("images") or []
@@ -307,11 +316,12 @@ def get_property_by_id(db: Any, property_id: str) -> Optional[Any]:
     if not property_id or not isinstance(property_id, str):
         return None
     clean_id = property_id.strip()
+    target = "admin" if staff else "user"
 
     # 1. Primary check: live Cloud Firestore
     try:
         from app.services.firestore_service import get_property_by_id_from_firestore
-        fs_p = get_property_by_id_from_firestore(clean_id)
+        fs_p = get_property_by_id_from_firestore(clean_id, target=target)
         if fs_p:
             return FirestorePropertyAdapter(fs_p)
     except Exception as e:
@@ -324,11 +334,12 @@ def get_property_by_name(db: Any, name_query: str) -> Optional[Any]:
     if not name_query or not isinstance(name_query, str):
         return None
     clean_name = name_query.strip()
+    target = "admin" if staff else "user"
 
     # 1. Primary check: live Cloud Firestore
     try:
         from app.services.firestore_service import get_property_by_id_from_firestore
-        fs_p = get_property_by_id_from_firestore(clean_name)
+        fs_p = get_property_by_id_from_firestore(clean_name, target=target)
         if fs_p:
             return FirestorePropertyAdapter(fs_p)
     except Exception as e:

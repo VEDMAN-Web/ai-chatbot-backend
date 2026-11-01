@@ -191,6 +191,94 @@ def calculate_lead_score(
     return min(score, 100.0)
 
 
+def _first_present(doc: Dict[str, Any], *keys: str) -> Any:
+    for k in keys:
+        v = doc.get(k)
+        if v is not None and v != "":
+            return v
+    return None
+
+
+def _positive_number(value: Any) -> bool:
+    try:
+        return float(value) > 0
+    except (TypeError, ValueError):
+        return bool(str(value or "").strip())
+
+
+def score_lead_document(doc: Dict[str, Any]) -> float:
+    """
+    Compute a lead score from a stored lead document's own signals.
+
+    Tolerates every shape in the `leads` collection: snake_case session leads,
+    camelCase docs from create_lead_in_firestore / the portal, and imported rows.
+    Uses the same calculate_lead_score() as live chat capture.
+    """
+    d = dict(doc or {})
+    email = _first_present(d, "contact_email", "email", "contactEmail")
+    phone = _first_present(d, "contact_phone", "phone", "contactPhone")
+    has_contact = bool(validate_email(email) or validate_phone(phone))
+
+    budget_specified = any(
+        _positive_number(d.get(k))
+        for k in ("budget_min", "budget_max", "budget", "budgetMin", "budgetMax")
+        if d.get(k) not in (None, "")
+    )
+    property_requested = _first_present(
+        d,
+        "preferred_location", "preferred_type", "preferredLocation", "preferredType",
+        "location", "property_type", "propertyType",
+        "property_id", "propertyId", "property_name", "propertyName",
+    ) is not None
+
+    turns = 1
+    for k in ("turns_count", "message_count", "messageCount", "turns"):
+        try:
+            if d.get(k) is not None:
+                turns = max(turns, int(d.get(k)))
+                break
+        except (TypeError, ValueError):
+            continue
+    else:
+        history = d.get("message_history") or d.get("messages")
+        if isinstance(history, list) and history:
+            turns = len(history)
+
+    return calculate_lead_score(
+        has_contact=has_contact,
+        budget_specified=budget_specified,
+        property_requested=property_requested,
+        turns_count=turns,
+    )
+
+
+def stored_lead_score(doc: Dict[str, Any]) -> Optional[float]:
+    """
+    Return the score actually stored on a lead doc, or None when it is unscored.
+
+    calculate_lead_score() never returns below 10, so a stored value <= 0 (or a
+    missing / unparseable one) is a default placeholder, not a computed score.
+    """
+    d = doc or {}
+    for k in ("lead_score", "leadScore", "score"):
+        raw = d.get(k)
+        if raw is None or raw == "":
+            continue
+        try:
+            val = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if val > 0:
+            return val
+    return None
+
+
+def resolve_lead_score(doc: Dict[str, Any]) -> float:
+    """Stored score when present, otherwise computed from the doc's signals."""
+    stored = stored_lead_score(doc)
+    return stored if stored is not None else score_lead_document(doc)
+
+
 def record_or_update_lead(
     db: Optional[Any] = None,
     conversation: Optional[Any] = None,
