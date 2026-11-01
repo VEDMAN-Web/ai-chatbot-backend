@@ -302,7 +302,7 @@ def _lookup_names(property_ids: List[str]) -> Dict[str, str]:
     ids = [i for i in dict.fromkeys(str(x) for x in property_ids if x)]
     if not ids:
         return {}
-    client = get_firestore_client()
+    client = get_snapshot_client()
     if not client:
         return {}
     out: Dict[str, str] = {}
@@ -713,7 +713,8 @@ def execute_batch_property_operation(
             f"Validation failed for {len(validation_errors)} row(s): " + " | ".join(shown) + more
         )
 
-    fs_client = get_firestore_client()
+    # Listings live in the admin store (undo restores there too). On staging the user store is production.
+    fs_client = get_snapshot_client()
     if not fs_client:
         raise BatchOperationError("Firestore client is not available. Cannot execute batch operation.")
 

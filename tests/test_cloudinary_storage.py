@@ -3,9 +3,12 @@ from PIL import Image
 import pytest
 from app.services.cloud_media_storage import cloud_storage
 
+# Live uploads to Cloudinary: run only where Cloudinary credentials are configured (never in CI).
+pytestmark = pytest.mark.skipif(not getattr(cloud_storage, "_cloudinary_configured", False), reason="Cloudinary credentials not configured")
+
 
 def test_cloudinary_configuration():
-    """Verifies Cloudinary is initialized and configured with qzwebcf0."""
+    """Verifies Cloudinary is initialized."""
     assert cloud_storage._cloudinary_configured is True
 
 

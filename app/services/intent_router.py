@@ -8,6 +8,10 @@ from decimal import Decimal
 
 logger = logging.getLogger(__name__)
 
+# Area units (sqm, m², metrów, ตร.ม...). Module level: used by more than one parser.
+_AREA_UNIT_PATTERN = r"(?:sq\.?\s*m|sqm|m²|m2|square\s+(?:meters?|metres?)|m\s*kw\.?|metr(?:ów|ow|y|a)?|sq\.?\s*ft|sqft|square\s+feet|ตร\.?ม\.?|ตารางเมตร|ตรม)"
+
+
 class IntentType(str, Enum):
     GREETING = "greeting"
     SHOW_MORE = "show_more"

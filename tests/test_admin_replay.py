@@ -426,10 +426,16 @@ def test_admin_replay_script(world):
         json={},
     )
     assert missing_token.status_code in {400, 403}
-    boss = _say(world, "yes confirm", staff=_staff("boss@example.com", "super_admin"))
-    # staging hardening: only the proposer confirms; a super admin cannot confirm someone else's action
-    assert "Only the staff member who proposed this action can confirm or reject it" in boss["text"]
-    assert boss.get("action_status") not in {"executed", "confirmed"}
+    # A different staff member cannot even open the proposer's admin chat (conversation ownership),
+    # so a super admin typing "yes confirm" there gets 404 and the action stays pending.
+    world["holder"]["staff"] = _staff("boss@example.com", "super_admin")
+    reset_rate_limiter()
+    boss = world["client"].post(
+        "/api/v1/admin/chat", json={"session_id": "replay-admin", "message": "yes confirm", "language": "en"}
+    )
+    assert boss.status_code == 404, boss.text
+    still = world["client"].post(f"/api/v1/admin/actions/{other['pending_action_id']}/confirm", json={"confirmation_token": other["confirmation_token"]})
+    assert still.status_code == 403  # the boss cannot confirm it by id either: proposer-only
     world["holder"]["staff"] = _staff()
 
     delete_reply = _say(world, "delete Laguna Villa")

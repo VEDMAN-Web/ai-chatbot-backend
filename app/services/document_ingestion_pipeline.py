@@ -28,8 +28,6 @@ from bs4 import BeautifulSoup
 from PIL import Image
 
 from app.core.config import settings
-from app.db.models import Property, PropertyImage, PropertySpec
-from app.db.session import SessionLocal
 from app.services.claude_property_extractor import (
     extract_property_details_from_image_with_claude,
     extract_property_details_with_claude,
@@ -512,168 +510,54 @@ def _upload_and_make_public(bucket: str, obj_name: str, content: bytes, content_
 
 
 def _save_to_postgresql_and_firestore(payload: Dict[str, Any], verified_images: List[Dict[str, Any]]):
-    """Saves to PostgreSQL and synchronizes both Firestore collections (projects and properties)."""
-    db = SessionLocal()
+    """Saves the listing to the ADMIN Firestore (projects + properties) and bumps that store's cache counter.
+
+    The Postgres database was removed; the admin store is where every other listing write goes.
+    On staging the admin store is the test project, so ingestion never writes to production.
+    """
+    import app.services.firestore_service as fs
+
     pid = payload["property_id"]
+    fs_client = fs.get_firestore_client(target="admin")
+    if fs_client is None:
+        raise RuntimeError("Admin Firestore is not available; the listing was not saved.")
+    images = [i["public_url"] for i in verified_images if i.get("public_url")] or payload.get("images", [])
+    fs_payload = {
+        "property_id": pid,
+        "name": payload["property_name"],
+        "project_name": payload.get("project_name"),
+        "property_type": payload.get("property_type"),
+        "status": payload.get("status"),
+        "country": payload.get("country"),
+        "province": payload.get("province"),
+        "district": payload.get("district"),
+        "area": payload.get("area"),
+        "address": payload.get("address"),
+        "price": payload.get("price_display"),
+        "price_numeric_min": payload.get("price_numeric_min"),
+        "price_numeric_max": payload.get("price_numeric_max"),
+        "currency": payload.get("currency"),
+        "bedrooms": payload.get("bedrooms_display"),
+        "bathrooms": payload.get("bathrooms"),
+        "area_sqm_min": payload.get("area_sqm_min"),
+        "total_units": payload.get("units"),
+        "total_floors": payload.get("total_floors"),
+        "amenities": payload.get("amenities", []),
+        "features": payload.get("features", []),
+        "images": images,
+        "image_urls": images,
+        "cover_image": payload.get("cover_image"),
+        "unit_types": payload.get("unit_types", [])
+    }
+
+    for coll in ("projects", "properties"):
+        fs_client.collection(coll).document(pid).set(fs_payload, merge=True)
     try:
-        # Upsert PostgreSQL Property
-        p = db.query(Property).filter(Property.property_id == pid).first()
-        if not p:
-            p = Property(
-                property_id=pid,
-                property_name=payload["property_name"],
-                project_name=payload.get("project_name"),
-                property_type=payload.get("property_type"),
-                status=payload.get("status"),
-                country=payload.get("country"),
-                province=payload.get("province"),
-                district=payload.get("district"),
-                subdistrict=payload.get("subdistrict"),
-                area=payload.get("area"),
-                address=payload.get("address"),
-                latitude=payload.get("latitude"),
-                longitude=payload.get("longitude"),
-                developer_name=payload.get("developer_name"),
-                price_display=payload.get("price_display"),
-                price_numeric_min=payload.get("price_numeric_min"),
-                price_numeric_max=payload.get("price_numeric_max"),
-                currency=payload.get("currency"),
-                price_note=payload.get("price_note"),
-                bedrooms_display=payload.get("bedrooms_display"),
-                bedrooms_min=payload.get("bedrooms_min"),
-                bedrooms_max=payload.get("bedrooms_max"),
-                bathrooms=payload.get("bathrooms"),
-                area_display=payload.get("area_display"),
-                area_sqm_min=payload.get("area_sqm_min"),
-                area_sqm_max=payload.get("area_sqm_max"),
-                units=payload.get("units"),
-                available_units=payload.get("available_units"),
-                total_floors=payload.get("total_floors"),
-                completion_status=payload.get("completion_status") or payload.get("status"),
-                completion_date=payload.get("completion_date"),
-                project_name_pl=payload.get("project_name_pl") or payload.get("property_name"),
-                project_name_en=payload.get("project_name_en") or payload.get("property_name"),
-                slug_pl=payload.get("slug_pl"),
-                slug_en=payload.get("slug_en"),
-                subtitle_pl=payload.get("subtitle_pl"),
-                subtitle_en=payload.get("subtitle_en"),
-                city=payload.get("city") or payload.get("province"),
-                expected_roi=payload.get("expected_roi"),
-                rental_yield=payload.get("rental_yield"),
-                short_description_pl=payload.get("short_description_pl"),
-                description_pl=payload.get("full_description_pl") or payload.get("description_pl"),
-                short_description_en=payload.get("short_description_en"),
-                description_en=payload.get("full_description_en") or payload.get("description_en"),
-                video_url=payload.get("video_url"),
-                search_location=payload.get("search_location"),
-                address_en=payload.get("address_en") or payload.get("address"),
-                address_pl=payload.get("address_pl"),
-                neighborhood_lifestyle=payload.get("neighborhood_lifestyle"),
-                layouts=payload.get("layouts") or payload.get("unit_types", []),
-                seo_title_pl=payload.get("seo_title_pl"),
-                seo_title_en=payload.get("seo_title_en"),
-                seo_description_pl=payload.get("seo_description_pl"),
-                seo_description_en=payload.get("seo_description_en"),
-                is_featured=bool(payload.get("is_featured", False)),
-                is_top_list=bool(payload.get("is_top_list", False)),
-                has_pool=payload.get("has_pool", False),
-                beach_access=payload.get("beach_access", False),
-                sea_view=payload.get("sea_view", False),
-                amenities=payload.get("amenities", []),
-                features=payload.get("features", []),
-                tags=payload.get("tags", []),
-                raw_metadata={"unit_types": payload.get("unit_types", [])}
-            )
-            db.add(p)
-        else:
-            p.property_name = payload["property_name"]
-            p.price_display = payload.get("price_display")
-            p.price_numeric_min = payload.get("price_numeric_min")
-            p.amenities = payload.get("amenities", [])
-            p.raw_metadata = {"unit_types": payload.get("unit_types", [])}
-
-        db.flush()
-
-        # Specs
-        specs = payload.get("specs", {})
-        if specs:
-            spec_rec = db.query(PropertySpec).filter(PropertySpec.property_id == pid).first()
-            if not spec_rec:
-                spec_rec = PropertySpec(
-                    property_id=pid,
-                    roof_material=specs.get("roof_material"),
-                    flooring=specs.get("flooring"),
-                    walls=specs.get("walls"),
-                    doors_windows=specs.get("doors_windows"),
-                    architectural_style=specs.get("architectural_style")
-                )
-                db.add(spec_rec)
-            else:
-                spec_rec.flooring = specs.get("flooring")
-                spec_rec.doors_windows = specs.get("doors_windows")
-
-        # PropertyImages
-        db.query(PropertyImage).filter(PropertyImage.property_id == pid).delete()
-        for idx, img_info in enumerate(verified_images):
-            if "public_url" in img_info:
-                rec = PropertyImage(
-                    property_id=pid,
-                    image_url=img_info["public_url"],
-                    image_type=img_info.get("image_type", "exterior"),
-                    alt_text=img_info.get("alt_text"),
-                    sort_order=idx + 1
-                )
-                db.add(rec)
-
-        db.commit()
-        logger.info(f"Saved {pid} to PostgreSQL successfully")
-
-        # Firestore Synchronized Write
-        try:
-            import app.services.firestore_service as fs
-            fs_client = fs.get_firestore_client()
-            fs_payload = {
-                "property_id": pid,
-                "name": payload["property_name"],
-                "project_name": payload.get("project_name"),
-                "property_type": payload.get("property_type"),
-                "status": payload.get("status"),
-                "country": payload.get("country"),
-                "province": payload.get("province"),
-                "district": payload.get("district"),
-                "area": payload.get("area"),
-                "address": payload.get("address"),
-                "price": payload.get("price_display"),
-                "price_numeric_min": payload.get("price_numeric_min"),
-                "price_numeric_max": payload.get("price_numeric_max"),
-                "currency": payload.get("currency"),
-                "bedrooms": payload.get("bedrooms_display"),
-                "bathrooms": payload.get("bathrooms"),
-                "area_sqm_min": payload.get("area_sqm_min"),
-                "total_units": payload.get("units"),
-                "total_floors": payload.get("total_floors"),
-                "amenities": payload.get("amenities", []),
-                "features": payload.get("features", []),
-                "images": payload.get("images", []),
-                "image_urls": payload.get("images", []),
-                "cover_image": payload.get("cover_image"),
-                "unit_types": payload.get("unit_types", [])
-            }
-
-            for coll in ("projects", "properties"):
-                fs_client.collection(coll).document(pid).set(fs_payload, merge=True)
-
-            fs.clear_property_catalog_cache()
-            logger.info(f"Synchronized {pid} to Firestore collections projects & properties")
-        except Exception as fe:
-            logger.warning(f"Firestore sync warning: {fe}")
-
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Failed persisting {pid}: {e}")
-        raise
-    finally:
-        db.close()
+        fs.clear_property_catalog_cache()
+        fs.bump_properties_version(target="admin")
+    except Exception as exc:  # cache refresh is best-effort
+        logger.warning("Cache refresh after ingest failed: %s", exc)
+    logger.info("Saved %s to the admin Firestore (projects, properties)", pid)
 
 
 def _deterministic_fallback(raw_text: str, filename: str) -> Dict[str, Any]:

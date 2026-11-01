@@ -240,7 +240,7 @@ class Settings(BaseSettings):
     DRIVE_INGEST_ZIP_MAX_MEMBERS: int = 200
     DRIVE_INGEST_ZIP_MAX_TOTAL_BYTES: int = 100 * 1024 * 1024
     DRIVE_INGEST_ZIP_MAX_RATIO: float = 100.0
-    DRIVE_INGEST_OCR_ENABLED: bool = True       # Claude vision OCR for scanned PDFs and images (sends images to Anthropic)
+    DRIVE_INGEST_OCR_ENABLED: bool = False      # Claude vision OCR for scanned PDFs and images (sends images to Anthropic)
     DRIVE_INGEST_OCR_MODEL: str = ""             # empty -> ANTHROPIC_MODEL
     DRIVE_INGEST_OCR_MAX_PAGES: int = 10         # OCR pages per PDF
     DRIVE_INGEST_OCR_TIMEOUT_SEC: float = 90.0
@@ -249,7 +249,7 @@ class Settings(BaseSettings):
     DRIVE_INGEST_LLM_MAX_CHARS: int = 40000
     DRIVE_INGEST_LLM_TIMEOUT_SEC: float = 120.0
     DRIVE_INGEST_LEASE_SEC: int = 300            # a job runner's lease; another instance resumes after it lapses
-    DRIVE_INGEST_PHOTOS_ENABLED: bool = True     # Claude-verified, text-free property photos cropped from brochures
+    DRIVE_INGEST_PHOTOS_ENABLED: bool = False    # Claude-verified, text-free property photos cropped from brochures
     DRIVE_INGEST_PHOTO_TIMEOUT_SEC: float = 900.0  # photo extraction budget per file (on top of the file limit)
     DRIVE_INGEST_PHOTO_WORKERS: int = 6          # parallel Claude vision calls per file
     PHOTO_EXTRACT_MODEL: str = ""                # empty -> ANTHROPIC_MODEL
@@ -308,10 +308,10 @@ class Settings(BaseSettings):
     REPORT_SIGNED_LINK_TTL_SEC: int = 600
 
     # Cloudinary Cloud Media Storage
-    CLOUDINARY_CLOUD_NAME: Optional[str] = "qzwebcf0"
-    CLOUDINARY_API_KEY: Optional[str] = "551426861674956"
-    CLOUDINARY_API_SECRET: Optional[str] = "DNjZZUOkLmOVHu7WcF3p8p5N9W0"
-    CLOUDINARY_URL: Optional[str] = "cloudinary://551426861674956:DNjZZUOkLmOVHu7WcF3p8p5N9W0@qzwebcf0"
+    CLOUDINARY_CLOUD_NAME: Optional[str] = None
+    CLOUDINARY_API_KEY: Optional[str] = None
+    CLOUDINARY_API_SECRET: Optional[str] = None
+    CLOUDINARY_URL: Optional[str] = None
 
     # Universal / Fallback Cloud Firestore & Firebase Settings
     FIRESTORE_PROJECT_ID: str = "varsovia-8c135"
