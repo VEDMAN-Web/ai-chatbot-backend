@@ -17,12 +17,17 @@ def main():
         port = 8000
 
     print(f"--> Starting Uvicorn server on host 0.0.0.0 port {port}...")
+    # Forwarded proxy headers: allow configuring specific proxy IPs (e.g. Cloud Run / load balancer)
+    # Default to 127.0.0.1 rather than '*' to prevent spoofing client IP via client-crafted X-Forwarded-For
+    forwarded_ips = os.environ.get("FORWARDED_ALLOW_IPS", "127.0.0.1")
+    proxy_headers = os.environ.get("PROXY_HEADERS", "true").lower() in ("1", "true")
+
     uvicorn.run(
         "app.main:app",
         host="0.0.0.0",
         port=port,
-        proxy_headers=True,
-        forwarded_allow_ips="*"
+        proxy_headers=proxy_headers,
+        forwarded_allow_ips=forwarded_ips
     )
 
 

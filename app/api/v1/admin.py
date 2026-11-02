@@ -911,13 +911,13 @@ class PropertyUpdateRequest(BaseModel):
 
 @router.get("/properties")
 def list_admin_properties_endpoint(
-    location: Optional[str] = Query(None, description="Location filter"),
-    property_type: Optional[str] = Query(None, description="Property type"),
+    location: Optional[str] = Query(None, max_length=100, description="Location filter"),
+    property_type: Optional[str] = Query(None, max_length=50, description="Property type"),
     min_price: Optional[float] = Query(None, ge=0),
     max_price: Optional[float] = Query(None, ge=0),
     bedrooms: Optional[int] = Query(None, ge=0),
     has_pool: Optional[bool] = Query(None),
-    status: Optional[str] = Query(None),
+    status: Optional[str] = Query(None, max_length=50),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     staff: AuthenticatedStaff = Depends(require_admin_or_employee_with_sites),

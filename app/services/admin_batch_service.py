@@ -809,7 +809,9 @@ def execute_batch_property_operation(
                     change_rows.append(_make_change(doc_id, listing_name, k, current_doc.get(k), v))
 
                 # Instantly apply update in database
-                projects_col.document(doc_id).update(update_fields)
+                from app.services.data_sanitizer import sanitize_db_record
+                sanitized_update_fields = sanitize_db_record(update_fields)
+                projects_col.document(doc_id).update(sanitized_update_fields)
 
                 executed_details.append({
                     "property_id": doc_id,
@@ -856,7 +858,9 @@ def execute_batch_property_operation(
             doc_payload["_batchOperationId"] = operation_id
 
             # Instantly write to database
-            projects_col.document(new_id).set(doc_payload)
+            from app.services.data_sanitizer import sanitize_db_record
+            sanitized_payload = sanitize_db_record(doc_payload)
+            projects_col.document(new_id).set(sanitized_payload)
             created_ids.append(new_id)
             affected_ids.append(new_id)
 

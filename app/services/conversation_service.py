@@ -9,10 +9,20 @@ from typing import Optional, List, Dict, Any
 from datetime import datetime, timezone
 import logging
 
+import collections
+
 logger = logging.getLogger(__name__)
 
-# Hot in-process cache (same Cloud Run instance). Source of truth after restart = Firestore.
-_IN_SESSION_CONVERSATIONS: Dict[str, Any] = {}
+# Bounded in-process cache with max capacity (F-26: prevent unbounded memory growth from random session IDs)
+MAX_IN_SESSION_CONVERSATIONS = 1000
+_IN_SESSION_CONVERSATIONS: collections.OrderedDict[str, Any] = collections.OrderedDict()
+
+
+def _cache_conversation(key: str, conv: Any) -> None:
+    _IN_SESSION_CONVERSATIONS[key] = conv
+    _IN_SESSION_CONVERSATIONS.move_to_end(key)
+    while len(_IN_SESSION_CONVERSATIONS) > MAX_IN_SESSION_CONVERSATIONS:
+        _IN_SESSION_CONVERSATIONS.popitem(last=False)
 
 
 def _firestore_sync_enabled(agent_type: str) -> bool:
@@ -55,6 +65,7 @@ def get_or_create_conversation(
     session_id: str = "",
     site_origin: Optional[str] = None,
     agent_type: str = "public",
+    create_if_missing: bool = True,
 ):
     """
     Load or create a conversation. Persists entirely in Firestore (conversations collection).
@@ -82,8 +93,10 @@ def get_or_create_conversation(
                 session_id=clean_session_id,
                 site_origin=clean_site_origin,
                 agent_type=agent_type,
+                create_if_missing=create_if_missing,
             )
-            _IN_SESSION_CONVERSATIONS[session_key] = conversation
+            if create_if_missing or (conversation and getattr(conversation, "message_history", None)):
+                _cache_conversation(session_key, conversation)
         except Exception as e:
             logger.error(f"Firestore get_or_create_conversation failed: {e}")
 
@@ -105,7 +118,7 @@ def get_or_create_conversation(
                 "updatedAt": now_iso,
             },
         )
-        _IN_SESSION_CONVERSATIONS[session_key] = conversation
+        _cache_conversation(session_key, conversation)
         logger.warning(
             "Conversation %s created in-memory only — Firestore unavailable. "
             "History will not survive restart until Firestore is reachable.",
@@ -265,7 +278,7 @@ def persist_conversation_preferences(conversation) -> None:
     c_agent_type = getattr(conversation, "agent_type", "public")
     clean_session_id = getattr(conversation, "session_id", "anonymous")
     session_key = f"{c_agent_type}:{clean_session_id}"
-    _IN_SESSION_CONVERSATIONS[session_key] = conversation
+    _cache_conversation(session_key, conversation)
 
     if not _firestore_sync_enabled(c_agent_type):
         return

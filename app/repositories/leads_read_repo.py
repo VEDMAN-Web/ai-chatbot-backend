@@ -75,6 +75,7 @@ def query_leads(
     name_or_contact: Optional[str] = None,
     ids: Optional[List[str]] = None,
     site: Optional[str] = None,
+    allowed_sites: Optional[List[str]] = None,
     limit: int = 50,
     order: str = "newest",
 ) -> List[LeadRecord]:
@@ -89,6 +90,7 @@ def query_leads(
         name_or_contact=name_or_contact,
         ids=ids,
         site=site,
+        allowed_sites=allowed_sites,
         limit=limit,
         order=order,
     )
@@ -102,6 +104,7 @@ def count_leads(
     status: Optional[str] = None,
     min_score: float = 0.0,
     site: Optional[str] = None,
+    allowed_sites: Optional[List[str]] = None,
 ) -> int:
     rows = query_leads(
         db,
@@ -109,6 +112,7 @@ def count_leads(
         status=status,
         min_score=min_score,
         site=site,
+        allowed_sites=allowed_sites,
         limit=10_000,
     )
     return len(rows)
@@ -146,6 +150,7 @@ def _fs_query(
     name_or_contact: Optional[str] = None,
     ids: Optional[List[str]] = None,
     site: Optional[str] = None,
+    allowed_sites: Optional[List[str]] = None,
     limit: int = 50,
     order: str = "newest",
 ) -> List[LeadRecord]:
@@ -160,6 +165,11 @@ def _fs_query(
 
     id_set = {str(i).strip().lower() for i in (ids or []) if i}
     needle = (name_or_contact or "").strip().lower()
+    normalized_allowed_sites = None
+    if allowed_sites:
+        from app.core.tenant import normalize_website_list
+        normalized_allowed_sites = set(normalize_website_list(allowed_sites))
+
     out: List[LeadRecord] = []
     for d in docs:
         rec = LeadRecord(d, d.get("id"))
@@ -171,6 +181,11 @@ def _fs_query(
             continue
         if min_score and float(rec.lead_score or 0) < float(min_score):
             continue
+        rec_site = (rec.site or "").strip().lower()
+        if normalized_allowed_sites is not None:
+            # Check if lead's site matches any allowed site
+            if not any(a_site in rec_site or rec_site in a_site for a_site in normalized_allowed_sites):
+                continue
         if site:
             site_l = (rec.site or "").lower()
             if site.lower() not in site_l and site_l not in site.lower():

@@ -1544,7 +1544,7 @@ def save_or_update_property_firestore(
             update_payload["cityId"] = str(fields["province"]).lower().replace(" ", "-")
 
         # Property Type
-        if fields.get("property_type"):
+        if "property_type" in fields:
             update_payload["propertyType"] = fields.get("property_type")
 
         # Pricing
@@ -1552,15 +1552,16 @@ def save_or_update_property_firestore(
             update_payload["priceDisplay"] = fields.get("price_display")
         if fields.get("price_numeric_min") is not None:
             update_payload["priceFrom"] = float(fields["price_numeric_min"])
-        if fields.get("price_numeric_max") is not None:
-            update_payload["priceTo"] = float(fields["price_numeric_max"])
+        if "price_numeric_max" in fields:
+            val = fields.get("price_numeric_max")
+            update_payload["priceTo"] = float(val) if val is not None else 0.0
 
         # Status
         if fields.get("status"):
             update_payload["status"] = fields.get("status")
 
         # Description
-        if fields.get("description"):
+        if "description" in fields:
             update_payload["description"] = fields.get("description")
 
         # Import provenance (source URL, guessed fields) — Firestore is the only store now
@@ -1616,7 +1617,9 @@ def save_or_update_property_firestore(
             elif final_images and not existing_data.get("coverImage"):
                 update_payload["coverImage"] = final_images[0]
 
-        doc_ref.set(update_payload, merge=True)
+        from app.services.data_sanitizer import sanitize_db_record
+        sanitized_payload = sanitize_db_record(update_payload)
+        doc_ref.set(sanitized_payload, merge=True)
         logger.info(f"Successfully saved/updated property '{clean_id}' in Firestore 'projects'.")
         return True
 
@@ -1983,7 +1986,8 @@ def update_conversation_site_origin_firestore(conversation, site_origin: str) ->
 def get_or_create_conversation_firestore(
     session_id: str,
     site_origin: Optional[str] = None,
-    agent_type: str = "public"
+    agent_type: str = "public",
+    create_if_missing: bool = True
 ) -> FirestoreConversation:
     """
     Retrieves or creates a conversation in Firestore `conversations`.
@@ -1991,6 +1995,8 @@ def get_or_create_conversation_firestore(
 
     Existing docs are rebound to the request site_origin so multi-site session
     reuse cannot keep a stale brand / advisor email.
+    If create_if_missing is False, returns an ephemeral in-memory conversation
+    without writing an empty stub to Firestore.
     """
     client = get_firestore_client(target="admin" if agent_type == "admin" else "user")
     clean_sid = session_id.strip() if session_id else "anonymous"
@@ -2039,6 +2045,9 @@ def get_or_create_conversation_firestore(
                 # Migrate to agent-scoped id
                 doc_ref.set(data, merge=True)
                 return FirestoreConversation(doc_id, data)
+
+        if not create_if_missing:
+            return FirestoreConversation(doc_id, empty)
 
         initial_data = dict(empty)
         doc_ref.set(initial_data)

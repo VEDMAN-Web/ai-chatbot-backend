@@ -17,7 +17,7 @@ import pytest
 from googleapiclient.errors import HttpError
 import pytest
 
-pytest.importorskip("sqlalchemy", reason="rp-user-fix Drive-ingestion end-to-end tests are written for the removed Postgres/SQLite setup; port to the Firestore fake before enabling.")
+pytest.importorskip("app.db.models", reason="rp-user-fix Drive-ingestion end-to-end tests are written for the removed Postgres/SQLite setup; port to the Firestore fake before enabling.")
 from sqlalchemy import create_engine
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.ext.compiler import compiles
