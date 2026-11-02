@@ -4,6 +4,7 @@ When an existing listing has ID 'crud-run-k1' and a new listing is proposed with
 the creation must NOT resolve 'crud-run-k1' via substring matching, must NOT switch mode to 'update',
 and on Confirm must create the new listing rather than silently updating the existing one.
 """
+from tests.fake_firestore import plain_name
 import uuid
 from types import SimpleNamespace
 
@@ -62,7 +63,7 @@ def _row(pid):
     return SimpleNamespace(
         websites=list(raw.get("websites") or []),
         status=raw.get("status"),
-        name=raw.get("name") or raw.get("property_name"),
+        name=plain_name(raw.get("name")) or raw.get("property_name"),
         price=price,
         raw=raw,
     )

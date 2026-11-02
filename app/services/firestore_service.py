@@ -1481,6 +1481,141 @@ def search_properties_firestore(
     return matched
 
 
+_PLACE_ID_CACHE: Dict[str, Any] = {}
+_PLACE_ID_TTL_SEC = 600
+
+
+def _slug(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", str(value or "").strip().lower()).strip("-")
+
+
+def _names_of(doc_id: str, data: Dict[str, Any]) -> set:
+    out = {_slug(doc_id)}
+    for key in ("name", "slug", "title"):
+        v = data.get(key)
+        vals = v.values() if isinstance(v, dict) else [v]
+        out.update(_slug(x) for x in vals if x)
+    out.discard("")
+    return out
+
+
+def _place_index(client: Any, collection: str) -> Dict[str, Tuple[str, Dict[str, Any]]]:
+    import time as _t
+    key = f"{id(client)}:{collection}"
+    hit = _PLACE_ID_CACHE.get(key)
+    if hit and hit[1] is client and _t.time() - hit[0] < _PLACE_ID_TTL_SEC:
+        return hit[2]
+    index: Dict[str, Tuple[str, Dict[str, Any]]] = {}
+    for snap in client.collection(collection).stream():
+        data = snap.to_dict() or {}
+        for n in _names_of(snap.id, data):
+            index.setdefault(n, (snap.id, data))
+    _PLACE_ID_CACHE[key] = (_t.time(), client, index)
+    return index
+
+
+def _resolve_listing_place_ids(client: Any, fields: Dict[str, Any], existing: Dict[str, Any]) -> Dict[str, Any]:
+    """Map city / country / developer text to the ids the websites use. Only sets what it can match."""
+    out: Dict[str, Any] = {}
+    cities = _place_index(client, "cities")
+    for raw in (fields.get("province"), fields.get("city"), fields.get("district")):
+        hit = cities.get(_slug(raw)) if raw else None
+        if hit:
+            out["cityId"] = hit[0]
+            if hit[1].get("countryId"):
+                out["countryId"] = str(hit[1]["countryId"])
+            break
+    if "countryId" not in out and not existing.get("countryId"):
+        raw_country = fields.get("country")
+        if raw_country:
+            hit = _place_index(client, "countries").get(_slug(raw_country))
+            if hit:
+                out["countryId"] = hit[0]
+    dev = fields.get("developer_name")
+    if dev:
+        hit = _place_index(client, "developers").get(_slug(dev))
+        if hit:
+            out["developerId"] = hit[0]
+    return out
+
+
+CITY_NOT_RECOGNISED = "city not recognised"
+_LOCALIZED_FIELDS = ("name", "slug", "subtitle", "description", "shortDescription", "address", "seoTitle", "seoDescription")
+_PROPERTY_TYPES = {"condo", "villa", "apartment", "townhouse", "penthouse", "hotel_unit", "land"}
+_COUNTRY_CURRENCY = {"thailand": "THB", "cambodia": "USD", "vietnam": "VND"}
+
+
+def _localized(value: Any) -> Dict[str, str]:
+    if isinstance(value, dict):
+        pl = str(value.get("pl") or value.get("en") or "")
+        en = str(value.get("en") or value.get("pl") or "")
+        return {**{k: str(v or "") for k, v in value.items()}, "pl": pl, "en": en}
+    text = "" if value is None else str(value)
+    return {"pl": text, "en": text}
+
+
+def _fill_website_shape(client: Any, doc: Dict[str, Any], fields: Dict[str, Any], doc_id: str) -> None:
+    """A NEW listing gets every field the websites read, in the websites' shape, never empty/None.
+
+    The websites crash or 404 on missing or wrongly shaped fields (see Database Fix brief), so
+    unknown values get safe placeholders. A listing whose city is not in `cities` is saved
+    hidden (isActive False) because its public page would 404.
+    """
+    name = doc.get("name") or doc.get("title") or doc_id
+    doc["name"] = _localized(name)
+    doc["slug"] = _localized(doc.get("slug") or _slug(name if isinstance(name, str) else doc_id) or doc_id)
+    for key in _LOCALIZED_FIELDS:
+        doc[key] = _localized(doc.get(key)) if key in doc else {"pl": "", "en": ""}
+    doc["address"] = _localized(doc.get("address") or fields.get("address") or fields.get("district") or "")
+
+    for key in ("countryId", "cityId", "developerId", "completionDate", "videoUrl", "paymentPlan", "coverImage"):
+        doc[key] = str(doc.get(key) or "")
+    for key in ("priceFrom", "priceTo", "pricePerSqm", "totalUnits", "availableUnits", "areaFrom",
+                "areaTo", "expectedROI", "rentalYield"):
+        try:
+            doc[key] = float(doc.get(key) or 0)
+        except (TypeError, ValueError):
+            doc[key] = 0.0
+    if not doc["priceFrom"]:
+        doc["priceDisplay"] = doc.get("priceDisplay") or "Price on Request"
+        doc["priceOnRequest"] = True
+    for key in ("images", "amenities", "tags", "layouts"):
+        doc[key] = list(doc.get(key) or [])
+    for key in ("isFeatured", "isTopList"):
+        doc[key] = bool(doc.get(key) or False)
+
+    if not doc.get("propertyType"):
+        ptype = _slug(fields.get("property_type")).replace("-", "_")
+        doc["propertyType"] = ptype if ptype in _PROPERTY_TYPES else "condo"
+    doc["completionStatus"] = doc.get("completionStatus") if doc.get("completionStatus") in (
+        "ready", "under_construction", "pre_sale", "planned") else "ready"
+    doc["currency"] = doc.get("currency") or _COUNTRY_CURRENCY.get(doc["countryId"], "THB")
+
+    cities = _place_index(client, "cities")
+    city = cities.get(doc["cityId"]) if doc["cityId"] else None
+    coords = (city[1].get("coordinates") if city else None) or {}
+    try:
+        doc["coordinates"] = {"lat": float(coords.get("lat") or 0), "lng": float(coords.get("lng") or 0)}
+    except (TypeError, ValueError, AttributeError):
+        doc["coordinates"] = {"lat": 0.0, "lng": 0.0}
+    if not city and cities:  # only judge when the city list could be read
+        doc["isActive"] = False
+        doc["needsReview"] = CITY_NOT_RECOGNISED
+
+
+def listing_review_note(property_id: str, target: str = "admin") -> str:
+    """Staff-facing note when a new listing was saved hidden because its city is unknown."""
+    try:
+        snap = get_firestore_client(target=target).collection("projects").document(str(property_id)).get()
+        data = snap.to_dict() or {} if getattr(snap, "exists", False) else {}
+    except Exception:
+        return ""
+    if data.get("needsReview") == CITY_NOT_RECOGNISED:
+        return (f"The city was not recognised, so the listing is saved HIDDEN from the websites. "
+                f"Tell me the correct city for `{property_id}` to publish it.")
+    return ""
+
+
 def save_or_update_property_firestore(
     property_id: str,
     fields: Dict[str, Any],
@@ -1542,6 +1677,12 @@ def save_or_update_property_firestore(
         if fields.get("province"):
             update_payload["province"] = fields.get("province")
             update_payload["cityId"] = str(fields["province"]).lower().replace(" ", "-")
+        # Use the websites' real ids (cities / countries / developers collections) so the
+        # listing gets the same shape as one made in the website admin panel.
+        try:
+            update_payload.update(_resolve_listing_place_ids(client, fields, existing_data))
+        except Exception as e:  # never block a save on the lookup
+            logger.warning("Place-id lookup failed for '%s': %s", clean_id, e)
 
         # Property Type
         if "property_type" in fields:
@@ -1616,6 +1757,9 @@ def save_or_update_property_firestore(
                     update_payload["images"] = final_images
             elif final_images and not existing_data.get("coverImage"):
                 update_payload["coverImage"] = final_images[0]
+
+        if not doc.exists:
+            _fill_website_shape(client, update_payload, fields, clean_id)
 
         from app.services.data_sanitizer import sanitize_db_record
         sanitized_payload = sanitize_db_record(update_payload)

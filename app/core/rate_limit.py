@@ -97,7 +97,11 @@ def client_ip(request: Optional[Request]) -> str:
     """
     if request is None:
         return "unknown"
-    if bool(getattr(settings, "TRUST_PROXY_HEADERS", False)):
+    # On Cloud Run the app only ever sees Google's front end as the peer, so without the
+    # header every visitor would share one rate-limit bucket. Google's front end appends the
+    # real client address as the LAST X-Forwarded-For entry, which a caller cannot forge.
+    trust = bool(getattr(settings, "TRUST_PROXY_HEADERS", False)) or bool(os.environ.get("K_SERVICE"))
+    if trust:
         forwarded = (request.headers.get("x-forwarded-for") or "").strip()
         if forwarded:
             # Cloud Run / reverse proxies append hops to X-Forwarded-For: [client, proxy1, proxy2]

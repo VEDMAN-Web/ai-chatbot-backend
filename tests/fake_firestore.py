@@ -419,3 +419,10 @@ def fake_fs(monkeypatch):
 @pytest.fixture
 def firestore_store_modes(monkeypatch):
     set_store_modes(monkeypatch)
+
+
+def plain_name(value):
+    """Listing names are stored the websites' way ({"pl", "en"}); tests compare the English text."""
+    if isinstance(value, dict):
+        return value.get("en") or value.get("pl") or next((v for v in value.values() if v), None)
+    return value

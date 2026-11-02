@@ -9,6 +9,7 @@ Two entry points are exercised with real accounts and real tokens (in-memory Fir
 Accounts: super admin (all three sites), admin for tajlandia only, admin for tajlandia + varsoviaestate, worker (tajlandia).
 The selected website travels in the X-Selected-Websites header, exactly as the panel sends it.
 """
+from tests.fake_firestore import plain_name
 import uuid
 from types import SimpleNamespace
 
@@ -89,7 +90,7 @@ def _row(pid):
     public = raw.get("isActive") is not False and str(status).lower() != "archived"
     return SimpleNamespace(
         websites=list(raw.get("websites") or []), status=status, is_public=public,
-        name=raw.get("name") or raw.get("property_name"),
+        name=plain_name(raw.get("name")) or raw.get("property_name"),
         price=raw.get("priceFrom") if raw.get("priceFrom") is not None else raw.get("price_numeric_min"),
     )
 
@@ -99,7 +100,7 @@ def _count(name_like):
     wanted = name_like.strip().lower()
     return sum(
         1 for d in fsvc.get_admin_firestore_client().collection("projects").stream()
-        if str((d.to_dict() or {}).get("name") or (d.to_dict() or {}).get("property_name") or "").strip().lower() == wanted
+        if str(plain_name((d.to_dict() or {}).get("name")) or (d.to_dict() or {}).get("property_name") or "").strip().lower() == wanted
     )
 
 

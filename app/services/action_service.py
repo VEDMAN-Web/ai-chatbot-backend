@@ -3,6 +3,7 @@ import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, Optional, List, Tuple
 from fastapi import HTTPException, status
+from app.core.listing_writes import LISTING_WRITE_TOOLS, LISTING_WRITES_DISABLED_MSG, listing_writes_enabled
 import logging
 
 from app.core.config import settings
@@ -820,6 +821,10 @@ def confirm_and_execute_action(
                 "action_status": "awaiting_confirmation" if new_action else "superseded",
             }
 
+    # 3b. Read-only switch: refuse listing changes before anything is claimed or written.
+    if action.tool_name in LISTING_WRITE_TOOLS and not listing_writes_enabled():
+        raise HTTPException(status_code=status.HTTP_423_LOCKED, detail=LISTING_WRITES_DISABLED_MSG)
+
     # 4. Persist confirm audit BEFORE any data mutation. If audit cannot be written,
     # stop here so nothing changes.
     from app.services.audit_service import AuditPersistenceError, AUDIT_WRITE_FAILED_MSG
@@ -1475,6 +1480,8 @@ def _execute_update_listing(
             target="admin",
         ):
             raise RuntimeError(f"Firestore create failed for '{property_id}'")
+        from app.services.firestore_service import listing_review_note
+        review_note = listing_review_note(property_id)
         from app.services.cache_service import search_cache
         search_cache.invalidate()
         _bump_properties_version()
@@ -1482,6 +1489,7 @@ def _execute_update_listing(
             "property_id": property_id,
             "title": prop_name,
             "mode": "create",
+            "review_note": review_note,
             "updated_fields": {k: v for k, v in to_write.items() if k != "is_public"},
             "images_count": len(new_images),
             "images": new_images,

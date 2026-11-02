@@ -266,7 +266,20 @@ class OriginAllowlistMiddleware(BaseHTTPMiddleware):
         return response
 
 
+@app.middleware("http")
+async def listing_read_only_switch(request, call_next):
+    from app.core.listing_writes import (
+        LISTING_WRITES_DISABLED_MSG, is_listing_write_request, listing_writes_enabled,
+    )
+    if not listing_writes_enabled() and is_listing_write_request(request.method, request.url.path):
+        from fastapi.responses import JSONResponse
+        return JSONResponse(status_code=423, content={"detail": LISTING_WRITES_DISABLED_MSG})
+    return await call_next(request)
+
+
+# Added last = outermost, so CORS headers also wrap the read-only 423 reply.
 app.add_middleware(OriginAllowlistMiddleware)
+
 
 # Register Public Chatbot & Admin Agent Routers
 app.include_router(chat_router, prefix="/api/v1")

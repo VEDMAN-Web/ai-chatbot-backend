@@ -1929,11 +1929,13 @@ def _process_admin_chat_inner(
                 tool_label = target_action.tool_name
                 status_val = raw_res.get("current_status") or payload.get("fields", {}).get("status", "Active")
                 undo_line = ""
+                if raw_res.get("review_note"):
+                    undo_line += f"\n\n⚠️ {raw_res['review_note']}"
                 if op_id:
                     if active_lang == "pl":
-                        undo_line = f"\n\nMożesz cofnąć tę operację przez 6 dni: operation `{op_id}`."
+                        undo_line += f"\n\nMożesz cofnąć tę operację przez 6 dni: operation `{op_id}`."
                     else:
-                        undo_line = f"\n\nYou can undo this for 6 days: operation `{op_id}`."
+                        undo_line += f"\n\nYou can undo this for 6 days: operation `{op_id}`."
 
                 # Re-read stored record for honest verification line
                 verify_line = ""
