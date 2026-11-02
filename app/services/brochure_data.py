@@ -265,7 +265,7 @@ def _investment_info_from_raw(src: Any, language: str) -> Optional[str]:
         parts.append(str(inv).strip())
     for key in ("rentalYield", "rental_yield", "yield", "expectedYield", "roi"):
         val = src.get(key)
-        if val in (None, "", [], {}):
+        if val in (None, "", [], {}) or val == 0:  # 0 means "not set" on new listings
             continue
         parts.append(str(val).strip())
     text = " ".join(p for p in parts if p).strip()
@@ -747,7 +747,8 @@ def _from_firestore_card(card: Dict[str, Any], language: str, site_origin: Optio
     )
     parking = resolve_localized(src.get("parking") or src.get("parkingInfo"), lang)
 
-    prop_type = resolve_localized(src.get("propertyType") or card.get("property_type"), lang)
+    from app.services.listing_shape import type_label
+    prop_type = resolve_localized(type_label(src) or card.get("property_type"), lang)
     if prop_type and str(prop_type).lower() in ("villa / condo", "n/a"):
         prop_type = None
     elif prop_type:

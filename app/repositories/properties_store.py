@@ -5,6 +5,8 @@ collection, so callers that used to receive ORM rows keep working.
 """
 from __future__ import annotations
 
+from app.services.listing_shape import type_label as _type_label
+
 
 def _firestore_rows(target: str = "admin"):
     """Active listings from Firestore as simple row objects (property_id, property_name, province, ...)."""
@@ -37,7 +39,7 @@ def _firestore_rows(target: str = "admin"):
             property_id=str(doc.get("id") or getattr(snap, "id", "") or ""),
             property_name=str(name),
             province=canon.get("province"),
-            property_type=canon.get("property_type") or doc.get("propertyType"),
+            property_type=canon.get("property_type") or _type_label(doc),
             status=canon.get("status"),
             price_numeric_min=price,
             price_display=canon.get("price_display"),

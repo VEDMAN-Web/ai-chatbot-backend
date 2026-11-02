@@ -266,6 +266,11 @@ def check_firestore_health() -> Dict[str, Any]:
 # 1. Properties & Projects Synchronization
 # ==============================================================================
 
+def _type_label(data: Dict[str, Any]) -> Optional[str]:
+    from app.services.listing_shape import type_label
+    return type_label(data)
+
+
 def normalize_firestore_project(doc_id: str, data: Dict[str, Any]) -> Dict[str, Any]:
     """
     Normalizes a Firestore `projects` document into the standard Tajlandia property card format.
@@ -318,11 +323,14 @@ def normalize_firestore_project(doc_id: str, data: Dict[str, Any]) -> Dict[str, 
         lng = float(lng) if lng is not None else None
     except (ValueError, TypeError):
         lat, lng = None, None
+    if not lat and not lng:  # 0,0 is "unknown", not a place in the ocean
+        lat, lng = None, None
 
     # Address & Location strings
     address_raw = data.get("address")
     if isinstance(address_raw, dict):
-        address = ", ".join([str(v) for v in address_raw.values() if v and isinstance(v, (str, int, float))])
+        address = str(address_raw.get("en") or address_raw.get("pl") or next(
+            (v for v in address_raw.values() if v and isinstance(v, (str, int, float))), ""))
     elif address_raw:
         address = str(address_raw)
     else:
@@ -482,7 +490,7 @@ def normalize_firestore_project(doc_id: str, data: Dict[str, Any]) -> Dict[str, 
         "property_id": doc_id,
         "name": name_str,
         "title": name_str,
-        "property_type": data.get("propertyType") or "Villa / Condo",
+        "property_type": _type_label(data) or "Villa / Condo",
         "price": price_display,
         "price_numeric_min": price_num_min,
         "price_numeric_max": price_num_max,
@@ -1541,15 +1549,28 @@ def save_or_update_property_firestore(
                 update_payload["name"] = merged_name
 
         # Location / City / Address
+        from app.services import listing_shape
         if fields.get("district") or fields.get("province") or fields.get("address"):
-            update_payload["address"] = fields.get("address") or fields.get("district") or ""
+            new_address = fields.get("address") or fields.get("district") or ""
+            if new_address or not isinstance(existing_data.get("address"), dict):
+                update_payload["address"] = listing_shape.merge_localized(existing_data.get("address"), new_address)
         if fields.get("province"):
             update_payload["province"] = fields.get("province")
             update_payload["cityId"] = str(fields["province"]).lower().replace(" ", "-")
+        # The ids the websites use (cities / countries / developers), when they can be matched.
+        # An update moves the listing only when its city/province itself is changed, never from an address.
+        if not doc.exists or any(fields.get(k) for k in ("province", "city", "location")):
+            update_payload.update(listing_shape.resolve_place_ids(client, fields, existing_data))
+        elif fields.get("developer_name"):
+            update_payload.update(listing_shape.resolve_place_ids(client, {"developer_name": fields["developer_name"]}, existing_data))
+        if fields.get("currency") and str(fields["currency"]).upper() in listing_shape.WEBSITE_CURRENCIES:
+            update_payload["currency"] = str(fields["currency"]).upper()
 
         # Property Type
         if "property_type" in fields:
-            update_payload["propertyType"] = fields.get("property_type")
+            # Websites read a lowercase type; the bots keep showing the staff's label.
+            update_payload["propertyType"] = listing_shape.website_type(fields.get("property_type")) or fields.get("property_type")
+            update_payload["propertyTypeLabel"] = fields.get("property_type")
 
         # Pricing
         if fields.get("price_display"):
@@ -1566,7 +1587,7 @@ def save_or_update_property_firestore(
 
         # Description
         if "description" in fields:
-            update_payload["description"] = fields.get("description")
+            update_payload["description"] = listing_shape.merge_localized(existing_data.get("description"), fields.get("description"))
 
         # Import provenance (source URL, guessed fields) — Firestore is the only store now
         if isinstance(fields.get("raw_metadata"), dict) and fields["raw_metadata"]:
@@ -1620,6 +1641,9 @@ def save_or_update_property_firestore(
                     update_payload["images"] = final_images
             elif final_images and not existing_data.get("coverImage"):
                 update_payload["coverImage"] = final_images[0]
+
+        if not doc.exists:
+            listing_shape.apply_new_listing_shape(client, update_payload, fields, clean_id)
 
         from app.services.data_sanitizer import sanitize_db_record
         sanitized_payload = sanitize_db_record(update_payload)

@@ -5,6 +5,7 @@ Fake in-memory Firestore only. No live Firestore.
 """
 
 from __future__ import annotations
+from tests.fake_firestore import plain_name
 
 import copy
 import uuid
@@ -224,10 +225,10 @@ def test_minimal_and_full_create_land_in_firestore(world):
     assert payload["audit"] != "disabled"
 
     doc = _fs_doc(world["admin_fs"], pid)
-    assert doc["name"] == "Minimal Villa"
+    assert plain_name(doc["name"]) == "Minimal Villa"
     assert doc["priceFrom"] == 2500000
     assert doc["isActive"] is True
-    assert doc["propertyType"] == "Villa"
+    assert doc["propertyType"] == "villa" and doc["propertyTypeLabel"] == "Villa"  # website value + bot label
 
     full_id = "full-laguna-villa"
     full = world["client"].post(
@@ -249,7 +250,7 @@ def test_minimal_and_full_create_land_in_firestore(world):
     )
     assert full.status_code == 201, full.text
     full_doc = _fs_doc(world["admin_fs"], full_id)
-    assert full_doc["name"] == "Laguna Full Villa"
+    assert plain_name(full_doc["name"]) == "Laguna Full Villa"
     assert full_doc["priceTo"] == 6000000
 
 
@@ -279,7 +280,7 @@ def test_duplicate_create_is_409_and_leaves_original(world):
     assert "already exists" in again.json()["detail"].lower()
     doc = _fs_doc(world["admin_fs"], "dup-villa")
     assert doc["priceFrom"] == 1110000
-    assert doc["name"] == "Minimal Villa"
+    assert plain_name(doc["name"]) == "Minimal Villa"
 
 
 def test_firestore_failure_returns_502_and_writes_nothing(world, monkeypatch):
@@ -476,7 +477,7 @@ def test_update_existing_listing_changes_only_given_fields(world):
     assert res.status_code == 200, res.text
     body = res.json()
     assert body["firestore"] is True
-    assert _fs_doc(world["admin_fs"], "fs-only")["name"] == "Firestore Only"
+    assert plain_name(_fs_doc(world["admin_fs"], "fs-only")["name"]) == "Firestore Only"
     assert _fs_doc(world["admin_fs"], "fs-only")["priceFrom"] == 6400000
 
 

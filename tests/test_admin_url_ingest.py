@@ -3,6 +3,7 @@ Admin URL ingest. Fake HTTP and in-memory stores only — no network.
 """
 
 from __future__ import annotations
+from tests.fake_firestore import plain_name
 
 import copy
 import json
@@ -432,7 +433,7 @@ def test_chat_edits_confirm_and_guesses(world, monkeypatch):
     assert "provided by admin: " in saved["text"]
     row = fsh.prop_one(world["fs"], "layan-palm-villa")
     assert row.price_numeric_min == 12000000
-    assert world["fs"].get("projects", "layan-palm-villa")["name"] == "Layan Palm Villa"
+    assert plain_name(world["fs"].get("projects", "layan-palm-villa")["name"]) == "Layan Palm Villa"
 
     guess = _chat(world, "add https://example.com/guess")
     assert "Guess - " in guess["text"]
