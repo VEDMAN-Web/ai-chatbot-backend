@@ -676,6 +676,8 @@ def execute_batch_property_operation(
     confirmed_by_staff must be True only when invoked after an explicit pending-action
     confirmation (pending action id + confirming user). Chat proposals must not call this.
     """
+    from app.core.listing_writes import ensure_listing_writes_enabled
+    ensure_listing_writes_enabled()
     action_clean = action_type.lower().strip()
     if action_clean not in ["delete", "remove", "update", "create", "write"]:
         raise BatchOperationError(f"Invalid action_type '{action_type}'. Must be 'delete', 'update', or 'create'.")
@@ -1220,6 +1222,8 @@ def undo_batch_property_operation(
     one by one. A create, or a store the record did not previously occupy, is deleted.
     Success is reported only after a re-read matches the snapshot.
     """
+    from app.core.listing_writes import ensure_listing_writes_enabled
+    ensure_listing_writes_enabled()
     fs_client = get_snapshot_client()
     if not fs_client:
         raise BatchOperationError("Firestore client is not available. Cannot execute undo.")

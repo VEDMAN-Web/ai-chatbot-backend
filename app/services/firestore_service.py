@@ -1139,6 +1139,8 @@ def write_admin_property_document(
     Write a project document. A create (missing doc, or merge=False) is refused
     when the payload has no name/title, so a nameless stub is never stored.
     """
+    from app.core.listing_writes import ensure_listing_writes_enabled
+    ensure_listing_writes_enabled()
     client = get_firestore_client(target=target)
     if not client:
         logger.warning(f"Firestore client ({target}) not available for property write.")
@@ -1494,6 +1496,8 @@ def save_or_update_property_firestore(
     Supports updating core property information, pricing, bedrooms, and property images.
     Routes to admin or user Firestore client based on target (defaults to admin).
     """
+    from app.core.listing_writes import ensure_listing_writes_enabled
+    ensure_listing_writes_enabled()
     client = get_firestore_client(target=target)
     if not client:
         logger.warning(f"Firestore client ({target}) not available for property update.")
@@ -1640,6 +1644,8 @@ def delete_property_firestore(
     or permanently removes the document if hard_delete is True.
     Routes to admin or user Firestore client based on target (defaults to admin).
     """
+    from app.core.listing_writes import ensure_listing_writes_enabled
+    ensure_listing_writes_enabled()
     client = get_firestore_client(target=target)
     if not client:
         logger.warning(f"Firestore client ({target}) not available for property deletion.")

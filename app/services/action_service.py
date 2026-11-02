@@ -3,6 +3,7 @@ import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, Optional, List, Tuple
 from fastapi import HTTPException, status
+from app.core.listing_writes import LISTING_WRITE_TOOLS, LISTING_WRITES_DISABLED_MSG, listing_writes_enabled
 import logging
 
 from app.core.config import settings
@@ -819,6 +820,10 @@ def confirm_and_execute_action(
                 "previous_pending_action_id": str(action.id),
                 "action_status": "awaiting_confirmation" if new_action else "superseded",
             }
+
+    # 3b. Read-only switch: refuse listing changes before anything is claimed or written.
+    if action.tool_name in LISTING_WRITE_TOOLS and not listing_writes_enabled():
+        raise HTTPException(status_code=status.HTTP_423_LOCKED, detail=LISTING_WRITES_DISABLED_MSG)
 
     # 4. Persist confirm audit BEFORE any data mutation. If audit cannot be written,
     # stop here so nothing changes.

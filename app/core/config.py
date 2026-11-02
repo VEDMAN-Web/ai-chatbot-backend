@@ -267,6 +267,9 @@ class Settings(BaseSettings):
     ENABLE_API_DOCS: bool = False
     # Honour X-Forwarded-For. Railway sits behind a proxy, so set this true there.
     TRUST_PROXY_HEADERS: bool = False
+    # Global safety switch for listing changes (create/update/archive/bulk/undo/images/ingest-approve).
+    # Set to false on a server to make listings read-only; logins, logs and chat keep working.
+    ADMIN_LISTING_WRITES_ENABLED: bool = True
     # Dev/test only. Ignored when the runtime environment is production.
     EXPOSE_RESET_TOKEN_IN_RESPONSE: bool = False
 
@@ -583,7 +586,12 @@ def get_admin_config_status() -> Dict[str, Any]:
         "admin_chat_logging": admin_chat_on,
         "chat_log_retention_days": retention,
         "chat_log_mask_pii": mask_pii,
+        "listing_writes_enabled": bool(getattr(settings, "ADMIN_LISTING_WRITES_ENABLED", True)),
         "flags": {
+            "ADMIN_LISTING_WRITES_ENABLED": {
+                "value": bool(getattr(settings, "ADMIN_LISTING_WRITES_ENABLED", True)),
+                "what_it_does": "When false, every listing change is refused (read-only mode).",
+            },
             "ENABLE_AUDIT_LOGGING": {
                 "value": audit_on,
                 "what_it_does": "Writes who/what/when for admin actions to the audit log.",
