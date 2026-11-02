@@ -515,6 +515,8 @@ def _save_to_postgresql_and_firestore(payload: Dict[str, Any], verified_images: 
     The Postgres database was removed; the admin store is where every other listing write goes.
     On staging the admin store is the test project, so ingestion never writes to production.
     """
+    from app.core.listing_writes import ensure_listing_writes_enabled
+    ensure_listing_writes_enabled()
     import app.services.firestore_service as fs
 
     pid = payload["property_id"]

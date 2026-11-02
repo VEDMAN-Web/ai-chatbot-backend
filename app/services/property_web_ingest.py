@@ -1862,6 +1862,10 @@ def _edit_report(draft: Dict[str, Any], changed: List[str], rejected: List[Dict[
 def _save_one(db: Any, staff: Any, action: Any) -> str:
     from app.services.action_service import ACTION_STATUS_EXECUTED, save_ingested_listing
 
+    from app.core.listing_writes import LISTING_WRITES_DISABLED_MSG, listing_writes_enabled
+    if not listing_writes_enabled():
+        return LISTING_WRITES_DISABLED_MSG
+
     draft = dict(action.action_payload or {})
     # "confirm" is the admin's answer to a preview that already showed the outside-Thailand
     # warning and the guessed values, so it counts as "continue anyway" and "use the guesses".
