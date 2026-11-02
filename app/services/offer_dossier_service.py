@@ -8,6 +8,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import List, Dict, Any, Optional
 
+from app.services.listing_shape import type_label
+
 import requests
 from PIL import Image, ImageDraw
 from reportlab.pdfgen import canvas
@@ -102,7 +104,7 @@ def normalize_dossier_property(obj: Any) -> Any:
             property_id=safe_text(obj.get("property_id") or obj.get("id") or doc.get("id"), ""),
             property_name=safe_text(name, "Property"),
             project_name=safe_text(obj.get("project_name") or doc.get("projectName"), ""),
-            property_type=safe_text(canon.get("property_type") or doc.get("propertyType"), "Villa"),
+            property_type=safe_text(canon.get("property_type") or type_label(doc), "Villa"),
             status=safe_text(canon.get("status"), ""),
             province=safe_text(canon.get("province") or canon.get("location"), ""),
             district=safe_text(canon.get("district"), ""),

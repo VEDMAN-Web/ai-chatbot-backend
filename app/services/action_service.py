@@ -94,6 +94,29 @@ def _as_number(value: Any) -> Optional[float]:
     return None
 
 
+def _unknown_city_problem(fields: Dict[str, Any]) -> Optional[str]:
+    """A new listing must be in a city the websites know (its page would 404 otherwise)."""
+    try:
+        from app.services.firestore_service import get_firestore_client
+        from app.services.listing_shape import city_problem
+        client = get_firestore_client(target="admin")
+        return city_problem(client, fields) if client else None
+    except Exception as exc:  # a lookup problem never blocks saving
+        logger.warning("City check skipped: %s", exc)
+        return None
+
+
+def _price_text_number(text: Any) -> Optional[float]:
+    if _is_blank(text):
+        return None
+    try:
+        from app.services.admin_property_fields import parse_price_amount
+        value = parse_price_amount(text)
+    except Exception:
+        return None
+    return value if value and value > 0 else None
+
+
 def validate_listing_values(
     fields: Optional[Dict[str, Any]],
     *,
@@ -145,6 +168,11 @@ def validate_listing_values(
     loc = src.get("province") if not _is_blank(src.get("province")) else src.get("location")
     if is_create and _is_blank(loc):
         errors["location"] = "province or location is required"
+    elif is_create or any(not _is_blank(src.get(k)) for k in ("province", "city", "location")):
+        # New listings, and updates that move a listing, must use a city the websites know.
+        problem = _unknown_city_problem(src)
+        if problem:
+            errors["location"] = problem
 
     price_min_raw = src.get("price_numeric_min", src.get("price_from"))
     price_max_raw = src.get("price_numeric_max", src.get("price_to"))
@@ -169,8 +197,10 @@ def validate_listing_values(
 
     price_display = src.get("price_display") if not _is_blank(src.get("price_display")) else src.get("price")
     has_positive_min = price_min is not None and price_min > 0 and "price_numeric_min" not in errors
-    if is_create and not has_positive_min and _is_blank(price_display):
-        errors["price"] = "price_numeric_min (> 0) or price_display is required"
+    if is_create and not has_positive_min and not _price_text_number(price_display):
+        # The websites show the number ("from 0" otherwise), so a new listing needs a price number,
+        # given as a number or inside the price text ("12,000,000 THB", "12M").
+        errors["price"] = "a price number is required for a new listing (e.g. 5,000,000 THB)"
 
     status_val = src.get("status")
     if is_create and _is_blank(status_val):
@@ -1710,8 +1740,13 @@ def _summary_fs(raw: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         "status": raw.get("status"),
         "isActive": raw.get("isActive"),
         "websites": list(websites) if isinstance(websites, list) else websites,
-        "property_type": raw.get("propertyType") or raw.get("property_type"),
+        "property_type": _stored_type_label(raw),
     }
+
+
+def _stored_type_label(raw: Dict[str, Any]) -> Any:
+    from app.services.listing_shape import type_label
+    return type_label(raw) or raw.get("property_type")
 
 
 def _audit_rest(
@@ -2147,7 +2182,9 @@ def save_ingested_listing(
     except HTTPException as exc:
         detail = exc.detail
         if isinstance(detail, dict):
-            detail = detail.get("message") or str(detail)
+            reasons = detail.get("fields") if isinstance(detail.get("fields"), dict) else {}
+            detail = (detail.get("message") or str(detail)) + (
+                ": " + "; ".join(str(v) for v in reasons.values()) if reasons else "")
         return {
             "saved": False,
             "message": f"{detail} Nothing was saved.",

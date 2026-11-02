@@ -856,6 +856,10 @@ def execute_batch_property_operation(
             doc_payload["updatedAt"] = now.isoformat()
             doc_payload["_createdBy"] = staff_user.email or staff_user.user_id
             doc_payload["_batchOperationId"] = operation_id
+            # Same website shape as a listing created in chat (ids, {pl,en} text, coordinates, type).
+            from app.services import listing_shape
+            doc_payload.update(listing_shape.resolve_place_ids(fs_client, doc_payload, {}))
+            listing_shape.apply_new_listing_shape(fs_client, doc_payload, dict(doc_payload), new_id)
 
             # Instantly write to database
             from app.services.data_sanitizer import sanitize_db_record

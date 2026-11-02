@@ -5,6 +5,8 @@ Real accounts and tokens, the real POST /api/v1/admin/chat, and the in-memory Fi
 snapshots. The language model is not available here (dummy key), so these cases show what the backend does with each command
 before and without the model; they do not show how the live model words its answers.
 """
+from tests.fake_firestore import plain_name
+from app.services.listing_shape import type_label
 import uuid
 from types import SimpleNamespace
 
@@ -65,10 +67,10 @@ def _row(pid):
     status = raw.get("status")
     public = raw.get("isActive") is not False and str(status).lower() != "archived"
     return SimpleNamespace(
-        name=raw.get("name") or raw.get("property_name"), status=status, is_public=public,
+        name=plain_name(raw.get("name")) or raw.get("property_name"), status=status, is_public=public,
         price=float(raw.get("priceFrom") or raw.get("price_numeric_min") or 0),
         websites=list(raw.get("websites") or []), province=raw.get("province"),
-        type=raw.get("propertyType") or raw.get("property_type"),
+        type=type_label(raw) or raw.get("property_type"),
     )
 
 
@@ -175,7 +177,7 @@ def test_creating_the_same_listing_again_is_refused(people):
     again = chat.say(msg)
     assert not again.pending_action_id and "already exists" in again.text
     same_name = [d.to_dict() for d in _FS.collection("projects").stream()
-                 if (d.to_dict().get("name") or d.to_dict().get("property_name")) == f"Twice {RUN}"]
+                 if (plain_name(d.to_dict().get("name")) or d.to_dict().get("property_name")) == f"Twice {RUN}"]
     assert len(same_name) == 1
 
 
