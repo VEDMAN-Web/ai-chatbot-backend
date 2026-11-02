@@ -1544,7 +1544,7 @@ def save_or_update_property_firestore(
             update_payload["cityId"] = str(fields["province"]).lower().replace(" ", "-")
 
         # Property Type
-        if fields.get("property_type"):
+        if "property_type" in fields:
             update_payload["propertyType"] = fields.get("property_type")
 
         # Pricing
@@ -1552,15 +1552,16 @@ def save_or_update_property_firestore(
             update_payload["priceDisplay"] = fields.get("price_display")
         if fields.get("price_numeric_min") is not None:
             update_payload["priceFrom"] = float(fields["price_numeric_min"])
-        if fields.get("price_numeric_max") is not None:
-            update_payload["priceTo"] = float(fields["price_numeric_max"])
+        if "price_numeric_max" in fields:
+            val = fields.get("price_numeric_max")
+            update_payload["priceTo"] = float(val) if val is not None else 0.0
 
         # Status
         if fields.get("status"):
             update_payload["status"] = fields.get("status")
 
         # Description
-        if fields.get("description"):
+        if "description" in fields:
             update_payload["description"] = fields.get("description")
 
         # Import provenance (source URL, guessed fields) — Firestore is the only store now
@@ -1616,7 +1617,9 @@ def save_or_update_property_firestore(
             elif final_images and not existing_data.get("coverImage"):
                 update_payload["coverImage"] = final_images[0]
 
-        doc_ref.set(update_payload, merge=True)
+        from app.services.data_sanitizer import sanitize_db_record
+        sanitized_payload = sanitize_db_record(update_payload)
+        doc_ref.set(sanitized_payload, merge=True)
         logger.info(f"Successfully saved/updated property '{clean_id}' in Firestore 'projects'.")
         return True
 
