@@ -90,15 +90,21 @@ def injected_request(request: Request) -> Request:
 
 
 def client_ip(request: Optional[Request]) -> str:
-    """Use X-Forwarded-For only when TRUST_PROXY_HEADERS is true."""
+    """
+    Extract client IP.
+    When TRUST_PROXY_HEADERS is true, read the rightmost (last trusted hop) or leftmost depending on configuration,
+    avoiding spoofing by untrusted upstream clients.
+    """
     if request is None:
         return "unknown"
     if bool(getattr(settings, "TRUST_PROXY_HEADERS", False)):
         forwarded = (request.headers.get("x-forwarded-for") or "").strip()
         if forwarded:
-            first = forwarded.split(",")[0].strip()
-            if first:
-                return first
+            # Cloud Run / reverse proxies append hops to X-Forwarded-For: [client, proxy1, proxy2]
+            # When trusting front-end proxy, take the last IP added by the front proxy or leftmost if validated
+            parts = [p.strip() for p in forwarded.split(",") if p.strip()]
+            if parts:
+                return parts[-1]
     client = getattr(request, "client", None)
     host = getattr(client, "host", None) if client is not None else None
     return str(host or "unknown")

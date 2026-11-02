@@ -373,16 +373,16 @@ def get_branding(site_origin: Optional[str] = Query(None, description="Optional 
 @app.get("/api/v1/properties", tags=["Properties"])
 def list_properties(
     request: Request,
-    location: Optional[str] = Query(None, description="Location search query (e.g. Phuket, Bang Tao, Samui)"),
-    property_type: Optional[str] = Query(None, description="Villa or Condominium"),
+    location: Optional[str] = Query(None, max_length=100, description="Location search query (e.g. Phuket, Bang Tao, Samui)"),
+    property_type: Optional[str] = Query(None, max_length=50, description="Villa or Condominium"),
     min_price: Optional[float] = Query(None, ge=0),
     max_price: Optional[float] = Query(None, ge=0),
     bedrooms: Optional[int] = Query(None, ge=0),
     has_pool: Optional[bool] = Query(None),
     beach_access: Optional[bool] = Query(None),
-    status: Optional[str] = Query(None),
-    websites: Optional[str] = Query(None, description="Comma-separated website domains or single domain"),
-    site_origin: Optional[str] = Query(None, description="Tenant site origin domain"),
+    status: Optional[str] = Query(None, max_length=50),
+    websites: Optional[str] = Query(None, max_length=200, description="Comma-separated website domains or single domain"),
+    site_origin: Optional[str] = Query(None, max_length=200, description="Tenant site origin domain"),
     limit: Optional[int] = Query(50, ge=1, le=500, description="Max properties to return"),
     offset: Optional[int] = Query(0, ge=0, description="Pagination offset"),
     db: Any = Depends(get_user_db)

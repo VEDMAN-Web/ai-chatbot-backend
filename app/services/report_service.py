@@ -1151,15 +1151,15 @@ def _build_lead_excel_report(leads_data: List[Dict[str, Any]], title: str) -> by
 
     for l in leads_data:
         ws.append([
-            l.get("lead_id", ""),
-            l.get("contact_name", ""),
-            l.get("contact_email", ""),
-            l.get("contact_phone", ""),
-            l.get("preferred_location", ""),
-            l.get("budget", ""),
-            l.get("lead_score", ""),
-            l.get("status", ""),
-            l.get("notes", ""),
+            _sanitize_csv_val(l.get("lead_id", "")),
+            _sanitize_csv_val(l.get("contact_name", "")),
+            _sanitize_csv_val(l.get("contact_email", "")),
+            _sanitize_csv_val(l.get("contact_phone", "")),
+            _sanitize_csv_val(l.get("preferred_location", "")),
+            _sanitize_csv_val(l.get("budget", "")),
+            _sanitize_csv_val(l.get("lead_score", "")),
+            _sanitize_csv_val(l.get("status", "")),
+            _sanitize_csv_val(l.get("notes", "")),
             "possible test entry" if l.get("possible_test_entry") else "",
         ])
 
@@ -1202,6 +1202,16 @@ def _build_lead_docx_report(leads_data: List[Dict[str, Any]], title: str) -> byt
     return buf.getvalue()
 
 
+def _sanitize_csv_val(val: Any) -> Any:
+    """Neutralize spreadsheet formula injection (=, +, -, @, tab, CR)."""
+    if val is None:
+        return ""
+    s = str(val)
+    if s and s[0] in ("=", "+", "-", "@", "\t", "\r"):
+        return f"'{s}"
+    return s
+
+
 def _build_lead_csv_report(leads_data: List[Dict[str, Any]]) -> bytes:
     output = io.StringIO()
     writer = csv.writer(output)
@@ -1211,15 +1221,15 @@ def _build_lead_csv_report(leads_data: List[Dict[str, Any]]) -> bytes:
     ])
     for l in leads_data:
         writer.writerow([
-            l.get("lead_id", ""),
-            l.get("contact_name", ""),
-            l.get("contact_email", ""),
-            l.get("contact_phone", ""),
-            l.get("preferred_location", ""),
-            l.get("budget", ""),
-            l.get("lead_score", ""),
-            l.get("status", ""),
-            l.get("notes", ""),
+            _sanitize_csv_val(l.get("lead_id", "")),
+            _sanitize_csv_val(l.get("contact_name", "")),
+            _sanitize_csv_val(l.get("contact_email", "")),
+            _sanitize_csv_val(l.get("contact_phone", "")),
+            _sanitize_csv_val(l.get("preferred_location", "")),
+            _sanitize_csv_val(l.get("budget", "")),
+            _sanitize_csv_val(l.get("lead_score", "")),
+            _sanitize_csv_val(l.get("status", "")),
+            _sanitize_csv_val(l.get("notes", "")),
             "possible test entry" if l.get("possible_test_entry") else "",
         ])
     return output.getvalue().encode("utf-8")
@@ -1347,20 +1357,30 @@ def generate_report(
 
         leads: List[Any] = []
         capped = False
+        allowed_staff_sites = list(websites or [])
         if lead_ids:
             clean_lids = [str(lid).strip() for lid in lead_ids if lid]
             leads = leads_read_repo.query_leads(
-                db, ids=clean_lids, limit=LEADS_REPORT_CAP, order="newest"
+                db,
+                ids=clean_lids,
+                allowed_sites=allowed_staff_sites if allowed_staff_sites else None,
+                limit=LEADS_REPORT_CAP,
+                order="newest"
             )
             period_subtitle = f"selected leads ({len(leads)})"
         else:
             window_start = None
             if not all_time and period_days:
                 window_start = now - timedelta(days=period_days)
-            total_matching = leads_read_repo.count_leads(db, window_start=window_start)
+            total_matching = leads_read_repo.count_leads(
+                db,
+                window_start=window_start,
+                allowed_sites=allowed_staff_sites if allowed_staff_sites else None,
+            )
             leads = leads_read_repo.query_leads(
                 db,
                 window_start=window_start,
+                allowed_sites=allowed_staff_sites if allowed_staff_sites else None,
                 limit=LEADS_REPORT_CAP,
                 order="newest",
             )
@@ -1372,7 +1392,11 @@ def generate_report(
             if not leads and not all_time and period_days:
                 wider = 30 if period_days < 30 else (90 if period_days < 90 else 180)
                 w_start = now - timedelta(days=wider)
-                wider_count = leads_read_repo.count_leads(db, window_start=w_start)
+                wider_count = leads_read_repo.count_leads(
+                    db,
+                    window_start=w_start,
+                    allowed_sites=allowed_staff_sites if allowed_staff_sites else None,
+                )
                 most_recent = leads_read_repo.most_recent_lead(db)
                 recent_d = None
                 if most_recent and getattr(most_recent, "created_at", None):

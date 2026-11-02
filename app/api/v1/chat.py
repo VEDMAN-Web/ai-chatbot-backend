@@ -444,7 +444,8 @@ def get_chat_history(
     conversation = get_or_create_conversation(
         db=db,
         session_id=session_id,
-        agent_type="public"
+        agent_type="public",
+        create_if_missing=False
     )
     raw_history = list(conversation.message_history or [])
     enriched_history = []

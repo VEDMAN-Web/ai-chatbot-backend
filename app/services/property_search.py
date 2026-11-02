@@ -311,8 +311,8 @@ def search_properties_safe(db: Any, filters: PropertyFilterParams, target: str =
     return filter_properties(filters, target)[filters.offset: filters.offset + filters.limit]
 
 
-def get_property_by_id(db: Any, property_id: str) -> Optional[Any]:
-    """Retrieve full public record for a specific Property ID, checking live Cloud Firestore first."""
+def get_property_by_id(db: Any, property_id: str, staff: bool = False) -> Optional[Any]:
+    """Retrieve full record for a specific Property ID, checking live Cloud Firestore first."""
     if not property_id or not isinstance(property_id, str):
         return None
     clean_id = property_id.strip()
@@ -329,7 +329,7 @@ def get_property_by_id(db: Any, property_id: str) -> Optional[Any]:
 
     return None
 
-def get_property_by_name(db: Any, name_query: str) -> Optional[Any]:
+def get_property_by_name(db: Any, name_query: str, staff: bool = False) -> Optional[Any]:
     """Fuzzy lookup property by name, checking live Cloud Firestore first."""
     if not name_query or not isinstance(name_query, str):
         return None

@@ -5741,12 +5741,15 @@ def _execute_admin_tool_uncached(
 
         # A score threshold means "best leads first" (high-intent asks) even for all-time requests
         order = "score" if min_sc > 0 else ("newest" if (all_time or days == 0) else "score")
+        # Enforce staff site scope (F-05)
+        allowed_staff_sites = list(getattr(staff_user, "allowed_websites", None) or [])
         leads = leads_read_repo.query_leads(
             db,
             window_start=window_start,
             status=st,
             min_score=min_sc,
             site=site_filter,
+            allowed_sites=allowed_staff_sites if allowed_staff_sites else None,
             limit=max(limit, 50),
             order=order,
         )
@@ -5756,6 +5759,7 @@ def _execute_admin_tool_uncached(
             status=st,
             min_score=min_sc,
             site=site_filter,
+            allowed_sites=allowed_staff_sites if allowed_staff_sites else None,
         )
         leads = leads[:limit]
 

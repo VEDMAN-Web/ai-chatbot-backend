@@ -1986,7 +1986,8 @@ def update_conversation_site_origin_firestore(conversation, site_origin: str) ->
 def get_or_create_conversation_firestore(
     session_id: str,
     site_origin: Optional[str] = None,
-    agent_type: str = "public"
+    agent_type: str = "public",
+    create_if_missing: bool = True
 ) -> FirestoreConversation:
     """
     Retrieves or creates a conversation in Firestore `conversations`.
@@ -1994,6 +1995,8 @@ def get_or_create_conversation_firestore(
 
     Existing docs are rebound to the request site_origin so multi-site session
     reuse cannot keep a stale brand / advisor email.
+    If create_if_missing is False, returns an ephemeral in-memory conversation
+    without writing an empty stub to Firestore.
     """
     client = get_firestore_client(target="admin" if agent_type == "admin" else "user")
     clean_sid = session_id.strip() if session_id else "anonymous"
@@ -2042,6 +2045,9 @@ def get_or_create_conversation_firestore(
                 # Migrate to agent-scoped id
                 doc_ref.set(data, merge=True)
                 return FirestoreConversation(doc_id, data)
+
+        if not create_if_missing:
+            return FirestoreConversation(doc_id, empty)
 
         initial_data = dict(empty)
         doc_ref.set(initial_data)
