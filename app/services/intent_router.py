@@ -889,6 +889,11 @@ def detect_deterministic_intent(
     except Exception:
         pass
 
+    # If an out-of-market location is detected, route to search first rather than fuzzy matching Thai names
+    _f_chk = extract_search_filters_deterministic(msg_clean) or {}
+    if _f_chk.get("foreign_location"):
+        return IntentType.PROPERTY_SEARCH, {"foreign_location": _f_chk["foreign_location"], "raw_query": msg_clean}
+
     # A listing named anywhere in the message (typos allowed) decides the intent before any pattern guessing --
     # except card actions (PDF / email / tour / inquiry), which carry the name only to say WHICH listing.
     if len(msg_clean) >= 4 and not _is_card_action_message(msg_clean):
@@ -1121,6 +1126,22 @@ def detect_deterministic_intent(
             "raw_query": msg_clean
         }
 
+    clean_comp_msg = re.sub(r"(?i)\s*(?:side\s+by\s+side|side-by-side|for\s+me|please|together)\s*$", "", msg_clean).strip()
+    m_comp_named = re.search(r"(?i)^\s*compare\s+(?:properties\s+|listings\s+)?(.+?)\s+(?:and|with|to|vs|versus)\s+(.+?)$", clean_comp_msg)
+    if m_comp_named:
+        cand1, cand2 = m_comp_named.group(1).strip(), m_comp_named.group(2).strip()
+        stop_cands = {"the", "these", "those", "first", "second", "last", "them", "both"}
+        if cand1.lower() not in stop_cands and cand2.lower() not in stop_cands:
+            from app.services.property_name_index import match_property_name
+            m1 = match_property_name(cand1)
+            m2 = match_property_name(cand2)
+            id1 = (m1.confident.doc_id if m1.confident else None) or cand1.upper()
+            id2 = (m2.confident.doc_id if m2.confident else None) or cand2.upper()
+            return IntentType.PROPERTY_COMPARISON, {
+                "property_ids": [id1, id2],
+                "raw_query": msg_clean
+            }
+
     m_comp_explicit = re.search(r"\bcompare\s+(?:property\s+|listing\s+)?([a-z0-9\-]+)\s+(?:and|with|to|vs|versus)\s+(?:property\s+|listing\s+)?([a-z0-9\-]+)\b", msg_low)
     if m_comp_explicit and m_comp_explicit.group(1).lower() not in {"the", "these", "those", "first", "second", "last"}:
         return IntentType.PROPERTY_COMPARISON, {
@@ -1161,7 +1182,11 @@ def detect_deterministic_intent(
     prop_id_match = re.search(r"\b(?:property|listing)\s+(?:id\s*[:#]?\s*|#\s*)?([a-zA-Z0-9\-]+)|\b(prop-[a-zA-Z0-9\-]+)", msg_low)
     if prop_id_match and not any(k in msg_low for k in ["compare", "comparison", "เปรียบเทียบ"]):
         target_token = (prop_id_match.group(1) or prop_id_match.group(2)).strip().upper()
-        if target_token not in {"DETAILS", "PRICE", "AMENITIES", "LISTING", "PROPERTY", "THE", "A", "AN", "THIS", "THAT", "SPECIFICATIONS", "SPECS"}:
+        if target_token not in {
+            "DETAILS", "PRICE", "AMENITIES", "LISTING", "PROPERTY", "THE", "A", "AN", "THIS", "THAT",
+            "SPECIFICATIONS", "SPECS", "IN", "NEAR", "FOR", "AT", "WITH", "ON", "FROM", "UNDER",
+            "TYPE", "TYPES", "LISTINGS", "SEARCH", "FIND"
+        }:
             return IntentType.PROPERTY_DETAILS, {
                 "property_id": target_token,
                 "focus_question": msg_clean
@@ -1743,7 +1768,7 @@ def _extract_search_filters_deterministic_impl(message: str) -> Dict[str, Any]:
             ("greece", "Greece"), ("grecja", "Greece"),
             ("italy", "Italy"), ("włochy", "Italy"), ("wlochy", "Italy"),
             ("portugal", "Portugal"), ("portugalia", "Portugal"),
-            ("france", "France"), ("francja", "France"),
+            ("france", "France"), ("francja", "France"), ("paris", "France"), ("paryż", "France"), ("paryz", "France"),
             ("turkey", "Turkey"), ("turcja", "Turkey"),
             ("germany", "Germany"), ("niemcy", "Germany"),
             ("singapore", "Singapore"), ("australia", "Australia"), ("canada", "Canada"),

@@ -799,6 +799,20 @@ def execute_batch_property_operation(
                 for k, v in rec.items():
                     if k not in ["property_id", "doc_id", "id"] and v is not None:
                         update_fields[k] = v
+                # Map price aliases to priceFrom and priceDisplay
+                num_price = rec.get("price_numeric_min") if rec.get("price_numeric_min") is not None else (rec.get("price") or rec.get("price_thb"))
+                if num_price is not None:
+                    try:
+                        from app.services.admin_property_fields import parse_money
+                        p_val = parse_money(num_price)
+                        if p_val and p_val > 0:
+                            update_fields["priceFrom"] = float(p_val)
+                            update_fields["priceDisplay"] = f"{int(p_val):,} THB"
+                    except Exception:
+                        pass
+                if "name" in update_fields:
+                    from app.services import listing_shape
+                    update_fields["name"] = listing_shape.merge_localized(current_doc.get("name"), update_fields["name"])
 
                 update_fields["updatedAt"] = now.isoformat()
                 update_fields["_lastModifiedBy"] = staff_user.email or staff_user.user_id

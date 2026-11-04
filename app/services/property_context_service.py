@@ -328,7 +328,7 @@ def touch_discussed(
     ctx.recently_discussed_ids = ctx.recently_discussed_ids[:20]
     # Only rebuild first/second/... when given an explicit result batch (search/compare)
     ordered = [_normalize_id(p) for p in property_ids if _normalize_id(p)]
-    if refresh_ordinals and ordered:
+    if refresh_ordinals and len(ordered) >= 2:
         ctx.reference_map.update(_build_ordinal_map(ordered))
     return ctx
 

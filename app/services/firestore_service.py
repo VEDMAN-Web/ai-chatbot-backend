@@ -987,6 +987,14 @@ def get_property_by_id_from_firestore(
         if not record_visible_to(data, target=target, include_inactive=include_inactive):
             logger.info("Firestore lookup '%s' matched inactive/archived listing '%s'; not returned.", raw_query, doc_id)
             return None
+        if target == "user":
+            from app.core.tenant import allowed_countries_for_site
+            allowed_c = allowed_countries_for_site()
+            if allowed_c:
+                cid = str(data.get("countryId") or data.get("country") or "").lower()
+                if cid and cid not in [c.lower() for c in allowed_c]:
+                    logger.info("Firestore lookup '%s' outside allowed countries %s: '%s'", raw_query, allowed_c, cid)
+                    return None
         return globals()["normalize_firestore_project"](doc_id, data)
 
     # Never treat general city or country name as a single property!
@@ -1376,9 +1384,9 @@ def search_properties_firestore(
             is_condo_query = any(k in pt_clean for k in ["condo", "apart", "mieszkanie", "studio"])
             is_villa_query = (not is_condo_query) and (any(k in pt_clean for k in ["villa", "willa", "house"]) or bool(re.search(r"\bdom(?:y|u|em)?\b", pt_clean)))
             
-            if is_villa_query and "villa" not in p_type and "villa" not in p_name:
+            if is_villa_query and not any(k in p_type for k in ["villa", "willa", "house"]) and "villa" not in p_name:
                 continue
-            elif is_condo_query and "condo" not in p_type and "apart" not in p_type:
+            elif is_condo_query and not any(k in p_type for k in ["condo", "apart", "mieszkanie", "studio"]) and not any(k in p_name for k in ["condo", "apart"]):
                 continue
 
         # Bedroom filter — exclude unknown beds when any bedroom constraint is set
@@ -1588,6 +1596,37 @@ def save_or_update_property_firestore(
         # Description
         if "description" in fields:
             update_payload["description"] = listing_shape.merge_localized(existing_data.get("description"), fields.get("description"))
+
+        # Bedrooms, Bathrooms, Area
+        if "bedrooms" in fields or "bedrooms_min" in fields or "bedrooms_display" in fields:
+            raw_bed = fields.get("bedrooms") if fields.get("bedrooms") is not None else fields.get("bedrooms_min")
+            if raw_bed is not None:
+                try:
+                    num_bed = int(float(str(raw_bed).split("-")[0].strip()))
+                    update_payload["bedrooms"] = num_bed
+                    update_payload["bedroomsMin"] = num_bed
+                    update_payload["bedroomsMax"] = int(float(str(fields.get("bedrooms_max") or raw_bed).split("-")[-1].strip()))
+                except Exception:
+                    pass
+            b_disp = fields.get("bedrooms_display") or (str(raw_bed) if raw_bed is not None else None)
+            if b_disp:
+                update_payload["bedrooms_display"] = str(b_disp)
+                update_payload["bedroomsDisplay"] = str(b_disp)
+        if "bathrooms" in fields and fields["bathrooms"] is not None:
+            try:
+                update_payload["bathrooms"] = int(float(fields["bathrooms"]))
+            except Exception:
+                pass
+        if "area_sqm_min" in fields and fields["area_sqm_min"] is not None:
+            try:
+                update_payload["areaFrom"] = float(fields["area_sqm_min"])
+            except Exception:
+                pass
+        if "area_sqm_max" in fields and fields["area_sqm_max"] is not None:
+            try:
+                update_payload["areaTo"] = float(fields["area_sqm_max"])
+            except Exception:
+                pass
 
         # Import provenance (source URL, guessed fields) — Firestore is the only store now
         if isinstance(fields.get("raw_metadata"), dict) and fields["raw_metadata"]:

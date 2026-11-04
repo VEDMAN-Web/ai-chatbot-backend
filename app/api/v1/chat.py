@@ -418,6 +418,10 @@ def handle_public_chat(
             site_origin=req.site_origin,
         )
 
+        try:
+            append_conversation_turn(db, conversation, getattr(req, "message", "") or "", err_text)
+        except Exception:
+            pass
         return {
             "type": "text",
             "text": err_text,

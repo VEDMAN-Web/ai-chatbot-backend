@@ -69,9 +69,9 @@ CANONICAL_AMENITY_ALIASES: Dict[str, Tuple[str, ...]] = {
         "ochrona", "bezpečnosť", "охрана", "okhrana", "รปภ", "รักษาความปลอดภัย",
     ),
     "beach_access": (
-        "beach", "beach-access", "beach access", "beachfront", "beach-front",
-        "sea access", "plaz", "plaża", "plaza", "пляж", "plyazh",
-        "ชายหาด", "ใกล้ชายหาด", "ติดทะเล",
+        "beach-access", "beach access", "beachfront", "beach-front",
+        "direct beach access", "private beach", "sea access", "dostep do plazy", "dostęp do plaży",
+        "bezposrednio przy plazy", "ติดทะเล", "ทางลงหาด",
     ),
     "sea_view": (
         "sea-view", "sea view", "seaview", "ocean-view", "ocean view",

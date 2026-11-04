@@ -51,6 +51,33 @@ _DISTRICTS = {
     "bophut": ("Surat Thani", "Bophut", "Samui"),
     "chaweng": ("Surat Thani", "Chaweng", "Samui"),
     "lamai": ("Surat Thani", "Lamai", "Samui"),
+    "koh samui": ("Surat Thani", "Koh Samui", "Samui"),
+    "samui": ("Surat Thani", "Koh Samui", "Samui"),
+    "phaya thai": ("Bangkok", "Phaya Thai", "Bangkok"),
+    "phayathai": ("Bangkok", "Phaya Thai", "Bangkok"),
+    "phahol pradipat": ("Bangkok", "Phaya Thai", "Bangkok"),
+    "phaholyothin": ("Bangkok", "Phaya Thai", "Bangkok"),
+    "bangkok": ("Bangkok", "Bangkok", "Bangkok"),
+    "krung thep": ("Bangkok", "Bangkok", "Bangkok"),
+    "sukhumvit": ("Bangkok", "Sukhumvit", "Bangkok"),
+    "silom": ("Bangkok", "Silom", "Bangkok"),
+    "sathorn": ("Bangkok", "Sathorn", "Bangkok"),
+    "thonglor": ("Bangkok", "Thonglor", "Bangkok"),
+    "thong lo": ("Bangkok", "Thonglor", "Bangkok"),
+    "ekkamai": ("Bangkok", "Ekkamai", "Bangkok"),
+    "asok": ("Bangkok", "Asoke", "Bangkok"),
+    "asoke": ("Bangkok", "Asoke", "Bangkok"),
+    "ratchada": ("Bangkok", "Ratchada", "Bangkok"),
+    "chatuchak": ("Bangkok", "Chatuchak", "Bangkok"),
+    "bang na": ("Bangkok", "Bang Na", "Bangkok"),
+    "pattaya": ("Chonburi", "Pattaya", "Pattaya"),
+    "jomtien": ("Chonburi", "Jomtien", "Pattaya"),
+    "naklua": ("Chonburi", "Naklua", "Pattaya"),
+    "pratumnak": ("Chonburi", "Pratumnak", "Pattaya"),
+    "wongamat": ("Chonburi", "Wongamat", "Pattaya"),
+    "bang saray": ("Chonburi", "Bang Saray", "Pattaya"),
+    "hua hin": ("Prachuap Khiri Khan", "Hua Hin", "Hua Hin"),
+    "cha am": ("Phetchaburi", "Cha-am", "Hua Hin"),
 }
 _IMAGE_SKIP = (
     "logo", "icon", "pixel", "favicon", "sprite", "spacer", "tracking", "1x1",
@@ -296,7 +323,13 @@ def fetch_public_page(url: str, *, use_cache: bool = True) -> FetchedPage:
         raise IngestError("The site's robots.txt disallows that path, so I did not fetch it.")
 
     current = clean
-    headers = {"User-Agent": _USER_AGENT, "Accept": "text/html,application/json,application/xml"}
+    headers = {
+        "User-Agent": _USER_AGENT,
+        "Accept": "text/html,application/json,application/xml",
+        "Accept-Language": "th-TH,th;q=0.9,en-US;q=0.8,en;q=0.7",
+    }
+    if "fazwaz.com" in current.lower():
+        headers["Cookie"] = "currency=THB; fazwaz_currency=THB; preferred_currency=THB" 
     response: Optional[HttpResponse] = None
     for _hop in range(6):
         _check_url_policy(current)
@@ -632,8 +665,11 @@ def _district_hit(text: str) -> Optional[Tuple[str, Tuple[str, str, str]]]:
     return None
 
 
-def _location_scope(fields: Dict[str, Dict[str, Any]], main_text: str, title: str = "") -> str:
+def _location_scope(fields: Dict[str, Dict[str, Any]], main_text: str, title: str = "", url: str = "") -> str:
     parts = [title or ""]
+    if url:
+        clean_url = url.replace("-", " ").replace("/", " ").replace("_", " ")
+        parts.append(clean_url)
     for key in ("address", "location", "property_name"):
         value = (fields.get(key) or {}).get("value")
         if value:
@@ -702,9 +738,9 @@ def _admin_thai_location(draft: Dict[str, Any]) -> bool:
     return False
 
 
-def _apply_inferences(fields: Dict[str, Dict[str, Any]], page_text: str, main_text: str = "", title: str = "", allow_location: bool = True) -> None:
+def _apply_inferences(fields: Dict[str, Dict[str, Any]], page_text: str, main_text: str = "", title: str = "", url: str = "", allow_location: bool = True) -> None:
     if allow_location and "province" not in fields:
-        hit = _district_hit(_location_scope(fields, main_text, title))
+        hit = _district_hit(_location_scope(fields, main_text, title, url=url))
         if hit:
             key, (province, district, area) = hit
             fields["province"] = _prov(province, "inferred", "rule", reason=f"province taken from '{key}' in the address or page")
@@ -788,6 +824,18 @@ def _money_currency(text: str) -> Optional[str]:
         return "INR"
     if re.search(r"฿|\bTHB\b|\bbaht\b", blob, re.I):
         return "THB"
+    if re.search(r"\bSGD\b|S\$", blob, re.I):
+        return "SGD"
+    if re.search(r"\bAUD\b|A\$", blob, re.I):
+        return "AUD"
+    if re.search(r"\bHKD\b|HK\$", blob, re.I):
+        return "HKD"
+    if re.search(r"£|\bGBP\b", blob, re.I):
+        return "GBP"
+    if re.search(r"¥|\bCNY\b|\bRMB\b", blob, re.I):
+        return "CNY"
+    if re.search(r"\bMYR\b|\bRM\b", blob, re.I):
+        return "MYR"
     if "$" in blob or re.search(r"\bUSD\b", blob, re.I):
         return "USD"
     if re.search(r"€|\bEUR\b", blob, re.I):
@@ -804,7 +852,7 @@ def _foreign_price_needs_decision(fields: Dict[str, Dict[str, Any]]) -> None:
     if detected and detected != "THB":
         if "price_display" in fields:
             fields["price_display"]["needs_decision"] = True
-            fields["price_display"]["reason"] = "the page shows a non-THB price and no THB amount"
+            fields["price_display"]["reason"] = f"the page shows a {detected} price and no THB amount"
         fields.pop("price_numeric_min", None)
         fields.pop("price_numeric_max", None)
 
@@ -862,7 +910,13 @@ def _labeled_pairs(parser: _PageParser) -> Dict[str, Dict[str, Any]]:
 _NON_LISTING_LD_TYPES = (
     "Organization", "Corporation", "LocalBusiness", "WebSite", "WebPage", "BreadcrumbList",
     "SearchAction", "ImageObject", "Person", "ContactPoint", "SiteNavigationElement",
+    "RealEstateAgent", "RealEstateAgency", "Agent", "Broker", "TravelAgency",
 )
+
+_KNOWN_SITE_NAMES = {
+    "fazwaz", "fazwaz.com", "realestateindia", "real estate india", "99acres",
+    "magicbricks", "housing.com", "zameen", "dotproperty", "ddproperty", "hipflat",
+}
 
 
 def _json_blocks(parser: _PageParser) -> List[Dict[str, Any]]:
@@ -883,15 +937,16 @@ def _json_blocks(parser: _PageParser) -> List[Dict[str, Any]]:
             if isinstance(item, dict):
                 raw_kind = item.get("@type") or ""
                 kind = " ".join(str(k) for k in raw_kind) if isinstance(raw_kind, list) else str(raw_kind)
-                # The site's own company, page or breadcrumb data is not the listing:
+                # The site's own company, agency, page or breadcrumb data is not the listing:
                 # its name and head-office address would overwrite the property's.
-                if any(token in kind for token in _NON_LISTING_LD_TYPES) and not any(
-                    token in kind for token in ("RealEstate", "Residence", "Apartment", "House", "Accommodation")
-                ):
+                if any(token.lower() in kind.lower() for token in _NON_LISTING_LD_TYPES):
                     continue
-                if any(token in kind for token in ("RealEstate", "Product", "Residence", "Offer", "Apartment", "House", "Place")):
+                bname = str(item.get("name") or "").strip().lower()
+                if bname in _KNOWN_SITE_NAMES:
+                    continue
+                if any(token in kind for token in ("SingleFamilyResidence", "Apartment", "House", "Accommodation", "Product", "Place", "RealEstateListing", "Offer", "Residence")):
                     blocks.append(item)
-                elif "name" in item:
+                elif "name" in item and not any(token.lower() in kind.lower() for token in ("agent", "business", "org")):
                     blocks.append(item)
     for raw in (parser.next_data,):
         if not raw:
@@ -956,9 +1011,31 @@ _PRICE_VALUE = re.compile(
 )
 _SLUG_PRICE = re.compile(r"(\d+(?:\.\d+)?)[-_](lac|lakh|lacs|lakhs|cr|crore|crores|million|mn|mil)\b", re.I)
 _SITE_SUFFIX = re.compile(
-    r"\s*[\|\-–—]\s*(?:real\s*estate\s*india|realestateindia|99acres|magicbricks|zameen|housing\.com).*$",
+    r"\s*[\|\-–—]\s*(?:real\s*estate\s*india|realestateindia|99acres|magicbricks|zameen|housing\.com|fazwaz(?:\.com)?|dotproperty(?:\.co\.th)?|ddproperty|thailand-property|hipflat).*$",
     re.IGNORECASE,
 )
+
+
+def _extract_project_name(title: str, url: str = "") -> Optional[str]:
+    clean = re.sub(r"\s+", " ", title or "").strip()
+    clean = _SITE_SUFFIX.sub("", clean)
+    m = re.search(
+        r"(?i)\b(?:condo|apartment|villa|house|property|unit|studio|home|bedroom|bed)s?\b.*?\bat\s+(.+?)(?:\s+in\s+([A-Za-z\s,-]+?))?(?:,\s*thailand)?$",
+        clean,
+    )
+    if m and m.group(1):
+        cand = m.group(1).strip(" |-–—")
+        if cand.lower() not in _KNOWN_SITE_NAMES:
+            return cand
+
+    if url:
+        m_url = re.search(r"-at-([a-z0-9-]+?)-in-([a-z0-9-]+?)(?:-u\d+)?(?:/|\.html)?$", url)
+        if m_url and m_url.group(1):
+            raw_slug = m_url.group(1)
+            words = raw_slug.split("-")
+            title_slug = " ".join(w.capitalize() for w in words)
+            return title_slug
+    return None
 
 
 def _clean_listing_name(text: str) -> str:
@@ -966,7 +1043,13 @@ def _clean_listing_name(text: str) -> str:
     name = _SITE_SUFFIX.sub("", name)
     name = re.sub(r"\s*\((?:[A-Za-z]{0,8}\d{4,}|listing\s*id[^)]*)\)", "", name, flags=re.I)
     name = re.sub(r"\s*listing\s*id\s*[:#-]?\s*[A-Za-z0-9-]+", "", name, flags=re.I)
-    return name.strip(" |-–—")
+    cleaned = name.strip(" |-–—")
+    if cleaned.lower() in _KNOWN_SITE_NAMES:
+        return ""
+    proj = _extract_project_name(cleaned)
+    if proj:
+        return proj
+    return cleaned
 
 
 def _single_label_line(line: str) -> Optional[Tuple[str, str]]:
@@ -1006,10 +1089,16 @@ def _price_phrase(main_text: str, url: str) -> Optional[Tuple[str, Optional[str]
 
 def _apply_visible_fallbacks(fields: Dict[str, Dict[str, Any]], parser: _PageParser, page: FetchedPage) -> None:
     """Fill gaps after JSON-LD, Open Graph and table cells. Does not overwrite them."""
-    if "property_name" not in fields:
-        name = _clean_listing_name(parser.h1) or _clean_listing_name(parser.title)
+    current_name = str((fields.get("property_name") or {}).get("value") or "").strip()
+    if not current_name or current_name.lower() in _KNOWN_SITE_NAMES:
+        name = (
+            _clean_listing_name(parser.h1)
+            or _clean_listing_name(parser.title)
+            or _extract_project_name(parser.title, page.final_url or page.url)
+            or _extract_project_name("", page.final_url or page.url)
+        )
         if name:
-            source = "h1" if parser.h1 else "title"
+            source = "h1" if parser.h1 else ("title" if parser.title else "url")
             fields["property_name"] = _prov(name, "found", "html", evidence=source)
     for line in parser.lines:
         pair = _single_label_line(line)
@@ -1070,7 +1159,7 @@ def extract_draft(page: FetchedPage) -> Dict[str, Any]:
     images = _images_from(parser, page.final_url)
     outside = _foreign_place(fields, parser.main_text(), page.final_url, parser.title or parser.h1)
     _normalize_type_status(fields)
-    _apply_inferences(fields, text, main_text=parser.main_text(), title=parser.title or parser.h1, allow_location=not outside)
+    _apply_inferences(fields, text, main_text=parser.main_text(), title=parser.title or parser.h1, url=page.final_url or page.url, allow_location=not outside)
     _foreign_price_needs_decision(fields)
     _apply_guesses(fields, text)
     _normalize_type_status(fields)
@@ -1333,10 +1422,15 @@ def render_preview(draft: Dict[str, Any], *, changed_only: Optional[List[str]] =
         lines.append(f"Images: {len(draft.get('images') or [])}")
         duplicate = draft.get("duplicate")
         if duplicate:
-            lines.append(
-                f"Duplicate: this matches existing '{duplicate.get('name')}' ({duplicate.get('property_id')}) in {duplicate.get('store')}. "
-                "Confirm will update that listing. Say 'create new' if you wanted a separate property; the same name cannot be created twice."
-            )
+            if draft.get("mode") == "update":
+                lines.append(
+                    f"Notice: updating existing '{duplicate.get('name')}' ({duplicate.get('property_id')}) in {duplicate.get('store')}."
+                )
+            else:
+                lines.append(
+                    f"Duplicate: a listing named '{duplicate.get('name')}' ({duplicate.get('property_id')}) exists in {duplicate.get('store')}. "
+                    f"Confirm will create a new listing. To update existing, say 'update {duplicate.get('property_id')}'."
+                )
         else:
             lines.append("Duplicate: none")
         lines.append("")
@@ -1582,7 +1676,10 @@ def apply_command(draft: Dict[str, Any], command: Dict[str, Any]) -> List[str]:
         number, display = _parse_admin_price(raw_price)
         current_raw = ((draft.get("provenance") or {}).get("price_numeric_min") or {}).get("value")
         current_price = parse_money(current_raw) if current_raw is not None else None
-        if number is not None:
+        prev_disp = (draft.get("provenance") or {}).get("price_display") or {}
+        prev_currency = str(((draft.get("provenance") or {}).get("currency") or {}).get("value") or "")
+        skip_sanity = bool(prev_disp.get("needs_decision")) or (_money_currency(prev_currency) not in {None, "THB"})
+        if number is not None and not skip_sanity:
             refusal = price_sanity_message(number, current_price)
             if refusal:
                 draft["price_warning"] = refusal
@@ -1721,7 +1818,7 @@ def apply_command(draft: Dict[str, Any], command: Dict[str, Any]) -> List[str]:
     return changed
 
 
-def find_duplicate(db: Any, url: str, name: str) -> Optional[Dict[str, str]]:
+def find_duplicate(db: Any, url: str, name: str, allowed_websites: Optional[List[str]] = None) -> Optional[Dict[str, str]]:
     from app.services.action_service import name_slug
 
     slug = name_slug(name)
@@ -1731,6 +1828,10 @@ def find_duplicate(db: Any, url: str, name: str) -> Optional[Dict[str, str]]:
         if client:
             for doc in client.collection("projects").stream():
                 data = doc.to_dict() or {}
+                if allowed_websites:
+                    doc_sites = data.get("websites") or []
+                    if not any(s in allowed_websites for s in doc_sites):
+                        continue
                 label = data.get("name") or data.get("title") or doc.id
                 if isinstance(label, dict):
                     label = label.get("en") or next(iter(label.values()), doc.id)
@@ -1759,15 +1860,16 @@ def draft_from_url(db: Any, staff: Any, url: str, websites: Optional[List[str]] 
     draft["confirm_via_chat_only"] = True
     draft["websites"] = _target_websites(staff, websites)
     name = str(((draft.get("provenance") or {}).get("property_name") or {}).get("value") or "")
-    duplicate = find_duplicate(db, page.url, name)
+    allowed = getattr(staff, "allowed_websites", None)
+    duplicate = find_duplicate(db, page.url, name, allowed_websites=allowed)
     if target_property_id:
         draft["property_id"] = target_property_id
         draft["mode"] = "update"
         draft["duplicate"] = {"property_id": target_property_id, "name": target_property_id, "store": "requested"}
     elif duplicate:
         draft["duplicate"] = duplicate
-        draft["mode"] = "update"
-        draft["property_id"] = duplicate["property_id"]
+        # An import defaults to create. A name match must NEVER turn an import into an update.
+        draft["mode"] = "create"
     return draft
 
 
@@ -1918,7 +2020,8 @@ def _save_one(db: Any, staff: Any, action: Any) -> str:
             "Say 'use your guesses' or 'accept status' before confirm. Nothing was saved.\n\n"
             + CONFIRM_FOOTER
         )
-    if draft.get("duplicate") and draft.get("mode") != "update":
+    # If mode is create, duplicate is a warning; we proceed with creating a new listing
+    if draft.get("duplicate") and draft.get("mode") != "update" and draft.get("duplicate", {}).get("source_url") == draft.get("source_url"):
         return "This URL matches an existing listing, so I did not create a second one.\n\n" + CONFIRM_FOOTER
     draft["fields"] = savable_fields(draft)
     draft["guessed_fields"] = [field for field in (draft.get("guesses_accepted") or []) if (draft.get("provenance") or {}).get(field, {}).get("status") == "guess"]
