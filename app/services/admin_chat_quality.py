@@ -337,17 +337,23 @@ def format_saved_listing_reply(
     store_line: str,
     undo: bool,
     audit_note: str = "",
+    mode: Optional[str] = None,
 ) -> str:
     name = (title or "The property").strip() or "The property"
-    shown_new = _display_price(new_value)
-    shown_old = _display_price(old_value)
-    if shown_new:
-        if shown_old:
-            sentence = f"Done. {name}'s price is now {shown_new} (was {shown_old})."
-        else:
-            sentence = f"Done. {name}'s price is now {shown_new}."
+    if (mode or "").lower() == "create":
+        sentence = f"Done. New listing {name} created."
     else:
-        sentence = f"Done. {name} is updated."
+        shown_new = _display_price(new_value)
+        shown_old = _display_price(old_value)
+        if shown_old in ("—", "-", ""):
+            shown_old = None
+        if shown_new:
+            if shown_old:
+                sentence = f"Done. {name}'s price is now {shown_new} (was {shown_old})."
+            else:
+                sentence = f"Done. {name}'s price is now {shown_new}."
+        else:
+            sentence = f"Done. {name} is updated."
     parts = [sentence]
     if (store_line or "").strip():
         parts.append(store_line.strip())

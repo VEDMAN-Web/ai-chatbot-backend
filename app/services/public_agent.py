@@ -1900,6 +1900,8 @@ def is_off_topic_query(message: str, lenient: bool = False) -> bool:
         "tax", "taxes", "podatki", "podatek", "cam fee", "sinking fund",
         # Services & platform
         "viewing", "tour", "prezentacja", "wizyta", "brochure", "broszura", "floor plan", "rzuty",
+        "phone", "contact", "email", "whatsapp", "call", "office", "reach", "telefon", "kontakt",
+        "numer telefonu", "adres email", "zadzwonic", "napisz",
         "prop-", "tajlandia", "varsovia", "aileen", "lead", "agent", "broker", "doradca",
         "off-market", "turnkey", "deweloper", "developer", "szukam", "znajdź", "znajdz",
         "visa", "wiza", "wizy", "elite visa", "ltr",
@@ -2315,6 +2317,11 @@ def _listing_fact_reply(focus_q: str, card: Any, language: str, conversation: An
     try:
         if not isinstance(card, dict):
             return None
+        # Strip property name from query so e.g. "The Title" does not trigger ownership regex
+        p_name = str(card.get("name") or card.get("property_name") or "").strip()
+        clean_focus_q = focus_q
+        if p_name and len(p_name) >= 3:
+            clean_focus_q = re.sub(re.escape(p_name), "", clean_focus_q, flags=re.I).strip()
         # A question that asks for several basic facts at once ("price, bedrooms and ownership") needs the
         # full fact block, not a single-topic answer that silently drops the other parts.
         _multi = sum(bool(re.search(pat, focus_q or "", re.I)) for pat in (
@@ -2326,7 +2333,7 @@ def _listing_fact_reply(focus_q: str, card: Any, language: str, conversation: An
         from app.core.tenant import resolve_tenant
         from app.services.listing_facts import answer_listing_fact
         advisor = resolve_tenant(getattr(conversation, "site_origin", None)).advisor_email
-        return answer_listing_fact(focus_q, card, language=language, advisor_email=advisor, ownership=(str(p_owner) if p_owner else None))
+        return answer_listing_fact(clean_focus_q, card, language=language, advisor_email=advisor, ownership=(str(p_owner) if p_owner else None))
     except Exception as exc:  # never let the helper break the chat: fall back to the existing answer
         logger.warning("listing fact answer failed: %s", exc)
         return None
@@ -4427,7 +4434,9 @@ class PublicAgentService:
         """Resolve property reference, then fetch CURRENT authorized facts (never chat memory)."""
         from app.services.conversation_controls import message_starts_new_search
         _explicit_id = str(args.get("property_id") or "").strip()
-        if message_starts_new_search(user_message) and not (_explicit_id and (re.fullmatch(r"prop-[a-z0-9\-]+", _explicit_id, re.I) or re.fullmatch(r"\d{3,6}", _explicit_id))):
+        from app.services.firestore_service import get_property_by_id_from_firestore
+        _resolved_prop = get_property_by_id_from_firestore(_explicit_id) if _explicit_id else None
+        if not _resolved_prop and message_starts_new_search(user_message) and not (_explicit_id and (re.fullmatch(r"prop-[a-z0-9\-]+", _explicit_id, re.I) or re.fullmatch(r"\d{3,6}", _explicit_id))):
             return self._handle_property_search(
                 db, conversation, user_message, start_time, language=language
             )
@@ -5372,13 +5381,8 @@ class PublicAgentService:
                 if len(p_name_l) > 3 and (p_name_l in u_clean or (len(u_clean) > 4 and u_clean in p_name_l)):
                     explicit_prop_id = p.property_id
                     break
-                tokens = [w for w in p_name_l.split() if len(w) >= 4 and w not in common_words]
-                for t in tokens:
-                    if t in u_clean:
-                        explicit_prop_id = p.property_id
-                        break
-                if explicit_prop_id:
-                    break
+                # Distinctive tokens require confident matching; do not fallback to arbitrary words
+                pass
 
         # Check Firestore for explicit target or current message
         if not explicit_prop_id and getattr(settings, "ENABLE_FIRESTORE_SYNC", True):
@@ -6200,6 +6204,7 @@ class PublicAgentService:
                 amenity_none_match = True
 
         if cards and not amenity_none_match:
+            cards = cards[:3]  # Show at most 3 cards; ordinals and cheapest-of-those evaluate only shown cards
             stored_prefs["seen_property_ids"] = list(set(seen_ids + [c["property_id"] for c in cards]))
             stored_prefs["last_result_ids"] = [c["property_id"] for c in cards]
             stored_prefs["last_shown_names"] = [

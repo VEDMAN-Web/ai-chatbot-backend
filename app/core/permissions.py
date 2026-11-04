@@ -57,6 +57,7 @@ TOOL_PERMISSIONS: Dict[str, str] = {
     "execute_batch_property_action": PROPERTIES_IMPORT,
     "undo_batch_property_operation": PROPERTIES_UNDO,
     "archive_listing": PROPERTIES_WRITE,
+    "manage_property_images": PROPERTIES_WRITE,
     "undo_operation": PROPERTIES_UNDO,
 }
 

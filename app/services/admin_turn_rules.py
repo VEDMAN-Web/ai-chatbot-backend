@@ -141,11 +141,7 @@ def resolve_write_target(db: Any, name: str) -> Tuple[Any, Optional[str]]:
         return None, _which(exact)
     if len(exact) == 1:
         return exact[0], None
-    partial = [row for row in named if label.casefold() in row.property_name.casefold()]
-    if len(partial) > 1:
-        return None, _which(partial)
-    if len(partial) == 1:
-        return partial[0], None
+    # Mutation/write targets require an exact name, slug, or ID match.
     source, record = resolve_existing_property(db, label)
     if source and record is not None:
         return record, None

@@ -893,6 +893,10 @@ def try_image_command(
     staff: Any,
     attached_images: Optional[List[str]] = None,
 ) -> Optional[Dict[str, Any]]:
+    from app.core.permissions import tool_denial
+    denial = tool_denial(getattr(staff, "role", None), "manage_property_images")
+    if denial:
+        return _reply(conv, denial)
     owned, rejected = _accepted_attachments(attached_images)
     if rejected:
         return _reply(conv, rejected)

@@ -20,28 +20,61 @@ from app.services.action_service import ALLOWED_PROPERTY_TYPES, ALLOWED_STATUSES
 
 _AMOUNT = re.compile(
     r"(?P<neg>[-−]\s*|minus\s+|negative\s+)?"
-    r"(?P<cur1>฿\s*|thb\s*|baht\s*)?"
-    r"(?P<num>\d[\d,]*(?:\.\d+)?)"
+    r"(?P<cur1>฿\s*|thb\s*|baht\s*|\$\s*|€\s*|usd\s*|eur\s*|sgd\s*|pln\s*|zł\s*)?"
+    r"(?P<num>\d{1,3}(?:\.\d{3})+|\d[\d,]*(?:\.\d+)?)"
     r"(?P<unit>\s*(?:million|mln|mil|m|k|thousand)\b)?"
-    r"(?P<cur2>\s*(?:฿|thb\b|baht\b))?",
+    r"(?P<cur2>\s*(?:฿|thb\b|baht\b|usd\b|eur\b|sgd\b|pln\b|zł\b|\$|€))?",
     re.I,
 )
 _UNIT_FACTOR = {"million": 1_000_000, "mln": 1_000_000, "mil": 1_000_000, "m": 1_000_000, "k": 1_000, "thousand": 1_000}
 # Words that, right before a number, say "this number is the new value" (not "of", "for": "price of 3 Villas").
-_VALUE_ANCHORS = {"to", "at", "na", "as", "is", "=", ":", "price", "cena"}
+_VALUE_ANCHORS = {"to", "at", "na", "as", "is", "=", ":", "price", "cena", "for"}
+
+
+def _detect_currency_code(cur1: str, cur2: str) -> str:
+    blob = f"{cur1 or ''} {cur2 or ''}".lower()
+    if "$" in blob or "usd" in blob:
+        return "USD"
+    if "€" in blob or "eur" in blob:
+        return "EUR"
+    if "sgd" in blob:
+        return "SGD"
+    if "pln" in blob or "zł" in blob:
+        return "PLN"
+    return "THB"
+
+
+def _parse_num_token(token: str) -> Optional[float]:
+    text = (token or "").strip().replace("\u00a0", "").replace("_", "").replace("'", "")
+    text = re.sub(r"\s+", "", text)
+    if not text:
+        return None
+    if re.fullmatch(r"\d+,\d{1,2}", text):
+        text = text.replace(",", ".")
+    elif re.fullmatch(r"\d{1,3}(?:\.\d{3})+", text):
+        text = text.replace(".", "")
+    elif "," in text:
+        text = text.replace(",", "")
+    if text.count(".") > 1:
+        text = text.replace(".", "")
+    try:
+        return float(text)
+    except ValueError:
+        return None
 
 
 @dataclass
 class PriceReading:
-    value: Optional[float] = None      # THB, when a usable price was found
+    value: Optional[float] = None      # THB or native currency amount
+    currency: str = "THB"              # Currency code ("THB", "USD", "EUR", etc.)
     error: Optional[str] = None        # why a price that was given cannot be used
     present: bool = False              # the message gave a price (usable or not)
 
 
 def extract_price(message: str) -> PriceReading:
     """The price a command asks for. Only amounts that look like prices count: a number with a unit or currency
-    ("5M", "5,000,000 THB"), a number right after "to"/"at"/"price", or an amount of 1,000 or more. A number that is
-    part of a listing name ("3 Villas - Lamai", "Villa 12") is ignored."""
+    ("5M", "5,000,000 THB", "450,000 EUR", "$250,000"), a number right after "to"/"at"/"price", or an amount of 1,000 or more.
+    A number that is part of a listing name ("3 Villas - Lamai", "Villa 12") is ignored."""
     text = message or ""
     chosen = None
     for m in _AMOUNT.finditer(text):
@@ -50,25 +83,29 @@ def extract_price(message: str) -> PriceReading:
             continue
         unit = (m.group("unit") or "").strip().lower()
         explicit = bool(unit or m.group("cur1") or m.group("cur2"))
-        number = float(m.group("num").replace(",", ""))
+        num_str = m.group("num")
+        number = _parse_num_token(num_str)
+        if number is None:
+            continue
         value = number * _UNIT_FACTOR.get(unit, 1)
         before = text[:m.start()].rstrip()
         last_word = re.split(r"\s+", before)[-1].lower() if before else ""
         anchored = last_word in _VALUE_ANCHORS or before.endswith(("=", ":"))
         following = re.match(r"\s*([A-Za-z]+)", text[m.end():])
-        names_something = bool(following) and not explicit and following.group(1).lower() not in {"thb", "baht", "usd", "eur"}
+        names_something = bool(following) and not explicit and following.group(1).lower() not in {"thb", "baht", "usd", "eur", "sgd", "pln"}
         if names_something and not anchored:
             continue                      # "3 Villas", "2 bedrooms", "12 units": a count or a name, not a price
         if not (explicit or anchored or value >= 1000):
             continue
         negative = bool(m.group("neg"))
-        chosen = (value, negative)         # the last candidate wins: the price usually closes the sentence
+        curr = _detect_currency_code(m.group("cur1"), m.group("cur2"))
+        chosen = (value, negative, curr)  # the last candidate wins: the price usually closes the sentence
     if chosen is None:
         return PriceReading()
-    value, negative = chosen
+    value, negative, curr = chosen
     if negative or value <= 0:
         return PriceReading(error="The price must be greater than 0 THB, so I did not stage any change.", present=True)
-    return PriceReading(value=float(value), present=True)
+    return PriceReading(value=float(value), currency=curr, present=True)
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -104,12 +141,11 @@ class StatusReading:
 
 def _map_status(raw: str) -> Optional[str]:
     cleaned = re.sub(r"\s+", " ", (raw or "").strip().lower().strip(" .,;:"))
+    cleaned = re.sub(r"^(?:status\s+(?:is|to|as|=|:)\s+|status\s*[:=]\s*|status\s+)", "", cleaned)
     cleaned = re.sub(r"^(?:the|a|an)\s+", "", cleaned)
     if cleaned in STATUS_WORDS:
         return STATUS_WORDS[cleaned]
     return None
-
-
 def extract_status(message: str) -> StatusReading:
     """The listing status a command asks for, mapped to the allowed values. An unknown value is an error, never a silent default."""
     text = message or ""
@@ -224,9 +260,49 @@ def _body_of(message: str) -> str:
 def parse_new_listing(message: str) -> NewListing:
     """The fields of 'Add a new listing: Sunset Pearl, villa, Phuket, 12,000,000 THB, available' (or name: ..., type: ... pairs)."""
     result = NewListing()
-    body = _body_of(message or "")
+    text = (message or "").strip()
     fields: Dict[str, object] = {}
 
+    # Check prefix for property type (e.g. "Add a new condo: Riverside Loft, Bangkok, 5 mln THB, under construction")
+    prefix_type_m = re.search(
+        rf"^\s*(?:please\s+|pls\s+|can you\s+|could you\s+)?(?:add|create|register|insert|enter|make)\s+(?:a\s+|an\s+|the\s+)?(?:brand[- ]new\s+|new\s+)?(?P<type>{_TYPE_WORDS})\b",
+        text,
+        re.I
+    )
+    if prefix_type_m:
+        ptype = prefix_type_m.group("type").lower()
+        if ptype not in ("property", "properties", "listing", "listings", "project"):
+            fields["property_type"] = ALLOWED_PROPERTY_TYPES.get(ptype, ALLOWED_PROPERTY_TYPES.get(ptype.rstrip("s"), ptype.title()))
+
+    body = _body_of(text)
+
+    # Check for sentence pattern: "[called/named] <name> in <loc> for/at/price <price>"
+    m_sentence = re.search(
+        r"^(?:called\s+|named\s+)?(?P<name>.+?)\s+in\s+(?P<loc>[A-Za-z0-9 -]+?)\s+(?:for|at|price|with\s+price)\s+(?P<price>[0-9][0-9,.\s]*(?:million|mln|mil|m|k|thousand)?\s*(?:thb|baht|usd|eur|sgd|pln|\$|€)?)(?:\s*,\s*(?P<rest>.+))?$",
+        body,
+        re.I
+    )
+    if m_sentence:
+        fields["property_name"] = m_sentence.group("name").strip()
+        fields["province"] = m_sentence.group("loc").strip()
+        reading = extract_price(m_sentence.group("price").strip())
+        if reading.error:
+            result.errors.append(reading.error)
+        elif reading.value:
+            fields["price_numeric_min"] = reading.value
+            if reading.currency != "THB":
+                fields["currency"] = reading.currency
+        rest = (m_sentence.group("rest") or "").strip()
+        if rest:
+            st = _map_status(rest)
+            if st:
+                fields["status"] = st
+            else:
+                body = rest
+        else:
+            body = ""
+
+    # Parse keyed patterns with : or =
     for m in _KEYED.finditer(body):
         key, val = m.group("key").lower(), m.group("val").strip()
         if key in ("name", "title"):
@@ -249,6 +325,8 @@ def parse_new_listing(message: str) -> NewListing:
                 result.errors.append(reading.error)
             elif reading.value:
                 fields["price_numeric_min"] = reading.value
+                if reading.currency != "THB":
+                    fields["currency"] = reading.currency
         elif key in ("bedrooms", "bedroom", "beds"):
             n = re.search(r"\d+", val)
             if n:
@@ -257,38 +335,126 @@ def parse_new_listing(message: str) -> NewListing:
         body = _KEYED.sub("", body)
 
     leftovers: List[str] = []
-    for token in [t.strip(" .") for t in re.split(r",(?!\d{3}(?!\d))|[;\n]", body) if t.strip(" .")]:
+    tokens = [t.strip(" .") for t in re.split(r",(?!\d{3}(?!\d))|[;\n]", body) if t.strip(" .")]
+    from app.services.listing_shape import CITY_ALIASES
+
+    for token in tokens:
         low = token.lower()
+
+        # Keyed without colon: status Available
+        m_st = re.match(r"^\s*status\s*[:=]?\s*(.+)$", token, re.I)
+        if m_st:
+            st_val = m_st.group(1).strip()
+            mapped = _map_status(st_val)
+            if mapped:
+                fields["status"] = mapped
+            else:
+                result.errors.append(f"'{st_val}' is not a valid status. Valid statuses: {VALID_STATUS_LIST}.")
+            continue
+
+        # Keyed without colon: price 9,500,000 THB
+        m_pr = re.match(r"^\s*price\s*[:=]?\s*(.+)$", token, re.I)
+        if m_pr:
+            reading = extract_price(m_pr.group(1))
+            if reading.error:
+                result.errors.append(reading.error)
+            elif reading.value:
+                fields["price_numeric_min"] = reading.value
+                if reading.currency != "THB":
+                    fields["currency"] = reading.currency
+            continue
+
+        # Keyed without colon: type Villa
+        m_tp = re.match(r"^\s*type\s*[:=]?\s*(.+)$", token, re.I)
+        if m_tp:
+            tp_val = m_tp.group(1).strip().lower()
+            if tp_val in ALLOWED_PROPERTY_TYPES:
+                fields["property_type"] = ALLOWED_PROPERTY_TYPES[tp_val]
+            else:
+                fields["property_type"] = tp_val.title()
+            continue
+
+        # Keyed without colon: location Lamai
+        m_lc = re.match(r"^\s*(?:location|province|city|area|district)\s*[:=]?\s*(.+)$", token, re.I)
+        if m_lc:
+            fields["province"] = m_lc.group(1).strip()
+            continue
+
+        # Type in location: "a villa in Lamai"
+        m_type_in = re.match(r"^\s*(?:a\s+|an\s+)?(?P<type>villa|condominium|condo|apartment|house|townhouse|penthouse|land|hotel unit|commercial)\s+in\s+(?P<loc>.+)$", token, re.I)
+        if m_type_in:
+            t_val = m_type_in.group("type").lower()
+            fields["property_type"] = ALLOWED_PROPERTY_TYPES.get(t_val, t_val.title())
+            loc = m_type_in.group("loc").strip()
+            if "province" in fields:
+                fields["province"] = f"{fields['province']}, {loc}"
+            else:
+                fields["province"] = loc
+            continue
+
+        # Standalone type
         if low in ALLOWED_PROPERTY_TYPES and "property_type" not in fields:
             fields["property_type"] = ALLOWED_PROPERTY_TYPES[low]
             continue
+
+        # Standalone status
         mapped = _map_status(token)
         if mapped and "status" not in fields and low not in ALLOWED_PROPERTY_TYPES:
             fields["status"] = mapped
             continue
+
+        # Beds
         beds = re.fullmatch(r"(\d+)\s*(?:bed|beds|bedroom|bedrooms|br)", low)
         if beds:
             fields["bedrooms_min"] = int(beds.group(1))
             continue
+
+        # Standalone price
         reading = extract_price(token if re.search(r"\d", token) else "")
-        if reading.present and re.fullmatch(r"[\d\s,.฿a-zA-Z\-]*", token) and re.search(r"(thb|baht|฿|\d\s*(?:m|k|million)\b|\d[\d,]{3,})", low):
+        if reading.present and re.fullmatch(r"[\d\s,.฿$€a-zA-Z\-]*", token) and re.search(r"(thb|baht|฿|usd|\$|eur|€|sgd|pln|zł|\d\s*(?:m|k|million)\b|\d[\d,]{3,})", low):
             if reading.error:
                 result.errors.append(reading.error)
             elif "price_numeric_min" not in fields:
                 fields["price_numeric_min"] = reading.value
+                if reading.currency != "THB":
+                    fields["currency"] = reading.currency
             continue
+
+        # Place word: if province already set, combine it (e.g. "Lamai", "Koh Samui")
+        tok_slug = token.lower().replace(" ", "-")
+        if tok_slug in CITY_ALIASES or token.lower() in ("koh samui", "samui", "phuket", "bangkok", "pattaya", "hua hin", "lamai"):
+            if "province" in fields:
+                fields["province"] = f"{fields['province']}, {token}"
+            else:
+                fields["province"] = token
+            continue
+
         leftovers.append(token)
+
     if "property_name" not in fields and leftovers:
         fields["property_name"] = leftovers.pop(0)
     if "province" not in fields and leftovers:
         fields["province"] = leftovers.pop(0)
+
     for token in leftovers:
-        result.errors.append(f"I could not place '{token}'. Give the name, type, location, price (THB) and one of the valid statuses.")
+        tok_slug = token.lower().replace(" ", "-")
+        if tok_slug in CITY_ALIASES or token.lower() in ("koh samui", "samui", "phuket", "bangkok", "pattaya", "hua hin"):
+            fields["province"] = f"{fields.get('province', '')}, {token}".strip(", ")
+            continue
+        if token.lower() in ("sea view", "private pool", "pool", "garden", "gym", "balcony"):
+            continue
+        result.errors.append(f"I could not place '{token}'.")
 
     if fields.get("price_numeric_min"):
         price = float(fields["price_numeric_min"])
         fields["price_numeric_min"] = int(price) if price == int(price) else price
-        fields["price_display"] = f"{int(price):,} THB"
+        curr = str(fields.get("currency") or "THB").upper()
+        if curr in ("THB", ""):
+            fields["price_display"] = f"{int(price):,} THB"
+        else:
+            fields["currency"] = curr
+            fields["price_display"] = f"{int(price):,} {curr}"
+
     result.fields = fields
     if "property_name" in fields:
         result.property_id = result.property_id or name_slug(str(fields["property_name"]))

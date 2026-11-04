@@ -540,6 +540,7 @@ CLAUDE_ADMIN_TOOLS = [
             "type": "object",
             "properties": {
                 "property_id": {"type": "string", "description": "Existing property identifier. Leave empty when creating a new listing: the system generates the id from the property name."},
+                "mode": {"type": "string", "enum": ["create", "update"], "description": "Explicit mode: 'create' for new listings, 'update' for modifying existing listings."},
                 "fields_to_update": {"type": "object", "description": "Dictionary of fields to update"},
                 "images": {"type": "array", "items": {"type": "string"}, "description": "List of property image URLs"},
                 "cover_image": {"type": "string", "description": "Cover image URL"}
@@ -703,10 +704,6 @@ CLAUDE_ADMIN_TOOLS = [
                     "type": "array",
                     "items": {"type": "string"},
                     "description": "List of property IDs or names to delete or update"
-                },
-                "file_path": {
-                    "type": "string",
-                    "description": "Optional local file path or filename of PDF, Excel, CSV, or Word doc containing properties to delete or update"
                 },
                 "update_fields": {
                     "type": "object",
@@ -1996,6 +1993,7 @@ def _process_admin_chat_inner(
                     message=clean_message,
                     audit_disabled=audit_disabled,
                 )
+                op_mode = payload.get("mode") or change_diff.get("operation_mode") or change_diff.get("mode") or (raw_exec.get("mode") if isinstance(raw_exec, dict) else None)
                 reply_text = format_saved_listing_reply(
                     title=str(title),
                     new_value=None if new_value in (None, "") else str(new_value),
@@ -2003,6 +2001,7 @@ def _process_admin_chat_inner(
                     store_line=store_line,
                     undo=bool(op_id),
                     audit_note=note,
+                    mode=str(op_mode or ""),
                 )
                 if active_lang == "pl":
                     reply_text = (
@@ -2038,8 +2037,11 @@ def _process_admin_chat_inner(
                 _res = raw_exec if isinstance(raw_exec, dict) else {}
                 _stores = _res.get("stores") or {}
                 _undo = f"\n\nYou can undo this for 6 days: say `undo` or `undo {op_id}`." if op_id else ""
+                _title = _res.get('title') or _res.get('property_name') or _res.get('property_id')
+                if isinstance(_title, dict):
+                    _title = _title.get('en') or _title.get('pl') or _res.get('property_id')
                 reply_text = (
-                    f"\u2705 **Listing archived.** **{_res.get('title') or _res.get('property_id')}** (`{_res.get('property_id')}`) is now "
+                    f"\u2705 **Listing archived:** **{_title}** (`{_res.get('property_id')}`) is now "
                     f"`Archived` and hidden from the public website. Nothing was erased.\n"
                     f"- Database: {'saved' if _stores.get('sql', True) else 'not updated'}; "
                     f"Firestore: {'saved' if _stores.get('firestore') else 'not updated or not used'}"
@@ -5289,7 +5291,11 @@ def _handle_crud_intent(db, conv, message: str, intent: str, staff_user, languag
         return reply(denial, status="forbidden")
     new = crud.parse_new_listing(message)
     if new.errors:
-        return reply("I did not stage a new listing:\n- " + "\n- ".join(new.errors), status="invalid_value")
+        problems = "\n- ".join(new.errors)
+        return reply(
+            f"I did not stage a new listing:\n- {problems}\n\nGive the name, type, location, price (THB) and one of the valid statuses.",
+            status="invalid_value"
+        )
     if new.missing:
         known = ", ".join(f"{k.replace('_', ' ')}: {v}" for k, v in new.fields.items() if k != "price_display")
         return reply(
@@ -6329,11 +6335,21 @@ def _execute_admin_tool_uncached(
             action_payload=tool_args,
             conversation_id=conversation_id
         )
+        to_addr = tool_args.get("to") or tool_args.get("recipient") or ""
+        subj = tool_args.get("subject") or "Message"
+        body = tool_args.get("body") or ""
+        msg = (
+            f"Here is the email:\n\n"
+            f"- **To:** {to_addr}\n"
+            f"- **Subject:** {subj}\n"
+            f"- **Body:**\n{body}\n\n"
+            f"Click **Confirm** to send it, or **Cancel** to discard."
+        )
         proposal_res = {
             "status": "PROPOSED",
             "pending_action_id": str(action.id),
             "confirmation_token": action.confirmation_token,
-            "message": "Email draft staged in pending_actions. Explicit confirmation required."
+            "message": msg
         }
         return proposal_res, True, str(action.id)
 
@@ -6345,11 +6361,24 @@ def _execute_admin_tool_uncached(
             action_payload=tool_args,
             conversation_id=conversation_id
         )
+        title = tool_args.get("title") or tool_args.get("summary") or "Calendar event"
+        start = tool_args.get("start_time") or tool_args.get("start") or ""
+        end = tool_args.get("end_time") or tool_args.get("end") or ""
+        attendees = tool_args.get("attendees") or []
+        att_str = ", ".join(attendees) if isinstance(attendees, list) else str(attendees)
+        msg = (
+            f"Here is the calendar event:\n\n"
+            f"- **Event:** {title}\n"
+            f"- **Start:** {start}\n"
+            f"- **End:** {end}\n"
+            + (f"- **Attendees:** {att_str}\n" if att_str else "")
+            + f"\nClick **Confirm** to add it, or **Cancel** to discard."
+        )
         proposal_res = {
             "status": "PROPOSED",
             "pending_action_id": str(action.id),
             "confirmation_token": action.confirmation_token,
-            "message": "Calendar event staged in pending_actions. Explicit confirmation required."
+            "message": msg
         }
         return proposal_res, True, str(action.id)
 
@@ -6388,17 +6417,27 @@ def _execute_admin_tool_uncached(
         parsed_from_file: List[Dict[str, Any]] = []
         source_name = "chat_command"
         if f_path and os.path.exists(f_path):
-            source_name = os.path.basename(f_path)
-            with open(f_path, "rb") as f:
-                content = f.read()
-            parsed_from_file = parse_property_batch_file(content, source_name)
+            # Safe upload restriction
+            f_res = Path(f_path).resolve()
+            safe_dir = Path("data").resolve()
+            if safe_dir in f_res.parents or f_res.is_relative_to(safe_dir):
+                source_name = f_res.name
+                content = f_res.read_bytes()
+                parsed_from_file = parse_property_batch_file(content, source_name)
 
         if parsed_from_file:
+            from app.services.action_service import name_slug, property_id_slug_error
             items = []
             records = []
             for rec in parsed_from_file:
-                pid = rec.get("property_id") or rec.get("id") or rec.get("name")
-                name = rec.get("name") or rec.get("title") or pid
+                raw_id = rec.get("property_id") or rec.get("id")
+                name = rec.get("name") or rec.get("title") or ""
+                if raw_id and not property_id_slug_error(str(raw_id)):
+                    pid = str(raw_id).strip()
+                elif name:
+                    pid = name_slug(str(name))
+                else:
+                    pid = str(raw_id or "prop")
                 items.append({
                     "property_id": pid,
                     "name": name,

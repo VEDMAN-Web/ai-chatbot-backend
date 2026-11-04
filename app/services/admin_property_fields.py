@@ -833,7 +833,33 @@ def resolve_existing_property(
     if not raw:
         return None, None
 
-    aliases = {raw} if exact_id_only else {raw, raw.lower(), raw.upper()}
+    if exact_id_only:
+        from app.services.firestore_service import get_firestore_client
+        for target in ("admin", "user"):
+            client = get_firestore_client(target=target)
+            if not client:
+                continue
+            try:
+                snap = client.collection("projects").document(raw).get()
+                if snap.exists:
+                    doc = snap.to_dict() or {}
+                    keys = list(CANONICAL_FIELDS) + [
+                        "bedrooms_min", "bedrooms_max", "bedrooms_display", "bathrooms",
+                        "area_display", "has_pool", "currency",
+                    ]
+                    canon = read_firestore_canonical(doc, keys)
+                    if canon.get("property_name"):
+                        canon["property_name"] = localize_name(canon["property_name"]) or str(canon["property_name"])
+                    if canon.get("price_numeric_min") is not None:
+                        canon["price_numeric_min"] = int(canon["price_numeric_min"])
+                    canon["_firestore_doc_id"] = snap.id
+                    canon["_raw"] = doc
+                    return "firestore", canon
+            except Exception:
+                pass
+        return None, None
+
+    aliases = {raw, raw.lower(), raw.upper()}
     # Firestore (admin client, then user)
     try:
         from app.services.firestore_service import (

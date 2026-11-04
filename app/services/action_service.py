@@ -1278,10 +1278,11 @@ def _execute_batch_property_action(
                 if not allowed_fields:
                     trimmed.append(r)
                     continue
+                # Do not force "name" unless "name" was explicitly in allowed_fields
                 keep = {
                     k: v
                     for k, v in r.items()
-                    if k in ("property_id", "name") or k in allowed_fields
+                    if k == "property_id" or k in allowed_fields
                 }
                 trimmed.append(keep)
             records = trimmed
@@ -2133,6 +2134,12 @@ def save_ingested_listing(
 
     mode = "update" if draft.get("mode") == "update" else "create"
     property_id = str(draft.get("property_id") or "").strip()
+    if mode == "create" and property_id and _read_raw_firestore(property_id) is not None:
+        base_id = property_id
+        counter = 2
+        while _read_raw_firestore(f"{base_id}-{counter}") is not None:
+            counter += 1
+        property_id = f"{base_id}-{counter}"
     fields = dict(draft.get("fields") or {})
     fields.pop("location", None)
     websites = normalize_website_list(draft.get("websites") or [])
