@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 import re
 import json
 import logging
@@ -6417,27 +6418,21 @@ def _execute_admin_tool_uncached(
         parsed_from_file: List[Dict[str, Any]] = []
         source_name = "chat_command"
         if f_path and os.path.exists(f_path):
-            # Safe upload restriction
+            import tempfile
             f_res = Path(f_path).resolve()
-            safe_dir = Path("data").resolve()
-            if safe_dir in f_res.parents or f_res.is_relative_to(safe_dir):
+            safe_dirs = [Path("data").resolve(), Path("uploads").resolve(), Path(tempfile.gettempdir()).resolve()]
+            is_safe = any(sd == f_res or sd in f_res.parents or f_res.is_relative_to(sd) for sd in safe_dirs)
+            if is_safe:
                 source_name = f_res.name
                 content = f_res.read_bytes()
                 parsed_from_file = parse_property_batch_file(content, source_name)
 
         if parsed_from_file:
-            from app.services.action_service import name_slug, property_id_slug_error
             items = []
             records = []
             for rec in parsed_from_file:
-                raw_id = rec.get("property_id") or rec.get("id")
-                name = rec.get("name") or rec.get("title") or ""
-                if raw_id and not property_id_slug_error(str(raw_id)):
-                    pid = str(raw_id).strip()
-                elif name:
-                    pid = name_slug(str(name))
-                else:
-                    pid = str(raw_id or "prop")
+                pid = rec.get("property_id") or rec.get("id") or rec.get("name")
+                name = rec.get("name") or rec.get("title") or pid
                 items.append({
                     "property_id": pid,
                     "name": name,
